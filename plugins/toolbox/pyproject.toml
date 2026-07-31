@@ -123,5 +123,5 @@ reportMissingImports = "warning"
 # mkdocs.yml / docs/); the unified docs site lives elsewhere.
 docs = [
     "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.27",
+    "mkdocstrings[python]>=1.0.6",
 ]
