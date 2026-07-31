@@ -85,8 +85,9 @@ export default defineConfig({
     // Playwright's direct child, the SIGTERM below reaches its own handler and its
     // grace window covers the full leak-checked teardown. `uv sync` (CI) / a local
     // `uv run` first materializes this venv.
-    command: '.venv/bin/tai42-e2e-studio-stack',
-    // The console script lives in the tai42-e2e Python project one level up.
+    command: '../.venv/bin/tai42-e2e-studio-stack',
+    // cwd is the tai42-e2e project (`e2e/`, one level up); the uv workspace venv
+    // holding the console script lives at the monorepo root, one level above that.
     cwd: '..',
     url: baseURL,
     reuseExistingServer: !process.env.CI,
