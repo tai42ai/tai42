@@ -33,6 +33,7 @@ becomes the tool's input schema and its docstring becomes the tool's description
 ```python
 from tai42_contract.app import tai42_app
 
+
 @tai42_app.tools.tool
 def greet(name: str) -> str:
     """Greet a person by name."""

@@ -59,7 +59,7 @@ class PresetStore(Protocol):
         name: str,
         fixed_kwargs: dict[str, Any] | None = None,
         extensions: Sequence[Sequence[ExtensionElement]] | None = None,
-        output_schema: dict[str, Any] | None | CarryForward = CARRY_FORWARD,
+        output_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
     ) -> DocumentVersion:
         """Append a new version from the editable body fields.
