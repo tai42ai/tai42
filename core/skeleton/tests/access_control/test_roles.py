@@ -237,6 +237,24 @@ async def test_hooks_listing_is_grantable_to_editor_and_viewer(mem: _MemStore):
         assert allowed is True, f"GET /api/hooks should be a grantable read for {role}"
 
 
+async def test_tool_meta_listing_is_grantable_to_editor_and_viewer(mem: _MemStore):
+    from tai42_skeleton.access_control import role_grants as role_grants_module
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+
+    # The tool-metadata overlay listing is action=read, exactly like the tools listing it
+    # decorates: the overlay shapes how tools RENDER (display names / folders / tags) for
+    # every principal who can list tools, so its READ must require the SAME grantable-read
+    # access as the tools list. A seeded editor AND viewer therefore reach it — a reader who
+    # could list tools but not their overlay would meet the tools page's loud overlay-read
+    # error. (The overlay WRITE doors stay action=write, pinned in the write-door test below.)
+    role_grants_module.reset_role_grants_cache()
+    reset_route_index()
+    await seed_default_roles()
+    for role in ("editor", "viewer"):
+        allowed, _cause = await _level_allows(role, "/api/tool-meta", "GET")
+        assert allowed is True, f"GET /api/tool-meta should be a grantable read for {role}"
+
+
 async def test_topic_verifier_binding_doors_are_admin_only(mem: _MemStore):
     from tai42_skeleton.access_control import role_grants as role_grants_module
     from tai42_skeleton.access_control.role_gate import DenialCause, reset_route_index, resolve_route_meta
@@ -286,6 +304,7 @@ _GRANTABLE_WRITE_DOORS = [
     ("/api/schedules", "POST"),
     ("/api/mcp-status/gh/reload", "POST"),
     ("/api/tools/shout/extensions", "POST"),
+    ("/api/tool-meta/tools/shout", "PATCH"),
     ("/api/hooks", "POST"),
     ("/api/hooks/orders-hook", "DELETE"),
 ]
