@@ -241,12 +241,9 @@ async def test_tool_meta_listing_is_grantable_to_editor_and_viewer(mem: _MemStor
     from tai42_skeleton.access_control import role_grants as role_grants_module
     from tai42_skeleton.access_control.role_gate import reset_route_index
 
-    # The tool-metadata overlay listing is action=read, exactly like the tools listing it
-    # decorates: the overlay shapes how tools RENDER (display names / folders / tags) for
-    # every principal who can list tools, so its READ must require the SAME grantable-read
-    # access as the tools list. A seeded editor AND viewer therefore reach it — a reader who
-    # could list tools but not their overlay would meet the tools page's loud overlay-read
-    # error. (The overlay WRITE doors stay action=write, pinned in the write-door test below.)
+    # The tool-meta overlay listing is action=read, coupled to the tools list: the tools page
+    # reads it on mount, so every principal who can list tools must reach it too (editor AND
+    # viewer) or hit a loud overlay-read error. (WRITE doors stay action=write — write-door test.)
     role_grants_module.reset_role_grants_cache()
     reset_route_index()
     await seed_default_roles()
