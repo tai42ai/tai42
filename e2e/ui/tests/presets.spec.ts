@@ -25,6 +25,10 @@ test('create a preset over e2e_echo; UI row + API list + live tool', async ({ pa
   // selects it WITHOUT opening the listbox: typing jumps to the first option
   // whose text starts with the string (e2e_echo, before its _prometheus variants).
   const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });
+  // The picker is disabled ("Loading tools…") until the tools query resolves;
+  // focus/typeahead on the disabled trigger drops the keystrokes, so gate on the
+  // trigger being enabled before typing.
+  await expect(baseTool).toBeEnabled();
   await baseTool.focus();
   await baseTool.pressSequentially('e2e_echo');
   // Exactly e2e_echo (typeahead lands on the first prefix match), not an
