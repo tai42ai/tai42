@@ -2,14 +2,23 @@ spec_version: 1
 namespace: tai42
 name: channel-whatsapp
 package: tai42-channel-whatsapp
-version: 0.2.0
-description: "Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask_user questions to a human on WhatsApp and bridges the reply back."
+version: 0.2.1
+description: >-
+  Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask_user
+  questions to a human on WhatsApp and bridges the reply back.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-whatsapp
-contract: ">=0.3,<0.4"
-categories: [channels]
-tags: [channel, whatsapp, meta, graph-api, ask-user, hitl]
+contract: '>=0.3,<0.4'
+categories:
+  - channels
+tags:
+  - channel
+  - whatsapp
+  - meta
+  - graph-api
+  - ask-user
+  - hitl
 permissions:
   network: true
   subprocess: false
@@ -18,4 +27,6 @@ provides:
   - kind: channel
     name: whatsapp
     module: tai42_channel_whatsapp.register
-    description: "Deliver ask_user questions to a human on WhatsApp via the Meta Cloud API and bridge the reply back."
+    description: >-
+      Deliver ask_user questions to a human on WhatsApp via the Meta Cloud API
+      and bridge the reply back.

@@ -2,14 +2,18 @@ spec_version: 1
 namespace: tai42
 name: storage-github
 package: tai42-storage-github
-version: 0.2.0
-description: "GitHub-backed Storage provider (text + binary/media) for the TAI ecosystem."
+version: 0.2.1
+description: GitHub-backed Storage provider (text + binary/media) for the TAI ecosystem.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/storage-github
-contract: ">=0.3,<0.4"
-categories: [storage]
-tags: [storage, github, git]
+contract: '>=0.3,<0.4'
+categories:
+  - storage
+tags:
+  - storage
+  - github
+  - git
 permissions:
   network: true
   subprocess: false
@@ -18,5 +22,9 @@ provides:
   - kind: storage
     name: github
     module: tai42_storage_github
-    description: "Storage backend serving text and binary/media content over a GitHub repository."
-    tags: [storage, github]
+    description: >-
+      Storage backend serving text and binary/media content over a GitHub
+      repository.
+    tags:
+      - storage
+      - github

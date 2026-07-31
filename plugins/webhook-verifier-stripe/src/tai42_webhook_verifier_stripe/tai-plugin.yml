@@ -2,14 +2,23 @@ spec_version: 1
 namespace: tai42
 name: webhook-verifier-stripe
 package: tai42-webhook-verifier-stripe
-version: 0.2.0
-description: "Stripe webhook-signature verifier plugin for the TAI ecosystem: a per-provider WebhookVerifier that checks each delivery's Stripe-Signature HMAC before the payload is dispatched."
+version: 0.2.1
+description: >-
+  Stripe webhook-signature verifier plugin for the TAI ecosystem: a per-provider
+  WebhookVerifier that checks each delivery's Stripe-Signature HMAC before the
+  payload is dispatched.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/webhook-verifier-stripe
-contract: ">=0.3,<0.4"
-categories: [webhooks, security]
-tags: [webhooks, stripe, hmac, security]
+contract: '>=0.3,<0.4'
+categories:
+  - webhooks
+  - security
+tags:
+  - webhooks
+  - stripe
+  - hmac
+  - security
 permissions:
   network: false
   subprocess: false
@@ -18,5 +27,7 @@ provides:
   - kind: webhook-verifier
     name: stripe
     module: tai42_webhook_verifier_stripe
-    description: "Verify a Stripe webhook delivery's Stripe-Signature HMAC before dispatch."
-    tags: [stripe, hmac]
+    description: Verify a Stripe webhook delivery's Stripe-Signature HMAC before dispatch.
+    tags:
+      - stripe
+      - hmac

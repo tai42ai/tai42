@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-identity-oidc"
-version = "0.2.0"
+version = "0.2.1"
 description = "Validate-only OIDC identity provider for the TAI ecosystem: an installable plugin that registers itself as the \"identity-oidc\" identity provider and resolves an issuer-minted JWT to an authenticated identity (no key minting, no stored state)."
 readme = "README.md"
 requires-python = ">=3.13"
