@@ -66,7 +66,7 @@ dependencies = [
     "httpx>=0.28",
     "fastmcp>=3.2,<4",
     "redis>=5",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary]>=3.3.4",
     "prometheus-client>=0.24",
     # The signing OIDC issuer fixture (``netfixtures.OAuthIdp``) mints RS256
     # id_tokens and serves a JWK set; joserfc is the same JOSE library the SUT's
