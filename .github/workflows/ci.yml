@@ -493,21 +493,63 @@ jobs:
         if: ${{ needs.changes.outputs.run_browsers == 'true' }}
         working-directory: e2e/ui
         run: pnpm exec playwright install --with-deps firefox webkit
-      - name: Run the browser suite on firefox + webkit
+      - name: Run the browser suite on firefox
+        # firefox and webkit each run as their OWN playwright invocation so each
+        # boots its OWN webServer stack. The stack's login bootstrap is once-per-DB
+        # (login.spec creates the first owner in a fresh Postgres clone) and its
+        # pending-question state is per-stack, so a single invocation running both
+        # engines against the one shared stack bleeds the first engine's owner +
+        # questions into the second. Playwright boots and tears the webServer down
+        # per invocation — the runner's SIGTERM handler drops the stack DB and frees
+        # the pinned port (KEEP_STACKS only skips the log-dir rmtree, never the
+        # process/port teardown) — so the second boot is genuinely fresh. Each engine
+        # writes to its own output/report dir; a shared dir would be wiped by the
+        # next invocation's output-clean.
+        id: firefox
         if: ${{ needs.changes.outputs.run_browsers == 'true' }}
         working-directory: e2e/ui
-        run: pnpm exec playwright test --project=firefox --project=webkit
-      - name: Upload firefox + webkit diagnostics (per-browser)
-        # Retain each browser's result tree (Playwright writes a project-named
-        # subfolder under test-results/) whether the run passed or failed, so a
-        # per-browser regression is diagnosable.
+        env:
+          PLAYWRIGHT_HTML_REPORT: playwright-report/firefox
+        run: pnpm exec playwright test --project=firefox --output=test-results/firefox
+      - name: Run the browser suite on webkit
+        # Runs on its own fresh stack whether firefox passed or failed (the prior
+        # single-invocation form ran both engines regardless), but stays skipped
+        # when firefox itself was skipped (chromium failed upstream).
+        id: webkit
+        if: ${{ !cancelled() && steps.firefox.conclusion != 'skipped' }}
+        working-directory: e2e/ui
+        env:
+          PLAYWRIGHT_HTML_REPORT: playwright-report/webkit
+        run: pnpm exec playwright test --project=webkit --output=test-results/webkit
+      - name: Upload firefox diagnostics
+        # Retain firefox's result tree + html report whether it passed or failed.
         if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: ui-e2e-browser-diagnostics
+          name: ui-e2e-browser-diagnostics-firefox
           path: |
-            e2e/ui/test-results/**
-            e2e/ui/playwright-report/**
+            e2e/ui/test-results/firefox/**
+            e2e/ui/playwright-report/firefox/**
+          if-no-files-found: ignore
+      - name: Upload webkit diagnostics
+        # Retain webkit's result tree + html report whether it passed or failed.
+        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-e2e-browser-diagnostics-webkit
+          path: |
+            e2e/ui/test-results/webkit/**
+            e2e/ui/playwright-report/webkit/**
+          if-no-files-found: ignore
+      - name: Upload the widening stack server logs
+        # Both engines' kept stack dirs (KEEP_STACKS) carry the skeleton/backend
+        # process logs; their tmp-dir names are engine-agnostic, so capture them
+        # once as a combined artifact rather than duplicating into each engine's.
+        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-e2e-browser-stacks
+          path: |
             e2e/**/tai-e2e-studio-*/
           if-no-files-found: ignore
 
