@@ -54,7 +54,11 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   await popup.waitForEvent('close');
 
   // UI: the connection lands in the Connections list (its alias becomes a link).
-  await expect(page.getByRole('link', { name: alias })).toBeVisible();
+  // This paints only after POST /api/connectors/oauth/complete returns, and that
+  // completion reloads this worker AND awaits the sibling worker's reload
+  // (MULTIWORKER(2)) — inherently 5-10s server-side, beyond the global 10s
+  // expect budget.
+  await expect(page.getByRole('link', { name: alias })).toBeVisible({ timeout: 30_000 });
 
   // API: the same connection is present over the same origin.
   await expect.poll(async () => await connectionAliases(request)).toContain(alias);
@@ -68,8 +72,11 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
     .getByRole('button', { name: 'Disconnect' })
     .click();
 
-  // UI: back on the list, the connection is gone.
-  await expect(page.getByRole('link', { name: alias })).toHaveCount(0);
+  // UI: back on the list, the connection is gone. This paints only after the
+  // DELETE returns, and the delete reloads this worker AND awaits the sibling
+  // worker's reload (MULTIWORKER(2)) — inherently 5-10s server-side, beyond the
+  // global 10s expect budget.
+  await expect(page.getByRole('link', { name: alias })).toHaveCount(0, { timeout: 30_000 });
   // API: the connections list no longer carries it.
   await expect.poll(async () => await connectionAliases(request)).not.toContain(alias);
 });

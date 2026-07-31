@@ -7,9 +7,10 @@
  * update affordances. Every effect is asserted through BOTH the UI and the API,
  * and the arc uninstalls everything so the shared venv is left clean.
  *
- * The studio stack is MULTIWORKER(2): an install/uninstall/update reload fans out
- * to the sibling worker asynchronously, so every API-side proof polls to
- * convergence rather than reading once.
+ * The studio stack is MULTIWORKER(2): an install/uninstall/update response returns
+ * only after the awaited fan-out collects the sibling worker's reload reply — but a
+ * sibling that misses the apply window is reported, not raised, so every API-side
+ * proof still polls to convergence rather than reading once.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { apiHeaders, MP_URL, mpAdminHeaders, seedCredential, uniq } from './helpers';
@@ -51,7 +52,11 @@ async function confirmDialog(page: Page, title: string, confirmLabel: string): P
   const dialog = page.getByRole('dialog', { name: title });
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: confirmLabel, exact: true }).click();
-  await expect(dialog).toBeHidden();
+  // The dialog stays mounted until the install/update/uninstall mutation
+  // resolves: a real pip install/uninstall plus this worker's reload and the
+  // awaited sibling-worker reload — inherently 5-10s+ server-side, beyond the
+  // global 10s expect budget.
+  await expect(dialog).toBeHidden({ timeout: 30_000 });
 }
 
 test('browse, install beta via UI, then the API-pinned alpha advisory + update arc', async ({
