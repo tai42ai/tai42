@@ -59,3 +59,26 @@ jobs:
           # Attestations are minted from the OIDC identity token, which token
           # auth does not issue.
           attestations: false
+
+  # Image refresh hook: every published component pokes tai-distribution, whose
+  # refresh-pins pipeline re-reads PyPI and rebuilds the platform image when
+  # the pinned roster changed. Fork runs carry no token and skip.
+  notify-distribution:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DIST_DISPATCH_TOKEN: ${{ secrets.TAI_DIST_DISPATCH_TOKEN }}
+    steps:
+      - name: Trigger the tai-distribution pin refresh
+        if: env.DIST_DISPATCH_TOKEN != ''
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3.0.0
+        with:
+          token: ${{ env.DIST_DISPATCH_TOKEN }}
+          repository: ${{ github.repository_owner }}/tai-distribution
+          event-type: platform-release
+          client-payload: |
+            {
+              "tag": "${{ github.ref_name }}"
+            }
