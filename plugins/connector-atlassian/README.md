@@ -48,7 +48,7 @@ credential env vars on the API process environment.
 
 `src/tai42_connector/atlassian/core/connector.py` builds the descriptor and
 registers it on import. `tai42_connector` is a namespace package, so each provider
-ships in its own repo under the shared namespace.
+ships as its own package under the shared namespace.
 
 ## Install
 
@@ -59,9 +59,8 @@ server:
 uv add tai42-connector-atlassian
 ```
 
-Or from source — clone this repo and add it as an editable dependency. Clone
-`tai-contract` beside this repo first — `[tool.uv.sources]` resolves it from
-the sibling path.
+Or from source — clone this repo and add it as an editable dependency; the
+`tai42-*` dependencies resolve in-tree from the workspace.
 
 ```bash
 git clone https://github.com/tai42ai/tai42   # next to your app checkout
@@ -81,7 +80,7 @@ uv run --no-sync pytest --cov --cov-report=term-missing                         
 ```
 
 A clone needs **nothing private**: the install resolves every dependency from
-PyPI, so no sibling checkout has to be present for the gates to run.
+PyPI, so nothing else in the workspace needs to be present for the gates to run.
 
 ## License
 

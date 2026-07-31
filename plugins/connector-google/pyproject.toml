@@ -67,9 +67,9 @@ filterwarnings = ["error"]
 cache-keys = [{ file = "pyproject.toml" }]
 
 
-# The version floors in [project] are the compatibility contract; these path
-# sources point local development at the sibling checkouts instead of the
-# published packages. They are not part of wheel metadata.
+# The version floors in [project] are the compatibility contract; these sources
+# resolve the tai42-* requirements to the in-tree workspace members instead of
+# the published packages. They are not part of wheel metadata.
 [tool.uv.sources]
 tai42-contract = { workspace = true }
 [tool.ruff]

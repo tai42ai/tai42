@@ -38,9 +38,8 @@ server:
 uv add tai42-kit
 ```
 
-Or from source — clone this repo and add it as an editable dependency. Clone
-`tai-contract` beside this repo first — `[tool.uv.sources]` resolves it from
-the sibling path.
+Or from source — clone this repo and add it as an editable dependency; the
+`tai42-*` dependencies resolve in-tree from the workspace.
 
 ```bash
 git clone https://github.com/tai42ai/tai42   # next to your app checkout

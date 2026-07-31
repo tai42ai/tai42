@@ -40,9 +40,8 @@ server, with the optional `[k8s]` extra that pulls the kubernetes client:
 uv add "tai42-config-k8s[k8s]"
 ```
 
-Or from source — clone this repo and add it as an editable dependency. Clone
-`tai-contract` and `tai-kit` beside this repo first — `[tool.uv.sources]`
-resolves them from sibling paths.
+Or from source — clone this repo and add it as an editable dependency; the
+`tai42-*` dependencies resolve in-tree from the workspace.
 
 ```bash
 git clone https://github.com/tai42ai/tai42   # next to your app checkout

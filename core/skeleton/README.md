@@ -114,7 +114,7 @@ co-tenant deployments would otherwise cross-talk.
 
 ## Development
 
-Set up the dev venv and run the gates. `--no-sources` ignores the sibling-checkout
+Set up the dev venv and run the gates. `--no-sources` ignores the workspace-source
 overrides in `[tool.uv.sources]`, so the dev deps come from PyPI and the clone stands
 alone; `--no-sync` runs each gate against that environment instead of re-resolving:
 

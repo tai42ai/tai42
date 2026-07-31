@@ -46,6 +46,6 @@ cross-repository references.
   swallowed exceptions, no compatibility shims.
 - The workflows under `.github/workflows/` are the source of truth for commands;
   keep this file in step with them.
-- Per-package ruff `banned-api` walls (e.g. plugins ban `tai42_skeleton`) are the
-  only guard against illegal cross-package imports now that the workspace makes
-  them physically importable — never delete them.
+- The workspace makes every package physically importable from every other, so
+  the per-package ruff `banned-api` walls (e.g. plugins ban `tai42_skeleton`) are
+  the only guard against illegal cross-package imports — never delete them.

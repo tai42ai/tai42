@@ -1,9 +1,9 @@
 # Contributing to tai42
 
 tai42 is one repository and one uv workspace: `core/*` (contract, kit,
-skeleton), `plugins/*`, and `e2e`. There is no multi-repo ecosystem to keep in
-sync — a change lives in the package directory it touches, and the `tai42-*`
-dependencies between packages resolve in-tree through the workspace.
+skeleton), `plugins/*`, and `e2e`. A change lives in the package directory it
+touches, and the `tai42-*` dependencies between packages resolve in-tree through
+the workspace.
 
 ## Setup
 
@@ -33,12 +33,11 @@ Run each package's checks from its own directory so its coverage floor,
 The single root `uv.lock` is the workspace resolution: `[tool.uv.sources]` in
 each member points sibling `tai42-*` requirements at `{ workspace = true }`, and
 the lock records that in-tree resolution. `uv lock` regenerates it; CI asserts it
-with `uv sync --locked`. There is no `UV_NO_SOURCES`, no per-repo lock, and no
-disagreement between the lock and the sources to reconcile — the workspace
-sources are the resolution.
+with `uv sync --locked`. The workspace sources are the resolution — the lock and
+the sources agree by construction.
 
 An in-repo version bump is atomic: raising a package's version updates every
-in-tree consumer in the same commit, so there is no cross-repo bump propagation.
+in-tree consumer in the same commit.
 
 ## Naming
 
