@@ -28,7 +28,7 @@ import httpx
 import yaml
 
 from tai42_e2e import ports
-from tai42_e2e.httpapi import ApiClient
+from tai42_e2e.httpapi import ApiClient, _is_reloading
 from tai42_e2e.mcp import McpClient, mcp_url
 from tai42_e2e.metrics import Scrape, scrape
 from tai42_e2e.pg import PostgresAdmin
@@ -38,7 +38,7 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for, wait_for_async
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     from tai42_e2e.tcprelay import TcpRelay
     from tai42_e2e.variants import BrokerLease, BusOrigin, Variants
@@ -98,6 +98,26 @@ def spawn_expect_refusal(argv: list[str], env: dict[str, str], cwd: str | Path, 
     if proc.returncode == 0:
         raise RuntimeError(f"process was expected to refuse to boot but exited 0: {argv!r}\nstderr:\n{stderr}")
     return stderr
+
+
+async def _probe_tolerating_reloading[T](open_and_call: Callable[[], Awaitable[T]]) -> T | None:
+    """Await a boot/restart wait probe that opens an MCP client, returning ``None`` when
+    it raises the reload gate's retriable ``reloading`` envelope so the enclosing wait
+    keeps polling within its own deadline; any other error propagates loudly.
+
+    A worker still holding its boot/reload self-resync gate rejects the MCP initialize
+    handshake with that envelope (a ``503`` the authenticated request path answers while
+    the identity registry is mid-rebuild). The fastmcp client raises ``HTTPStatusError``
+    from ``__aenter__`` — before a session exists — so the tool-call ``retry_on_reloading``
+    path never sees it, and the reloading-vs-real decision is made here on the raised
+    response through the one canonical :func:`_is_reloading` check. ``open_and_call`` must
+    never itself return ``None``, so a ``None`` result unambiguously means "still reloading"."""
+    try:
+        return await open_and_call()
+    except httpx.HTTPStatusError as exc:
+        if _is_reloading(exc.response):
+            return None
+        raise
 
 
 class InfraUnavailable(RuntimeError):
@@ -724,7 +744,7 @@ class TaiStack:
         authenticates the probe, so the drain reaches the fenced surface."""
         seen: dict[int, str] = {}
 
-        async def probe() -> bool:
+        async def worker_info() -> dict[str, Any]:
             async with self.mcp(port, auth=self.auth_token) as client:
                 # A worker fresh in the census may still hold its boot-time reload gate
                 # (the ~2s self-resync), so poll past the retriable ``reloading`` rejection.
@@ -732,6 +752,16 @@ class TaiStack:
             data = result.data if result.data is not None else result.structured_content
             if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
                 raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
+            return data
+
+        async def probe() -> bool:
+            # The MCP initialize handshake itself is rejected while the worker holds its
+            # self-resync gate (the client raises before a session exists, so the tool
+            # call's own ``retry_on_reloading`` cannot cover it); treat that envelope as
+            # "not ready yet" and keep polling.
+            data = await _probe_tolerating_reloading(worker_info)
+            if data is None:
+                return False
             seen[int(data["pid"])] = str(data["state_digest"])
             return len(seen) >= n
 

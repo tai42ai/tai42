@@ -115,7 +115,7 @@ the env var untouched. `stack.py` asserts the rule on every child env.
 
 ## xfail policy
 
-A test for a fix that has not shipped in the sibling checkouts is marked
+A test for a fix that has not yet landed in the workspace is marked
 `xfail(strict=True)` with the observed-behavior reason, so it flips loudly
 (xpass → failure) the moment the fix lands.
 
@@ -130,26 +130,48 @@ a change to a shared root, sets `run_e2e`):
   `redis:7-alpine` (shared), `postgres:16-alpine`, and `redis:8` — the
   module-capable checkpoint Redis the arq leg points
   `TAI_E2E_CHECKPOINT_REDIS_URL` at. The celery leg brings its RabbitMQ up from
-  the compose `celery` profile; non-arq legs deselect `-m "not backendless"`.
+  the compose `celery` profile; non-arq legs deselect `-m "not backendless"`. The
+  langfuse monitoring profile runs on the arq leg only when the `run_monitoring`
+  gate is on (a change under `plugins/monitoring-langfuse`, `core`, or `e2e`, or a
+  manual `workflow_dispatch`). When the private-repo token is present it also runs
+  the marketplace suite (`TAI_E2E_MARKETPLACE=1`), installing the git-sourced
+  `tai42-marketplace` and booting it as harness processes.
 - `ui-e2e` — needs `e2e`; boots redis + postgres, clones `tai-studio`, builds the
-  Studio SPA, and runs the Playwright chromium suite in `ui/`.
+  Studio SPA, and runs the Playwright chromium suite in `ui/`. When the `run_browsers`
+  gate is on (a change under `e2e/ui`, or a manual `workflow_dispatch`) it also
+  widens the matrix onto firefox + webkit. With the token it also clones the private
+  `tai-marketplace-web` and runs the marketplace browser specs under
+  `TAI_E2E_MARKETPLACE=1`.
 
-Neither job runs the marketplace or external-consumer legs. The marketplace suite
-lives in `tai42ai/tai-marketplace` under its `e2e/`; other external consumers install
-this harness as the published `tai42-e2e` package and run their own suites against it.
-Any consumer booting the studio stack must also install the Studio reference plugin
-from the `tai42ai/tai-studio` repo (`e2e/reference-plugin`), which the studio profile
-manifest names but the harness does not carry as a runtime dependency.
+The marketplace legs need the private `tai42ai/tai-marketplace` and
+`tai42ai/tai-marketplace-web` repos, so they run only when the `RELEASE_PLEASE_TOKEN`
+secret is available — a fork PR has no secrets, so those steps skip with a visible
+`::warning::` rather than failing. Other external consumers install this harness as
+the published `tai42-e2e` package and run their own suites against it. Any consumer
+booting the studio stack must also install the Studio reference plugin from the
+`tai42ai/tai-studio` repo (`e2e/reference-plugin`), which the studio profile manifest
+names but the harness does not carry as a runtime dependency.
 
-## Marketplace area (external)
+## Marketplace area (opt-in)
 
-The marketplace legs — the registry install/advisory/compat suite, the fixture
-plugins they publish, and the Studio + public-site browser specs — live in the
-`tai42ai/tai-marketplace` repo under its `e2e/`, consuming this harness as the
-published `tai42-e2e` package (the `pytest11` plugin supplies `infra` /
-`fresh_stack`). This harness keeps the pieces that repo drives: the marketplace
-driver (`tai42_e2e.marketplace`, which shells out to the `tai42-marketplace`
-console script), the `build_marketplace_*` stack builders in `manifests.py`, and
-the `marketplace: bool` gate + `TAI_E2E_MARKETPLACE_FIXTURES` env on
-`HarnessSettings`. Point `TAI_E2E_MARKETPLACE_FIXTURES` at that repo's
-`fixtures/marketplace_plugins` tree to forge the fixture artifacts.
+`tests/marketplace/` only collects when `TAI_E2E_MARKETPLACE=1`; unset, it is
+skipped at collection like `tests/monitoring/`. When on, the harness boots the
+`tai42-marketplace` registry — installed from its git source via the `marketplace`
+dependency group — as a harness-managed process (the API server) on an isolated
+Postgres database: **no extra compose profile**; it rides the core
+`docker compose up -d` infra. The suite forges REAL fixture wheels (and one source
+tarball) from the in-repo `fixtures/marketplace_plugins` tree
+(`TAI_E2E_MARKETPLACE_FIXTURES` overrides it), served over a local package index,
+seeds them through the registry's real ingest pipeline, which publishes each version
+synchronously, and the skeleton REALLY pip-installs them into the one shared venv —
+so every lifecycle spec ends with its own uninstall and a session guard raises loudly
+on any leftover distribution (never auto-cleaning). The ui leg additionally
+pnpm-builds and serves the public `tai-marketplace-web` checkout and drives the Studio
+marketplace page and the public site over a browser.
+
+```bash
+docker compose up -d
+TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
+# the browser legs (built Studio dist + the tai-marketplace-web checkout):
+cd ui && TAI_E2E_MARKETPLACE=1 pnpm exec playwright test tests/marketplace.spec.ts tests/marketplace-web.spec.ts
+```

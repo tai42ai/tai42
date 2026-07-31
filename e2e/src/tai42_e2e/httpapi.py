@@ -22,11 +22,19 @@ class ApiError(AssertionError):
 
 def _is_reloading(response: httpx.Response) -> bool:
     """Whether a response is the reload gate's retriable ``503 reloading`` rejection —
-    the boot-time self-resync (or an in-flight config reload) holding the gate."""
+    the boot-time self-resync (or an in-flight config reload) holding the gate.
+
+    A buffered response is identified by its ``{"reloading": true}`` body. A streaming
+    response whose body was never read — the MCP initialize the fastmcp client raises
+    ``HTTPStatusError`` on, where ``raise_for_status`` fires before the stream is read
+    and the stream then closes unread — exposes no body, so it is identified by the
+    ``Retry-After`` header the reload gate is the sole ``503`` to stamp."""
     if response.status_code != 503:
         return False
     try:
         body = response.json()
+    except httpx.ResponseNotRead:
+        return "retry-after" in response.headers
     except ValueError:
         return False
     return isinstance(body, dict) and body.get("reloading") is True

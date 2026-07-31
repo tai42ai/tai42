@@ -112,6 +112,14 @@ dev = [
     # reference-plugin Requires-Dist.
     "reference-plugin",
 ]
+# The tai42-marketplace registry the opt-in marketplace suite boots (harness-spawned
+# processes) — the git source below is a PRIVATE repo. Split from `dev` (though both
+# are default-on) so a fork PR without the private-repo token can still sync the rest
+# with `--no-group marketplace`; kept out of [project.dependencies] so the published
+# wheel carries no bare, unresolvable tai42-marketplace Requires-Dist.
+marketplace = [
+    "tai42-marketplace",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -142,10 +150,13 @@ markers = [
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]
+# The marketplace group is default-on with dev; a fork PR opts out with
+# `--no-group marketplace` when it lacks the private-repo token.
+default-groups = ["dev", "marketplace"]
 
-# Resolve the ecosystem repos under test from local sibling checkouts.
+# Resolve the tai42-* packages under test from the in-tree workspace members.
 # The published version floors in [project].dependencies are what a wheel would
-# declare; these source overrides float the siblings at their working trees.
+# declare; these source overrides float them at their in-tree working trees.
 [tool.uv.sources]
 tai42-contract = { workspace = true }
 tai42-kit = { workspace = true }
@@ -168,6 +179,10 @@ tai42-channel-slack = { workspace = true }
 tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
+# Not a workspace member — the registry lives in its own repo; the private git
+# source is fetched (and installed via the marketplace group) only when the CI
+# token / local git auth can reach it.
+tai42-marketplace = { git = "https://github.com/tai42ai/tai-marketplace" }
 reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 
 # Source-of-truth annotations for the catalog membership of every ecosystem
@@ -199,6 +214,10 @@ tai42-channel-slack = { tier = "oss-public", catalog = true }
 tai42-channel-twilio = { tier = "oss-public", catalog = true }
 tai42-channel-whatsapp = { tier = "oss-public", catalog = true }
 tai42-monitoring-langfuse = { tier = "oss-public", catalog = true }
+# The registry service (catalog = false — it hosts the catalog, it does not
+# register in it); the marketplace suite boots it as a real service under test,
+# sourced via the git override above.
+tai42-marketplace = { tier = "oss-public", catalog = false }
 # The Studio SPA repo (catalog = false); the browser-e2e studio_stack serves its
 # reference plugin, sourced via the git-subdirectory override above.
 tai-studio = { tier = "oss-public", catalog = false }
@@ -222,7 +241,7 @@ select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
 "asyncio.sleep".msg = "Ad-hoc sleeps are banned; wait on a condition with tai42_e2e.waiting.wait_for_async."
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "fixtures"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingImports = "warning"

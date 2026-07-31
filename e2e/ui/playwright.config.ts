@@ -46,9 +46,13 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   // The specs run on chromium as the PR/default browser; firefox + webkit widen
-  // the matrix on the nightly schedule only (the CI job gates them behind
-  // `github.event_name == 'schedule'`). Every project shares the one webServer and
-  // the tall viewport below.
+  // the matrix when the ui suite changed or the CI run is manual (the workflow's
+  // `run_browsers` gate). Every project shares the one webServer and the tall
+  // viewport below. The cross-viewport / a11y sweep lives in
+  // `viewport-sweep.spec.ts` and the accessibility audit in `a11y-audit.spec.ts`:
+  // each sets its own per-test viewport/theme and runs chromium-only, so the two
+  // widening browsers `testIgnore` them rather than laying out the whole 320-1920
+  // ladder — and re-running the axe pass — three times over.
   projects: [
     {
       name: 'chromium',
@@ -57,15 +61,17 @@ export default defineConfig({
       // and the modal does not scroll its own body, so a short viewport pushes the
       // submit button below the fold where it is unreachable. A tall viewport keeps
       // the whole dialog — including its footer buttons — on screen. The two
-      // nightly browsers inherit the same tall viewport for the same reason.
+      // widening browsers inherit the same tall viewport for the same reason.
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 1600 } },
     },
     {
       name: 'firefox',
+      testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
       use: { ...devices['Desktop Firefox'], viewport: { width: 1280, height: 1600 } },
     },
     {
       name: 'webkit',
+      testIgnore: /(viewport-sweep|a11y-audit)\.spec\.ts$/,
       use: { ...devices['Desktop Safari'], viewport: { width: 1280, height: 1600 } },
     },
   ],

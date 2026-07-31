@@ -46,14 +46,17 @@ if TYPE_CHECKING:
     from tai42_e2e.stack import Infra
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"
+# The in-repo fixture-plugin sources (outside ``src`` so uv never installs them,
+# outside ``tests`` so pytest never collects them). ``TAI_E2E_MARKETPLACE_FIXTURES``
+# overrides for an out-of-tree checkout.
+_DEFAULT_FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "marketplace_plugins"
 
 
 def _resolve_fixtures_dir(fixtures_dir: Path | None) -> Path:
     """The marketplace fixture-plugin source tree the forge builds artifacts from.
 
-    The trees are not carried in this repo; the caller supplies the directory
-    explicitly or via ``TAI_E2E_MARKETPLACE_FIXTURES``. A missing directory raises
-    loudly — never a silent empty forge."""
+    Resolves the explicit argument, then ``TAI_E2E_MARKETPLACE_FIXTURES``, then the
+    in-repo default. A missing directory raises loudly — never a silent empty forge."""
     resolved = fixtures_dir if fixtures_dir is not None else _env_fixtures_dir()
     if not resolved.is_dir():
         raise RuntimeError(
@@ -66,12 +69,7 @@ def _resolve_fixtures_dir(fixtures_dir: Path | None) -> Path:
 
 def _env_fixtures_dir() -> Path:
     raw = os.environ.get(_FIXTURES_ENV)
-    if not raw:
-        raise RuntimeError(
-            f"marketplace fixtures dir not provided; set {_FIXTURES_ENV} to the "
-            "checked-out marketplace_plugins tree (or pass fixtures_dir)"
-        )
-    return Path(raw)
+    return Path(raw) if raw else _DEFAULT_FIXTURES_DIR
 
 
 ALPHA_PACKAGE = "tai-e2e-market-alpha"
