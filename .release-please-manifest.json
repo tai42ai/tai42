@@ -7,7 +7,7 @@
   "plugins/agents": "0.3.2",
   "plugins/backend-arq": "0.3.2",
   "plugins/backend-celery": "0.3.2",
-  "plugins/backend-rq": "0.3.1",
+  "plugins/backend-rq": "0.3.2",
   "plugins/channel-slack": "0.2.1",
   "plugins/channel-telegram": "0.2.1",
   "plugins/channel-twilio": "0.2.1",
@@ -25,5 +25,5 @@
   "plugins/tools-stripe": "0.3.3",
   "plugins/webhook-verifier-github": "0.2.1",
   "plugins/webhook-verifier-stripe": "0.2.1",
-  "e2e": "0.3.0"
+  "e2e": "0.3.1"
 }
