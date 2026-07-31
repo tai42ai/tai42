@@ -24,7 +24,11 @@ from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 from tai42_kit.utils.data.string_util import hash_api_key
 
 from tai42_skeleton.access_control.adapter import AuthAdapter, handle_auth_error
-from tai42_skeleton.access_control.backend import AccessControlAuthBackend, AuthorizationError
+from tai42_skeleton.access_control.backend import (
+    AccessControlAuthBackend,
+    AuthorizationError,
+    IdentityProviderUnavailableError,
+)
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_identity_claims,
     set_request_identity_claims,
@@ -113,9 +117,11 @@ async def test_adapter_resolves_provider_lazily_after_registration():
 
 async def test_adapter_unknown_provider_raises_loudly_on_first_verify():
     # An unknown provider name is a fail-closed LOUD raise on first use, NOT a boot
-    # crash (construction succeeded above) and NOT a silent allow.
+    # crash (construction succeeded above) and NOT a silent allow. It surfaces as the
+    # precise ``IdentityProviderUnavailableError`` (the registry-miss class the backend
+    # gate-checks), never a bare KeyError.
     adapter = AuthAdapter(AccessControlSettings(auth_providers=["never-registered"]))
-    with pytest.raises(KeyError, match="never-registered"):
+    with pytest.raises(IdentityProviderUnavailableError, match="never-registered"):
         await adapter.verify_token("raw")
 
 

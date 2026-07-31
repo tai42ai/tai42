@@ -11,12 +11,18 @@ from tai42_contract.access_control.context import get_current_user_id
 from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.access_control.registry import get_identity_provider_factory
 
-from tai42_skeleton.access_control.backend import AccessControlAuthBackend, AuthorizationError
+from tai42_skeleton.access_control.backend import (
+    AccessControlAuthBackend,
+    AuthorizationError,
+    IdentityProviderUnavailableError,
+    ReloadInProgressError,
+)
 from tai42_skeleton.access_control.middleware import ResourceGuardMiddleware
 from tai42_skeleton.access_control.role_gate import refusal_route
 from tai42_skeleton.access_control.roles import SkeletonAccountsAdminServices
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
+from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.middleware.audit_log import ANONYMOUS, UNAUTHENTICATED, emit_audit_line
 from tai42_skeleton.settings.audit_log import audit_log_settings
 
@@ -24,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 
 def handle_auth_error(conn: HTTPConnection, exc: Exception) -> JSONResponse:
+    # A reload holds the gate and cleared the identity registry (its reset->reimport
+    # window): answer the SAME retriable ``reloading`` envelope the dispatch surface
+    # uses, so the client retries rather than seeing a spurious 401. A transient infra
+    # condition, not an authentication decision — no refusal audit line, no error log.
+    if isinstance(exc, ReloadInProgressError):
+        return reload_gate.reject_response()
+
     # Log the full failure server-side (loud), but never surface the exception
     # string to the caller — it can carry internal detail (redis host:port, jq
     # internals). An authenticated-but-denied caller (AuthorizationError) gets a
@@ -85,10 +98,19 @@ class AuthAdapter(TokenVerifier):
     def _get_identity_providers(self) -> list[IdentityProvider]:
         # Resolve EVERY configured provider through the module-level identity-provider
         # registry, which the manifest's identity plugins populate at import, preserving
-        # the configured order (the verifier tries them in turn). An unknown name raises
-        # LOUDLY here (surfaced as a fail-closed deny by the backend's error handling),
-        # never a boot crash and never a silent allow.
-        return [get_identity_provider_factory(name)(self.settings) for name in self.settings.auth_providers]
+        # the configured order (the verifier tries them in turn). A missing name — the
+        # registry cleared mid-reload, or a genuine misconfiguration — raises the precise
+        # ``IdentityProviderUnavailableError`` so the backend answers the retriable
+        # ``reloading`` envelope while a reload is in flight and fails closed otherwise.
+        # Only the registry lookup is wrapped, never a provider's own construction.
+        providers: list[IdentityProvider] = []
+        for name in self.settings.auth_providers:
+            try:
+                factory = get_identity_provider_factory(name)
+            except KeyError as e:
+                raise IdentityProviderUnavailableError(f"identity provider {name!r} is not registered") from e
+            providers.append(factory(self.settings))
+        return providers
 
     def _get_access_control_middleware(self) -> list[Middleware]:
         if not self.settings.enable:

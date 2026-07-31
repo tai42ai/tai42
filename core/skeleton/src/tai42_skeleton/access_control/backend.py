@@ -16,6 +16,7 @@ from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.user import TaiUser, is_admin_policy
 from tai42_skeleton.access_control.verifier import AccessControlVerifier, is_always_public_prefix
+from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,23 @@ class AuthorizationError(AuthenticationError):
         self.cause = cause
 
 
+class IdentityProviderUnavailableError(Exception):
+    """No identity-provider factory resolved for a configured provider name — the
+    registry held none. Distinct from an invalid credential (a resolved provider
+    returning no identity): only THIS class is treated as a reload-window transient
+    when the reload gate is held; a bad key stays a 401 in every case."""
+
+
+class ReloadInProgressError(AuthenticationError):
+    """Authentication could not resolve its providers because a reload holds the gate
+    and cleared the identity registry (its reset->reimport window).
+
+    Subclasses ``AuthenticationError`` so ``AuthenticationMiddleware`` still routes it
+    through ``on_error``, where the handler renders the shared retriable ``reloading``
+    envelope (HTTP 503) instead of a spurious 401 — the run surface's contract, now
+    honored on the auth path that runs before it."""
+
+
 class AccessControlAuthBackend(AuthenticationBackend):
     def __init__(self, verifier: AccessControlVerifier, settings: AccessControlSettings):
         self.verifier = verifier
@@ -101,6 +119,21 @@ class AccessControlAuthBackend(AuthenticationBackend):
                 access_token = await self.verifier.verify_token(token)
                 if access_token:
                     return access_token
+            except IdentityProviderUnavailableError as e:
+                # Provider resolution found no provider in the registry. A reload
+                # clears that registry before re-importing the plugin that
+                # re-registers, so a request whose FIRST verify lands in that
+                # reset->reimport window gets the retriable "reloading" answer the run
+                # surface already gives — never a spurious 401. Only THIS precise class
+                # gets the gate check; outside a reload a missing provider is a real
+                # fault and fails closed exactly like any verification error below.
+                if reload_gate.locked:
+                    raise ReloadInProgressError(REJECT_MESSAGE) from e
+                logger.exception(
+                    "access_control: identity provider unavailable with no reload in progress; "
+                    "treating candidate as invalid"
+                )
+                continue
             except Exception:
                 # Fail-closed: a verification error never grants access. Treat
                 # this candidate as invalid and try the next; if every candidate
