@@ -68,10 +68,19 @@ async def test_category_facet(marketplace_service: MarketplaceService) -> None:
     assert _refs(payload) == {ALPHA_REF}
 
 
-async def test_sort_name_is_deterministic(marketplace_service: MarketplaceService) -> None:
+async def test_sort_name_groups_items_by_listing(marketplace_service: MarketplaceService) -> None:
+    # sort=name orders by listing name, then item name (l.name ASC, i.name ASC,
+    # i.id ASC), so one listing's items stay contiguous. For the seeded catalog
+    # that is alpha's item, then beta's two (beta_marker < e2e_market_beta_probe),
+    # then gamma's — NOT the globally item-name-sorted order.
     items = _items(await marketplace_service.api.get("/api/v1/search?sort=name"))
     names = [row["item"]["name"] for row in items]
-    assert names == sorted(names)
+    assert names == [
+        "e2e_market_probe",
+        "beta_marker",
+        "e2e_market_beta_probe",
+        "e2e_market_gamma_probe",
+    ]
 
 
 async def test_sort_downloads_returns_complete_set(marketplace_service: MarketplaceService) -> None:
