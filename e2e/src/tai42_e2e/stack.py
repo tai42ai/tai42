@@ -700,18 +700,30 @@ class TaiStack:
 
         wait_for(probe, deadline=deadline, message=f"{label} never became ready at {url}")
 
-    def _wait_backend_census(self, deadline: float) -> None:
+    def _wait_backend_census(self, deadline: float, exclude: frozenset[str] | set[str] = frozenset()) -> None:
         # The bus census lists ALL origins (serve + backend), so readiness keys on
         # the origin KIND: the backend worker is up once a ``backend``-kind origin
         # appears, not merely once the census is non-empty (the serve workers
-        # register first).
+        # register first). ``exclude`` carries the pre-restart backend origins so a
+        # restart waits for a GENUINELY NEW worker: a SIGKILLed worker's presence key
+        # lingers until its heartbeat TTL, and keying on "any backend origin" would
+        # pass on that corpse before the replacement has joined.
+        #
+        # Scoped to the restart path (called only from ``_wait_after_restart``), which
+        # runs a SINGLE backend worker: the one being restarted. Census identities are
+        # unstable across subscription re-homes, so "a new backend-kind origin" could
+        # in general be a surviving worker that merely re-keyed — but with exactly one
+        # backend worker in play, the only backend origin that can appear outside the
+        # pre-restart set is the restarted process. Do not reuse this against a
+        # multi-backend fleet without revisiting that assumption.
         def probe() -> bool:
             early = self._early_exit_detail()
             if early is not None:
                 raise RuntimeError(f"backend census: {early}")
-            return any(origin.kind == "backend" for origin in self.census())
+            return any(origin.kind == "backend" and origin.origin not in exclude for origin in self.census())
 
-        wait_for(probe, deadline=deadline, message="no backend-kind origin ever appeared in the worker-bus census")
+        want = "a new backend-kind origin" if exclude else "a backend-kind origin"
+        wait_for(probe, deadline=deadline, message=f"{want} never appeared in the worker-bus census")
 
     def _run_readiness_coro(self, coro: Coroutine[Any, Any, None]) -> None:
         """Run a readiness coroutine to completion from synchronous boot/restart code.
@@ -816,6 +828,11 @@ class TaiStack:
         """Stop and respawn one process from its saved spec (component-restart
         tests). The new process re-enters readiness for its own port kind."""
         handle = self._procs[name]
+        # The backend worker joins no port — its readiness keys on a ``backend``-kind
+        # census origin. The dying worker's presence key lingers until its heartbeat
+        # TTL, so capture the pre-restart backend origins BEFORE the kill; the
+        # post-restart wait then keys on a genuinely NEW origin, never the corpse.
+        before_backends = {o.origin for o in self.census() if o.kind == "backend"} if name == "backend" else frozenset()
         handle.terminate()
         # The respawn reuses the same port; wait for the killed process to release
         # it before rebinding, else the new process fails to bind and exits early.
@@ -823,7 +840,7 @@ class TaiStack:
             wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed before restart")
         spec = self._specs[name]
         self._spawn(spec)
-        self._wait_after_restart(name)
+        self._wait_after_restart(name, before_backends)
 
     def _ports_for(self, name: str) -> list[int]:
         """The loopback ports a process kind binds (empty for the backend worker,
@@ -849,7 +866,7 @@ class TaiStack:
         and asserts it left nothing listening (like a leaked port)."""
         self._relays.append(relay)
 
-    def _wait_after_restart(self, name: str) -> None:
+    def _wait_after_restart(self, name: str, before_backends: frozenset[str] | set[str] = frozenset()) -> None:
         deadline = self.infra.settings.boot_timeout
         if name.startswith("serve"):
             idx = 0 if name in ("serve", "serve-a") else 1
@@ -868,7 +885,7 @@ class TaiStack:
             assert self.metrics_port is not None
             self._wait_http_ok(f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
         elif name == "backend":
-            self._wait_backend_census(deadline)
+            self._wait_backend_census(deadline, exclude=before_backends)
 
     # ---- config rendering ------------------------------------------------
 
