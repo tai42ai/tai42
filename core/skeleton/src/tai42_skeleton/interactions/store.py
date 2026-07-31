@@ -237,7 +237,7 @@ class InteractionStore:
                 2,
                 self.pending_deadline_key,
                 self.pending_key,
-                _now_ms(),
+                str(_now_ms()),
                 request.group_id,
             ),
         )
@@ -318,9 +318,9 @@ class InteractionStore:
                 _OPEN_RESERVE_LUA,
                 1,
                 self.open_key,
-                _now_ms(),
-                limit,
-                _timeout_ms(request),
+                str(_now_ms()),
+                str(limit),
+                str(_timeout_ms(request)),
                 request.interaction_id,
             ),
         )
