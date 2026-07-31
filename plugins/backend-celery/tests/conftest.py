@@ -9,6 +9,7 @@ relevant facets (clients, admin, monitoring, storage) at per-test fakes.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -143,14 +144,21 @@ class _StubResourceManager:
 
 
 class _RecordingLifecycle:
-    """Records ``on_fleet_op_applied`` handler registrations."""
+    """Records ``on_fleet_op_applied`` registrations and drives the boot-ready latch
+    the worker gate awaits. ``ready`` is pre-set, so ``wait_until_ready`` resolves at
+    once unless a test clears it to exercise the gate."""
 
     def __init__(self) -> None:
         self.fleet_op_applied: list[Any] = []
+        self.ready = asyncio.Event()
+        self.ready.set()
 
     def on_fleet_op_applied(self, func: Any) -> Any:
         self.fleet_op_applied.append(func)
         return func
+
+    async def wait_until_ready(self) -> None:
+        await self.ready.wait()
 
 
 class _StubApp:
@@ -192,6 +200,11 @@ def _reset_stub_state() -> Any:
     stub_app_instance.admin.calls.clear()
     stub_app_instance.admin.results.clear()
     stub_app_instance.admin.live_manifest = {"backend_module": "tai42_backend_celery"}
+    # Fresh Event per test: an asyncio.Event binds to the loop of its first await
+    # (``_LoopBoundMixin``), and each async test runs on its own loop, so a reused
+    # Event would raise "bound to a different event loop".
+    stub_app_instance.lifecycle.ready = asyncio.Event()
+    stub_app_instance.lifecycle.ready.set()
     stub_app_instance.monitoring.reset_mock()
     stub_app_instance.config.reset_mock()
     return None

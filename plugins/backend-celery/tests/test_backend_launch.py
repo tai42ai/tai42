@@ -78,6 +78,57 @@ async def test_launch_worker_keeps_the_loop_alive(monkeypatch: pytest.MonkeyPatc
     await asyncio.wait_for(task, timeout=5)
 
 
+async def test_launch_worker_waits_for_boot_ready_before_starting(
+    stub_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker must not start (nor fork its pool) until the boot-ready latch
+    opens: a pool child forked against a half-built tool registry fails every job
+    routed to it permanently."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def _cli() -> None:
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(backend_module, "_celery_cli_main", _cli)
+    stub_app.lifecycle.ready.clear()
+    old_argv = sys.argv
+    task = asyncio.ensure_future(CeleryBackend().launch(["worker"]))
+    try:
+        # While the latch is closed the worker stays unstarted.
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            assert not started.is_set()
+            assert not task.done()
+        # Opening the latch releases the worker start.
+        stub_app.lifecycle.ready.set()
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 5), timeout=5)
+        assert started.is_set()
+    finally:
+        release.set()
+        sys.argv = old_argv
+    await asyncio.wait_for(task, timeout=5)
+
+
+async def test_launch_worker_readiness_timeout_raises_without_starting(
+    stub_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A boot that never becomes ready fails loudly at the timeout, and the worker
+    is never started."""
+    started: list[str] = []
+    monkeypatch.setattr(backend_module, "_celery_cli_main", lambda: started.append("cli"))
+    monkeypatch.setattr(backend_module, "_APP_READY_TIMEOUT_SECONDS", 0.05)
+    stub_app.lifecycle.ready.clear()
+    old_argv = sys.argv
+    try:
+        with pytest.raises(RuntimeError, match=r"did not become ready within 0\.05s"):
+            await CeleryBackend().launch(["worker"])
+    finally:
+        sys.argv = old_argv
+    assert started == []
+
+
 async def test_launch_worker_cancellation_requests_shutdown_and_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     release = threading.Event()
     requested: list[str] = []
