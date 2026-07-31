@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-webhook-verifier-stripe"
+version = "0.2.0"
+description = "Stripe webhook-signature verifier plugin for the TAI ecosystem: a per-provider WebhookVerifier that checks each delivery's Stripe-Signature HMAC before the payload is dispatched."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["tai", "webhook", "verifier", "stripe", "hmac", "signature", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract this verifier registers through (the global
+    # tai42_app handle and the WebhookVerifier / WebhookVerificationError types).
+    # The HMAC work is pure standard library (hmac / hashlib) — no other tai-*
+    # dependency is needed.
+    "tai42-contract>=0.3,<0.4",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/plugins/webhook-verifier-stripe"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/webhook-verifier-stripe/CHANGELOG.md"
+
+[dependency-groups]
+# Public dev/test tooling (installed by default with `uv sync`).
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    # The plugin-spec test parses tai-plugin.yml.
+    "pyyaml>=6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_webhook_verifier_stripe*"]
+
+[tool.setuptools.package-data]
+tai42_webhook_verifier_stripe = ["py.typed", "tai-plugin.yml"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+
+# The version floors in [project] are the compatibility contract; these path
+# sources point local development at the sibling checkouts instead of the
+# published packages. They are not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_skeleton".msg = "tai42-webhook-verifier-stripe is contract-facing: it never imports tai42-skeleton."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["tai42_webhook_verifier_stripe"]
+
+[tool.coverage.report]
+fail_under = 95
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"

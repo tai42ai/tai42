@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-connector-google"
+version = "0.2.0"
+description = "Google (Gmail, Calendar, Drive) OAuth connector provider for the TAI ecosystem. Pure descriptor data; depends only on tai42-contract."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["connector", "oauth", "google", "gmail", "calendar", "drive", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract — this plugin's only dependency. It declares a
+    # ProviderDescriptor and registers it via the tai42_app handle; it never imports
+    # the skeleton or any engine code.
+    "tai42-contract>=0.3,<0.4",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/plugins/connector-google"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/connector-google/CHANGELOG.md"
+
+[dependency-groups]
+# Public dev/test tooling — a clone needs nothing private to lint, type-check,
+# and run the self-contained tests.
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    # The plugin-spec test parses tai-plugin.yml.
+    "pyyaml>=6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+include = ["tai42_connector*"]
+
+[tool.setuptools.package-data]
+"tai42_connector.google" = ["py.typed", "tai-plugin.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+
+# The version floors in [project] are the compatibility contract; these path
+# sources point local development at the sibling checkouts instead of the
+# published packages. They are not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_kit".msg = "tai42-connector-google is a pure-data plugin: it never imports tai42-kit."
+"tai42_skeleton".msg = "tai42-connector-google is a pure-data plugin: it never imports tai42-skeleton."
+
+[tool.coverage.run]
+source = ["tai42_connector"]
+
+[tool.coverage.report]
+fail_under = 97
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+# tai42-contract resolves via a dev-time editable path install pyright can't follow;
+# a missing-import is a warning, not an error.
+reportMissingImports = "warning"

@@ -1,0 +1,17 @@
+{
+  "name": "tai42_accounts_postgres",
+  "version": "0.3.1",
+  "api_version": 1,
+  "entry": "tai42-accounts-postgres-DpF1F0o2.js",
+  "integrity": {
+    "tai42-accounts-postgres-DpF1F0o2.js": "sha384-JUcvwzoojcC6XoTx98GDbNOmnDmxxxRz6X9JQnX9VNLdWa8q2sGtPViC68dN7iku",
+    "tai42-accounts-postgres-Ulk7-WS7.css": "sha384-nbv5BFllmbFJhEunqvEJEvhONoeRar2RmcsAKUV0AY2AgFoUwYu6voDIrzAiWOae"
+  },
+  "contributions": {
+    "tool_panels": {},
+    "pages": [
+      "users"
+    ],
+    "settings_tabs": []
+  }
+}

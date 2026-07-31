@@ -1,0 +1,98 @@
+spec_version: 1
+namespace: tai42
+name: toolbox
+package: tai42-toolbox
+version: 0.3.2
+description: >-
+  Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded
+  generic tools and tool extensions (a tool extension extends a single tool).
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/toolbox
+contract: '>=0.3,<0.4'
+categories:
+  - utilities
+  - productivity
+tags:
+  - uuid
+  - time
+  - embeddings
+  - http
+  - cache
+  - batch
+  - chain
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: current_time_info
+    module: tai42_toolbox.tools.current_time_info
+    description: Return the current time as a structured object.
+    tags:
+      - time
+  - kind: tool
+    name: generate_embeddings
+    module: tai42_toolbox.tools.generate_embeddings
+    description: Generate embeddings for a single string or a list of strings.
+    tags:
+      - embeddings
+  - kind: tool
+    name: generate_uuid
+    module: tai42_toolbox.tools.generate_uuid
+    description: Generate a random UUID (version 4).
+    tags:
+      - uuid
+  - kind: tool
+    name: pad_embeddings
+    module: tai42_toolbox.tools.pad_embeddings
+    description: Pad each embedding vector with zeros up to a target dimension.
+    tags:
+      - embeddings
+  - kind: tool
+    name: request
+    module: tai42_toolbox.tools.request
+    description: Execute an HTTP request through a curl-backed session.
+    tags:
+      - http
+  - kind: extension
+    name: batch
+    module: tai42_toolbox.extensions.batch
+    description: Branch a tool into a variant that runs many instances at once.
+    tags:
+      - batch
+  - kind: extension
+    name: cache
+    module: tai42_toolbox.extensions.cache
+    description: Branch a tool into a variant that memoizes results by call arguments.
+    tags:
+      - cache
+  - kind: extension
+    name: chain
+    module: tai42_toolbox.extensions.chain
+    description: >-
+      Branch a tool into a variant that transforms its output and calls a next
+      tool.
+    tags:
+      - chain
+  - kind: extension
+    name: output_schema
+    module: tai42_toolbox.extensions.output_schema
+    description: >-
+      Branch a tool into a variant that forces a configured JSON Schema as its
+      output schema and validates every result against it.
+    tags:
+      - schema
+  - kind: extension
+    name: prometheus_metrics
+    module: tai42_toolbox.extensions.prometheus
+    description: Branch a tool into a variant that records a Prometheus call metric.
+    tags:
+      - metrics
+  - kind: extension
+    name: proxy
+    module: tai42_toolbox.extensions.proxy
+    description: Branch a tool into a variant that runs the wrapped tool through a proxy.
+    tags:
+      - proxy

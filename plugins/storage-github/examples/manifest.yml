@@ -1,0 +1,13 @@
+# Example tai42-skeleton manifest wiring the GitHub storage backend.
+#
+# `storage_module` is a Python import path; importing it runs the package's
+# `@tai42_app.storage.register_storage` decorator, making GithubStorage the active
+# Storage provider. tai42-storage-github must be installed in the app's environment.
+storage_module: tai42_storage_github
+
+# Configure the backend through STORAGE_GITHUB_-prefixed environment variables:
+#
+#   STORAGE_GITHUB_USERNAME=my-org
+#   STORAGE_GITHUB_REPO=my-content-repo
+#   STORAGE_GITHUB_BRANCH=main          # defaults to "main"
+#   STORAGE_GITHUB_TOKEN=ghp_...        # a fine-grained/PAT token; omit for a public repo

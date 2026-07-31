@@ -1,0 +1,12 @@
+# pnpm settings for this single-package repo (pnpm 11 reads build-script approval
+# from here, not package.json). esbuild ships a platform binary via a build script;
+# vite needs it, so it is allow-listed to run.
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@tai42/api-client@0.4.0'
+  - '@tai42/studio-sdk@0.4.0'
+
+onlyBuiltDependencies:
+  - esbuild

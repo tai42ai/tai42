@@ -1,0 +1,127 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-toolbox"
+version = "0.3.2"
+description = "Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded generic tools and tool extensions (a tool extension extends a single tool)."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["tai", "tools", "tool-extensions", "cache", "proxy", "batch", "chain", "http", "embeddings"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract these tools and tool extensions register through
+    # (the global tai42_app handle, ExtensionKind, tool/extension facets).
+    "tai42-contract>=0.3,<0.4",
+    # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
+    # llm/embedding factories the extra-gated modules wire to.
+    "tai42-kit>=0.2,<0.3",
+    # Composed callables for the transformer extensions (batch, chain) present a
+    # real, concrete signature via makefun.create_function.
+    "makefun>=1.15",
+    # Imported directly in base (non-extra) modules: settings machinery and model
+    # building in the extensions and their settings.
+    "pydantic>=2.12",
+    "pydantic-settings>=2.11",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/plugins/toolbox"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/toolbox/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Heavy backing dependencies are opt-in per module. A module whose extra is
+# missing fails loudly at import with a copy-pasteable "install tai42-toolbox[extra]"
+# hint — never a silent skip. The base install stays light.
+http = ["tai42-kit[curl]"]           # kit's curl client backs the `request` tool
+prometheus = ["prometheus-client>=0.24"] # the prometheus extension's counter emitter
+chain = ["tai42-kit[jq]"]            # jq expression compilation lives in kit's jq extra
+embeddings = ["tai42-kit[llm]"]      # tai42_kit.llm.embedding needs kit's llm extra
+proxy = ["PySocks~=1.7.1"]         # SOCKS routing for the proxy extension (HTTP/HTTPS path is stdlib-only)
+
+# Public dev/test tooling. Reference every runtime extra from a single source so a
+# full checkout can run the whole suite (extension and tool tests alike).
+dev = [
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    "trustme>=1.1",             # loopback TLS certs for the HTTPS-proxy test path
+    # The plugin-spec test parses tai-plugin.yml.
+    "pyyaml>=6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_toolbox*"]
+
+[tool.setuptools.package-data]
+tai42_toolbox = ["py.typed", "tai-plugin.yml"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+
+# The version floors in [project] are the compatibility contract; these path
+# sources point local development at the sibling checkouts instead of the
+# published packages. They are not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+tai42-kit = { workspace = true }
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_skeleton".msg = "tai42-toolbox is contract-facing: it never imports tai42-skeleton."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["tai42_toolbox"]
+
+[tool.coverage.report]
+fail_under = 95
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+# Basic (not strict) is deliberate: the heavy optional deps (prometheus-client,
+# curl-cffi) ship no type stubs, so strict is impractical. reportMissingImports
+# stays a warning so the extra-gated optional imports don't fail the check when
+# their extra is absent.
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+
+[dependency-groups]
+# Reserved for docs tooling. This repo builds no docs site of its own (no
+# mkdocs.yml / docs/); the unified docs site lives elsewhere.
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+]

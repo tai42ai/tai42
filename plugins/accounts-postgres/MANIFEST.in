@@ -1,0 +1,3 @@
+prune tests
+recursive-include src/tai42_accounts_postgres/sql *.sql
+recursive-include src/tai42_accounts_postgres/studio *

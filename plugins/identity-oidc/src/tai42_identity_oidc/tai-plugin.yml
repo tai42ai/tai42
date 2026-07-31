@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: identity-oidc
+package: tai42-identity-oidc
+version: 0.2.0
+description: "Validate-only OIDC identity provider for the TAI ecosystem: an installable plugin that registers itself as the \"identity-oidc\" identity provider and resolves an issuer-minted JWT to an authenticated identity (no key minting, no stored state)."
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/identity-oidc
+contract: ">=0.3,<0.4"
+categories: [identity, security]
+tags: [identity, oidc, jwt, auth]
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: identity
+    name: identity-oidc
+    module: tai42_identity_oidc.provider
+    description: "Validate-only OIDC identity provider — resolve an issuer-minted JWT to an authenticated identity."

@@ -1,0 +1,8 @@
+# Build outputs and artifacts — never formatted.
+node_modules/
+pnpm-lock.yaml
+uv.lock
+
+# The compiled Studio bundle + generated manifest (emitted by scripts/build-studio.mjs,
+# shipped inside the Python package).
+src/tai42_accounts_postgres/studio/

@@ -1,0 +1,56 @@
+spec_version: 1
+namespace: tai42
+name: tools-stripe
+package: tai42-tools-stripe
+version: 0.3.2
+description: >-
+  Stripe payment tools for the TAI ecosystem: manifest-loaded Checkout Session
+  tools for the external-ask checkout link, the webhook-bridge confirm, the
+  reconciliation recovery layer, and a flexible-amount non-blocking payment
+  link.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-stripe
+contract: '>=0.3,<0.4'
+categories:
+  - payments
+  - utilities
+tags:
+  - stripe
+  - payments
+  - checkout
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: confirm_stripe_payment
+    module: tai42_tools_stripe.tools.confirm_stripe_payment
+    description: Answer a paid checkout ask from a Stripe webhook event.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: create_stripe_checkout
+    module: tai42_tools_stripe.tools.create_stripe_checkout
+    description: Create a Stripe Checkout Session and return its hosted payment URL.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: create_stripe_payment_link
+    module: tai42_tools_stripe.tools.create_stripe_payment_link
+    description: >-
+      Create a flexible-amount non-blocking Stripe payment link and return its
+      URL and session id.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: reconcile_stripe_payments
+    module: tai42_tools_stripe.tools.reconcile_stripe_payments
+    description: Re-answer paid Stripe checkout sessions the webhook path may have lost.
+    tags:
+      - stripe
+      - payments
