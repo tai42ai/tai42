@@ -1,8 +1,8 @@
 """``tai catalog`` — the packaged ecosystem catalog.
 
-Covers the offline read of ``data/ecosystem.yml``, the package->repo join (the
-repo lives in one place, joined at render time), the loud error when an entry's
-package is missing from that map, and the ``--json`` / table rendering.
+Covers the offline read of ``data/ecosystem.yml``, the package->source join (the
+source location lives in one place, joined at render time), the loud error when
+an entry's package is missing from that map, and the ``--json`` / table rendering.
 """
 
 from __future__ import annotations
@@ -47,11 +47,11 @@ def test_valid_kinds_track_the_contract() -> None:
     assert {kind.value for kind in PluginItemKind} == _VALID_KINDS
 
 
-def test_load_catalog_joins_repo_for_every_entry() -> None:
+def test_load_catalog_joins_source_for_every_entry() -> None:
     records = catalog.load_catalog()
     assert records, "the packaged catalog is empty"
     for record in records:
-        assert record["repo"], f"{record['name']} has no derived repo"
+        assert record["source"], f"{record['name']} has no derived source"
         assert record["kind"] in _VALID_KINDS, f"{record['name']} has an unknown kind {record['kind']!r}"
         for field in ("name", "group", "package", "module", "description"):
             assert record[field], f"{record['name']} is missing {field}"
@@ -84,7 +84,7 @@ def test_catalog_json_parses() -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert isinstance(data, list)
-    assert {"name", "kind", "repo", "package", "module"} <= set(data[0])
+    assert {"name", "kind", "source", "package", "module"} <= set(data[0])
 
 
 def test_catalog_json_trailing_flag_parses() -> None:
@@ -94,7 +94,7 @@ def test_catalog_json_trailing_flag_parses() -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert isinstance(data, list)
-    assert {"name", "kind", "repo"} <= set(data[0])
+    assert {"name", "kind", "source"} <= set(data[0])
 
 
 def test_catalog_command_wraps_packaging_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,8 +110,8 @@ def test_catalog_command_wraps_packaging_error(monkeypatch: pytest.MonkeyPatch) 
     assert "Traceback" not in result.output
 
 
-def test_catalog_table_renders_with_repo_column() -> None:
+def test_catalog_table_renders_with_source_column() -> None:
     result = CliRunner().invoke(app_module.app, ["catalog"])
     assert result.exit_code == 0, result.output
-    assert "repo" in result.output
+    assert "source" in result.output
     assert "tai42-skeleton" in result.output

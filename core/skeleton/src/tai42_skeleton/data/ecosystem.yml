@@ -18,10 +18,10 @@
 #   module      the Python module a host imports to trigger the registration
 #   description one line describing what it does
 #
-# An entry carries NO repo field. The repo is derived at render time by joining
-# the entry's `package` against the `packages` map below — repo lives in ONE
-# place, never duplicated per entry. A `package` absent from that map is a loud
-# error at render time, never a blank repo cell.
+# An entry carries NO source field. The source location is derived at render
+# time by joining the entry's `package` against the `packages` map below — it
+# lives in ONE place, never duplicated per entry. A `package` absent from that
+# map is a loud error at render time, never a blank source cell.
 
 entries:
   # -- Tools: tai42-skeleton built-ins ----------------------------------------
@@ -339,30 +339,32 @@ entries:
     module: tai42_identity_oidc
     description: Validate-only OIDC identity provider — verifies issuer-minted JWTs against the issuer's JWKS.
 
-# package -> repository mapping (the single source of the repo column). Every
-# package named in `entries` MUST appear here.
+# package -> source-location mapping (the single source of the source column).
+# Every package here is a member of the tai42 monorepo; the value is its member
+# path (core/<name> or plugins/<name>). Every package named in `entries` MUST
+# appear here.
 packages:
-  tai42-skeleton: tai-skeleton
-  tai42-toolbox: tai-toolbox
-  tai42-tools-stripe: tai-tools-stripe
-  tai42-agents: tai-agents
-  tai42-storage-s3: tai-storage-s3
-  tai42-storage-github: tai-storage-github
-  tai42-storage-local: tai-storage-local
-  tai42-webhook-verifier-github: tai-webhook-verifier-github
-  tai42-webhook-verifier-stripe: tai-webhook-verifier-stripe
-  tai42-connector-google: tai-connector-google
-  tai42-connector-atlassian: tai-connector-atlassian
-  tai42-config-k8s: tai-config-k8s
-  tai42-channel-telegram: tai-channel-telegram
-  tai42-channel-slack: tai-channel-slack
-  tai42-channel-twilio: tai-channel-twilio
-  tai42-channel-whatsapp: tai-channel-whatsapp
-  tai42-identity-redis: tai-identity-redis
-  tai42-accounts-postgres: tai-accounts-postgres
-  tai42-accounts-oidc: tai-accounts-oidc
-  tai42-identity-oidc: tai-identity-oidc
-  tai42-backend-arq: tai-backend-arq
-  tai42-backend-celery: tai-backend-celery
-  tai42-backend-rq: tai-backend-rq
-  tai42-monitoring-langfuse: tai-monitoring-langfuse
+  tai42-skeleton: core/skeleton
+  tai42-toolbox: plugins/toolbox
+  tai42-tools-stripe: plugins/tools-stripe
+  tai42-agents: plugins/agents
+  tai42-storage-s3: plugins/storage-s3
+  tai42-storage-github: plugins/storage-github
+  tai42-storage-local: plugins/storage-local
+  tai42-webhook-verifier-github: plugins/webhook-verifier-github
+  tai42-webhook-verifier-stripe: plugins/webhook-verifier-stripe
+  tai42-connector-google: plugins/connector-google
+  tai42-connector-atlassian: plugins/connector-atlassian
+  tai42-config-k8s: plugins/config-k8s
+  tai42-channel-telegram: plugins/channel-telegram
+  tai42-channel-slack: plugins/channel-slack
+  tai42-channel-twilio: plugins/channel-twilio
+  tai42-channel-whatsapp: plugins/channel-whatsapp
+  tai42-identity-redis: plugins/identity-redis
+  tai42-accounts-postgres: plugins/accounts-postgres
+  tai42-accounts-oidc: plugins/accounts-oidc
+  tai42-identity-oidc: plugins/identity-oidc
+  tai42-backend-arq: plugins/backend-arq
+  tai42-backend-celery: plugins/backend-celery
+  tai42-backend-rq: plugins/backend-rq
+  tai42-monitoring-langfuse: plugins/monitoring-langfuse

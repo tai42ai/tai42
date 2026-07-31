@@ -1,11 +1,10 @@
-"""The emitter's ``x-destructive`` output, the declared-metadata dual path, and
-the emitter-determinism pin.
+"""The emitter's ``x-destructive`` output, declared operation metadata, and the
+emitter-determinism pin.
 
-The product spec now carries ``x-destructive`` on the mutating routes converted to
-operations (the first routers migrated to the operations layer): a read never
-declares it, so the invariant the emitter pins is ``x-destructive`` appears only on
-a non-GET method. The emitter is still deterministic — rebuilding the spec twice is
-byte-stable."""
+Mutating routes are operations with declared metadata, and the OpenAPI document
+reflects it: ``x-destructive`` appears only on a non-GET method (a read never
+declares it), and error statuses come from the operation's declared error classes.
+The emitter is deterministic — rebuilding the spec twice is byte-stable."""
 
 from __future__ import annotations
 

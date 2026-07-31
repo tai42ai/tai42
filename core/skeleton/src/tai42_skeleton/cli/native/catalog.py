@@ -13,16 +13,16 @@ from tai42_skeleton.cli.commands._common import app_context
 from tai42_skeleton.cli.render import print_records
 
 # Columns rendered in the human table (JSON output carries the raw records).
-_COLUMNS = ["name", "kind", "group", "package", "repo", "module", "description"]
+_COLUMNS = ["name", "kind", "group", "package", "source", "module", "description"]
 
 
 def load_catalog() -> list[dict[str, Any]]:
     """Read the packaged ecosystem catalog, joining each entry's ``package`` to
-    its repo via the file's ``packages`` map.
+    its source location via the file's ``packages`` map.
 
-    The repo lives in exactly one place — the ``packages`` map — so a package
-    that appears on an entry but is absent from the map raises loudly rather than
-    rendering a blank repo cell.
+    The source location lives in exactly one place — the ``packages`` map — so a
+    package that appears on an entry but is absent from the map raises loudly
+    rather than rendering a blank source cell.
     """
     resource = importlib.resources.files("tai42_skeleton").joinpath("data", "ecosystem.yml")
     document = yaml.safe_load(resource.read_text(encoding="utf-8")) or {}
@@ -35,9 +35,9 @@ def load_catalog() -> list[dict[str, Any]]:
         if package not in packages:
             raise RuntimeError(
                 f"ecosystem catalog entry '{entry['name']}' names package '{package}', which is "
-                "missing from the 'packages' repo map in ecosystem.yml — add it, never leave the repo blank."
+                "missing from the 'packages' source map in ecosystem.yml — add it, never leave the source blank."
             )
-        records.append({**entry, "repo": packages[package]})
+        records.append({**entry, "source": packages[package]})
     return records
 
 
