@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,16 +16,20 @@ concurrency:
 jobs:
   # Per-member path filter. A change under a member runs that member's check
   # leg; a change to shared roots (core/*, e2e, the lock, root pyproject, the
-  # root fleet tests, or .github) runs the full workspace including e2e. The
-  # dynamic `check_matrix` / `e2e_backends` outputs are assembled from these
+  # root fleet tests, or .github) runs the full workspace including e2e. A manual
+  # `workflow_dispatch` treats everything as changed: it forces core=true and
+  # every downstream gate on. The dynamic `check_matrix` / `e2e_backends` outputs,
+  # plus the `run_monitoring` / `run_browsers` gates, are computed from these
   # booleans so an unchanged member never runs a silent green no-op.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.filter.outputs.core }}
+      core: ${{ steps.assemble.outputs.core }}
       check_matrix: ${{ steps.assemble.outputs.check_matrix }}
       run_e2e: ${{ steps.assemble.outputs.run_e2e }}
       e2e_backends: ${{ steps.assemble.outputs.e2e_backends }}
+      run_monitoring: ${{ steps.assemble.outputs.run_monitoring }}
+      run_browsers: ${{ steps.assemble.outputs.run_browsers }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -59,19 +64,33 @@ jobs:
             webhook-verifier-github: [plugins/webhook-verifier-github/**]
             webhook-verifier-stripe: [plugins/webhook-verifier-stripe/**]
             e2e: [e2e/**]
+            monitoring: [plugins/monitoring-langfuse/**, core/**, e2e/**]
+            browsers: [e2e/ui/**]
       - name: Assemble the check matrix and e2e leg set
         id: assemble
         env:
           CORE: ${{ steps.filter.outputs.core }}
           CHANGES_JSON: ${{ toJSON(steps.filter.outputs) }}
+          MONITORING: ${{ steps.filter.outputs.monitoring }}
+          BROWSERS: ${{ steps.filter.outputs.browsers }}
+          # A manual run has no diff base, so the path filter cannot decide what
+          # changed: treat the whole workspace as changed and force every gate on.
+          DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
+          # workflow_dispatch: force the full workspace + every downstream gate.
+          if [ "$DISPATCH" = "true" ]; then
+            CORE=true
+          fi
           # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode
           # import_path empty -> core/e2e (no packaged-descriptor gate);
           # legs empty -> the member has no e2e trigger;
           # pytest_mode collect -> infra-bound suite; check runs collect-only
           # (imports + plugin registration, no live infra); the live pytest is
           # the services-backed e2e job. Any other value -> full pytest with cov.
+          # the e2e row's sync_extra drops the default `marketplace` group (sole
+          # member a private git source): the collect-only check leg configures
+          # no git auth and never boots the registry.
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
           kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres|arq,celery,rq|cov
@@ -99,7 +118,7 @@ jobs:
           tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
           webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
           webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov
-          e2e|e2e|tai42-e2e|||arq|collect
+          e2e|e2e|tai42-e2e||--no-group marketplace|arq|collect
           EOF
           entries='[]'
           legs=''
@@ -128,9 +147,23 @@ jobs:
           else
             backends='[]'
           fi
+          # The monitoring profile runs when its own paths (monitoring-langfuse,
+          # core, or e2e) changed; the firefox+webkit browser widening runs when
+          # the ui suite (e2e/ui) changed. A manual dispatch forces both on.
+          run_monitoring=false
+          if [ "$DISPATCH" = "true" ] || [ "$MONITORING" = "true" ]; then
+            run_monitoring=true
+          fi
+          run_browsers=false
+          if [ "$DISPATCH" = "true" ] || [ "$BROWSERS" = "true" ]; then
+            run_browsers=true
+          fi
+          echo "core=$CORE" >> "$GITHUB_OUTPUT"
           echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
           echo "run_e2e=$run_e2e" >> "$GITHUB_OUTPUT"
           echo "e2e_backends=$backends" >> "$GITHUB_OUTPUT"
+          echo "run_monitoring=$run_monitoring" >> "$GITHUB_OUTPUT"
+          echo "run_browsers=$run_browsers" >> "$GITHUB_OUTPUT"
 
   check:
     needs: changes
@@ -146,9 +179,9 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      # Workspace resolution: siblings resolve in-tree, so no UV_NO_SOURCES and no
-      # sibling checkouts. --package scopes the sync to this member; its own dev
-      # recipe (extra dev + CI extras, or the PEP 735 dev group by default) applies.
+      # Workspace resolution: the tai42-* siblings resolve in-tree from the
+      # workspace. --package scopes the sync to this member; its own dev recipe
+      # (extra dev + CI extras, or the PEP 735 dev group by default) applies.
       - run: uv sync --locked --package ${{ matrix.package }} ${{ matrix.sync_extra }}
       - name: Ruff
         working-directory: ${{ matrix.dir }}
@@ -174,7 +207,18 @@ jobs:
         run: |
           set -euo pipefail
           uv build --package ${{ matrix.package }} --wheel --out-dir dist
-          wheel=$(ls dist/${{ matrix.package }}*.whl dist/$(echo '${{ matrix.package }}' | tr - _)*.whl 2>/dev/null | head -1)
+          # Wheel filenames normalize the distribution name's dashes to
+          # underscores, so the wheel glob uses the underscore form only.
+          underscore=$(echo '${{ matrix.package }}' | tr - _)
+          shopt -s nullglob
+          wheels=(dist/"${underscore}"*.whl)
+          shopt -u nullglob
+          [ ${#wheels[@]} -gt 0 ] || {
+            echo "::error::no wheel built for ${{ matrix.package }} (expected dist/${underscore}*.whl)"
+            ls -la dist
+            exit 1
+          }
+          wheel=${wheels[0]}
           version=$(uv run --no-sync python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("${{ matrix.dir }}/pyproject.toml").read_text())["project"]["version"])')
           descriptor=$(unzip -p "$wheel" ${{ matrix.import_path }}/tai-plugin.yml) || {
             echo "::error::$wheel does not package ${{ matrix.import_path }}/tai-plugin.yml"
@@ -281,7 +325,30 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - run: uv sync --locked --package tai42-e2e
+      - name: Detect marketplace access
+        # The marketplace suite installs the PRIVATE tai42-marketplace git source and
+        # runs under TAI_E2E_MARKETPLACE=1; both need the RELEASE_PLEASE_TOKEN secret,
+        # absent on fork PRs. When absent, skip loudly rather than fail the sync.
+        id: mp
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [ -n "${MP_TOKEN}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::marketplace e2e skipped — fork PRs have no access to the private marketplace repos"
+          fi
+      - name: Configure git auth for the private tai42-marketplace source
+        if: steps.mp.outputs.enabled == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
+      - name: Sync the locked venv
+        # The default groups include `marketplace`; a token-less fork drops it so the
+        # private git source is never fetched.
+        run: uv sync --locked --package tai42-e2e ${{ steps.mp.outputs.enabled != 'true' && '--no-group marketplace' || '' }}
       - name: Bring up RabbitMQ (celery leg only)
         if: matrix.backend == 'celery'
         working-directory: e2e
@@ -289,11 +356,38 @@ jobs:
       - name: Point the checkpoint Redis at the module-capable service (default leg)
         if: matrix.backend == 'arq'
         run: echo "TAI_E2E_CHECKPOINT_REDIS_URL=redis://localhost:6380" >> "$GITHUB_ENV"
+      - name: Bring up the monitoring profile (default leg only)
+        # The langfuse observability suite is backendless, so it runs only on the
+        # default leg — and only when its own paths changed or the run is manual
+        # (the `run_monitoring` gate).
+        if: ${{ matrix.backend == 'arq' && needs.changes.outputs.run_monitoring == 'true' }}
+        working-directory: e2e
+        # Name only the langfuse services (their infra deps come via depends_on).
+        # A bare `--profile monitoring up` also starts the profile-less core redis
+        # + postgres, which the `services:` block already binds on 6379/5432 —
+        # colliding with "port is already allocated". Same pattern as the celery
+        # step naming `rabbitmq`. The compose langfuse-web healthcheck makes
+        # `--wait` block until Langfuse actually serves.
+        run: |
+          docker compose --profile monitoring up -d --wait langfuse-web langfuse-worker
+          echo "TAI_E2E_MONITORING=1" >> "$GITHUB_ENV"
       - name: Run the suite
         working-directory: e2e
         run: >-
           uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit.xml -o log_cli=true
           ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
+      - name: Run the fixture identity/storage axis (default leg)
+        # The second value on each of the identity and storage axes, so the plugin
+        # switch itself is exercised rather than pinned to one provider. Only the
+        # identity/storage-bearing suites — the other seams do not touch these axes.
+        if: matrix.backend == 'arq'
+        working-directory: e2e
+        env:
+          TAI_E2E_IDENTITY: fixture
+          TAI_E2E_STORAGE: fixture
+        run: >-
+          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true
+          tests/redis_semantics tests/storage tests/harness
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -338,9 +432,37 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - run: uv sync --locked --package tai42-e2e
+      - name: Detect marketplace access
+        # The marketplace browser leg clones the PRIVATE tai-marketplace-web, installs
+        # the PRIVATE tai42-marketplace git source, and runs under TAI_E2E_MARKETPLACE=1;
+        # all need the RELEASE_PLEASE_TOKEN secret, absent on fork PRs. Skip loudly then.
+        id: mp
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [ -n "${MP_TOKEN}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::marketplace e2e skipped — fork PRs have no access to the private marketplace repos"
+          fi
+      - name: Configure git auth for the private tai42-marketplace source
+        if: steps.mp.outputs.enabled == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
+      - name: Sync the locked venv
+        # The default groups include `marketplace`; a token-less fork drops it so the
+        # private git source is never fetched.
+        run: uv sync --locked --package tai42-e2e ${{ steps.mp.outputs.enabled != 'true' && '--no-group marketplace' || '' }}
       - name: Clone tai-studio (public, no token)
         run: git clone --depth 1 https://github.com/tai42ai/tai-studio
+      - name: Clone tai-marketplace-web (private, marketplace browser leg)
+        if: steps.mp.outputs.enabled == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: git clone --depth 1 https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace-web
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
       - name: Install the ui/ workspace
@@ -357,6 +479,32 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ui-e2e-diagnostics
+          path: |
+            e2e/ui/test-results/**
+            e2e/ui/playwright-report/**
+            e2e/**/tai-e2e-studio-*/
+          if-no-files-found: ignore
+      - name: Install firefox + webkit (browser widening)
+        # firefox + webkit widen the matrix when the ui suite changed or the run is
+        # manual (the `run_browsers` gate). --with-deps apt-installs their system
+        # libraries (the CI runner is root). The cross-viewport / a11y sweeps are
+        # chromium-only via `testIgnore` in playwright.config.ts, so these two
+        # browsers run the remaining specs.
+        if: ${{ needs.changes.outputs.run_browsers == 'true' }}
+        working-directory: e2e/ui
+        run: pnpm exec playwright install --with-deps firefox webkit
+      - name: Run the browser suite on firefox + webkit
+        if: ${{ needs.changes.outputs.run_browsers == 'true' }}
+        working-directory: e2e/ui
+        run: pnpm exec playwright test --project=firefox --project=webkit
+      - name: Upload firefox + webkit diagnostics (per-browser)
+        # Retain each browser's result tree (Playwright writes a project-named
+        # subfolder under test-results/) whether the run passed or failed, so a
+        # per-browser regression is diagnosable.
+        if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-e2e-browser-diagnostics
           path: |
             e2e/ui/test-results/**
             e2e/ui/playwright-report/**

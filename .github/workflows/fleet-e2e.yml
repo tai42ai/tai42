@@ -1,13 +1,17 @@
 name: fleet-e2e
 
-# Fleet e2e gate receiver for tai-studio. tai-studio survives standalone; its
-# `trigger-e2e` job dispatches a `fleet-e2e` event for a tested studio sha. This
-# builds the Studio SPA from that sha, runs the browser suite against the
-# monorepo harness, and posts a `fleet-e2e` commit status back to the studio sha.
-# Branch protection on tai-studio requires that status, so this is the gate.
+# Fleet e2e gate receiver for the external front-end repos: tai-studio,
+# tai-marketplace, and tai-marketplace-web. Each survives standalone; its
+# `trigger-e2e` job dispatches a `fleet-e2e` event for a tested source sha. This
+# checks that sha out (pinning the source repo, the others at main), runs the
+# browser suite against this repo's harness — with the marketplace-gated legs
+# (`TAI_E2E_MARKETPLACE=1`) for the two marketplace repos — and posts a `fleet-e2e`
+# commit status back to the source sha. Branch protection on the source repo
+# requires that status, so this is the gate.
 #
-# The allowlist is tai-studio ALONE — every packaged member lives in this repo
-# and gates through the in-repo ci.yml, so there is nothing else to receive.
+# The allowlist is these three front-end repos — every packaged member lives in
+# this repo and gates through the in-repo ci.yml, so there is nothing else to
+# receive.
 
 on:
   repository_dispatch:
@@ -33,7 +37,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          [ "$SRC_REPO" = "tai-studio" ] || { echo "::error::source repo not in fleet: $SRC_REPO"; exit 1; }
+          case "$SRC_REPO" in
+            tai-studio|tai-marketplace|tai-marketplace-web) ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
           for attempt in 1 2 3 4 5; do
             gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \
@@ -79,14 +86,67 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - run: uv sync --locked --package tai42-e2e
-      - name: Clone tai-studio at the dispatched ref
+      - name: Resolve the source repo and marketplace gate
+        # The two marketplace repos run the marketplace-gated legs
+        # (TAI_E2E_MARKETPLACE=1); tai-studio runs the plain studio browser suite.
+        # An unknown repo fails loudly.
+        id: src
         env:
-          STUDIO_REF: ${{ github.event.client_payload.ref }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
         run: |
           set -euo pipefail
+          case "$SRC_REPO" in
+            tai-marketplace|tai-marketplace-web)
+              echo "marketplace=true" >> "$GITHUB_OUTPUT"
+              echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV" ;;
+            tai-studio)
+              echo "marketplace=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
+      - name: Configure git auth for the private tai42-marketplace sources
+        if: steps.src.outputs.marketplace == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
+      - name: Sync the locked venv
+        # The default `marketplace` group fetches the PRIVATE tai42-marketplace git
+        # source, so it is dropped unless a marketplace repo dispatched.
+        run: uv sync --locked --package tai42-e2e ${{ steps.src.outputs.marketplace != 'true' && '--no-group marketplace' || '' }}
+      - name: Pin the marketplace registry at the dispatched sha
+        # tai-marketplace gates its own sha: reinstall the registry from that sha
+        # on top of the locked venv so the suite exercises the dispatched code.
+        if: github.event.client_payload.repo == 'tai-marketplace'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+          uv pip install --reinstall "tai42-marketplace @ git+https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace@${SRC_REF}"
+      - name: Clone tai-studio (dispatched sha when studio-dispatched, else main)
+        env:
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
           git clone https://github.com/tai42ai/tai-studio
-          git -C tai-studio checkout --detach "$STUDIO_REF"
+          if [ "$SRC_REPO" = "tai-studio" ]; then
+            git -C tai-studio checkout --detach "$SRC_REF"
+          fi
+      - name: Clone tai-marketplace-web (dispatched sha when web-dispatched, else main)
+        if: steps.src.outputs.marketplace == 'true'
+        env:
+          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+          git clone https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace-web
+          if [ "$SRC_REPO" = "tai-marketplace-web" ]; then
+            git -C tai-marketplace-web checkout --detach "$SRC_REF"
+          fi
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
       - name: Install the ui/ workspace
@@ -114,7 +174,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          [ "$SRC_REPO" = "tai-studio" ] || { echo "::error::source repo not in fleet: $SRC_REPO"; exit 1; }
+          case "$SRC_REPO" in
+            tai-studio|tai-marketplace|tai-marketplace-web) ;;
+            *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
+          esac
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
           case "$RESULT" in
             success) state=success; desc="cross-repo e2e passed" ;;
