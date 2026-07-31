@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["core/*", "plugins/*", "e2e"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pyyaml>=6", "packaging>=24"]  # root fleet test only

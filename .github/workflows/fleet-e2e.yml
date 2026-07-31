@@ -1,0 +1,132 @@
+name: fleet-e2e
+
+# Fleet e2e gate receiver for tai-studio. tai-studio survives standalone; its
+# `trigger-e2e` job dispatches a `fleet-e2e` event for a tested studio sha. This
+# builds the Studio SPA from that sha, runs the browser suite against the
+# monorepo harness, and posts a `fleet-e2e` commit status back to the studio sha.
+# Branch protection on tai-studio requires that status, so this is the gate.
+#
+# The allowlist is tai-studio ALONE — every packaged member lives in this repo
+# and gates through the in-repo ci.yml, so there is nothing else to receive.
+
+on:
+  repository_dispatch:
+    types: [fleet-e2e]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-e2e-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  pending:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mark fleet-e2e pending on the source sha
+        env:
+          GH_TOKEN: ${{ secrets.TAI_FLEET_STATUS_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SHA: ${{ github.event.client_payload.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$SRC_REPO" = "tai-studio" ] || { echo "::error::source repo not in fleet: $SRC_REPO"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \
+              -f state=pending \
+              -f context=fleet-e2e \
+              -f description="cross-repo e2e running" \
+              -f target_url="${RUN_URL}" && exit 0
+            echo "fleet-e2e pending POST attempt ${attempt} failed; retrying" >&2
+            sleep "$((attempt * 3))"
+          done
+          echo "::error::failed to post fleet-e2e pending status after 5 attempts"; exit 1
+
+  suite:
+    needs: pending
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      TAI_E2E_REDIS_URL: redis://localhost:6379
+      TAI_E2E_PG_HOST: localhost
+      TAI_E2E_PG_PASSWORD: postgres
+      TAI_E2E_KEEP_STACKS: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --package tai42-e2e
+      - name: Clone tai-studio at the dispatched ref
+        env:
+          STUDIO_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          git clone https://github.com/tai42ai/tai-studio
+          git -C tai-studio checkout --detach "$STUDIO_REF"
+      - name: Build the Studio SPA
+        uses: ./.github/actions/studio-spa
+      - name: Install the ui/ workspace
+        working-directory: e2e/ui
+        run: pnpm install --frozen-lockfile
+      - name: Install chromium
+        working-directory: e2e/ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run the browser suite
+        working-directory: e2e/ui
+        run: pnpm exec playwright test --project=chromium
+
+  status:
+    needs: [pending, suite]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post final fleet-e2e status to the source sha
+        env:
+          GH_TOKEN: ${{ secrets.TAI_FLEET_STATUS_TOKEN }}
+          SRC_REPO: ${{ github.event.client_payload.repo }}
+          SHA: ${{ github.event.client_payload.ref }}
+          RESULT: ${{ needs.suite.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$SRC_REPO" = "tai-studio" ] || { echo "::error::source repo not in fleet: $SRC_REPO"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SHA"; exit 1; }
+          case "$RESULT" in
+            success) state=success; desc="cross-repo e2e passed" ;;
+            *)       state=failure; desc="cross-repo e2e ${RESULT}" ;;
+          esac
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY_OWNER}/${SRC_REPO}/statuses/${SHA}" \
+              -f state="${state}" \
+              -f context=fleet-e2e \
+              -f description="${desc}" \
+              -f target_url="${RUN_URL}" && exit 0
+            echo "fleet-e2e status POST attempt ${attempt} failed; retrying" >&2
+            sleep "$((attempt * 3))"
+          done
+          echo "::error::failed to post final fleet-e2e status after 5 attempts"; exit 1

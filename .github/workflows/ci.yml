@@ -1,0 +1,378 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Per-member path filter. A change under a member runs that member's check
+  # leg; a change to shared roots (core/*, e2e, the lock, root pyproject, the
+  # root fleet tests, or .github) runs the full workspace including e2e. The
+  # dynamic `check_matrix` / `e2e_backends` outputs are assembled from these
+  # booleans so an unchanged member never runs a silent green no-op.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      check_matrix: ${{ steps.assemble.outputs.check_matrix }}
+      run_e2e: ${{ steps.assemble.outputs.run_e2e }}
+      e2e_backends: ${{ steps.assemble.outputs.e2e_backends }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            core: [core/**, e2e/**, uv.lock, pyproject.toml, tests/**, .github/**]
+            contract: [core/contract/**]
+            kit: [core/kit/**]
+            skeleton: [core/skeleton/**]
+            accounts-oidc: [plugins/accounts-oidc/**]
+            accounts-postgres: [plugins/accounts-postgres/**]
+            agents: [plugins/agents/**]
+            backend-arq: [plugins/backend-arq/**]
+            backend-celery: [plugins/backend-celery/**]
+            backend-rq: [plugins/backend-rq/**]
+            channel-slack: [plugins/channel-slack/**]
+            channel-telegram: [plugins/channel-telegram/**]
+            channel-twilio: [plugins/channel-twilio/**]
+            channel-whatsapp: [plugins/channel-whatsapp/**]
+            config-k8s: [plugins/config-k8s/**]
+            connector-atlassian: [plugins/connector-atlassian/**]
+            connector-google: [plugins/connector-google/**]
+            identity-oidc: [plugins/identity-oidc/**]
+            identity-redis: [plugins/identity-redis/**]
+            monitoring-langfuse: [plugins/monitoring-langfuse/**]
+            storage-github: [plugins/storage-github/**]
+            storage-local: [plugins/storage-local/**]
+            storage-s3: [plugins/storage-s3/**]
+            toolbox: [plugins/toolbox/**]
+            tools-stripe: [plugins/tools-stripe/**]
+            webhook-verifier-github: [plugins/webhook-verifier-github/**]
+            webhook-verifier-stripe: [plugins/webhook-verifier-stripe/**]
+            e2e: [e2e/**]
+      - name: Assemble the check matrix and e2e leg set
+        id: assemble
+        env:
+          CORE: ${{ steps.filter.outputs.core }}
+          CHANGES_JSON: ${{ toJSON(steps.filter.outputs) }}
+        run: |
+          set -euo pipefail
+          # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode
+          # import_path empty -> core/e2e (no packaged-descriptor gate);
+          # legs empty -> the member has no e2e trigger;
+          # pytest_mode collect -> infra-bound suite; check runs collect-only
+          # (imports + plugin registration, no live infra); the live pytest is
+          # the services-backed e2e job. Any other value -> full pytest with cov.
+          read -r -d '' TABLE <<'EOF' || true
+          contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
+          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres|arq,celery,rq|cov
+          skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
+          accounts-oidc|plugins/accounts-oidc|tai42-accounts-oidc|tai42_accounts_oidc|--extra dev|arq|cov
+          accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
+          agents|plugins/agents|tai42-agents|tai42_agents|--extra dev|arq|cov
+          backend-arq|plugins/backend-arq|tai42-backend-arq|tai42_backend_arq||arq|cov
+          backend-celery|plugins/backend-celery|tai42-backend-celery|tai42_backend_celery||celery|cov
+          backend-rq|plugins/backend-rq|tai42-backend-rq|tai42_backend_rq||rq|cov
+          channel-slack|plugins/channel-slack|tai42-channel-slack|tai42_channel_slack||arq|cov
+          channel-telegram|plugins/channel-telegram|tai42-channel-telegram|tai42_channel_telegram||arq|cov
+          channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov
+          channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
+          config-k8s|plugins/config-k8s|tai42-config-k8s|tai42_config_k8s|||cov
+          connector-atlassian|plugins/connector-atlassian|tai42-connector-atlassian|tai42_connector/atlassian|||cov
+          connector-google|plugins/connector-google|tai42-connector-google|tai42_connector/google|||cov
+          identity-oidc|plugins/identity-oidc|tai42-identity-oidc|tai42_identity_oidc|--extra dev|arq|cov
+          identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
+          monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov
+          storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github|||cov
+          storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov
+          storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3|||cov
+          toolbox|plugins/toolbox|tai42-toolbox|tai42_toolbox|--extra dev|arq|cov
+          tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
+          webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
+          webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov
+          e2e|e2e|tai42-e2e|||arq|collect
+          EOF
+          entries='[]'
+          legs=''
+          run_e2e=false
+          while IFS='|' read -r name dir package import_path sync_extra memlegs pytest_mode; do
+            [ -n "$name" ] || continue
+            changed=$(printf '%s' "$CHANGES_JSON" | jq -r --arg n "$name" '.[$n] // "false"')
+            if [ "$CORE" = "true" ] || [ "$changed" = "true" ]; then
+              entries=$(jq -c \
+                --arg dir "$dir" --arg package "$package" \
+                --arg import_path "$import_path" --arg sync_extra "$sync_extra" \
+                --arg pytest_mode "$pytest_mode" \
+                '. + [{dir:$dir, package:$package, import_path:$import_path, sync_extra:$sync_extra, pytest_mode:$pytest_mode}]' \
+                <<<"$entries")
+              if [ -n "$memlegs" ]; then
+                run_e2e=true
+                legs="$legs,$memlegs"
+              fi
+            fi
+          done <<<"$TABLE"
+          # Empty legs means no member triggers e2e (run_e2e is false, the e2e job
+          # is skipped): emit an empty backend set instead of feeding the pipeline
+          # empty input. A non-empty legs still runs the pipeline, which raises loudly.
+          if [ -n "$legs" ]; then
+            backends=$(printf '%s' "$legs" | tr ',' '\n' | grep -v '^$' | sort -u | jq -R . | jq -cs '.')
+          else
+            backends='[]'
+          fi
+          echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
+          echo "run_e2e=$run_e2e" >> "$GITHUB_OUTPUT"
+          echo "e2e_backends=$backends" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: changes
+    if: ${{ fromJSON(needs.changes.outputs.check_matrix).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.check_matrix) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      # Workspace resolution: siblings resolve in-tree, so no UV_NO_SOURCES and no
+      # sibling checkouts. --package scopes the sync to this member; its own dev
+      # recipe (extra dev + CI extras, or the PEP 735 dev group by default) applies.
+      - run: uv sync --locked --package ${{ matrix.package }} ${{ matrix.sync_extra }}
+      - name: Ruff
+        working-directory: ${{ matrix.dir }}
+        run: uv run --no-sync ruff check .
+      - name: Ruff format
+        working-directory: ${{ matrix.dir }}
+        run: uv run --no-sync ruff format --check .
+      - name: Pyright
+        working-directory: ${{ matrix.dir }}
+        run: uv run --no-sync pyright
+      - name: Pytest
+        # The e2e member's suite is infra-bound; here it is collect-only (imports +
+        # plugin registration, no live Redis/Postgres). Its live pytest is the
+        # services-backed e2e job. Every other member runs the full suite with cov.
+        working-directory: ${{ matrix.dir }}
+        run: >-
+          uv run --no-sync pytest ${{ matrix.pytest_mode == 'collect' && '--collect-only -q' || '--cov --cov-report=term-missing' }}
+      - name: Packaged descriptor
+        # Plugins only: the wheel is what users install, so build it from root and
+        # assert the descriptor travels inside it at the import path the loader
+        # reads, declaring the same version as the project metadata.
+        if: ${{ matrix.import_path != '' }}
+        run: |
+          set -euo pipefail
+          uv build --package ${{ matrix.package }} --wheel --out-dir dist
+          wheel=$(ls dist/${{ matrix.package }}*.whl dist/$(echo '${{ matrix.package }}' | tr - _)*.whl 2>/dev/null | head -1)
+          version=$(uv run --no-sync python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("${{ matrix.dir }}/pyproject.toml").read_text())["project"]["version"])')
+          descriptor=$(unzip -p "$wheel" ${{ matrix.import_path }}/tai-plugin.yml) || {
+            echo "::error::$wheel does not package ${{ matrix.import_path }}/tai-plugin.yml"
+            unzip -l "$wheel"
+            exit 1
+          }
+          printf '%s\n' "$descriptor" | grep -qx "version: $version" || {
+            echo "::error::$wheel packages a tai-plugin.yml that does not declare version: $version"
+            printf '%s\n' "$descriptor"
+            exit 1
+          }
+
+  accounts-postgres-studio:
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' || contains(fromJSON(needs.changes.outputs.check_matrix).include.*.package, 'tai42-accounts-postgres') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: plugins/accounts-postgres/pnpm-lock.yaml
+      - name: Install deps
+        working-directory: plugins/accounts-postgres
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        working-directory: plugins/accounts-postgres
+        run: pnpm typecheck
+      - name: Format check
+        working-directory: plugins/accounts-postgres
+        run: pnpm run format:check
+      - name: Test
+        working-directory: plugins/accounts-postgres
+        run: pnpm test
+      - name: Build Studio bundle
+        working-directory: plugins/accounts-postgres
+        run: pnpm run build
+      - name: Dist freshness
+        working-directory: plugins/accounts-postgres
+        run: git diff --exit-code src/tai42_accounts_postgres/studio/
+
+  fleet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked
+      - name: Fleet consistency
+        run: uv run pytest tests/
+
+  e2e:
+    needs: changes
+    if: ${{ needs.changes.outputs.run_e2e == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: ${{ fromJSON(needs.changes.outputs.e2e_backends) }}
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      redis-agents:
+        image: redis:8
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      TAI_E2E_REDIS_URL: redis://localhost:6379
+      TAI_E2E_PG_HOST: localhost
+      TAI_E2E_PG_PASSWORD: postgres
+      TAI_E2E_KEEP_STACKS: "1"
+      TAI_E2E_BACKEND: ${{ matrix.backend }}
+      TAI_E2E_IDENTITY: redis
+      TAI_E2E_STORAGE: local
+      TAI_E2E_FLEET: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --package tai42-e2e
+      - name: Bring up RabbitMQ (celery leg only)
+        if: matrix.backend == 'celery'
+        working-directory: e2e
+        run: docker compose --profile celery up -d rabbitmq --wait
+      - name: Point the checkpoint Redis at the module-capable service (default leg)
+        if: matrix.backend == 'arq'
+        run: echo "TAI_E2E_CHECKPOINT_REDIS_URL=redis://localhost:6380" >> "$GITHUB_ENV"
+      - name: Run the suite
+        working-directory: e2e
+        run: >-
+          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit.xml -o log_cli=true
+          ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics-${{ matrix.backend }}
+          path: |
+            e2e/junit.xml
+            e2e/**/stack-*/
+          if-no-files-found: ignore
+
+  ui-e2e:
+    needs: [changes, e2e]
+    if: ${{ !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      TAI_E2E_REDIS_URL: redis://localhost:6379
+      TAI_E2E_PG_HOST: localhost
+      TAI_E2E_PG_PASSWORD: postgres
+      TAI_E2E_KEEP_STACKS: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv sync --locked --package tai42-e2e
+      - name: Clone tai-studio (public, no token)
+        run: git clone --depth 1 https://github.com/tai42ai/tai-studio
+      - name: Build the Studio SPA
+        uses: ./.github/actions/studio-spa
+      - name: Install the ui/ workspace
+        working-directory: e2e/ui
+        run: pnpm install --frozen-lockfile
+      - name: Install chromium
+        working-directory: e2e/ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run the browser suite
+        working-directory: e2e/ui
+        run: pnpm exec playwright test --project=chromium
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-e2e-diagnostics
+          path: |
+            e2e/ui/test-results/**
+            e2e/ui/playwright-report/**
+            e2e/**/tai-e2e-studio-*/
+          if-no-files-found: ignore
+
+  # Single required check. Fails if any needed job failed or was cancelled;
+  # skipped members do not fail it.
+  ci-ok:
+    needs: [changes, check, accounts-postgres-studio, fleet, e2e, ui-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no needed job failed
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "$results"
+          echo "$results" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
+            || { echo "::error::a required job did not pass"; exit 1; }

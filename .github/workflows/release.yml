@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    # Component tags only: tai42-<package>-v<version> (incl. tai42-e2e-v*). The
+    # old bare v* scheme can never match — 27 packages cannot share bare v* tags.
+    tags: ["tai42-*-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds the tagged package and publishes to PyPI with an API token held as a
+  # repository secret. The `pypi` environment scopes that secret to this job.
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Resolve component + assert tag matches pyproject version
+        # Parse component/version out of the tag, look the component up as a
+        # package-name in release-please-config.json to find its member dir, and
+        # assert the built version matches — a stale pyproject can never publish
+        # under the wrong tag.
+        id: resolve
+        run: |
+          set -euo pipefail
+          component="${GITHUB_REF_NAME%-v*}"
+          version="${GITHUB_REF_NAME##*-v}"
+          dir=$(python3 -c '
+          import json, sys
+          component = sys.argv[1]
+          config = json.load(open("release-please-config.json"))
+          for path, entry in config["packages"].items():
+              if entry.get("package-name") == component:
+                  print(path); break
+          else:
+              sys.exit(f"::error::no package-name {component} in release-please-config.json")
+          ' "$component")
+          pyproject_version=$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$dir/pyproject.toml")
+          if [ "$version" != "$pyproject_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} version ${version} != ${dir}/pyproject.toml version ${pyproject_version}" >&2
+            exit 1
+          fi
+          echo "component=$component" >> "$GITHUB_OUTPUT"
+      - run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
+      - run: uvx twine check dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Attestations are minted from the OIDC identity token, which token
+          # auth does not issue.
+          attestations: false

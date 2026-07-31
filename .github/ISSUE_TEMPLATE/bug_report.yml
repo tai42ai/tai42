@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a defect in a tai42 package
+labels: ["bug"]
+body:
+  - type: input
+    id: package
+    attributes:
+      label: Package / area
+      description: Which package or area is affected (e.g. tai42-kit, plugins/channel-slack, e2e)?
+      placeholder: "tai42-kit"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps or code that reproduce the problem.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, OS, and the extras you have installed with relevant backend versions.
+      placeholder: "Python 3.13.x, macOS 15, tai42-kit[redis,anthropic]"
+    validations:
+      required: true
