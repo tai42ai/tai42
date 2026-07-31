@@ -2,14 +2,27 @@ spec_version: 1
 namespace: tai42
 name: accounts-oidc
 package: tai42-accounts-oidc
-version: 0.2.0
-description: "OIDC/OAuth2 login accounts provider for the TAI ecosystem: an installable plugin that registers itself as the \"accounts-oidc\" accounts provider (session-based login via an external identity provider, sessions in Redis, SSO code hand-back)."
+version: 0.2.1
+description: >-
+  OIDC/OAuth2 login accounts provider for the TAI ecosystem: an installable
+  plugin that registers itself as the "accounts-oidc" accounts provider
+  (session-based login via an external identity provider, sessions in Redis, SSO
+  code hand-back).
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/accounts-oidc
-contract: ">=0.3,<0.4"
-categories: [identity, security]
-tags: [accounts, identity, login, oidc, oauth2, sso, auth]
+contract: '>=0.3,<0.4'
+categories:
+  - identity
+  - security
+tags:
+  - accounts
+  - identity
+  - login
+  - oidc
+  - oauth2
+  - sso
+  - auth
 permissions:
   network: true
   subprocess: false
@@ -18,8 +31,10 @@ provides:
   - kind: identity
     name: accounts-oidc
     module: tai42_accounts_oidc.provider
-    description: "OIDC/OAuth2 login accounts provider — session-based login via an external identity provider with SSO code hand-back."
+    description: >-
+      OIDC/OAuth2 login accounts provider — session-based login via an external
+      identity provider with SSO code hand-back.
   - kind: router
     name: login
     module: tai42_accounts_oidc.routes
-    description: "The public /api/login/* login-flow routes."
+    description: The public /api/login/* login-flow routes.

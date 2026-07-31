@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-connector-atlassian"
-version = "0.2.0"
+version = "0.2.1"
 description = "Atlassian (Jira, Confluence, Compass) OAuth connector provider for the TAI ecosystem. Pure descriptor data; depends only on tai42-contract."
 readme = "README.md"
 requires-python = ">=3.13"

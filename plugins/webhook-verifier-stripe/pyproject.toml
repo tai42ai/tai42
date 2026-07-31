@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-webhook-verifier-stripe"
-version = "0.2.0"
+version = "0.2.1"
 description = "Stripe webhook-signature verifier plugin for the TAI ecosystem: a per-provider WebhookVerifier that checks each delivery's Stripe-Signature HMAC before the payload is dispatched."
 readme = "README.md"
 requires-python = ">=3.13"

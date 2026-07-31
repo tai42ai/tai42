@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-storage-s3"
-version = "0.2.0"
+version = "0.2.1"
 description = "S3 storage backend for the TAI ecosystem — text, binary, and media content over an S3 bucket."
 readme = "README.md"
 requires-python = ">=3.13"
