@@ -2,8 +2,8 @@
  * The Studio TOOLS screen tool_meta surface (PLAN_3), driven over the real
  * multi-worker stack and DOUBLE-ASSERTED through the same-origin tool-meta API the
  * app itself uses. The screen merges each tool's native tags (`/api/tools/tags`)
- * with its overlay row (`/api/tool-meta`): a display name over the real name, merged
- * tag grouping/filtering, a folder explorer (breadcrumb + subfolders), and the full
+ * with its overlay row (`/api/tool-meta`): a display name over the real name, a flat
+ * file-explorer list (breadcrumb + subfolders) with a tag-chip OR filter, and the full
  * four-field edit dialog. An effectively hidden tool is excluded outright — unhiding
  * is a CLI/API operation (overlay `hidden:false`), never a screen toggle.
  *
@@ -13,23 +13,12 @@
  * is DB-backed and this stack is shared/serial, so each test cleans up the rows and
  * folders it created.
  */
-import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
 
 /** The tools whose overlay a test may touch; reset before and after so a shared,
  *  serial stack never leaks organizational state between specs. */
 const TOUCHED_TOOLS = ['e2e_echo', 'generate_uuid'];
-
-/** A tool renders ONCE PER merged-tag group it belongs to (e2e_echo carries the
- *  native `e2e` tag plus any overlay tag, so it appears in several groups), and the
- *  bare-name link is a substring match that also catches longer tool names — so every
- *  tool-scoped assertion is made INSIDE one named group: the `TagGroup` <section>
- *  whose heading reads "<tag> <count>". Pair with `exact: true` on the link/button. */
-function tagGroup(page: Page, tag: string): Locator {
-  return page
-    .locator('section')
-    .filter({ has: page.getByRole('heading', { name: new RegExp(`^${tag} \\d`) }) });
-}
 
 async function resetOverlay(request: APIRequestContext): Promise<void> {
   for (const name of TOUCHED_TOOLS) {
@@ -90,39 +79,39 @@ test('display name + merged native/overlay tags render; edit dialog round-trips 
   await seedCredential(page);
   await page.goto('/tools');
 
-  // The tool renders its display name; its real name stays visible for identity.
-  // Scope to the overlay tag's group (only e2e_echo carries this unique tag) so the
-  // per-group duplication and substring name matches never trip strict mode.
-  const group = tagGroup(page, overlayTag);
-  const link = group.getByRole('link', { name: `Open tool e2e_echo`, exact: true });
+  // The tool renders its display name; its real name stays visible for identity. The
+  // flat explorer lists each tool once and the aria-label is exact, so no group scoping
+  // is needed to disambiguate substring or per-group-duplicate matches.
+  const link = page.getByRole('link', { name: `Open tool e2e_echo`, exact: true });
   await expect(link).toBeVisible();
   await expect(link).toContainText(displayName);
   await expect(link).toContainText('e2e_echo');
 
-  // MERGED tags: e2e_echo is grouped under BOTH its native `e2e` tag and its overlay
-  // tag — each tag produces a section that lists the tool, proving the overlay tag
-  // merged onto the native set. (The filter-chip row caps how many tags it shows,
-  // collapsing the rest into a STATIC "+N more"; on a many-tagged stack neither tag is
-  // among the first chips, so the merge is asserted through the groups the tags
-  // produce — the real per-tag rendering — not the capped chip row.)
+  // MERGED tags: e2e_echo carries BOTH its native `e2e` tag and its overlay tag. The
+  // flat explorer proves the merge through the tag-chip OR filter — selecting either tag
+  // keeps the tool, so both are on its merged set. The tag is reached through the
+  // shell-owned `?tags=` param (a deep-link the app owns): a selected tag is always
+  // surfaced as a PRESSED chip regardless of the visible-chip cap, which collapses the
+  // rest into a static "+N more". The native leg:
+  await page.goto('/tools?tags=e2e');
   await expect(
-    tagGroup(page, 'e2e').getByRole('link', { name: `Open tool e2e_echo`, exact: true }),
-  ).toBeVisible();
-  await expect(group.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeVisible();
+    page
+      .getByRole('group', { name: 'Filter tools by tag' })
+      .getByRole('button', { name: /^e2e \(/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeVisible();
 
-  // Filtering by the overlay tag keeps the tool and reflects the pressed state. The tag
-  // is reached through the shell-owned `?tags=` param (a deep-link the app owns): a
-  // selected tag is always surfaced as a pressed chip regardless of the visible-chip
-  // cap, and its group still lists the tool.
+  // The overlay leg — filtering by the overlay tag keeps the tool and its chip is pressed,
+  // proving the overlay tag merged onto the native set.
   await page.goto(`/tools?tags=${overlayTag}`);
   const overlayChip = page
     .getByRole('group', { name: 'Filter tools by tag' })
     .getByRole('button', { name: new RegExp(`^${overlayTag} \\(`) });
   await expect(overlayChip).toHaveAttribute('aria-pressed', 'true');
-  await expect(group.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeVisible();
 
   // Edit dialog round-trip: change the display name through the UI, read it back via API.
-  await group.getByRole('button', { name: `Edit tool e2e_echo`, exact: true }).click();
+  await page.getByRole('button', { name: `Edit tool e2e_echo`, exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Edit e2e_echo' });
   await expect(dialog).toBeVisible();
   const renamed = uniq('Renamed');
@@ -159,13 +148,12 @@ test('folder explorer: a filed tool lives inside its folder, reached via the bre
   await expect(folderButton).toBeVisible();
 
   // Opening the folder navigates inward; the breadcrumb shows the path and the tool
-  // appears. Inside the folder e2e_echo carries its native `e2e` tag, so it renders in
-  // that group — scope the assertion there.
+  // appears in the folder's flat list.
   await folderButton.click();
   const breadcrumb = page.getByRole('navigation', { name: 'Folder path' });
   await expect(breadcrumb.getByRole('button', { name: folderName })).toHaveAttribute('aria-current', 'page');
   await expect(
-    tagGroup(page, 'e2e').getByRole('link', { name: `Open tool e2e_echo`, exact: true }),
+    page.getByRole('link', { name: `Open tool e2e_echo`, exact: true }),
   ).toBeVisible();
 
   // The root crumb navigates back out.
