@@ -4878,7 +4878,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -4962,7 +4962,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5015,7 +5015,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5072,7 +5072,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5127,7 +5127,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5170,7 +5170,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5443,7 +5443,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "0.3.1"
+version = "0.4.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "celery" },
@@ -5606,7 +5606,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "0.2.2"
+version = "0.3.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5835,7 +5835,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
