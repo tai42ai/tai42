@@ -28,8 +28,8 @@ dependencies = [
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=0.3.0,<0.4",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.2.2,<0.3",
-    "tai42-skeleton[toolbox,files]>=0.4.1,<0.5",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.2.2,<0.4",
+    "tai42-skeleton[toolbox,files]>=0.4.1,<0.6",
     "tai42-toolbox[http,prometheus,chain,proxy]>=0.3.3,<0.4",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -41,21 +41,21 @@ dependencies = [
     # Postgres-backed accounts provider (password login, sessions, invites), the
     # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
     # provider (issuer-minted machine JWTs).
-    "tai42-accounts-postgres>=0.3.2,<0.4",
+    "tai42-accounts-postgres>=0.3.2,<0.5",
     "tai42-accounts-oidc>=0.2.1,<0.3",
     "tai42-identity-oidc>=0.2.1,<0.3",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
-    "tai42-backend-arq>=0.3.2,<0.4",
-    "tai42-backend-celery>=0.3.2,<0.4",
-    "tai42-backend-rq>=0.3.1,<0.4",
+    "tai42-backend-arq>=0.3.2,<0.5",
+    "tai42-backend-celery>=0.3.2,<0.5",
+    "tai42-backend-rq>=0.3.1,<0.5",
     # The real Storage plugin.
     "tai42-storage-local>=0.2.2,<0.3",
     # The real webhook verifiers.
     "tai42-webhook-verifier-github>=0.2.1,<0.3",
     "tai42-webhook-verifier-stripe>=0.2.1,<0.3",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=0.2.1,<0.3",
-    "tai42-channel-slack>=0.2.1,<0.3",
+    "tai42-channel-telegram>=0.2.1,<0.4",
+    "tai42-channel-slack>=0.2.1,<0.4",
     "tai42-channel-twilio>=0.2.1,<0.3",
     "tai42-channel-whatsapp>=0.2.1,<0.3",
     # Loaded only by the monitoring stack's manifest.
