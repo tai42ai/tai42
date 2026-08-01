@@ -29,7 +29,7 @@ dependencies = [
     # TaiBaseSettings + settings cache, pooled Redis clients, schedule
     # normalization, and the signature helpers; [jq] compiles the callback
     # condition/expression filters.
-    "tai42-kit[jq]>=0.2,<0.4",
+    "tai42-kit[jq]>=0.3,<0.4",
     # The broker stack: RQ workers/queues, the recurring-job scheduler (beat),
     # and the web dashboard.
     "rq~=2.7.0",

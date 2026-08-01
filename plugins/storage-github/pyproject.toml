@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract (Storage, ObjectStat, assert_not_root, tai42_app).
     "tai42-contract>=0.3,<0.4",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=0.2,<0.4",
+    "tai42-kit>=0.3,<0.4",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
