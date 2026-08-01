@@ -21,6 +21,10 @@ pytestmark = pytest.mark.usefixtures("slack_env")
 _CALLBACK = "http://gateway/api/interactions/callback/ticket-9"
 
 
+def _deadline(seconds: float = 300) -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
 async def test_store_correlation_writes_value_and_positive_ttl(fake_redis):
     timeout_at = datetime.now(UTC) + timedelta(seconds=120)
 
@@ -66,3 +70,37 @@ async def test_release_dedupe_allows_reclaim(fake_redis):
     assert await claim_dedupe("Ev1") is True
     await release_dedupe("Ev1")
     assert await claim_dedupe("Ev1") is True
+
+
+async def test_missing_redis_url_raises_on_every_store_function(monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_SLACK_REDIS_URL")
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    reset_all_settings()
+
+    for call in (
+        store_correlation("11.22", _CALLBACK, _deadline()),
+        get_callback_url("11.22"),
+        delete_correlation("11.22"),
+        claim_dedupe("Ev1"),
+        release_dedupe("Ev1"),
+    ):
+        with pytest.raises(ValueError, match="CHANNEL_SLACK_REDIS_URL"):
+            await call
+
+
+async def test_specific_redis_url_configures_the_store(fake_redis):
+    # The store URL is set by slack_env — a store call goes through, no config error.
+    assert await get_callback_url("nope") is None
+
+
+async def test_default_namespace_redis_url_configures_the_store(fake_redis, monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_SLACK_REDIS_URL")
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+    reset_all_settings()
+
+    # The resolved setting falls back to the default namespace, so the gate passes.
+    assert await get_callback_url("nope") is None

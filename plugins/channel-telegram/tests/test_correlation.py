@@ -36,3 +36,36 @@ async def test_non_positive_ttl_raises(fake_redis, ttl: int):
     with pytest.raises(ValueError, match="TTL must be positive"):
         await store_correlation(42, _CALLBACK, ttl)
     assert fake_redis.data == {}
+
+
+async def test_missing_redis_url_raises_on_every_store_function(monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_TELEGRAM_REDIS_URL")
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    reset_all_settings()
+
+    for call in (
+        store_correlation(42, _CALLBACK, 600),
+        lookup_callback_url(42),
+        clear_correlation(42),
+    ):
+        with pytest.raises(ValueError, match="CHANNEL_TELEGRAM_REDIS_URL"):
+            await call
+
+
+async def test_specific_redis_url_configures_the_store(fake_redis):
+    # The store URL is set by the channel_env fixture — a store call goes
+    # through without a config error.
+    assert await lookup_callback_url(99) is None
+
+
+async def test_default_namespace_redis_url_configures_the_store(fake_redis, monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.delenv("CHANNEL_TELEGRAM_REDIS_URL")
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+    reset_all_settings()
+
+    # The resolved setting falls back to the default namespace, so the gate passes.
+    assert await lookup_callback_url(99) is None

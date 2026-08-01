@@ -43,7 +43,7 @@ class AccountsPgSettings(PostgresConnectionSettings):
     baked-in credential — supply the password via ``TAI_ACCOUNTS_PG_PASSWORD``.
     """
 
-    model_config = SettingsConfigDict(env_prefix="TAI_ACCOUNTS_PG_")
+    model_config = SettingsConfigDict(env_prefix="TAI_ACCOUNTS_")
 
     pg_db: str = "tai"
 

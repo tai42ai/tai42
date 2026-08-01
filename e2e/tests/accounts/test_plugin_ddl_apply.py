@@ -19,15 +19,15 @@ _APPLY = [sys.executable, "-m", "tai42_accounts_postgres.db", "apply"]
 
 
 def _pg_env(stack: TaiStack, *, host: str | None = None, port: str | None = None) -> dict[str, str]:
-    """The plugin's ``TAI_ACCOUNTS_PG_PG_*`` connection env pointed at this stack's
+    """The plugin's ``TAI_ACCOUNTS_PG_*`` connection env pointed at this stack's
     live database, optionally re-pointed at an unreachable endpoint."""
     resources = stack.resources
     return {
-        "TAI_ACCOUNTS_PG_PG_HOST": host if host is not None else resources.pg_host,
-        "TAI_ACCOUNTS_PG_PG_PORT": port if port is not None else str(resources.pg_port),
-        "TAI_ACCOUNTS_PG_PG_DB": resources.pg_db,
-        "TAI_ACCOUNTS_PG_PG_USER": resources.pg_user,
-        "TAI_ACCOUNTS_PG_PG_PASSWORD": resources.pg_password,
+        "TAI_ACCOUNTS_PG_HOST": host if host is not None else resources.pg_host,
+        "TAI_ACCOUNTS_PG_PORT": port if port is not None else str(resources.pg_port),
+        "TAI_ACCOUNTS_PG_DB": resources.pg_db,
+        "TAI_ACCOUNTS_PG_USER": resources.pg_user,
+        "TAI_ACCOUNTS_PG_PASSWORD": resources.pg_password,
     }
 
 

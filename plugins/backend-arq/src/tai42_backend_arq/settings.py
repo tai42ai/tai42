@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 import orjson
 from pydantic_core import to_jsonable_python
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 # Marker key of the tagged in-place description an unserializable value serializes to.
 UNSERIALIZABLE_KEY = "__tai_unserializable__"
@@ -105,10 +106,17 @@ def job_deserializer(data: bytes) -> Any:
     return payload
 
 
-class ArqSettings(TaiBaseSettings):
+class ArqSettings(DefaultNamespaceMixin, TaiBaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ARQ_",
     )
+
+    # Connection identity falls back to the shared ``TAI_DEFAULT_*`` namespace
+    # when ``ARQ_*`` leaves it unset; a set ``ARQ_`` value always wins.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {
+        "redis_url": "redis_url",
+        "redis_max_connections": "redis_max_connections",
+    }
 
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int | None = None

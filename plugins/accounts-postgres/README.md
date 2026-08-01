@@ -89,7 +89,7 @@ skeleton config):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `TAI_ACCOUNTS_PG_PG_HOST` / `_PG_PORT` / `_PG_DB` / `_PG_USER` / `_PG_PASSWORD` | `localhost` / `5432` / `tai` / `postgres` / (empty) | Postgres connection for the plugin's tables. |
+| `TAI_ACCOUNTS_PG_HOST` / `_PG_PORT` / `_PG_DB` / `_PG_USER` / `_PG_PASSWORD` | `localhost` / `5432` / `tai` / `postgres` / (empty) | Postgres connection for the plugin's tables. |
 | `TAI_ACCOUNTS_SESSION_IDLE_SECONDS` | `86400` | Sliding-idle session expiry. |
 | `TAI_ACCOUNTS_SESSION_ABSOLUTE_SECONDS` | `2592000` | Absolute session cap from mint. |
 | `TAI_ACCOUNTS_INVITE_TTL_SECONDS` | `259200` | Invite validity from mint. |

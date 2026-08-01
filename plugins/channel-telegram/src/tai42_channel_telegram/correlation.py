@@ -18,7 +18,7 @@ from typing import cast
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_channel_telegram.settings import telegram_correlation_settings
+from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegram_correlation_settings
 
 _KEY_PREFIX = "channel:telegram:corr:"
 
@@ -27,8 +27,16 @@ def _key(message_id: int) -> str:
     return f"{_KEY_PREFIX}{message_id}"
 
 
+def _redis_settings() -> TelegramCorrelationSettings:
+    """The correlation-store connection, raising a clear config error when unset."""
+    settings = telegram_correlation_settings()
+    if not settings.redis_url:
+        raise ValueError("Telegram channel correlation store is not configured: set CHANNEL_TELEGRAM_REDIS_URL.")
+    return settings
+
+
 def _redis_ctx():
-    return tai42_app.clients.client_ctx(RedisClient, telegram_correlation_settings())
+    return tai42_app.clients.client_ctx(RedisClient, _redis_settings())
 
 
 async def store_correlation(message_id: int, callback_url: str, ttl_seconds: int) -> None:

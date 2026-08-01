@@ -898,7 +898,7 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     # The accounts plugin's own Postgres: its accounts_* tables live in the same
     # per-stack database as the policy store (the template carries both schemas).
-    env.update(_pg_env("TAI_ACCOUNTS_PG_", res))
+    env.update(_pg_env("TAI_ACCOUNTS_", res))
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # The plugin's rate-limit counters + bootstrap token ride the same ACCESS_CONTROL_REDIS_URL
     # the identity-provider factory receives; sessions live in Postgres, so no plugin Redis
@@ -1118,7 +1118,7 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     # The accounts plugin's own Postgres: its accounts_* tables live in the same
     # per-stack database as the policy store (the template carries both schemas).
-    env.update(_pg_env("TAI_ACCOUNTS_PG_", res))
+    env.update(_pg_env("TAI_ACCOUNTS_", res))
     # First-owner bootstrap gate, pinned to a known value (see ``_ACCOUNTS_BOOTSTRAP_TOKEN``).
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # Tier one of the route mapping: request-path regex -> route template. Tier two

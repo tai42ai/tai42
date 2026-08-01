@@ -8,12 +8,19 @@ seam meets on the same env key, timeout, and kwarg name without configuration.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import ClassVar
+
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 
-class RqSettings(TaiBaseSettings):
+class RqSettings(DefaultNamespaceMixin, TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="RQ_")
+
+    # ``redis_url`` falls back to the shared ``TAI_DEFAULT_REDIS_URL`` when
+    # ``RQ_REDIS_URL`` is unset; a set ``RQ_REDIS_URL`` always wins.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {"redis_url": "redis_url"}
 
     # Env key the worker CLI stores the manifest JSON under, so forked
     # work-horse children inherit it.

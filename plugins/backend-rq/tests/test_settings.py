@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from tai42_backend_rq.settings import RqSettings, rq_settings
 
 
@@ -47,3 +51,38 @@ def test_key_helpers():
 
 def test_settings_accessor_is_cached():
     assert rq_settings() is rq_settings()
+
+
+# -- TAI_DEFAULT_* fallback -------------------------------------------------------
+
+# Env prefixes the fallback tests touch — stripped so ambient env never colours a
+# resolution.
+_TEST_ENV_PREFIXES = ("RQ_", "TAI_DEFAULT_")
+
+
+@pytest.fixture
+def isolated_env(monkeypatch):
+    """Drop every relevant env var so the test controls the whole set."""
+    for key in list(os.environ):
+        if key.startswith(_TEST_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_redis_url_falls_back_to_default_namespace(monkeypatch):
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+
+    assert RqSettings().redis_url == "redis://shared:6379/0"
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_specific_redis_url_beats_default(monkeypatch):
+    monkeypatch.setenv("RQ_REDIS_URL", "redis://rq:6380/1")
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+
+    assert RqSettings().redis_url == "redis://rq:6380/1"
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_nothing_set_keeps_class_default():
+    assert RqSettings().redis_url == "redis://localhost:6379/0"

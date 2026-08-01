@@ -9,12 +9,27 @@ into so preforked children inherit it. ``redbeat_schedule_key`` yields the exact
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import ClassVar
+
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 
-class CelerySettings(TaiBaseSettings):
+class CelerySettings(DefaultNamespaceMixin, TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="CELERY_")
+
+    # The broker, result backend, and RedBeat store are all Redis URLs, so each
+    # falls back to the shared ``TAI_DEFAULT_REDIS_URL`` when its ``CELERY_*`` var
+    # is unset; a set ``CELERY_*`` value always wins. With the default set and
+    # ``CELERY_BROKER_URL`` unset the broker resolves to Redis rather than the
+    # AMQP class default — Redis is a first-class Celery broker; an operator on
+    # AMQP sets ``CELERY_BROKER_URL`` explicitly.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {
+        "broker_url": "redis_url",
+        "result_backend": "redis_url",
+        "redbeat_redis_url": "redis_url",
+    }
 
     broker_url: str = "amqp://localhost:5672//"
     result_backend: str = "redis://localhost:6379/0"
