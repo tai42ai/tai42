@@ -225,11 +225,11 @@ def _base_env(res: StackResources, variants: Variants) -> dict[str, str]:
     # Harness targets all bind 127.0.0.1, which the SSRF/URL guard refuses by default.
     # Opt the loopback ranges in, keeping the guard ON for everything else.
     env["TAI_URL_GUARD_ALLOW_CIDRS"] = json.dumps(["127.0.0.0/8", "::1/128"])
-    # Presets + policy history live in the versioning store.
-    env.update(_pg_env("VERSIONING_STORE_", res))
-    # The tool_meta overlay (folders + per-tool rows) is a default-mounted platform
-    # store; point it at this stack's isolated PG clone, same as the versioning store.
-    env.update(_pg_env("TOOL_META_STORE_", res))
+    # The versioning store (presets + policy history) and the tool_meta overlay
+    # (folders + per-tool rows) both live on this stack's isolated PG clone. Set only
+    # the shared default namespace, so each resolves its connection through the
+    # TAI_DEFAULT_* fallback instead of a store-specific prefix.
+    env.update(_pg_env("TAI_DEFAULT_", res))
     # Off by default here; the auth/accounts profiles turn it back on after calling this.
     env["ACCESS_CONTROL_ENABLE"] = "false"
     return env
@@ -895,10 +895,10 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     # Ordered resolution: the accounts provider claims its own session tokens, the
     # redis provider claims sk- keys; a non-matching provider is a MISS, not an error.
     env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", "redis"])
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
-    # The accounts plugin's own Postgres: its accounts_* tables live in the same
-    # per-stack database as the policy store (the template carries both schemas).
-    env.update(_pg_env("TAI_ACCOUNTS_", res))
+    # The access-control policy store and the accounts plugin's Postgres — whose
+    # accounts_* tables share this stack's database, the template carrying both
+    # schemas — resolve through the TAI_DEFAULT_* namespace already set in
+    # _base_env; no store-specific PG env here.
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # The plugin's rate-limit counters + bootstrap token ride the same ACCESS_CONTROL_REDIS_URL
     # the identity-provider factory receives; sessions live in Postgres, so no plugin Redis
@@ -1115,10 +1115,10 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # Ordered resolution: the accounts provider claims tai-sess- tokens, the key provider
     # claims sk- keys; a non-matching provider is a MISS, not an error.
     env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", variants.identity.name])
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
-    # The accounts plugin's own Postgres: its accounts_* tables live in the same
-    # per-stack database as the policy store (the template carries both schemas).
-    env.update(_pg_env("TAI_ACCOUNTS_", res))
+    # The access-control policy store and the accounts plugin's Postgres — whose
+    # accounts_* tables share this stack's database, the template carrying both
+    # schemas — resolve through the TAI_DEFAULT_* namespace already set in
+    # _base_env; no store-specific PG env here.
     # First-owner bootstrap gate, pinned to a known value (see ``_ACCOUNTS_BOOTSTRAP_TOKEN``).
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # Tier one of the route mapping: request-path regex -> route template. Tier two
