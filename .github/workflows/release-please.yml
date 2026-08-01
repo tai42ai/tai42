@@ -69,6 +69,14 @@ jobs:
             echo "accounts-postgres pyproject not in this release PR; skipping studio rebuild."
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
           fi
+      # Derive first-party tai42-* version ranges (member pyproject specifiers +
+      # tai-plugin.yml contract pins) from the just-bumped member versions, so the
+      # release PR carries versions, ranges, and lock as one consistent unit and
+      # ranges never go stale by hand. Pure-stdlib script; runs before `uv lock`
+      # so the lock reflects any range changes. `--no-project` avoids resolving
+      # the workspace just to run a stdlib script.
+      - name: Range-sync first-party version ranges
+        run: uv run --python 3.13 --no-project python scripts/range_sync.py
       - name: Refresh uv.lock
         run: uv lock
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
@@ -91,6 +99,10 @@ jobs:
           REBUILD: ${{ steps.detect.outputs.rebuild }}
         run: |
           set -euo pipefail
+          # Stage the range-sync edits (member pyproject.toml + tai-plugin.yml) as
+          # well as the refreshed lock, so ranges, versions, and lock land as one
+          # commit on the release PR.
+          git add -- core plugins e2e
           git add -- uv.lock
           if [ "$REBUILD" = "true" ]; then
             git add -- plugins/accounts-postgres/src/tai42_accounts_postgres/studio
@@ -102,8 +114,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "$REBUILD" = "true" ]; then
-            git commit -m "chore: sync uv.lock and studio bundle for release"
+            git commit -m "chore: sync ranges, uv.lock and studio bundle for release"
           else
-            git commit -m "chore: sync uv.lock for release"
+            git commit -m "chore: sync ranges and uv.lock for release"
           fi
           git push origin "HEAD:$BRANCH"
