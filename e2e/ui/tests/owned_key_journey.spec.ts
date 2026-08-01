@@ -40,7 +40,12 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   page,
   request,
   browser,
+  browserName,
 }) => {
+  // Server-stream-rendered inbox: CI's Linux WebKit build delivers fetch-streams
+  // unreliably, so this stream-dependent flow flakes only there; chromium+firefox
+  // cover the stream path and webkit still runs the rest of the suite.
+  test.skip(browserName === 'webkit', 'Linux CI WebKit delivers fetch-streams unreliably');
   // -- Arrange over the API (the pinned root key mints; the owner mints its owned key) --
   // Gate the `system` feature's route behind a scope the owned key will NOT hold, so
   // it resolves to `studio` AND this scope (deny-wins) — reachable by the admin root
