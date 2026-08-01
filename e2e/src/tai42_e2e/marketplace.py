@@ -2,7 +2,7 @@
 
 The registry is OUR service under test, so it boots the way the skeleton SUT
 does — REAL OS processes spawned from the shared venv via
-:class:`~tai42_e2e.procs.ProcessHandle`, from the editable sibling checkout, with
+:class:`~tai42_e2e.procs.ProcessHandle`, from the out-of-band pinned install, with
 log files and a leak-checked teardown — not a net-fixture thread. A
 :class:`MarketplaceService` owns an isolated Postgres database (created empty and
 schema-bootstrapped through the production ``tai42-marketplace db init`` path,
@@ -44,6 +44,12 @@ from tai42_e2e.waiting import wait_for, wait_for_async
 
 if TYPE_CHECKING:
     from tai42_e2e.stack import Infra
+
+# The registry lives in its own private repo, kept out of the monorepo lock. The
+# opt-in marketplace suite installs it out-of-band at boot from this pinned ref
+# (the git insteadOf token config rewrites the URL — no token handling here).
+_MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
+_MARKETPLACE_PIN = "a03d9ae213eacdb14649e6c6192fb4475882b6e3"
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"
 # The in-repo fixture-plugin sources (outside ``src`` so uv never installs them,
@@ -244,15 +250,33 @@ class MarketplaceService:
     # ---- lifecycle -------------------------------------------------------
 
     def _bin(self) -> str:
-        """The ``tai42-marketplace`` console script from the active venv (the
-        editable sibling checkout installs it next to the interpreter)."""
+        """The ``tai42-marketplace`` console script from the active venv.
+
+        The registry is absent from the monorepo lock, so the base venv carries
+        no console script: install the pinned registry out-of-band on first use,
+        which lands the script next to the interpreter. Idempotent — once
+        installed the candidate short-circuits."""
         candidate = Path(sys.executable).parent / "tai42-marketplace"
         if not candidate.exists():
-            raise RuntimeError(
-                f"tai42-marketplace console script not found next to interpreter at {candidate}; "
-                "the ../tai-marketplace sibling must be installed in the venv (uv sync)"
-            )
+            self._install_marketplace()
         return str(candidate)
+
+    @staticmethod
+    def _install_marketplace() -> None:
+        """``uv pip install`` the pinned tai42-marketplace registry into the
+        active venv (the git insteadOf token config rewrites the URL — no token
+        handling here). Raises loudly on a non-zero exit with the captured output."""
+        spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_MARKETPLACE_PIN}"
+        proc = subprocess.run(
+            ["uv", "pip", "install", "--python", sys.executable, spec],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"installing {spec} into the active venv failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+            )
 
     def boot(self) -> None:
         """Apply the schema through the production DDL path, then spawn the API

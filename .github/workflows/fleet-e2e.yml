@@ -109,9 +109,10 @@ jobs:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
       - name: Sync the locked venv
-        # The default `marketplace` group fetches the PRIVATE tai42-marketplace git
-        # source, so it is dropped unless a marketplace repo dispatched.
-        run: uv sync --locked --package tai42-e2e ${{ steps.src.outputs.marketplace != 'true' && '--no-group marketplace' || '' }}
+        # The registry is not in the lock; a marketplace leg installs it out-of-band
+        # at boot from its pinned ref (the git auth above lets that install reach the
+        # PRIVATE source).
+        run: uv sync --locked --package tai42-e2e
       - name: Pin the marketplace registry at the dispatched sha
         # tai-marketplace gates its own sha: reinstall the registry from that sha
         # on top of the locked venv so the suite exercises the dispatched code.

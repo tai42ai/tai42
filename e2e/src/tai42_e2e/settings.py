@@ -58,9 +58,10 @@ class HarnessSettings(BaseSettings):
     # profile to be up). When false, tests/monitoring is skipped at collection.
     monitoring: bool = Field(default=False)
 
-    # Opt in to the marketplace suite (boots the tai42-marketplace sibling as
-    # harness-managed processes against the shared Redis/Postgres). When false,
-    # tests/marketplace is skipped at collection.
+    # Opt in to the marketplace suite (installs the tai42-marketplace registry
+    # out-of-band from its pinned git source at boot and runs it as harness-managed
+    # processes against the shared Redis/Postgres). When false, tests/marketplace
+    # is skipped at collection.
     marketplace: bool = Field(default=False)
 
     # Opt in to the fleet-consistency suite (boots the multi-worker / REPLICAS stacks

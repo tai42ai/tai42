@@ -88,9 +88,6 @@ jobs:
           # pytest_mode collect -> infra-bound suite; check runs collect-only
           # (imports + plugin registration, no live infra); the live pytest is
           # the services-backed e2e job. Any other value -> full pytest with cov.
-          # the e2e row's sync_extra drops the default `marketplace` group (sole
-          # member a private git source): the collect-only check leg configures
-          # no git auth and never boots the registry.
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
           kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres|arq,celery,rq|cov
@@ -118,7 +115,7 @@ jobs:
           tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
           webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
           webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov
-          e2e|e2e|tai42-e2e||--no-group marketplace|arq|collect
+          e2e|e2e|tai42-e2e|||arq|collect
           EOF
           entries='[]'
           legs=''
@@ -346,9 +343,10 @@ jobs:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
       - name: Sync the locked venv
-        # The default groups include `marketplace`; a token-less fork drops it so the
-        # private git source is never fetched.
-        run: uv sync --locked --package tai42-e2e ${{ steps.mp.outputs.enabled != 'true' && '--no-group marketplace' || '' }}
+        # The registry is not in the lock; the marketplace suite installs it
+        # out-of-band at boot from its pinned ref (the git auth above lets that
+        # install reach the private source).
+        run: uv sync --locked --package tai42-e2e
       - name: Bring up RabbitMQ (celery leg only)
         if: matrix.backend == 'celery'
         working-directory: e2e
@@ -453,9 +451,10 @@ jobs:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
       - name: Sync the locked venv
-        # The default groups include `marketplace`; a token-less fork drops it so the
-        # private git source is never fetched.
-        run: uv sync --locked --package tai42-e2e ${{ steps.mp.outputs.enabled != 'true' && '--no-group marketplace' || '' }}
+        # The registry is not in the lock; the marketplace browser leg installs it
+        # out-of-band at boot from its pinned ref (the git auth above lets that
+        # install reach the private source).
+        run: uv sync --locked --package tai42-e2e
       - name: Clone tai-studio (public, no token)
         run: git clone --depth 1 https://github.com/tai42ai/tai-studio
       - name: Clone tai-marketplace-web (private, marketplace browser leg)

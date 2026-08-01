@@ -155,9 +155,9 @@ names but the harness does not carry as a runtime dependency.
 ## Marketplace area (opt-in)
 
 `tests/marketplace/` only collects when `TAI_E2E_MARKETPLACE=1`; unset, it is
-skipped at collection like `tests/monitoring/`. When on, the harness boots the
-`tai42-marketplace` registry — installed from its git source via the `marketplace`
-dependency group — as a harness-managed process (the API server) on an isolated
+skipped at collection like `tests/monitoring/`. When on, the harness installs the
+`tai42-marketplace` registry out-of-band from its pinned git source at boot and
+boots it — as a harness-managed process (the API server) on an isolated
 Postgres database: **no extra compose profile**; it rides the core
 `docker compose up -d` infra. The suite forges REAL fixture wheels (and one source
 tarball) from the in-repo `fixtures/marketplace_plugins` tree

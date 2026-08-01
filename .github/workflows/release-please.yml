@@ -53,13 +53,6 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - name: Configure git auth for the private tai42-marketplace source
-        # `uv lock` re-resolves the e2e dev-group's private git source
-        # tai42-marketplace. This job runs only on the canonical repo's release
-        # PR, so the secret is always present — no fork guard needed.
-        env:
-          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
       # The accounts-postgres studio bundle embeds the project version in its
       # studio-manifest.json, so a version bump to that member restales the
       # committed bundle and reds the drift check on main. Rebuild it here, but
