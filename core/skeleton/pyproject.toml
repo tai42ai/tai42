@@ -28,7 +28,7 @@ dependencies = [
     # Generic leaf helpers + pooled-client framework. Extras: the LLM stack
     # (agent facets, checkpoint/store registries), jq (hooks + policy
     # conditions), uvicorn (CLI arg parsing), redis/postgres drivers.
-    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=0.2,<0.4",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=0.2,<0.3",
     # Direct third-party deps imported by the orchestrator + copied-in impl.
     "click>=8.3",
     # The unified ``tai`` CLI. Typer builds on click, so it composes with the

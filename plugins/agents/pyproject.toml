@@ -28,7 +28,7 @@ dependencies = [
     "tai42-contract>=0.3,<0.4",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
-    "tai42-kit>=0.2,<0.4",
+    "tai42-kit>=0.2,<0.3",
     # The agent runtime. Agents are this repo's purpose, so the runtime is a
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
@@ -83,7 +83,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=0.4,<0.6",
+    "tai42-skeleton>=0.4,<0.5",
 ]
 
 [tool.setuptools]
