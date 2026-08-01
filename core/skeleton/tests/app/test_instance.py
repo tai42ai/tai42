@@ -145,6 +145,19 @@ async def test_catalog_refresh_runs_when_a_provider_is_registered(monkeypatch):
     assert calls == [True]
 
 
+def test_default_namespace_env_does_not_flip_connectors_gate(monkeypatch):
+    # The gate reads raw CONNECTORS_*/CONNECTOR_STORE_* keys; the TAI_DEFAULT_*
+    # connection fallback is a different namespace, so setting it must not make a
+    # connector-less deployment look connector-backed.
+    _clear_connector_env(monkeypatch)
+    monkeypatch.setattr(instance, "list_providers", list)
+    monkeypatch.setattr(instance.build_app(), "_manifest", Manifest())
+    monkeypatch.setenv("TAI_DEFAULT_PG_HOST", "shared-db")
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+
+    assert instance.connectors_in_use() is False
+
+
 # --- versioned-preset rehydration gate --------------------------------------
 
 

@@ -8,18 +8,23 @@ A feature subclasses one of the concrete settings with its own ``env_prefix``
 """
 
 import math
+from collections.abc import Mapping
 from typing import Any, ClassVar
 from urllib.parse import quote
 
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 
-class ClientSettings(TaiBaseSettings):
+class ClientSettings(DefaultNamespaceMixin, TaiBaseSettings):
     # Abstract base — claims no env vars of its own; excluded from the settings
     # registry. Own-attribute flag, so concrete product subclasses still register.
+    # The default-namespace mixin is first in the MRO so its
+    # ``settings_customise_sources`` wins; it lives here rather than on
+    # ``TaiBaseSettings`` so the ``TAI_DEFAULT_*`` fallback never leaks into
+    # unrelated settings groups.
     registry_exclude: ClassVar[bool] = True
 
     def client_kwargs(self) -> dict[str, Any]:
@@ -31,6 +36,15 @@ class RedisConnectionSettings(ClientSettings):
     # Base with unprefixed field names — a product subclasses it with its own
     # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
     registry_exclude: ClassVar[bool] = True
+
+    # Connection-identity fields fall back to the shared ``TAI_DEFAULT_*``
+    # namespace when this store's own namespace leaves them unset. Only identity
+    # is mapped — behavior knobs (timeouts, retries, pool bounds,
+    # ``decode_responses``) stay per-store.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {
+        "redis_url": "redis_url",
+        "redis_max_connections": "redis_max_connections",
+    }
 
     redis_url: str | None = None
     redis_max_connections: int | None = None
@@ -74,6 +88,18 @@ class PostgresConnectionSettings(ClientSettings):
     # Base with unprefixed field names — a product subclasses it with its own
     # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
     registry_exclude: ClassVar[bool] = True
+
+    # Connection-identity fields fall back to the shared ``TAI_DEFAULT_*``
+    # namespace when this store's own namespace leaves them unset. Only identity
+    # is mapped — behavior knobs (connect/statement timeouts, pool bounds) stay
+    # per-store.
+    tai_default_fields: ClassVar[Mapping[str, str]] = {
+        "pg_host": "pg_host",
+        "pg_port": "pg_port",
+        "pg_db": "pg_db",
+        "pg_user": "pg_user",
+        "pg_password": "pg_password",
+    }
 
     pg_host: str = "localhost"
     pg_port: int = 5432

@@ -10,7 +10,7 @@ import enum
 import inspect
 import json
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Union, cast, get_args, get_origin
 
 from pydantic import AliasChoices, BaseModel, SecretBytes, SecretStr, TypeAdapter
@@ -29,6 +29,10 @@ class SettingsFieldInfo(BaseModel):
     secret: bool
     description: str | None = None
     nested_group: str | None = None
+    # The ``TAI_DEFAULT_*`` env var this field falls back to when its own
+    # namespace leaves it unset, or ``None`` for a field with no default-namespace
+    # mapping (every behavior knob and every nested-group reference).
+    default_namespace_var: str | None = None
 
 
 class SettingsClassInfo(BaseModel):
@@ -211,6 +215,9 @@ def _resolve_default(field_info: FieldInfo) -> Any | None:
 def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
     env_prefix = cls.model_config.get("env_prefix", "")
     case_sensitive = bool(cls.model_config.get("case_sensitive"))
+    # ``{field_name: default_key}`` map for classes carrying the default-namespace
+    # fallback (empty for every other settings class).
+    default_fields: Mapping[str, str] = getattr(cls, "tai_default_fields", {})
     fields: list[SettingsFieldInfo] = []
     for name, field_info in cls.model_fields.items():
         nested = _settings_member(field_info.annotation)
@@ -242,6 +249,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 # str/int for the enums used here) is — emit that.
                 raw_default = raw_default.value
             default = _json_safe(raw_default)
+        default_key = default_fields.get(name)
         fields.append(
             SettingsFieldInfo(
                 name=name,
@@ -252,6 +260,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 secret=secret,
                 description=field_info.description,
                 nested_group=None,
+                default_namespace_var=f"TAI_DEFAULT_{default_key.upper()}" if default_key is not None else None,
             )
         )
     return SettingsClassInfo(

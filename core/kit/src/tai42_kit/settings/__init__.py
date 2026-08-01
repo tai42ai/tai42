@@ -8,6 +8,10 @@ from tai42_kit.settings.cache_registry import (
     reset_all_settings,
     settings_cache,
 )
+from tai42_kit.settings.default_namespace import (
+    TAI_DEFAULT_ENV_PREFIX,
+    DefaultNamespaceMixin,
+)
 from tai42_kit.settings.registry import (
     SettingsClassInfo,
     SettingsFieldInfo,
@@ -15,6 +19,8 @@ from tai42_kit.settings.registry import (
 )
 
 __all__ = [
+    "TAI_DEFAULT_ENV_PREFIX",
+    "DefaultNamespaceMixin",
     "SettingsClassInfo",
     "SettingsFieldInfo",
     "TaiBaseSettings",
