@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: channel-telegram
 package: tai42-channel-telegram
-version: 0.3.1
+version: 0.3.2
 description: >-
   Telegram channel plugin for the TAI ecosystem — delivers ask_user questions to
   a Telegram chat and bridges the typed reply back to the interactions callback

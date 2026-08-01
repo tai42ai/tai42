@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-monitoring-langfuse"
-version = "0.2.2"
+version = "0.2.3"
 description = "Langfuse monitoring backend for the TAI ecosystem — trace/span emission plus the observability read surface over Langfuse."
 readme = "README.md"
 requires-python = ">=3.13"
