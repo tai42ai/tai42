@@ -1,15 +1,15 @@
 {
   "core/contract": "0.3.0",
-  "core/kit": "0.2.2",
-  "core/skeleton": "0.4.1",
+  "core/kit": "0.3.0",
+  "core/skeleton": "0.5.0",
   "plugins/accounts-oidc": "0.2.1",
-  "plugins/accounts-postgres": "0.3.2",
+  "plugins/accounts-postgres": "0.4.0",
   "plugins/agents": "0.3.2",
-  "plugins/backend-arq": "0.3.2",
-  "plugins/backend-celery": "0.3.2",
-  "plugins/backend-rq": "0.3.2",
-  "plugins/channel-slack": "0.2.1",
-  "plugins/channel-telegram": "0.2.1",
+  "plugins/backend-arq": "0.4.0",
+  "plugins/backend-celery": "0.4.0",
+  "plugins/backend-rq": "0.4.0",
+  "plugins/channel-slack": "0.3.0",
+  "plugins/channel-telegram": "0.3.0",
   "plugins/channel-twilio": "0.2.1",
   "plugins/channel-whatsapp": "0.2.1",
   "plugins/config-k8s": "0.2.2",
@@ -25,5 +25,5 @@
   "plugins/tools-stripe": "0.3.3",
   "plugins/webhook-verifier-github": "0.2.1",
   "plugins/webhook-verifier-stripe": "0.2.1",
-  "e2e": "0.3.1"
+  "e2e": "0.4.0"
 }
