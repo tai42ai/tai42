@@ -17,6 +17,7 @@ _ROUTES = [
     Route("/api/template", router.get_template, methods=["POST"]),
     Route("/api/upload-template", router.upload_template, methods=["POST"]),
     Route("/api/delete-template", router.delete_template, methods=["POST"]),
+    Route("/api/delete-template-dir", router.delete_template_dir, methods=["POST"]),
     Route("/api/render-template", router.render_template, methods=["POST"]),
     Route("/api/clear-templates-cache", router.clear_templates_cache, methods=["POST"]),
 ]
@@ -25,6 +26,7 @@ _STANCES = {
     r"/api/template": AUTHED,
     r"/api/upload-template": AUTHED,
     r"/api/delete-template": AUTHED,
+    r"/api/delete-template-dir": AUTHED,
     r"/api/render-template": AUTHED,
     r"/api/clear-templates-cache": AUTHED,
 }
@@ -48,6 +50,11 @@ def test_upload_rejected_without_auth(monkeypatch):
 def test_delete_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.post("/api/delete-template", json={"path": "x.j2"}).status_code in (401, 403)
+
+
+def test_delete_dir_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post("/api/delete-template-dir", json={"path": "prompts/archive"}).status_code in (401, 403)
 
 
 def test_render_rejected_without_auth(monkeypatch):

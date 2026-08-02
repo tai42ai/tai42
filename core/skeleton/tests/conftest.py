@@ -1,18 +1,16 @@
 """Suite-wide test infrastructure.
 
-The connector catalog refresh is an app startup handler that runs whenever
-connectors are in use (managed manifest entries, registered providers, or
-``CONNECTORS_*``/``CONNECTOR_STORE_*`` env vars — which the connectors suite
-sets), so a test entering ``app.app_context`` would otherwise open a real
-Postgres pool for the ``connector_category`` / ``connector_catalog`` reads and
-hang on the connection timeout. This suite is fully offline, so the autouse
-fixture below injects a fake pooled Postgres client at the catalog store's
-``client_ctx`` seam: the real ``refresh_catalog`` wiring runs, reads an empty
-catalog, and returns instantly.
+The provider-catalog listing serves the ``connector_category`` grouping rows when
+the connector store is configured, reading them through the catalog store's pooled
+``client_ctx``. A test that drives that read (the connectors suite sets
+``CONNECTOR_STORE_*`` env) would otherwise open a real Postgres pool and hang on
+the connection timeout. This suite is fully offline, so the autouse fixture below
+injects a fake pooled Postgres client at the catalog store's ``client_ctx`` seam:
+the real ``fetch_categories`` wiring runs, reads an empty category set, and returns
+instantly.
 
-Tests that exercise the catalog DB behavior itself patch their own client seam
-(e.g. the connectors token-store tests patch ``redis_pg.client_ctx``); this
-fixture only covers the otherwise-incidental startup load.
+Tests that exercise the category DB read itself patch their own client seam; this
+fixture only covers the otherwise-incidental categories read.
 """
 
 from __future__ import annotations
@@ -92,7 +90,7 @@ class _FakePool:
 
 
 @pytest.fixture(autouse=True)
-def _offline_connector_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+def _offline_connector_categories(monkeypatch: pytest.MonkeyPatch) -> None:
     @asynccontextmanager
     async def fake_client_ctx(client_cls, settings=None, **kwargs):
         yield _FakePool()

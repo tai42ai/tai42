@@ -408,48 +408,6 @@ class K8sConfigManager(ConfigManager):
             f"{_MAX_CONFLICT_ATTEMPTS} attempts due to repeated resourceVersion conflicts"
         )
 
-    def write_manifest(self, manifest: dict[str, Any]) -> None:
-        """Write manifest YAML to a K8s ConfigMap as a single key.
-
-        Three-way merges (defaults + current + new) and patches under the read
-        ``resourceVersion`` precondition, so a concurrent modification fails loudly
-        with a 409 rather than being clobbered.
-        """
-        from kubernetes.client.exceptions import ApiException
-
-        existing = self._read_configmap_for_write()
-
-        # Preserved view so an `!ENV` default backfill round-trips as its marker,
-        # never a resolved secret baked to disk as plaintext.
-        defaults = self._load_defaults_preserved(existing.data)
-        current: CommentedMap | dict[str, Any] = {}
-        if existing.data and self._settings.manifest_key in existing.data:
-            # A malformed existing manifest aborts the write, never discarded.
-            current = self._load_manifest_document(existing.data[self._settings.manifest_key])
-
-        content = merge_and_dump_manifest(defaults, cast("CommentedMap", current), manifest)
-        resource_version = self._require_resource_version(existing)
-        body = self._manifest_patch_body(existing, content, resource_version)
-        try:
-            self._core_api.patch_namespaced_config_map(
-                self._settings.configmap_name,
-                self._settings.namespace,
-                body,
-            )
-        except ApiException as exc:
-            if exc.status == 403:
-                raise K8sConfigError(
-                    f"Permission denied updating ConfigMap '{self._settings.configmap_name}': {exc.reason}"
-                ) from exc
-            raise K8sConfigError(f"Failed to update ConfigMap: {exc.reason}") from exc
-
-        logger.info(
-            "Updated K8s ConfigMap '%s' key '%s' in namespace '%s'",
-            self._settings.configmap_name,
-            self._settings.manifest_key,
-            self._settings.namespace,
-        )
-
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         """Atomically read-modify-write the manifest under a resourceVersion precondition.
 

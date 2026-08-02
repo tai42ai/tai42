@@ -25,6 +25,7 @@ import tai42_skeleton.operations.connectors as conn_ops
 import tai42_skeleton.routers.connectors as router
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import state
+from tai42_skeleton.connectors.store.catalog_store import ConnectorCategory
 
 # The mode-wrapped fan-out summary the service threads onto a mutating result; the
 # router/operation must surface it verbatim in the connector's HTTP response.
@@ -45,11 +46,18 @@ def _req(body=None, **path_params) -> Request:
     return cast(Request, SimpleNamespace(json=_json, path_params=path_params, query_params={}, headers={}))
 
 
+def _req_q(**query_params) -> Request:
+    async def _json():
+        return None
+
+    return cast(Request, SimpleNamespace(json=_json, path_params={}, query_params=query_params, headers={}))
+
+
 def _data(resp):
     return json.loads(bytes(resp.body))
 
 
-def _record(cid="c1"):
+def _record(cid="c1", health=AuthHealthState.HEALTHY):
     return SimpleNamespace(
         connection_id=cid,
         provider_id="github",
@@ -58,7 +66,8 @@ def _record(cid="c1"):
         account_identity="me@x",
         enabled_sub_services=["repo"],
         granted_scopes=["repo"],
-        auth_health_state=AuthHealthState.HEALTHY,
+        auth_health_state=health,
+        is_healthy=lambda: health == AuthHealthState.HEALTHY,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
@@ -90,9 +99,14 @@ def wiring(monkeypatch):
 # -- Views -------------------------------------------------------------------
 
 
-async def test_providers_view(wiring):
+async def test_providers_view(wiring, monkeypatch):
+    async def _categories():
+        return [ConnectorCategory(id="productivity", display_name="Productivity", sort_order=2)]
+
+    monkeypatch.setattr(conn_ops, "fetch_categories", _categories)
     resp = await router.providers(_req())
-    p = _data(resp)["data"][0]
+    body = _data(resp)["data"]
+    p = body["providers"][0]
     assert p["id"] == "github"
     assert p["sub_services"][0]["id"] == "repo"
     # Reshaped wire model: per-sub scopes (not a scopes_summary string), and the
@@ -101,6 +115,8 @@ async def test_providers_view(wiring):
     assert "scopes_summary" not in p["sub_services"][0]
     assert "connections" not in p
     assert p["config_fields"][0]["key"] == "host"
+    # N3: the category groupings are served alongside the providers.
+    assert body["categories"] == [{"id": "productivity", "display_name": "Productivity", "sort_order": 2}]
 
 
 async def test_connections_list_excludes_secrets(wiring, monkeypatch):
@@ -109,10 +125,26 @@ async def test_connections_list_excludes_secrets(wiring, monkeypatch):
     resp = await router.connections(_req())
     data = _data(resp)["data"]
     assert data["total"] == 1
+    assert data["unhealthy"] == 0
     item = data["items"][0]
     assert item["connection_id"] == "c1"
     assert "access_token" not in item
     assert "config_values" not in item
+
+
+async def test_connections_list_rejects_non_integer_limit_400(wiring):
+    # The HTTP-edge extractor parses ?limit; a non-integer is a loud 400.
+    resp = await router.connections(_req_q(limit="abc"))
+    assert resp.status_code == 400
+    assert "error" in _data(resp)
+
+
+async def test_connections_list_rejects_invalid_health_400(wiring, monkeypatch):
+    monkeypatch.setattr(conn_ops, "token_store", lambda: SimpleNamespace(list=_alist([])))
+    monkeypatch.setattr(conn_ops, "load_record_or_none", _acall({}))
+    resp = await router.connections(_req_q(health="bogus"))
+    assert resp.status_code == 400
+    assert "error" in _data(resp)
 
 
 async def test_get_connection_404(wiring, monkeypatch):
@@ -152,6 +184,24 @@ async def test_start_connect_no_auth(wiring, monkeypatch):
 async def test_start_connect_validation_400(wiring):
     resp = await router.start_connect(_req({"provider_id": "", "alias": "a", "enabled_sub_services": ["s"]}))
     assert resp.status_code == 400
+
+
+async def test_start_connect_validation_400_never_echoes_input_values(wiring):
+    # N4: a body that fails the schema on a field carrying a secret (config_values)
+    # must answer 400 WITHOUT the rejected value — only the field path + error type.
+    secret = "SUPER-SECRET-abc123"
+    resp = await router.start_connect(
+        _req({"provider_id": "p", "alias": "work", "enabled_sub_services": ["s"], "config_values": secret})
+    )
+    assert resp.status_code == 400
+    # The secret value never appears anywhere in the serialized error body.
+    assert secret not in bytes(resp.body).decode()
+    body = _data(resp)
+    assert body["error"] == "invalid request body"
+    # The body still names WHICH field failed (path) and its error type — no value.
+    fields = body["fields"]
+    assert any(f["loc"] == ["config_values"] for f in fields)
+    assert all("input" not in f and "ctx" not in f for f in fields)
 
 
 async def test_start_connect_alias_in_use_409(wiring, monkeypatch):

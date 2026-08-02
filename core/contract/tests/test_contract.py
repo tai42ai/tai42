@@ -310,9 +310,6 @@ def test_config_manager_both_transaction_seams_required():
         def read_defaults_manifest(self) -> dict[str, Any]:
             return {}
 
-        def write_manifest(self, manifest: dict[str, Any]) -> None:
-            self._manifest = dict(manifest)
-
         def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
             working = dict(self._manifest)
             mutator(working)  # a raise here aborts before the commit below

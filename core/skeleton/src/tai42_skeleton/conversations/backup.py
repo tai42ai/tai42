@@ -2,8 +2,10 @@
 the routing rows are backed up; the record/dedupe/reverse-index keyspaces are transient.
 
 Each row's ``callback_secret`` is EXCLUDED from the export (a live secret never leaves the
-host) and re-minted per row on import, surfaced in ``new_callback_secrets``; callbacks
-signed with the pre-import secret are therefore unverifiable.
+host). Under ``overwrite`` a row is replaced and its ``api`` secret re-minted (surfaced in
+``new_callback_secrets``; callbacks signed with the pre-import secret then stop verifying).
+Under ``skip`` (the default) an existing route is left FULLY untouched — no re-mint — so a
+re-import of an unchanged backup never invalidates a live signer.
 
 The ``execution_key_fingerprint`` IS exported: import asserts the live key still carries it
 and is token-free-evaluable, so a key revoked+reminted since the backup is refused per row
@@ -14,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 from tai42_contract.conversations import ConversationRoute
@@ -31,7 +33,7 @@ _SectionReport = dict[str, Any]
 
 
 def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "errors": [], "new_callback_secrets": []}
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": [], "new_callback_secrets": []}
 
 
 def _channel_identity(route: ConversationRoute) -> tuple[str, str] | None:
@@ -58,15 +60,22 @@ async def export_conversation_routes() -> dict[str, Any]:
     return {"routes": exported}
 
 
-async def import_conversation_routes(payload: dict[str, Any]) -> _SectionReport:
-    """Restore routing rows, re-minting each ``api`` row's ``callback_secret`` and
-    surfacing every new value in ``new_callback_secrets``.
+async def import_conversation_routes(
+    payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
+) -> _SectionReport:
+    """Restore routing rows.
 
-    A malformed envelope raises BEFORE any write. Each row is validated, its execution key
-    asserted usable and token-free-evaluable against the LIVE policy store (pass-role is
-    skipped — the restore door is admin-fenced), and its ``(channel, our_identity)`` claim
-    checked unclaimed, as the create door checks it. A row failing any of these is a per-row
-    rejection in the report, never an aborted restore of the rest."""
+    Keyed by ``route_name``: under ``skip`` (the default) an existing route is left
+    fully untouched — NOT re-minted — so a re-import never breaks a live callback
+    signer; under ``overwrite`` the row is replaced and its ``api`` secret re-minted,
+    surfaced in ``new_callback_secrets``.
+
+    A malformed envelope raises BEFORE any write. Each row written is validated, its
+    execution key asserted usable and token-free-evaluable against the LIVE policy store
+    (pass-role is skipped — the restore door is admin-fenced), and its
+    ``(channel, our_identity)`` claim checked unclaimed, as the create door checks it. A
+    row failing any of these is a per-row rejection in the report, never an aborted
+    restore of the rest."""
     if not isinstance(payload, dict):
         raise ValueError(f"conversations section payload must be an envelope dict, got {type(payload)}")
     if "routes" not in payload:
@@ -101,6 +110,11 @@ async def import_conversation_routes(payload: dict[str, Any]) -> _SectionReport:
             # Rejected per row rather than written unanchored.
             report["errors"].append(f"route {route_name!r}: {exc}")
             report["skipped"] += 1
+            continue
+        if route.route_name in existing and mode == "skip":
+            # An existing route is left fully untouched — no re-mint of its live
+            # callback secret, no re-assertion of its execution key.
+            report["skipped_existing"] += 1
             continue
         try:
             # The same assertion the create door makes; a key reminted since the backup no

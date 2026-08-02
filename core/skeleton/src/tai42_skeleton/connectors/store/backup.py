@@ -7,19 +7,11 @@ row-level copy of what the tables already hold.
 
 Two independent section pairs back the two halves of the connector state:
 
-  * :func:`export_connector_catalog` / :func:`import_connector_catalog` — the
-    public, secret-free market: the ``connector_category`` grouping rows, the
-    full ``connector_catalog`` (INCLUDING disabled rows, which
-    :func:`catalog_store.fetch_catalog` drops), and the read-only
-    ``connector_allowed_source`` discovery list. The stored ``descriptor`` JSONB
-    is carried verbatim. Each row's ``created_at`` is exported and restored so
-    the original creation time survives a round-trip (audit info for
-    community-added rows); ``updated_at`` is the write time of the restore.
-    Import upserts each row idempotently (``ON CONFLICT (pk) DO UPDATE``),
-    categories before providers so the ``connector_catalog.category`` foreign key
-    is satisfied, then reloads the in-memory provider cache via
-    :func:`catalog_store.refresh_catalog` so the restored rows go live
-    in-process.
+  * :func:`export_connector_categories` / :func:`import_connector_categories` —
+    the public, secret-free ``connector_category`` grouping rows (the UI's
+    provider grouping labels + sort order). Each row's ``created_at`` is exported
+    and restored so the original creation time survives a round-trip; import
+    upserts each row idempotently (``ON CONFLICT (id) DO UPDATE``).
 
   * :func:`export_connector_connections` / :func:`import_connector_connections`
     — the per-connection token records. Each entry carries the AES-GCM
@@ -49,16 +41,14 @@ from __future__ import annotations
 import base64
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from psycopg.errors import UniqueViolation
-from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.connectors.settings import connector_store_settings
-from tai42_skeleton.connectors.store.catalog_store import refresh_catalog
 from tai42_skeleton.connectors.store.redis_pg import _ALIAS_UNIQUE_CONSTRAINT, RedisPgConnectorTokenStore
 
 # The report shape every importer returns, matching the backup section contract
@@ -68,19 +58,17 @@ _SectionReport = dict[str, Any]
 
 
 def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
 
-# -- connector_catalog (public, secret-free) ---------------------------------
+# -- connector_category (public, secret-free) --------------------------------
 
 
-async def export_connector_catalog() -> dict[str, Any]:
-    """Export the categories, the full catalog, and the allowed-source list.
+async def export_connector_categories() -> dict[str, Any]:
+    """Export the ``connector_category`` grouping rows.
 
-    Every row is read raw — the catalog INCLUDES disabled rows (unlike
-    :func:`catalog_store.fetch_catalog`, which drops them) and the ``descriptor``
-    JSONB is carried verbatim. No descriptor is parsed or re-validated here; the
-    export is a faithful row copy.
+    Every row is read raw. Each row's ``created_at`` is exported so the original
+    creation time survives a round-trip; the export is a faithful row copy.
     """
     async with (
         client_ctx(PostgresClient, connector_store_settings().pg) as pool,
@@ -99,58 +87,23 @@ async def export_connector_catalog() -> dict[str, Any]:
             }
             for category_id, display_name, sort_order, created_at in await cur.fetchall()
         ]
-        await cur.execute(
-            "SELECT provider_id, descriptor, origin, category, source_url, added_by, enabled, created_at "
-            "FROM connector_catalog ORDER BY provider_id"
-        )
-        providers = [
-            {
-                "provider_id": provider_id,
-                "descriptor": descriptor,
-                "origin": origin,
-                "category": category,
-                "source_url": source_url,
-                "added_by": added_by,
-                "enabled": enabled,
-                "created_at": created_at.isoformat(),
-            }
-            for provider_id, descriptor, origin, category, source_url, added_by, enabled, created_at in await cur.fetchall()  # noqa: E501
-        ]
-        await cur.execute("SELECT id, url, enabled, created_at FROM connector_allowed_source ORDER BY id")
-        sources = [
-            {"id": source_id, "url": url, "enabled": enabled, "created_at": created_at.isoformat()}
-            for source_id, url, enabled, created_at in await cur.fetchall()
-        ]
-    return {"categories": categories, "providers": providers, "sources": sources}
+    return {"categories": categories}
 
 
-async def import_connector_catalog(payload: dict[str, Any]) -> _SectionReport:
-    """Upsert the categories, catalog rows, and allowed sources idempotently.
+async def import_connector_categories(
+    payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
+) -> _SectionReport:
+    """Restore the ``connector_category`` grouping rows, keyed by ``id``.
 
-    Categories are written before providers so the ``connector_catalog.category``
-    foreign key is satisfied inside the same transaction. Each row is an
-    ``ON CONFLICT (pk) DO UPDATE`` (idempotent), so a re-import over identical
-    rows is a no-op change reported as ``updated``. The backed-up ``created_at``
-    is written on the INSERT so the original creation time survives a restore
-    into a fresh table; it is immutable, so the ``DO UPDATE`` branch leaves the
-    existing value untouched. ``connector_catalog`` additionally refreshes its
-    ``updated_at`` to the restore write time; the category and allowed-source
-    tables have no such column.
-
-    Every ENABLED catalog row is validated inside the transaction BEFORE the first
-    INSERT — mirroring :func:`catalog_store.fetch_catalog`'s per-row checks (no
-    embedded origin/category, a known category, a community row carries
-    ``added_by``, a parseable no-auth ``ProviderDescriptor`` whose id matches the
-    row) — so a malformed backup aborts with nothing committed rather than landing
-    a poison row that then fails every connector-using worker at startup. Disabled
-    rows are carried verbatim, exactly the rows ``fetch_catalog`` drops. After the
-    commit the in-memory provider cache is reloaded via :func:`refresh_catalog`
-    (the publish step, not the gate) so the restored rows serve in-process.
+    Under ``overwrite`` each row is an ``ON CONFLICT (id) DO UPDATE`` (idempotent), so a
+    re-import over identical rows is a no-op change reported as ``updated``. Under
+    ``skip`` an already-present id is left untouched (``skipped_existing``) and only new
+    ids are inserted. The backed-up ``created_at`` is written on the INSERT so the
+    original creation time survives a restore into a fresh table; it is immutable, so
+    the ``DO UPDATE`` branch leaves the existing value untouched.
     """
     report = _empty_report()
     categories = payload.get("categories") or []
-    providers = payload.get("providers") or []
-    sources = payload.get("sources") or []
 
     async with (
         client_ctx(PostgresClient, connector_store_settings().pg) as pool,
@@ -162,22 +115,11 @@ async def import_connector_catalog(payload: dict[str, Any]) -> _SectionReport:
         # use); this drives only the report counts, not the write itself.
         await cur.execute("SELECT id FROM connector_category")
         existing_categories = {row[0] for row in await cur.fetchall()}
-        await cur.execute("SELECT provider_id FROM connector_catalog")
-        existing_providers = {row[0] for row in await cur.fetchall()}
-        await cur.execute("SELECT id FROM connector_allowed_source")
-        existing_sources = {row[0] for row in await cur.fetchall()}
-
-        # Gate every enabled row before any write: a bad backup must abort with
-        # nothing committed, not commit a poison row that then breaks worker boot.
-        # A category is valid if it already exists or arrives in this same payload
-        # (imported categories are inserted before providers in this transaction).
-        valid_category_ids = existing_categories | {category["id"] for category in categories}
-        for provider in providers:
-            if not provider["enabled"]:
-                continue
-            _validate_enabled_catalog_row(provider, valid_category_ids)
 
         for category in categories:
+            if category["id"] in existing_categories and mode == "skip":
+                report["skipped_existing"] += 1
+                continue
             await cur.execute(
                 "INSERT INTO connector_category (id, display_name, sort_order, created_at) "
                 "VALUES (%s, %s, %s, %s) "
@@ -192,81 +134,7 @@ async def import_connector_catalog(payload: dict[str, Any]) -> _SectionReport:
             )
             _count(report, category["id"] in existing_categories)
 
-        for provider in providers:
-            await cur.execute(
-                "INSERT INTO connector_catalog "
-                "(provider_id, descriptor, origin, category, source_url, added_by, enabled, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (provider_id) DO UPDATE "
-                "SET descriptor = EXCLUDED.descriptor, "
-                "    origin = EXCLUDED.origin, "
-                "    category = EXCLUDED.category, "
-                "    source_url = EXCLUDED.source_url, "
-                "    added_by = EXCLUDED.added_by, "
-                "    enabled = EXCLUDED.enabled, "
-                "    updated_at = now()",
-                (
-                    provider["provider_id"],
-                    Json(provider["descriptor"]),
-                    provider["origin"],
-                    provider["category"],
-                    provider["source_url"],
-                    provider["added_by"],
-                    provider["enabled"],
-                    datetime.fromisoformat(provider["created_at"]),
-                ),
-            )
-            _count(report, provider["provider_id"] in existing_providers)
-
-        for source in sources:
-            await cur.execute(
-                "INSERT INTO connector_allowed_source (id, url, enabled, created_at) "
-                "VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (id) DO UPDATE "
-                "SET url = EXCLUDED.url, enabled = EXCLUDED.enabled",
-                (source["id"], source["url"], source["enabled"], datetime.fromisoformat(source["created_at"])),
-            )
-            _count(report, source["id"] in existing_sources)
-
-    # Publish the restored (enabled) rows into the in-memory provider cache. The
-    # rows were already gated above, so this is the publish step, not the gate.
-    await refresh_catalog()
     return report
-
-
-def _validate_enabled_catalog_row(provider: dict[str, Any], valid_category_ids: set[str]) -> None:
-    """Reject a malformed ENABLED catalog row before any durable write.
-
-    Mirrors :func:`catalog_store.fetch_catalog`'s per-row checks so the two paths
-    agree on what a valid enabled row is: the ``origin``/``category`` columns are
-    authoritative (the descriptor jsonb must not embed them), the category must be
-    known, a community-origin row must carry ``added_by``, and the descriptor must
-    parse into a no-auth :class:`ProviderDescriptor` whose id matches the row.
-    """
-    provider_id = provider["provider_id"]
-    descriptor_json = provider["descriptor"]
-    origin = provider["origin"]
-    category = provider["category"]
-    added_by = provider["added_by"]
-    if "origin" in descriptor_json or "category" in descriptor_json:
-        raise ValueError(
-            f"connector_catalog row {provider_id!r} descriptor must not embed "
-            f"origin/category (the table columns are authoritative)"
-        )
-    if category not in valid_category_ids:
-        raise ValueError(f"connector_catalog row {provider_id!r} has unknown category {category!r}")
-    if origin == "community" and added_by is None:
-        raise ValueError(f"connector_catalog row {provider_id!r} is community-origin but has no added_by")
-    try:
-        descriptor = ProviderDescriptor.model_validate({**descriptor_json, "origin": origin, "category": category})
-    except Exception as exc:
-        raise ValueError(f"connector_catalog row {provider_id!r} has an invalid descriptor: {exc}") from exc
-    if descriptor.kind != "none":
-        raise ValueError(f"connector_catalog row {provider_id!r} must have kind='none' (got {descriptor.kind!r})")
-    if descriptor.id != provider_id:
-        raise ValueError(
-            f"connector_catalog row provider_id {provider_id!r} does not match descriptor id {descriptor.id!r}"
-        )
 
 
 # -- connector_connections (encrypted token records, secret) -----------------
@@ -301,8 +169,15 @@ async def export_connector_connections() -> list[dict[str, Any]]:
     ]
 
 
-async def import_connector_connections(payload: list[dict[str, Any]]) -> _SectionReport:
+async def import_connector_connections(
+    payload: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+) -> _SectionReport:
     """Re-insert each connection's ciphertext under its original connection id.
+
+    Keyed by ``connection_id``: under ``skip`` an already-present connection is left
+    untouched (``skipped_existing``, its cached token undisturbed) and only new ones are
+    inserted; under ``overwrite`` the ciphertext is upserted and the stale cache key
+    dropped.
 
     Each row runs inside its own savepoint (``conn.transaction()``) so a
     per-provider alias collision isolates to that row: an ``(provider_id, alias)``
@@ -327,6 +202,11 @@ async def import_connector_connections(payload: list[dict[str, Any]]) -> _Sectio
 
         for entry in payload:
             connection_id = entry["connection_id"]
+            if connection_id in existing and mode == "skip":
+                # An existing connection is left untouched — its stored ciphertext and
+                # warm cache entry stand, so no cache invalidation is needed either.
+                report["skipped_existing"] += 1
+                continue
             conn_uuid = uuid.UUID(connection_id)
             blob = base64.b64decode(entry["encrypted_blob_b64"])
             raw_expiry = entry.get("session_expires_at")

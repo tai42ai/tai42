@@ -638,6 +638,16 @@ def test_templates_delete_posts_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_templates_delete_dir_posts_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/delete-template-dir"
+        assert json.loads(request.content) == {"path": "prompts/archive"}
+        return data_response({"path": "prompts/archive", "deleted": True})
+
+    result = run_cli(monkeypatch, handler, ["templates", "delete-dir", "prompts/archive"])
+    assert result.exit_code == 0, result.output
+
+
 def test_templates_render_by_inline_content(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -706,7 +716,12 @@ def test_backup_import_rejects_malformed_json_file(monkeypatch: pytest.MonkeyPat
 def test_connectors_providers_renders(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/connectors/providers"
-        return data_response([{"id": "google", "display_name": "Google", "kind": "oauth", "category": "email"}])
+        return data_response(
+            {
+                "providers": [{"id": "google", "display_name": "Google", "kind": "oauth", "category": "email"}],
+                "categories": [{"id": "email", "display_name": "Email", "sort_order": 1}],
+            }
+        )
 
     result = run_cli(monkeypatch, handler, ["connectors", "providers"])
     assert result.exit_code == 0, result.output

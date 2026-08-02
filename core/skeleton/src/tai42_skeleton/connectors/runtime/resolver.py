@@ -323,6 +323,8 @@ async def resolve_managed_auth(
     connection_id: str,
     provider_id: str,
     sub_service: str,
+    *,
+    allow_refresh: bool = True,
 ) -> ManagedAuth | None:
     """Return the :class:`ManagedAuth` for a managed connection, or None.
 
@@ -336,6 +338,13 @@ async def resolve_managed_auth(
     re-loads the record and refreshes only if still needed. ``provider_id`` /
     ``sub_service`` come from the manifest ref; the OAuth body keys on
     ``connection_id``.
+
+    ``allow_refresh=False`` makes the OAuth resolution read-only for an
+    idempotent caller (the single-connection reachability probe): serve a
+    still-fresh token if one exists, else return None. It never takes the lock,
+    drives an upstream refresh, persists ``auth_health_state``, or opens the
+    refresh cooldown breaker — a read must not mutate connection health. No-auth
+    resolution is already side-effect-free, so the flag does not affect it.
     """
     record, _ = await _load(connection_id)
 
@@ -365,6 +374,13 @@ async def resolve_managed_auth(
         if server.type == "stdio":
             return ManagedAuth(env=values)
         return ManagedAuth(headers=values)
+
+    if not allow_refresh:
+        # Read-only OAuth resolution: serve a still-fresh token or None. A stale /
+        # reconnect-required / refresh-failing record needs an upstream exchange
+        # with write side-effects, which this caller must not drive — reporting no
+        # usable credential lets it classify the sub-service unreachable instead.
+        return _managed_auth(record) if _is_fresh(record) else None
 
     if record.auth_health_state == AuthHealthState.RECONNECT_REQUIRED:
         raise ConnectorReconnectRequiredError(

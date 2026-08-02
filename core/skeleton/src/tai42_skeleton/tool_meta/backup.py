@@ -19,7 +19,7 @@ is registered ``secret=False`` (default-ON in the export UI).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
@@ -31,7 +31,7 @@ _SectionReport = dict[str, Any]
 
 
 def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
 
 def _topological(folders: list[dict[str, Any]], existing_ids: set[str]) -> list[dict[str, Any]]:
@@ -102,8 +102,12 @@ async def export_tool_meta() -> dict[str, Any]:
     return {"folders": folders, "rows": rows}
 
 
-async def import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
+async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip") -> _SectionReport:
     """Restore folder + overlay rows under their original keys.
+
+    Folders are keyed by ``id``, overlay rows by ``tool_name``: under ``skip`` an
+    already-present key is left untouched (``skipped_existing``) and only new rows are
+    inserted; under ``overwrite`` each row is an ``ON CONFLICT DO UPDATE``.
 
     Folders are written before overlay rows so the ``folder_id`` foreign key is
     satisfied, and folders are inserted in TOPOLOGICAL order (a parent before its
@@ -113,9 +117,8 @@ async def import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
     share a ``name`` under different parents would both collapse to ``(NULL, name)``
     under a NULL-first pass and collide. Topological order keeps every insert's
     ``(parent_id, name)`` correct while the not-deferrable self-FK still sees its
-    parent already present. Every row is an ``ON CONFLICT (id) DO UPDATE``
-    (idempotent), and the created count classifies each row by whether its key
-    already existed.
+    parent already present. The created count classifies each written row by whether
+    its key already existed.
     """
     report = _empty_report()
     folders = payload.get("folders") or []
@@ -138,6 +141,9 @@ async def import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
         # entirely (it references a pre-existing folder), is likewise treated as
         # satisfied; a genuinely dangling parent surfaces loudly as an FK violation.
         for folder in _topological(folders, existing_folders):
+            if folder["id"] in existing_folders and mode == "skip":
+                report["skipped_existing"] += 1
+                continue
             await cur.execute(
                 "INSERT INTO tool_folders (id, name, parent_id, created_at) "
                 "VALUES (%s, %s, %s, %s) "
@@ -156,6 +162,9 @@ async def import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
                 report["created"] += 1
 
         for row in rows:
+            if row["tool_name"] in existing_rows and mode == "skip":
+                report["skipped_existing"] += 1
+                continue
             await cur.execute(
                 "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, created_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "

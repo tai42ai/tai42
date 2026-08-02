@@ -19,7 +19,7 @@ import time
 import zlib
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from rq.exceptions import NoSuchJobError
 from rq.job import JobStatus
@@ -584,8 +584,10 @@ async def backend_export_schedules() -> list[dict[str, Any]]:
 
 
 @tai42_app.tools.tool(tags={"backend"})
-async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str, Any]:
-    """Import schedule records produced by backend_export_schedules, upserting by name.
+async def backend_import_schedules(
+    schedules: list[dict[str, Any]], mode: Literal["skip", "overwrite"] = "skip"
+) -> dict[str, Any]:
+    """Import schedule records produced by backend_export_schedules, keyed by name.
 
     Each entry is validated as a ScheduleRecord and its schedule dict is
     re-normalized so a partial or non-canonical schedule is validated before
@@ -595,8 +597,12 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
     and kwargs under the record's name as the Job id. The create is keyed on
     that id, so it overwrites an existing job in place; no pre-cancel is
     performed, so a failure mid-apply never destroys the prior schedule.
-    Whether a name already existed is read (read-only) before the write to
-    classify the row as "updated" versus "created".
+    Whether a name already existed is read (read-only) before the write.
+
+    ``mode`` applies that key: under ``skip`` (the default) a name already present
+    is left untouched, counted in ``skipped_existing`` and never re-applied; under
+    ``overwrite`` the existing job is replaced in place. A new name is created under
+    both.
 
     The RQ backend has no disabled-schedule representation — disabling a
     schedule deletes its job — so a record with ``enabled=False`` is NOT
@@ -606,7 +612,7 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
     is surfaced in "errors". A record that fails validation or application is
     collected in "errors" with its reason and never dropped silently.
 
-    Returns ``{"created": int, "updated": int, "skipped": int, "errors": [...]}``
+    Returns ``{"created", "updated", "skipped", "skipped_existing", "errors"}``
     to match the shared section-report contract; each error row is
     ``{"index", "name", "error"}``.
     """
@@ -614,6 +620,7 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
     created = 0
     updated = 0
     skipped = 0
+    skipped_existing = 0
     errors: list[dict[str, Any]] = []
     async with _sync_redis(settings) as r:
         scheduler = Scheduler(connection=r)
@@ -644,8 +651,13 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
                     continue
 
                 # Read-only existence check before the write, to classify
-                # created vs updated.
+                # created vs updated and to honor ``skip``.
                 exists = await asyncio.to_thread(scheduler.__contains__, name)
+
+                if exists and mode == "skip":
+                    # An existing schedule (keyed by name) is left in place.
+                    skipped_existing += 1
+                    continue
 
                 await apply_normalized_schedule(scheduler, norm, tool_execution, record.args, record.kwargs, name)
 
@@ -670,4 +682,10 @@ async def backend_import_schedules(schedules: list[dict[str, Any]]) -> dict[str,
             except Exception as exc:
                 # Collect-and-continue: one bad record must not abort the batch.
                 errors.append({"index": index, "name": entry_name, "error": repr(exc)})
-        return {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
+        return {
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "skipped_existing": skipped_existing,
+            "errors": errors,
+        }

@@ -52,6 +52,9 @@ class _FakeResourceManager:
     async def delete_template(self, path):
         self.deleted.append(path)
 
+    async def delete_template_dir(self, path):
+        self.deleted.append(path)
+
     async def render_by_id_or_content(self, content=None, template_id=None, kwargs=None):
         return f"rendered:{template_id or content}:{kwargs}"
 
@@ -139,6 +142,45 @@ async def test_delete_absent_path_is_idempotent_200(manager, monkeypatch):
     assert resp.status_code == 200
     assert _data(resp)["data"] == {"path": "never-existed.j2", "deleted": True}
     assert seen == ["never-existed.j2"]
+
+
+async def test_delete_dir(manager):
+    resp = await router.delete_template_dir(_req({"path": "prompts/archive"}))
+    assert resp.status_code == 200
+    assert _data(resp)["data"] == {"path": "prompts/archive", "deleted": True}
+    assert manager.deleted == ["prompts/archive"]
+
+
+@pytest.mark.parametrize("bad", ["/abs", "../escape", "a/../../etc", "back\\slash"])
+async def test_delete_dir_traversal_rejected(manager, bad):
+    resp = await router.delete_template_dir(_req({"path": bad}))
+    assert resp.status_code == 400
+    assert manager.deleted == []
+
+
+async def test_delete_dir_absent_is_404(manager, monkeypatch):
+    # A directory that matches nothing is a loud 404, not a silent no-op: the
+    # provider raises ``FileNotFoundError`` and the op maps it to a 404.
+    async def _absent(path):
+        raise FileNotFoundError(f"Storage directory not found: {path}")
+
+    monkeypatch.setattr(manager, "delete_template_dir", _absent)
+    resp = await router.delete_template_dir(_req({"path": "prompts/gone"}))
+    assert resp.status_code == 404
+    assert "not found" in _data(resp)["error"]
+
+
+async def test_delete_dir_root_resolving_is_400(manager, monkeypatch):
+    # A key that clears the lexical guard but resolves to exactly the template root
+    # is refused at the operation layer with a client 400 before the provider is
+    # reached, independent of any backend's own root check.
+    async def _unreached(path):
+        raise AssertionError("provider must not be reached for a root-resolving key")
+
+    monkeypatch.setattr(manager, "delete_template_dir", _unreached)
+    resp = await router.delete_template_dir(_req({"path": "."}))
+    assert resp.status_code == 400
+    assert "template root" in _data(resp)["error"]
 
 
 @pytest.mark.parametrize("bad", ["/abs.j2", "../escape.j2", "a/../../etc", "back\\slash"])

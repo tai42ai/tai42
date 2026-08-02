@@ -18,16 +18,22 @@ record fields.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
+from tai42_contract.connectors.errors import ConnectorError, OperatorMisconfiguredError
 from tai42_contract.connectors.models import (
+    AuthHealthState,
     ConnectedAccountView,
     ConnectionRecord,
     ConnectionsListResponse,
+    ConnectorCategoryView,
     DisconnectResponse,
     PatchSubServicesRequest,
     PatchSubServicesResponse,
     ProviderCatalogEntry,
+    ProviderCatalogResponse,
     StartConnectNoAuthResponse,
     StartConnectRequest,
     StartConnectResponse,
@@ -42,12 +48,27 @@ from tai42_contract.connectors.service import (
 )
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
-from tai42_skeleton.connectors.providers.registry import list_providers
+from tai42_skeleton.connectors.providers.registry import get_provider, list_providers
+from tai42_skeleton.connectors.runtime.probe import probe
+from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
 from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.connectors.store import token_store
+from tai42_skeleton.connectors.store.catalog_store import fetch_categories
 from tai42_skeleton.connectors.store.persistence import load_record_or_none
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
+
+logger = logging.getLogger(__name__)
+
+# Hard cap on the connections-list ``limit`` query argument — a guard against an
+# absurd page size, not a default (an absent ``limit`` returns every connection).
+_MAX_LIST_LIMIT = 500
+
+# Upper bound on a single sub-service reachability probe (credential read + MCP
+# round-trip). The GET is idempotent, so the whole probe is bounded and a timeout
+# reads as unreachable — a read never blocks the caller on a slow/down provider.
+# Sits above ``probe``'s own transport timeout so a live MCP round-trip completes.
+_SUB_SERVICE_PROBE_TIMEOUT_SECONDS = 8.0
 
 # The machine-readable code + message the connector START refusal carries when the
 # token store is unconfigured. The read/named-entity doors answer the door's own
@@ -57,10 +78,29 @@ _NOT_CONFIGURED_MESSAGE = (
     "the connector token store is not configured: set CONNECTOR_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
 )
 
+# The machine-readable code a flow refusal carries when an OAuth provider is enabled
+# but its operator-supplied client credentials env var is unset. Distinct from the
+# store-not-configured code above: this names a per-provider credential gap, not the
+# whole feature being off.
+_PROVIDER_NOT_CONFIGURED_CODE = "connector-provider-not-configured"
+
+
+def _not_supported_from_misconfig(exc: OperatorMisconfiguredError) -> NotSupportedError:
+    """Map an operator-credential gap to a named, actionable 501.
+
+    The provider is registered but the deployment has not supplied its OAuth client
+    credentials, so this Connect flow is a capability the deployment does not
+    currently provide (501), not a transient outage (503). The message names the
+    offending env var; ``extra`` carries the machine-readable ``code`` and the env-var
+    pointer as a structured field.
+    """
+    return NotSupportedError(str(exc), extra={"code": _PROVIDER_NOT_CONFIGURED_CODE, "env_var": exc.env_var})
+
+
 # -- Serialization (through the contract wire models; never leaks secrets) ----
 
 
-def _provider_view(provider: ProviderDescriptor) -> dict[str, Any]:
+def _provider_view(provider: ProviderDescriptor) -> ProviderCatalogEntry:
     return ProviderCatalogEntry(
         id=provider.id,
         display_name=provider.display_name,
@@ -77,12 +117,18 @@ def _provider_view(provider: ProviderDescriptor) -> dict[str, Any]:
             ConfigFieldSpec(key=f.key, label=f.label, target=f.target, required=f.required, secret=f.secret)
             for f in provider.config_fields
         ],
-    ).model_dump(mode="json")
+    )
 
 
-def _connection_account(record: ConnectionRecord) -> ConnectedAccountView:
+def _connection_account(
+    record: ConnectionRecord,
+    *,
+    unreachable_sub_services: list[str] | None = None,
+) -> ConnectedAccountView:
     # Tokens (access/refresh/expiry) and no-auth config_values are SecretStr and
-    # are DELIBERATELY excluded — this view is UI-facing.
+    # are DELIBERATELY excluded — this view is UI-facing. ``unreachable_sub_services``
+    # is the live-probe result on the single-connection GET; the list is probe-free
+    # and leaves it empty (its default).
     return ConnectedAccountView(
         connection_id=record.connection_id,
         provider_id=record.provider_id,
@@ -92,8 +138,74 @@ def _connection_account(record: ConnectionRecord) -> ConnectedAccountView:
         enabled_sub_services=record.enabled_sub_services,
         granted_scopes=record.granted_scopes,
         auth_health_state=record.auth_health_state,
+        unreachable_sub_services=unreachable_sub_services or [],
         created_at=record.created_at,
     )
+
+
+# -- Reachability probing (single-connection GET only) -----------------------
+
+
+async def _probe_unreachable(record: ConnectionRecord) -> list[str]:
+    """Probe every enabled sub-service concurrently and return the ones that did
+    not answer.
+
+    Reachability is computed live (never stored). A connection whose provider
+    plugin is no longer registered has nothing reachable, so every enabled
+    sub-service is unreachable. The enabled sub-services are probed concurrently
+    (each per-sub-service probe self-bounds), so the aggregate wall time stays
+    near a single probe timeout rather than their sum. ``asyncio.gather``
+    preserves input order, so results zip back to their sub-service names and the
+    returned list keeps ``record.enabled_sub_services`` order.
+    """
+    try:
+        descriptor = get_provider(record.provider_id)
+    except KeyError:
+        return list(record.enabled_sub_services)
+    sub_services = list(record.enabled_sub_services)
+    reachable = await asyncio.gather(
+        *(_probe_sub_service(record, descriptor, sub_service) for sub_service in sub_services)
+    )
+    return [sub_service for sub_service, ok in zip(sub_services, reachable, strict=True) if not ok]
+
+
+async def _probe_sub_service(record: ConnectionRecord, descriptor: ProviderDescriptor, sub_service: str) -> bool:
+    """Whether ``sub_service`` answers a live MCP reachability probe.
+
+    Read-only and bounded, because the single-connection GET is idempotent. OAuth
+    resolves the access token WITHOUT driving a refresh (no lock, no upstream
+    token exchange, no ``auth_health_state`` write, no cooldown breaker): a
+    still-fresh token is probed; a token that is stale / needs reconnect / cannot
+    be resolved read-only yields no credential, so the sub-service reads
+    unreachable rather than triggering a refresh a read must not cause. No-auth
+    injects the stored client config on the sub-service's transport channel.
+
+    The whole per-sub-service probe (credential read + MCP round-trip) runs under
+    a short timeout; a timeout, a missing provider credential
+    (:class:`OperatorMisconfiguredError`), or any :class:`ConnectorError` is a
+    logged, deliberate unreachable classification — never a 500.
+    """
+    if record.kind == "none":
+        config_values = {key: value.get_secret_value() for key, value in record.config_values.items()}
+        return await probe(descriptor, sub_service, config_values=config_values)
+    try:
+        async with asyncio.timeout(_SUB_SERVICE_PROBE_TIMEOUT_SECONDS):
+            auth = await resolve_managed_auth(
+                record.connection_id, record.provider_id, sub_service, allow_refresh=False
+            )
+            if auth is None:
+                # No fresh token resolvable read-only — unreachable without an
+                # upstream exchange (the read-only resolver never refreshes).
+                return False
+            return await probe(descriptor, sub_service, access_token=auth.access_token)
+    except (ConnectorError, OperatorMisconfiguredError, TimeoutError) as exc:
+        logger.info(
+            "connectors: sub-service %s/%s classified unreachable on probe: %s",
+            record.connection_id,
+            sub_service,
+            exc,
+        )
+        return False
 
 
 def _start_result_view(result: StartConnectResult | NoAuthConnectResult) -> dict[str, Any]:
@@ -109,28 +221,79 @@ def _start_result_view(result: StartConnectResult | NoAuthConnectResult) -> dict
 # -- Providers + connections (reads) -----------------------------------------
 
 
-@operation(summary="List OAuth connector providers", tags=["connectors"])
-async def list_connector_providers() -> list[dict[str, Any]]:
-    """The provider catalog — one entry per registered connector provider."""
-    return [_provider_view(p) for p in list_providers()]
+@operation(summary="List connector providers", tags=["connectors"])
+async def list_connector_providers() -> dict[str, Any]:
+    """The provider catalog — one entry per registered connector provider, plus
+    the category groupings the UI arranges them under.
+
+    Providers come from the in-memory registry (populated by provider plugins at
+    import), so they list regardless of store configuration. The category
+    groupings live in the connector store's Postgres, so they are served only when
+    that store is configured (otherwise an empty grouping list, mirroring the
+    OFF-state connections read)."""
+    providers = [_provider_view(p) for p in list_providers()]
+    if connectors_store_configured():
+        categories = [
+            ConnectorCategoryView(id=category.id, display_name=category.display_name, sort_order=category.sort_order)
+            for category in await fetch_categories()
+        ]
+    else:
+        categories = []
+    return ProviderCatalogResponse(providers=providers, categories=categories).model_dump(mode="json")
 
 
-@operation(summary="List connections", tags=["connectors"])
-async def list_connections() -> dict[str, Any]:
-    """The installed connections as secret-free views."""
+@operation(summary="List connections", tags=["connectors"], errors=[BadRequestError])
+async def list_connections(health: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    """The installed connections as secret-free views.
+
+    ``health`` filters the returned items to a single ``auth_health_state``
+    (``healthy`` / ``reconnect_required`` / ``refresh_failing``); an unrecognised
+    value is a loud 400. ``limit`` caps the number of returned items (a positive
+    integer no larger than the hard guard); ``total`` still reports the full match
+    count so a caller sees there is more beyond the page. ``unhealthy`` counts every
+    not-healthy connection across the whole set, independent of the filter and limit.
+    """
+    health_filter = _parse_health_filter(health)
+    page_limit = _parse_limit(limit)
+
     # OFF gate: with no store configured there are no connections — the honest
-    # empty collection (today this path 500s reaching for an absent store).
+    # empty collection (reaching for an absent store would otherwise 500).
     if not connectors_store_configured():
-        return ConnectionsListResponse(items=[], total=0).model_dump(mode="json")
+        return ConnectionsListResponse(items=[], total=0, unhealthy=0).model_dump(mode="json")
+
     ids = await token_store().list()
-    records = [await load_record_or_none(cid) for cid in ids]
-    items = [_connection_account(r) for r in records if r is not None]
-    return ConnectionsListResponse(items=items, total=len(items)).model_dump(mode="json")
+    loaded = [await load_record_or_none(cid) for cid in ids]
+    records = [record for record in loaded if record is not None]
+    unhealthy = sum(1 for record in records if not record.is_healthy())
+
+    matched = [record for record in records if health_filter is None or record.auth_health_state == health_filter]
+    page = matched if page_limit is None else matched[:page_limit]
+    items = [_connection_account(record) for record in page]
+    return ConnectionsListResponse(items=items, total=len(matched), unhealthy=unhealthy).model_dump(mode="json")
+
+
+def _parse_health_filter(health: str | None) -> AuthHealthState | None:
+    if health is None:
+        return None
+    try:
+        return AuthHealthState(health)
+    except ValueError as exc:
+        allowed = ", ".join(state.value for state in AuthHealthState)
+        raise BadRequestError(f"invalid health filter {health!r}; expected one of: {allowed}") from exc
+
+
+def _parse_limit(limit: int | None) -> int | None:
+    if limit is None:
+        return None
+    if limit < 1 or limit > _MAX_LIST_LIMIT:
+        raise BadRequestError(f"limit must be between 1 and {_MAX_LIST_LIMIT}")
+    return limit
 
 
 @operation(summary="Get a connection", tags=["connectors"], errors=[NotFoundError])
 async def get_connection(connection_id: str) -> dict[str, Any]:
-    """One connection's secret-free view; an unknown id is a loud 404."""
+    """One connection's secret-free view, with live sub-service reachability; an
+    unknown id is a loud 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
     if not connectors_store_configured():
@@ -138,7 +301,8 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
     record = await load_record_or_none(connection_id)
     if record is None:
         raise NotFoundError("connection not found")
-    return _connection_account(record).model_dump(mode="json")
+    unreachable = await _probe_unreachable(record)
+    return _connection_account(record, unreachable_sub_services=unreachable).model_dump(mode="json")
 
 
 # -- Connect / reconnect / patch / disconnect (mutations) --------------------
@@ -177,6 +341,10 @@ async def start_connect(
         )
     except AliasInUseError as exc:
         raise ConflictError(str(exc)) from exc
+    except OperatorMisconfiguredError as exc:
+        # The provider's OAuth client credentials env var is unset — a named,
+        # actionable 501, never an unnamed 500.
+        raise _not_supported_from_misconfig(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.
@@ -212,7 +380,7 @@ async def disconnect(connection_id: str) -> dict[str, Any]:
     summary="Start a reconnect flow",
     tags=["connectors"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=StartReconnectRequest,
 )
 async def reconnect(
@@ -237,6 +405,10 @@ async def reconnect(
             redirect_uri=redirect_uri,
             origin=origin,
         )
+    except OperatorMisconfiguredError as exc:
+        # The provider's OAuth client credentials env var is unset — a named,
+        # actionable 501, never an unnamed 500.
+        raise _not_supported_from_misconfig(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.
@@ -248,7 +420,7 @@ async def reconnect(
     summary="Patch a connection's enabled sub-services",
     tags=["connectors"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PatchSubServicesRequest,
 )
 async def patch_sub_services(
@@ -273,6 +445,10 @@ async def patch_sub_services(
             redirect_uri=redirect_uri,
             origin=origin,
         )
+    except OperatorMisconfiguredError as exc:
+        # The provider's OAuth client credentials env var is unset — a named,
+        # actionable 501, never an unnamed 500.
+        raise _not_supported_from_misconfig(exc) from exc
     except (ValueError, oauth_client.OAuthError) as exc:
         # An off-list Origin surfaces as RedirectUriNotAllowedError (an OAuthError);
         # map it to a clean 400 rather than let it escape as a 500.

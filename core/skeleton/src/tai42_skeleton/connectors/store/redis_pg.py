@@ -62,7 +62,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from psycopg.errors import UniqueViolation
-from tai42_contract.connectors.errors import ConnectorError
+from tai42_contract.connectors.errors import ConnectorError, MalformedConnectionIdError
 from tai42_contract.connectors.service import AliasInUseError
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_kit.clients import client_ctx
@@ -160,7 +160,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         try:
             return uuid.UUID(connection_id)
         except (ValueError, AttributeError, TypeError) as exc:
-            raise ValueError(f"connection_id is not a valid UUID: {connection_id!r}") from exc
+            raise MalformedConnectionIdError(f"connection_id is not a valid UUID: {connection_id!r}") from exc
 
     async def _cache_set(
         self,

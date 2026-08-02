@@ -25,9 +25,9 @@ an ``!ENV`` placeholder.
 The connector tables are backed up at the SQL layer through
 ``connectors.store.backup`` (Postgres is their source of truth, so the section
 reads/writes rows directly rather than through the network-gated service layer):
-``connector_catalog`` carries the categories, the full catalog including disabled
-rows, and the allowed-source list; ``connector_connections`` carries each token
-record's ciphertext verbatim under the same KEK constraint that module documents.
+``connector_categories`` carries the ``connector_category`` grouping rows;
+``connector_connections`` carries each token record's ciphertext verbatim under
+the same KEK constraint that module documents.
 
 The ``schedules`` section is opaque: it exports through the scheduling backend's
 own ``backend_export_schedules`` door and imports through
@@ -46,15 +46,20 @@ from typing import Any
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.backup.registry import current_import_mode
+
 logger = logging.getLogger(__name__)
 
 # The report shape every importer returns (access_control extends it with
 # ``new_api_keys``). Built fresh per import so no state leaks between runs.
+# ``skipped`` counts per-record REJECTIONS (invalid/unauthorized items, each also in
+# ``errors``); ``skipped_existing`` counts records left untouched under ``skip`` mode
+# — a clean skip, never an error.
 _SectionReport = dict[str, Any]
 
 
 def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
 
 # -- manifest ----------------------------------------------------------------
@@ -136,6 +141,7 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.access_control import management
     from tai42_skeleton.access_control.settings import access_control_settings
 
+    mode = current_import_mode()
     report = _empty_report()
     report["new_api_keys"] = []
 
@@ -144,10 +150,19 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
     # route pattern is restored WITH that pattern, so pattern-scoped routes
     # re-authorize exactly as before the backup. An explicit public route (value
     # ``settings.public_resource_id``) replays through the same setter, re-creating
-    # the public mapping so it does not silently come back protected.
+    # the public mapping so it does not silently come back protected. The mapping is
+    # keyed by ``url``: under ``skip`` an already-mapped url is left as it stands.
     marker = access_control_settings().public_resource_id
     patterns = payload.get("patterns") or {}
-    for url, scope_id in (payload.get("scopes") or {}).items():
+    scopes = payload.get("scopes") or {}
+    # Read the live mappings only when there are scopes to place — the existence check
+    # drives skip/overwrite for the url key, and a token-only restore needs no store hit.
+    existing_urls = set((await management.get_all_route_mappings()).keys()) if scopes else set()
+    for url, scope_id in scopes.items():
+        existed = url in existing_urls
+        if existed and mode == "skip":
+            report["skipped_existing"] += 1
+            continue
         if scope_id == marker:
             # A public route restores through the dedicated public-pin writer, never
             # ``add_url_to_scope`` — the marker is a column value, not a scope, and the
@@ -155,10 +170,16 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
             await management.pin_route_public(url, patterns.get(url))
         else:
             await management.add_url_to_scope(scope_id, url, patterns.get(url))
-        report["created"] += 1
+        if existed:
+            report["updated"] += 1
+        else:
+            report["created"] += 1
 
     # API-key hashes are one-way, so a restore mints BRAND-NEW keys and surfaces
-    # each plaintext in ``new_api_keys`` for the operator to redistribute.
+    # each plaintext in ``new_api_keys`` for the operator to redistribute. Tokens are
+    # STRUCTURALLY skip-only under EVERY mode — token overwrite is user-ruled out — so
+    # an existing user id is a clean ``skipped_existing`` (the live key is preserved,
+    # never re-minted), not an error.
     for token in payload.get("tokens") or []:
         user_id = token.get("user_id")
         if not isinstance(user_id, str) or not user_id:
@@ -166,6 +187,12 @@ async def _import_access_control(payload: dict[str, Any]) -> _SectionReport:
             # loud per-token rejection, never a record written under a blank id.
             report["errors"].append(f"token with missing or empty user_id: {user_id!r}")
             report["skipped"] += 1
+            continue
+        if await management.get_policy_body(user_id) is not None:
+            # The user id is already provisioned: leave its live key in place. To
+            # replace it, revoke the key for that user id then re-import (mint raises
+            # on a duplicate — tokens are never overwritten).
+            report["skipped_existing"] += 1
             continue
         description = token.get("description", "")
         try:
@@ -208,11 +235,17 @@ async def _import_sub_mcp(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.sub_mcp.store import get_sub_mcp_store
 
     store = get_sub_mcp_store()
+    mode = current_import_mode()
     report = _empty_report()
     for slug, config in payload.items():
         # The created/updated counts reflect the DURABLE state (store presence), not
         # this worker's local cache — consistent with the store-backed export above.
         existed = await store.get_route(slug) is not None
+        if existed and mode == "skip":
+            # An existing route (keyed by slug) is left untouched — its stored config
+            # is not replaced and its local binding is not disturbed.
+            report["skipped_existing"] += 1
+            continue
         if not isinstance(config, dict) or "tools" not in config:
             # A hand-edited backup entry missing its ``tools`` mapping is a loud
             # per-slug rejection in the report, so one malformed entry never aborts
@@ -272,6 +305,7 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
     )
 
     manager = get_hooks_manager()
+    mode = current_import_mode()
     report = _empty_report()
     # One scan for the whole restore: each distinct execution key is read and rendered once.
     scan = ExecutionKeyScan()
@@ -287,6 +321,11 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
                 # hook written without a bounded identity nor an aborted restore of the rest.
                 report["errors"].append(f"hook {name!r}: {exc}")
                 report["skipped"] += 1
+                continue
+            if params.name in existing and mode == "skip":
+                # An existing hook (keyed by name) is left untouched — not re-registered,
+                # not re-validated against the live policy store.
+                report["skipped_existing"] += 1
                 continue
             if params.topic in unlocked_topics:
                 # Lock absent: writing the hook would hand an unverified public door this
@@ -356,7 +395,8 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
     # its live record). This runs BEFORE any write (hooks included) so the refusal
     # touches zero keys. A NAME appearing twice is NOT refused — it resolves last-wins
     # through displacement.
-    _reject_duplicate_hash_binding(trigger_links, await bound_hashes_by_name())
+    live_link_names = await bound_hashes_by_name()
+    _reject_duplicate_hash_binding(trigger_links, live_link_names)
 
     # Ingress locks go back BEFORE the records they gate: no window in which a restored
     # hook is reachable through a door the backup had verified. The bound verifier NAME is
@@ -369,6 +409,12 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
         if not isinstance(topic, str) or not topic:
             report["errors"].append(f"topic verifier with missing or empty topic: {topic!r}")
             report["skipped"] += 1
+            continue
+        if topic in existing_verifiers and mode == "skip":
+            # The topic (keyed by ``topic``) already has a verifier binding: leave it in
+            # place. The lock is present, so records on this topic are NOT treated as
+            # unlocked below.
+            report["skipped_existing"] += 1
             continue
         try:
             # Validates the binding shape on write: a hand-edited entry is a per-topic
@@ -387,7 +433,9 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
     await _restore_hooks(hooks, frozenset(unlocked_topics))
 
     # Tombstones first, then records — a tombstoned hash then refuses its own record
-    # in-script (the tombstone wins over any imported record).
+    # in-script (the tombstone wins over any imported record). Tombstones are an
+    # idempotent set-union keyed by ``token_hash``: restoring one already present is a
+    # no-op, so ``skip``/``overwrite`` make no difference here.
     for token_hash in tombstones:
         try:
             await restore_tombstone(token_hash)
@@ -400,6 +448,13 @@ async def _import_webhooks(payload: list[dict[str, Any]] | dict[str, Any]) -> _S
         try:
             if not isinstance(item, dict):
                 raise TriggerLinkError(400, "trigger link entry must be a JSON object")
+            if item["name"] in live_link_names and mode == "skip":
+                # An existing trigger link (keyed by name) is left untouched — its live
+                # record and token hash stand, so a re-import does not re-key it. New
+                # links still flow through ``restore_trigger_link``'s expiry/tombstone
+                # vocabulary below.
+                report["skipped_existing"] += 1
+                continue
             record = item["record"]
             topic = record.get("topic") if isinstance(record, dict) else None
             if topic in unlocked_topics:
@@ -472,7 +527,7 @@ async def _export_conversations() -> dict[str, Any]:
 async def _import_conversations(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.conversations.backup import import_conversation_routes
 
-    return await import_conversation_routes(payload)
+    return await import_conversation_routes(payload, current_import_mode())
 
 
 # -- templates ---------------------------------------------------------------
@@ -489,6 +544,7 @@ async def _import_templates(payload: dict[str, str]) -> _SectionReport:
 
     resource_manager = tai42_app.storage.resource_manager
     existing = set(await resource_manager.list_resources())
+    mode = current_import_mode()
     report = _empty_report()
     for path, content in payload.items():
         try:
@@ -501,6 +557,11 @@ async def _import_templates(payload: dict[str, str]) -> _SectionReport:
             report["errors"].append(f"template {path!r}: {exc}")
             report["skipped"] += 1
             logger.warning("backup restore skipped unsafe template path %r: %s", path, exc)
+            continue
+        if path in existing and mode == "skip":
+            # An existing template (keyed by path) is left untouched — its stored
+            # content is not replaced.
+            report["skipped_existing"] += 1
             continue
         await resource_manager.upload_template(path, content)
         if path in existing:
@@ -521,22 +582,29 @@ async def _export_schedules() -> Any:
 
 
 async def _import_schedules(payload: Any) -> _SectionReport:
-    return await tai42_app.tools.run_tool("backend_import_schedules", {"schedules": payload})
+    # The schedule document is opaque, but the per-record mode is not the backend's to
+    # guess: forward it explicitly across the tool boundary (a backend cannot read this
+    # process's import-mode context). A backend whose import tool predates the ``mode``
+    # parameter rejects the unknown argument, which the router records as this section's
+    # loud error — never a silent mode mismatch.
+    return await tai42_app.tools.run_tool(
+        "backend_import_schedules", {"schedules": payload, "mode": current_import_mode()}
+    )
 
 
-# -- connector_catalog / connector_connections -------------------------------
+# -- connector_categories / connector_connections ----------------------------
 
 
-async def _export_connector_catalog() -> dict[str, Any]:
-    from tai42_skeleton.connectors.store.backup import export_connector_catalog
+async def _export_connector_categories() -> dict[str, Any]:
+    from tai42_skeleton.connectors.store.backup import export_connector_categories
 
-    return await export_connector_catalog()
+    return await export_connector_categories()
 
 
-async def _import_connector_catalog(payload: dict[str, Any]) -> _SectionReport:
-    from tai42_skeleton.connectors.store.backup import import_connector_catalog
+async def _import_connector_categories(payload: dict[str, Any]) -> _SectionReport:
+    from tai42_skeleton.connectors.store.backup import import_connector_categories
 
-    return await import_connector_catalog(payload)
+    return await import_connector_categories(payload, current_import_mode())
 
 
 async def _export_connector_connections() -> list[dict[str, Any]]:
@@ -548,7 +616,7 @@ async def _export_connector_connections() -> list[dict[str, Any]]:
 async def _import_connector_connections(payload: list[dict[str, Any]]) -> _SectionReport:
     from tai42_skeleton.connectors.store.backup import import_connector_connections
 
-    return await import_connector_connections(payload)
+    return await import_connector_connections(payload, current_import_mode())
 
 
 # -- versioned_documents (the kind-agnostic versioned-document store) ---------
@@ -563,7 +631,7 @@ async def _export_versioned_documents() -> dict[str, Any]:
 async def _import_versioned_documents(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.versioning.backup import import_versioned_documents
 
-    return await import_versioned_documents(payload)
+    return await import_versioned_documents(payload, current_import_mode())
 
 
 # -- tool_meta (the folder tree + per-tool organizational overlay) ------------
@@ -578,7 +646,7 @@ async def _export_tool_meta() -> dict[str, Any]:
 async def _import_tool_meta(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.tool_meta.backup import import_tool_meta
 
-    return await import_tool_meta(payload)
+    return await import_tool_meta(payload, current_import_mode())
 
 
 # -- registration ------------------------------------------------------------
@@ -610,12 +678,12 @@ def register_core_sections(registry: Any) -> None:
     registry.register_section("webhooks", _export_webhooks, _import_webhooks, secret=True)
     # AFTER ``access_control`` and ``templates``, for the same reason as ``webhooks``.
     # secret=False: the export equals the grantable route-list read (``callback_secret``
-    # is excluded and re-minted on import).
+    # is excluded from the export and re-minted only when a row is overwritten).
     registry.register_section("conversations", _export_conversations, _import_conversations)
     # Registered unconditionally: an unbound scheduling backend surfaces as a
     # per-section error through the router, never a hidden gap in the section list.
     registry.register_section("schedules", _export_schedules, _import_schedules, secret=True)
-    registry.register_section("connector_catalog", _export_connector_catalog, _import_connector_catalog)
+    registry.register_section("connector_categories", _export_connector_categories, _import_connector_categories)
     registry.register_section(
         "connector_connections", _export_connector_connections, _import_connector_connections, secret=True
     )

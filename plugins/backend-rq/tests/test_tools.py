@@ -702,7 +702,7 @@ async def test_import_export_round_trip_interval(monkeypatch):
     }
 
     imported = await tools.backend_import_schedules([entry])
-    assert imported == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert imported == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
     # Job id is the schedule name.
     assert "sched-interval" in store
 
@@ -739,7 +739,7 @@ async def test_import_export_round_trip_cron(monkeypatch):
     }
 
     imported = await tools.backend_import_schedules([entry])
-    assert imported == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert imported == {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
     assert "sched-cron" in store
     # The cron string was mirrored into the job meta by the shared create logic.
     assert store["sched-cron"].meta == {"cron_string": "0 9 * * 1"}
@@ -754,7 +754,39 @@ async def test_import_export_round_trip_cron(monkeypatch):
 
 
 async def test_import_upsert_overwrites_existing(monkeypatch):
-    """Re-importing an existing name overwrites it in place, reported as updated."""
+    """Re-importing an existing name under overwrite replaces it in place, reported as
+    updated."""
+    store: dict[str, _StatefulScheduledJob] = {}
+    monkeypatch.setattr(tools, "Scheduler", _make_stateful_scheduler(store))
+    _patch_redis(monkeypatch, FakeSyncRedis())
+
+    first = {
+        "name": "sched-1",
+        "args": [],
+        "kwargs": {"tool_name": "do_thing"},
+        "schedule": {"__type__": "interval", "every": 60, "relative": False},
+        "enabled": True,
+    }
+    await tools.backend_import_schedules([first])
+
+    second = {
+        "name": "sched-1",
+        "args": [],
+        "kwargs": {"tool_name": "do_thing"},
+        "schedule": {"__type__": "interval", "every": 300, "relative": False},
+        "enabled": True,
+    }
+    result = await tools.backend_import_schedules([second], "overwrite")
+    assert result == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
+
+    # A single job remains, carrying the new interval.
+    assert list(store.keys()) == ["sched-1"]
+    assert store["sched-1"].meta == {"interval": 300.0}
+
+
+async def test_import_skip_leaves_existing_schedule(monkeypatch):
+    """Under skip (the default) an existing name is left in place — not re-applied —
+    and counted as a clean skip."""
     store: dict[str, _StatefulScheduledJob] = {}
     monkeypatch.setattr(tools, "Scheduler", _make_stateful_scheduler(store))
     _patch_redis(monkeypatch, FakeSyncRedis())
@@ -776,11 +808,11 @@ async def test_import_upsert_overwrites_existing(monkeypatch):
         "enabled": True,
     }
     result = await tools.backend_import_schedules([second])
-    assert result == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    assert result == {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 1, "errors": []}
 
-    # A single job remains, carrying the new interval.
+    # The original schedule is untouched — the 300s re-import never applied.
     assert list(store.keys()) == ["sched-1"]
-    assert store["sched-1"].meta == {"interval": 300.0}
+    assert store["sched-1"].meta == {"interval": 60.0}
 
 
 async def test_import_malformed_record_is_reported_not_silent(monkeypatch):
@@ -904,7 +936,8 @@ async def test_import_relative_interval_is_surfaced(monkeypatch):
 
 
 async def test_import_apply_failure_preserves_existing_schedule(monkeypatch):
-    """A failure mid-apply on an existing name records the error and leaves the prior schedule intact."""
+    """A failure mid-apply on an existing name (under overwrite) records the error and
+    leaves the prior schedule intact — no pre-cancel destroys it."""
     store = {
         "sched-1": _StatefulScheduledJob("sched-1", "tool_execution", [], {"tool_name": "orig"}, {"interval": 60.0}),
     }
@@ -941,7 +974,7 @@ async def test_import_apply_failure_preserves_existing_schedule(monkeypatch):
         "enabled": True,
     }
 
-    result = await tools.backend_import_schedules([entry])
+    result = await tools.backend_import_schedules([entry], "overwrite")
     assert result["created"] == 0
     assert result["updated"] == 0
     assert result["skipped"] == 0

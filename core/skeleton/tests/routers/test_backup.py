@@ -65,6 +65,18 @@ def _json(resp) -> dict:
     return json.loads(bytes(resp.body))
 
 
+def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_existing: int = 0) -> dict:
+    """The five-key section report shape, defaulting every count to zero — the router
+    tests assert exact reports, so this keeps them terse and one place to evolve."""
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "skipped_existing": skipped_existing,
+        "errors": [],
+    }
+
+
 # -- subsystem fakes ---------------------------------------------------------
 
 
@@ -192,7 +204,7 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
         "conversations",
         "templates",
         "schedules",
-        "connector_catalog",
+        "connector_categories",
         "connector_connections",
         "versioned_documents",
         "tool_meta",
@@ -207,8 +219,9 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     # The versioned-document store covers secret-bearing bodies (preset kwargs,
     # AC-policy conditions), so its one kind-agnostic section is flagged secret.
     assert by_name["versioned_documents"] is True
-    # The connector catalog is a public template — no secrets — so it is not flagged.
-    assert by_name["connector_catalog"] is False
+    # The connector categories are public grouping metadata — no secrets — so the
+    # section is not flagged.
+    assert by_name["connector_categories"] is False
     # The tool-metadata overlay is organizational data (no credentials), so its
     # section exports default-ON, not secret-gated.
     assert by_name["tool_meta"] is False
@@ -374,7 +387,7 @@ async def test_sub_mcp_roundtrip(monkeypatch):
     router.routes = {}
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["sub_mcp"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["sub_mcp"] == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert data["sections"]["sub_mcp"] == _report(created=1)
     assert router.routes["slug1"].tools == ["tool_a"]
     restored = await fresh.get_route("slug1")
     assert restored is not None
@@ -407,7 +420,7 @@ async def test_webhooks_roundtrip(monkeypatch, execution_gate_off):
     monkeypatch.setattr("tai42_skeleton.hooks.cache.get_hooks_manager", lambda: target)
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["webhooks"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["webhooks"] == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert data["sections"]["webhooks"] == _report(created=1)
     assert set((await target.list_hooks()).keys()) == {"h1"}
 
 
@@ -460,7 +473,7 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks", "templates"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["webhooks"] == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert data["sections"]["webhooks"] == _report(created=1)
     assert set((await target.list_hooks()).keys()) == {"h1"}
 
 
@@ -477,7 +490,7 @@ async def test_templates_roundtrip(monkeypatch):
     manager._templates = {}  # wipe
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["templates"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["templates"] == {"created": 1, "updated": 0, "skipped": 0, "errors": []}
+    assert data["sections"]["templates"] == _report(created=1)
     assert manager._templates == {"greeting.j2": "hello {{ name }}"}
 
 
@@ -838,8 +851,32 @@ async def test_import_env_no_existing_counts_all_created(monkeypatch):
     assert cm._env == {"A": "1", "B": "2"}
 
 
-async def test_import_sub_mcp_existing_slug_updates(monkeypatch):
-    # The slug already exists in the DURABLE store, so the import is an update.
+async def test_import_sub_mcp_existing_slug_overwrites(monkeypatch):
+    # The slug already exists in the DURABLE store; under overwrite the import replaces it.
+    from tai42_contract.sub_mcp import RouteConfig
+
+    from tai42_skeleton.sub_mcp import store as sub_mcp_store
+
+    seeded = sub_mcp_store.InMemorySubMcpStore()
+    await seeded.save_route("slug1", RouteConfig(tools=["old"], transport="http"))
+    monkeypatch.setattr(sub_mcp_store, "_IN_MEMORY_STORE", seeded)
+    router = _FakeSubAppRouter(routes={"slug1": _FakeRouteConfig(["old"], "http")})
+    _install(monkeypatch, sub_app=SimpleNamespace(mcp_sub_app_router=router))
+    document = {"version": 1, "sections": {"sub_mcp": {"slug1": {"tools": ["new"], "transport": "http"}}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["sub_mcp"], "mode": "overwrite"})))[
+        "data"
+    ]
+    assert data["ok"] is True
+    assert data["sections"]["sub_mcp"] == _report(updated=1)
+    updated = await seeded.get_route("slug1")
+    assert updated is not None
+    assert updated.tools == ["new"]
+    assert router.routes["slug1"].tools == ["new"]
+
+
+async def test_import_sub_mcp_existing_slug_skipped_by_default(monkeypatch):
+    # Under skip (the default) the existing slug is left untouched — its stored config
+    # and local binding are not replaced, and it counts as a clean skip.
     from tai42_contract.sub_mcp import RouteConfig
 
     from tai42_skeleton.sub_mcp import store as sub_mcp_store
@@ -852,11 +889,11 @@ async def test_import_sub_mcp_existing_slug_updates(monkeypatch):
     document = {"version": 1, "sections": {"sub_mcp": {"slug1": {"tools": ["new"], "transport": "http"}}}}
     data = _json(await import_backup(_post_req({"document": document, "sections": ["sub_mcp"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["sub_mcp"] == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
-    updated = await seeded.get_route("slug1")
-    assert updated is not None
-    assert updated.tools == ["new"]
-    assert router.routes["slug1"].tools == ["new"]
+    assert data["sections"]["sub_mcp"] == _report(skipped_existing=1)
+    kept = await seeded.get_route("slug1")
+    assert kept is not None
+    assert kept.tools == ["old"]  # untouched
+    assert router.routes["slug1"].tools == ["old"]
 
 
 async def test_import_sub_mcp_malformed_entry_is_skipped_not_fatal(monkeypatch):
@@ -895,7 +932,37 @@ async def test_import_sub_mcp_malformed_entry_is_skipped_not_fatal(monkeypatch):
     assert await sub_mcp_store._IN_MEMORY_STORE.get_route("good") is not None
 
 
-async def test_import_webhooks_existing_name_updates(monkeypatch, execution_gate_off):
+async def test_import_webhooks_existing_name_overwrites(monkeypatch, execution_gate_off):
+    from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
+    from tai42_skeleton.hooks.settings import HooksSettings
+
+    manager = InMemoryHooksManager(HooksSettings())
+    await manager.register(
+        HookParams(name="h1", topic="t1", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+    )
+    monkeypatch.setattr("tai42_skeleton.hooks.cache.get_hooks_manager", lambda: manager)
+    _install(monkeypatch)
+
+    document = {
+        "version": 1,
+        "sections": {
+            "webhooks": [
+                HookParams(
+                    name="h1", topic="t2", tool="mytool", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+                ).model_dump(mode="json")
+            ]
+        },
+    }
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"], "mode": "overwrite"})))[
+        "data"
+    ]
+    assert data["ok"] is True
+    # ``h1`` already existed and overwrite re-registers it as an update.
+    assert data["sections"]["webhooks"] == _report(updated=1)
+    assert (await manager.list_hooks())["h1"].topic == "t2"
+
+
+async def test_import_webhooks_existing_name_skipped_by_default(monkeypatch, execution_gate_off):
     from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
     from tai42_skeleton.hooks.settings import HooksSettings
 
@@ -918,8 +985,9 @@ async def test_import_webhooks_existing_name_updates(monkeypatch, execution_gate
     }
     data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks"]})))["data"]
     assert data["ok"] is True
-    # ``h1`` already existed, so the re-register is an update.
-    assert data["sections"]["webhooks"] == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
+    # ``h1`` already existed, so skip leaves it untouched (still on its original topic).
+    assert data["sections"]["webhooks"] == _report(skipped_existing=1)
+    assert (await manager.list_hooks())["h1"].topic == "t1"
 
 
 async def test_import_webhooks_keyless_record_makes_the_import_report_failure(monkeypatch, execution_gate_off):
@@ -992,15 +1060,28 @@ async def test_import_webhooks_uncompilable_jq_record_is_per_record_not_a_torn_i
     assert set(await manager.list_hooks()) == {"first", "last"}
 
 
-async def test_import_templates_existing_path_updates(monkeypatch):
+async def test_import_templates_existing_path_overwrites(monkeypatch):
+    manager = _FakeResourceManager({"greeting.j2": "old"})
+    _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
+    document = {"version": 1, "sections": {"templates": {"greeting.j2": "new"}}}
+    data = _json(
+        await import_backup(_post_req({"document": document, "sections": ["templates"], "mode": "overwrite"}))
+    )["data"]
+    assert data["ok"] is True
+    # The path already existed; overwrite replaces its content as an update.
+    assert data["sections"]["templates"] == _report(updated=1)
+    assert manager._templates == {"greeting.j2": "new"}
+
+
+async def test_import_templates_existing_path_skipped_by_default(monkeypatch):
     manager = _FakeResourceManager({"greeting.j2": "old"})
     _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
     document = {"version": 1, "sections": {"templates": {"greeting.j2": "new"}}}
     data = _json(await import_backup(_post_req({"document": document, "sections": ["templates"]})))["data"]
     assert data["ok"] is True
-    # The path already existed, so the upload is an update.
-    assert data["sections"]["templates"] == {"created": 0, "updated": 1, "skipped": 0, "errors": []}
-    assert manager._templates == {"greeting.j2": "new"}
+    # Under skip the existing template is left untouched, counted as a clean skip.
+    assert data["sections"]["templates"] == _report(skipped_existing=1)
+    assert manager._templates == {"greeting.j2": "old"}
 
 
 async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch):
@@ -1033,6 +1114,41 @@ async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch
     assert report["created"] == 0
     assert report["new_api_keys"] == []
     assert any("u1" in err for err in report["errors"])
+
+
+async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
+    # Tokens are structurally skip-only: a user id already provisioned is a CLEAN skip
+    # (``skipped_existing``), never a re-mint and never an error — the live key stands.
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import store as store_module
+    from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+    pg = FakeAccessControlPg()
+    pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
+    _install(monkeypatch)
+
+    document = {
+        "version": 1,
+        "sections": {
+            "access_control": {
+                "scopes": {},
+                "patterns": {},
+                "tokens": [{"user_id": "u1", "description": "d", "scopes": []}],
+            }
+        },
+    }
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["access_control"]})))["data"]
+    assert data["ok"] is True  # a clean skip is not an error
+    report = data["sections"]["access_control"]
+    assert report["skipped_existing"] == 1
+    assert report["skipped"] == 0
+    assert report["created"] == 0
+    assert report["errors"] == []
+    assert report["new_api_keys"] == []
+    # The pre-existing key's fingerprint is untouched — nothing was re-minted.
+    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == "fp-live"
 
 
 async def test_versioned_documents_section_round_trips_through_router(monkeypatch):

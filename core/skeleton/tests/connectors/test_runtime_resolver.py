@@ -361,6 +361,69 @@ async def test_unknown_sub_service_raises_connection_error(wiring):
         await resolve_managed_auth(CID, "widgets", "does-not-exist")
 
 
+# -- oauth read-only resolution (idempotent reachability probe) --------------
+
+
+async def test_read_only_serves_fresh_token(wiring, monkeypatch):
+    """``allow_refresh=False`` serves a still-fresh token with no write side-effects."""
+    state, store = wiring
+    state["record"] = make_oauth_record(expires_in_seconds=3600)
+
+    async def _boom(**kwargs):
+        raise AssertionError("read-only resolution must never refresh")
+
+    monkeypatch.setattr(oauth_client, "refresh", _boom)
+    auth = await resolve_managed_auth(CID, "acme", "mail", allow_refresh=False)
+    assert auth is not None
+    assert auth.access_token == "access-tok"
+    assert store.puts == []  # no record write
+
+
+async def test_read_only_stale_token_returns_none_without_side_effects(wiring, monkeypatch):
+    """A stale token resolves read-only to no credential: no upstream exchange (so an
+    unset client-cred env var never surfaces as a 500), no persisted health state, and
+    no cooldown breaker — the caller classifies the sub-service unreachable."""
+    state, store = wiring
+    state["record"] = make_oauth_record(expires_in_seconds=10)  # within safety margin
+
+    async def _boom(**kwargs):
+        # Stands in for the missing-creds path too: were a refresh driven with an
+        # unset ACME_CLIENT_ID, the oauth client would raise OperatorMisconfiguredError.
+        raise AssertionError("read-only resolution must never refresh a stale token")
+
+    monkeypatch.setattr(oauth_client, "refresh", _boom)
+    auth = await resolve_managed_auth(CID, "acme", "mail", allow_refresh=False)
+    assert auth is None
+    assert store.puts == []  # no auth_health_state persisted
+    assert CID not in state["cooldown"]  # no cooldown breaker opened
+
+
+async def test_read_only_reconnect_required_returns_none(wiring, monkeypatch):
+    """A reconnect-required record resolves read-only to None (never raises) and
+    leaves no side effect — the read reports unreachable without mutating health."""
+    state, store = wiring
+    state["record"] = make_oauth_record(expires_in_seconds=10, health=AuthHealthState.RECONNECT_REQUIRED)
+
+    async def _boom(**kwargs):
+        raise AssertionError("read-only resolution must never refresh")
+
+    monkeypatch.setattr(oauth_client, "refresh", _boom)
+    auth = await resolve_managed_auth(CID, "acme", "mail", allow_refresh=False)
+    assert auth is None
+    assert store.puts == []
+
+
+async def test_read_only_no_auth_resolves_config(wiring):
+    """No-auth resolution is already side-effect-free; the read-only flag is a no-op
+    for it and still injects the stored client config."""
+    state, _ = wiring
+    state["descriptor"] = make_noauth_stdio_descriptor()
+    state["record"] = make_noauth_record(config_values={"api_key": "secret"})
+    auth = await resolve_managed_auth(CID, "widgets", "search", allow_refresh=False)
+    assert auth is not None
+    assert auth.env == {"api_key": "secret"}
+
+
 # -- force_refresh -----------------------------------------------------------
 
 

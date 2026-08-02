@@ -1,15 +1,10 @@
-"""Pull-based reachability checks for a managed sub-service's MCP server.
+"""Pull-based reachability check for a managed sub-service's MCP server.
 
-Two variants over the same transport build:
+:func:`probe` — bool liveness for the API status path (never the tool-call hot
+path). Best-effort: it never raises and logs at DEBUG.
 
-* :func:`probe` — bool liveness for the API status path (never the tool-call
-  hot path). Best-effort: it never raises and logs at DEBUG.
-* :func:`verify` — verbose result for the community provider add path: the
-  served tool list on success, the specific failure reason otherwise — never
-  a bare bool, so a rejected add can say WHY.
-
-Both open the same MCP transport the runtime uses for the sub-service and run
-the MCP handshake plus a ``tools/list`` round-trip under a short timeout. For
+It opens the same MCP transport the runtime uses for the sub-service and runs the
+MCP handshake plus a ``tools/list`` round-trip under a short timeout. For
 ``http``/``websocket`` servers the access token is carried on the
 ``Authorization`` header; for ``stdio`` servers the child process is spawned and
 answers ``tools/list`` without per-call auth. Liveness is "the server
@@ -25,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from tai42_contract.connectors.probe import ToolSummary, VerifyResult
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_kit.clients import client_ctx
@@ -110,55 +104,3 @@ async def probe(
         )
         return False
     return True
-
-
-async def verify(
-    descriptor: ProviderDescriptor,
-    sub_service: str,
-    *,
-    access_token: str | None = None,
-    config_values: dict[str, str] | None = None,
-) -> VerifyResult:
-    """Verify the MCP server for ``sub_service`` and report the result verbosely.
-
-    Same transport build and ``initialize`` + ``tools/list`` round-trip as
-    :func:`probe`, but instead of collapsing to a bool it returns the served
-    tool list on success and the specific failure reason (timeout, transport
-    error, malformed response, unknown sub-service) on failure — the community
-    add path rejects on it and must say why.
-    """
-    if sub_service not in descriptor.sub_services:
-        return VerifyResult(
-            ok=False,
-            error=f"unknown sub_service {sub_service!r} for provider {descriptor.id!r}",
-        )
-
-    try:
-        config = _build_probe_config(descriptor, sub_service, access_token, config_values or {})
-        async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-            async with _probe_client(config) as client:
-                tools = await client.list_tools()
-    except TimeoutError:
-        return VerifyResult(
-            ok=False,
-            error=f"timeout: no response within {_PROBE_TIMEOUT_SECONDS}s",
-        )
-    except Exception:
-        # The raw exception text is attacker-influenceable (it can echo upstream
-        # server output), so return a fixed reason and keep the detail in the
-        # DEBUG log only.
-        logger.debug(
-            "connectors: verify — %s sub_service %s failed",
-            descriptor.id,
-            sub_service,
-            exc_info=True,
-        )
-        return VerifyResult(
-            ok=False,
-            error="transport error: could not complete the MCP handshake",
-        )
-
-    return VerifyResult(
-        ok=True,
-        tools=[ToolSummary(name=tool.name, description=tool.description or "") for tool in tools],
-    )

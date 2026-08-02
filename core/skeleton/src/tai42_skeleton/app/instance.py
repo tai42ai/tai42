@@ -18,7 +18,6 @@ from tai42_skeleton.access_control.verifier import reset_registered_reserved_pat
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 from tai42_skeleton.connectors.settings import connectors_store_configured
-from tai42_skeleton.connectors.store.catalog_store import refresh_catalog
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.versioning import versioned_store_configured
 
@@ -31,24 +30,10 @@ def connectors_in_use() -> bool:
     """Whether this deployment uses connectors at all.
 
     Thin alias for :func:`tai42_skeleton.connectors.settings.connectors_store_configured`
-    (the single source of truth) so the boot/reload hook skips the Postgres open when the
-    connector token store is unconfigured, mirroring the versioned-store gate.
+    (the single source of truth): connectors are ON exactly when the connector token
+    store is configured, mirroring the versioned-store gate.
     """
     return connectors_store_configured()
-
-
-async def refresh_catalog_if_connectors_in_use() -> None:
-    """Startup/reload handler: load the connector catalog only when the connector
-    token store is configured. A deployment with no store configured has nothing the
-    catalog could serve, and refreshing it would only stall boot retrying an absent
-    Postgres. When the store IS configured the refresh runs and an unreachable Postgres
-    fails it loudly; a skipped refresh still fails loudly at first real connector use via
-    the ``get_provider`` miss or the store's connection error.
-    """
-    if not connectors_in_use():
-        logger.info("connectors: skipping catalog refresh — the connector token store is not configured")
-        return
-    await refresh_catalog()
 
 
 def versioned_store_in_use() -> bool:
@@ -176,17 +161,11 @@ def build_app() -> TaiMCP:
     captures the post-``.env`` value rather than a pre-bootstrap default. Mirrors
     ``cli.metrics.create_app`` — construction is deferred out of import time.
 
-    Idempotent: the first call builds the app and wires the no-auth connector
-    catalog refresh as a startup+reload handler; later calls return the same app.
-    The catalog loads the in-memory provider cache at MCP startup AND after every
-    in-place re-init (``update()`` drops process state, and a community add
-    propagates fleet-wide through the backend reload dispatch), so the resolver's
-    sync ``get_provider`` sees catalog providers on the tool-call hot path. The
-    handler skips the load entirely when connectors are not in use (see
-    :func:`refresh_catalog_if_connectors_in_use`), so a connector-less deployment
-    never opens a Postgres connection at boot. Both at startup and on reload the
-    handlers run with ``raise_on_error``, so a failed load fails the boot / the
-    op loudly — never a silent half-loaded catalog.
+    Idempotent: the first call builds the app singleton; later calls return the
+    same app. Provider descriptors come from the code-built registry — a provider
+    plugin (named in the manifest, or installed from the marketplace) self-registers
+    at import via ``register_connector`` — so the resolver's sync ``get_provider``
+    needs no per-boot Postgres read.
 
     The root-logger re-apply on config reload is NOT wired here: it is a CLI-seam
     concern registered via :func:`register_cli_logging_reload`, so an embedded app
@@ -237,13 +216,10 @@ def build_app() -> TaiMCP:
             # A registered accounts provider left out of the resolution chain would mint
             # sessions that never authenticate — refuse to boot instead.
             app.lifecycle.on_startup(check_accounts_providers_configured)
-        app.lifecycle.on_startup(refresh_catalog_if_connectors_in_use)
-        app.lifecycle.on_reload(refresh_catalog_if_connectors_in_use)
-        # The Studio-plugin registry is a config-derived catalog like the
-        # connector catalog: built at startup AND rebuilt on reload (both with
-        # ``raise_on_error``, so a listed package missing its ``studio/`` dist
-        # fails the boot/op loudly), so a reload that changes ``studio_plugins``
-        # reflects without a process restart.
+        # The Studio-plugin registry is a config-derived catalog built at startup
+        # AND rebuilt on reload (both with ``raise_on_error``, so a listed package
+        # missing its ``studio/`` dist fails the boot/op loudly), so a reload that
+        # changes ``studio_plugins`` reflects without a process restart.
         app.lifecycle.on_startup(rebuild_studio_plugin_registry)
         app.lifecycle.on_reload(rebuild_studio_plugin_registry)
         # Versioned presets load at boot AND re-load on every in-place reload

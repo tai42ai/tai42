@@ -58,6 +58,8 @@ class _FakeCursor:
                 (v["id"], v["document_id"], v["version"], v["body"], list(v["tags"]), v["created_at"])
                 for v in sorted(pg.versions, key=lambda v: v["id"])
             ]
+        elif norm.startswith("SELECT id FROM versioned_document_versions"):
+            self._all = [(v["id"],) for v in pg.versions]
         elif norm.startswith("SELECT id FROM versioned_documents"):
             self._all = [(d["id"],) for d in pg.documents]
         elif norm.startswith("INSERT INTO versioned_documents"):
@@ -196,12 +198,27 @@ async def test_backup_reimport_over_existing_is_idempotent(pg: _FakeVersioningBa
     _seed(pg)
     payload = await export_versioned_documents()
 
-    # Re-import over the already-present rows: same ids, so every document upserts
-    # as "updated" and the tables are unchanged.
-    report = await import_versioned_documents(payload)
+    # Re-import over the already-present rows under overwrite: same ids, so every
+    # document upserts as "updated" and the tables are unchanged.
+    report = await import_versioned_documents(payload, "overwrite")
 
     assert report["created"] == 0
     assert report["updated"] == 3
+    assert len(pg.documents) == 3
+    assert len(pg.versions) == 6
+
+
+async def test_backup_reimport_under_skip_leaves_existing(pg: _FakeVersioningBackupPg):
+    _seed(pg)
+    payload = await export_versioned_documents()
+
+    # Re-import over the already-present rows under skip (the default): each existing
+    # document id is a clean skip, none is re-upserted, and the tables are unchanged.
+    report = await import_versioned_documents(payload)
+
+    assert report["created"] == 0
+    assert report["updated"] == 0
+    assert report["skipped_existing"] == 3
     assert len(pg.documents) == 3
     assert len(pg.versions) == 6
 

@@ -53,6 +53,7 @@ from tai42_skeleton.connectors.oauth.redirect import compute_deployment_origin, 
 from tai42_skeleton.connectors.service import connection_service
 from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.adapter import validation_error_fields
 from tai42_skeleton.operations.connectors import disconnect as _disconnect_op
 from tai42_skeleton.operations.connectors import get_connection as _get_connection_op
 from tai42_skeleton.operations.connectors import list_connections as _list_connections_op
@@ -92,6 +93,24 @@ async def _json_body(request: Request) -> dict:
 # -- HTTP-edge extractors (validate the body; compute request-derived args) ---
 
 
+async def _extract_list_connections(request: Request) -> dict:
+    """The optional ``?health=`` filter and ``?limit=`` page cap as the list
+    operation's flat arguments (a GET reads its parameters from the query string,
+    never a body). ``health`` stays a string the operation validates against the
+    health-state enum; ``limit`` is parsed to an int here (a non-integer is a loud
+    400), and the operation range-checks it."""
+    health = request.query_params.get("health")
+    raw_limit = request.query_params.get("limit")
+    if raw_limit is None:
+        limit: int | None = None
+    else:
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise BadRequestError(f"limit must be an integer: {raw_limit!r}") from exc
+    return {"health": health, "limit": limit}
+
+
 async def _extract_start_connect(request: Request) -> dict:
     try:
         body = await _json_body(request)
@@ -99,7 +118,9 @@ async def _extract_start_connect(request: Request) -> dict:
     except _BadRequest as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
-        raise BadRequestError(f"invalid request body: {exc}") from exc
+        # Never echo the rejected values (config_values can hold secrets): the body
+        # carries only the failing field paths + error types.
+        raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
     return {
         "provider_id": req.provider_id,
         "alias": req.alias,
@@ -118,7 +139,8 @@ async def _extract_reconnect(request: Request) -> dict:
     except _BadRequest as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
-        raise BadRequestError(f"invalid request body: {exc}") from exc
+        # Field paths + error types only — never the rejected input values.
+        raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
     return {
         "enabled_sub_services": req.enabled_sub_services,
         "return_url": req.return_url,
@@ -134,7 +156,8 @@ async def _extract_patch_sub_services(request: Request) -> dict:
     except _BadRequest as exc:
         raise BadRequestError(str(exc)) from exc
     except ValidationError as exc:
-        raise BadRequestError(f"invalid request body: {exc}") from exc
+        # Field paths + error types only — never the rejected input values.
+        raise BadRequestError("invalid request body", extra={"fields": validation_error_fields(exc)}) from exc
     return {
         "enabled_sub_services": req.enabled_sub_services,
         "return_url": req.return_url,
@@ -159,6 +182,7 @@ connections = register_operation_route(
     operation_metadata_of(_list_connections_op),
     path="/api/connectors/connections",
     method="GET",
+    context_extractor=_extract_list_connections,
     action="read",
 )
 

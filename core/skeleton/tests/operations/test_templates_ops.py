@@ -19,6 +19,7 @@ from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.templates import (
     clear_templates_cache,
     delete_template,
+    delete_template_dir,
     get_template,
     list_templates,
     render_template,
@@ -47,6 +48,9 @@ class _ResourceManager:
         self.uploaded[path] = content
 
     async def delete_template(self, path: str) -> None:
+        self.deleted.append(path)
+
+    async def delete_template_dir(self, path: str) -> None:
         self.deleted.append(path)
 
     async def render_by_id_or_content(self, content=None, template_id=None, kwargs=None) -> str:
@@ -127,6 +131,69 @@ async def test_delete_template_rejects_traversal(manager: _ResourceManager, bad:
     assert manager.deleted == []
 
 
+async def test_delete_template_dir_delegates(manager: _ResourceManager) -> None:
+    result = await delete_template_dir("prompts/archive")
+    assert result == {"path": "prompts/archive", "deleted": True}
+    assert manager.deleted == ["prompts/archive"]
+
+
+@pytest.mark.parametrize("bad", ["/abs", "../escape", "a/../../etc", "back\\slash"])
+async def test_delete_template_dir_rejects_traversal(manager: _ResourceManager, bad: str) -> None:
+    with pytest.raises(BadRequestError):
+        await delete_template_dir(bad)
+    assert manager.deleted == []
+
+
+async def test_delete_template_dir_absent_is_not_found(
+    manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A directory that matches nothing is a loud 404 — the provider raises
+    # ``FileNotFoundError`` and the op maps it to ``NotFoundError``, never a no-op.
+    async def _absent(path: str) -> None:
+        raise FileNotFoundError(f"Storage directory not found: {path}")
+
+    monkeypatch.setattr(manager, "delete_template_dir", _absent)
+    with pytest.raises(NotFoundError, match="not found"):
+        await delete_template_dir("prompts/gone")
+
+
+@pytest.mark.parametrize("root_key", [".", "a/.."])
+async def test_delete_template_dir_root_resolving_is_bad_request(manager: _ResourceManager, root_key: str) -> None:
+    # Defense in depth: a key that clears the traversal guard but resolves to EXACTLY
+    # the template root (wiping the whole store) is refused at the OPERATION layer
+    # with a 400, BEFORE the provider is reached — never relying on a backend's own
+    # root check.
+    with pytest.raises(BadRequestError, match="template root"):
+        await delete_template_dir(root_key)
+    assert manager.deleted == []
+
+
+async def test_delete_template_dir_provider_value_error_is_bad_request(
+    manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-root key still reaches the provider; a provider-reported boundary
+    # violation (``ValueError``) is a client 400, never a 500.
+    async def _boundary(path: str) -> None:
+        raise ValueError("Refusing to delete the storage root; a directory path is required.")
+
+    monkeypatch.setattr(manager, "delete_template_dir", _boundary)
+    with pytest.raises(BadRequestError, match="storage root"):
+        await delete_template_dir("prompts/archive")
+
+
+async def test_delete_template_dir_infra_error_propagates(
+    manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine infra failure is neither a 404 nor a 400: it propagates (a 500),
+    # never masked as a client error.
+    async def _boom(path: str) -> None:
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(manager, "delete_template_dir", _boom)
+    with pytest.raises(RuntimeError, match="storage down"):
+        await delete_template_dir("prompts/archive")
+
+
 async def test_render_template_requires_a_source(manager: _ResourceManager) -> None:
     with pytest.raises(BadRequestError, match="one of"):
         await render_template()
@@ -177,7 +244,7 @@ async def test_clear_templates_cache(manager: _ResourceManager) -> None:
 
 def test_upload_and_delete_project_with_destructive_hint() -> None:
     reg = OperationRegistry()
-    for op in (upload_template, delete_template, get_template, list_templates):
+    for op in (upload_template, delete_template, delete_template_dir, get_template, list_templates):
         reg.register(operation_metadata_of(op))
 
     class _Rec:
@@ -191,7 +258,8 @@ def test_upload_and_delete_project_with_destructive_hint() -> None:
     app = SimpleNamespace(tools=_Rec())
     names = project_operations(app, ApiToolsConfig(expose_destructive=True), registry=reg)
 
-    assert {"upload_template", "delete_template", "get_template", "list_templates"} <= set(names)
+    assert {"upload_template", "delete_template", "delete_template_dir", "get_template", "list_templates"} <= set(names)
     assert app.tools.registered["upload_template"]["annotations"].destructiveHint is True
     assert app.tools.registered["delete_template"]["annotations"].destructiveHint is True
+    assert app.tools.registered["delete_template_dir"]["annotations"].destructiveHint is True
     assert app.tools.registered["get_template"]["annotations"] is None  # read, not destructive

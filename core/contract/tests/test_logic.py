@@ -304,28 +304,11 @@ def test_to_storage_json_exposes_config_values_and_null_tokens():
     assert "secret-v" not in repr(rec)
 
 
-# === manifest — TaiMCPConfig.is_uds / is_managed ============================
+# === manifest — TaiMCPConfig.is_managed =====================================
 
 
 def _ref() -> ConnectorRef:
     return ConnectorRef(connection_id=UUID, provider_id="google", sub_service="gmail")
-
-
-def test_taimcpconfig_is_uds_true():
-    cfg = TaiMCPConfig(title="t", config=MCPConfig(uds="/run/sock"))
-    assert cfg.is_uds is True
-
-
-def test_taimcpconfig_is_uds_false_when_no_uds():
-    cfg = TaiMCPConfig(title="t", config=MCPConfig(url="https://x"))
-    assert cfg.is_uds is False
-
-
-def test_taimcpconfig_is_uds_false_when_uds_empty_string():
-    # Empty uds normalizes to None, so the gate and is_uds agree it is "not set".
-    cfg = TaiMCPConfig(title="t", config=MCPConfig(uds=""))
-    assert cfg.config.uds is None
-    assert cfg.is_uds is False
 
 
 def test_taimcpconfig_is_managed_true_and_false():

@@ -268,7 +268,10 @@ async def add_user_api_key(
     # Pre-checks with NO side effect, so a duplicate user or an unknown scope raises
     # before the provider mints anything (never a half-provisioned key).
     if await store.policy_exists(user_id):
-        raise ValueError(f"user id {user_id!r} is already in use")
+        raise ValueError(
+            f"user id {user_id!r} is already in use; to replace its key, revoke the key for "
+            "that user id, then re-import"
+        )
     if scopes:
         # A scope-typo guard. The universal "*" names no routed scope, so it is always
         # valid to mint; every other scope must exist in the route table.

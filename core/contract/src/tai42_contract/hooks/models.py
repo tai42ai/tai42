@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from tai42_contract.template import ConditionMixin, ExprMixin
+
+# A hook's ``topic`` is dispatched as ONE path segment of the public webhook URL
+# (``/universal_webhook/{topic}``), and its ``name`` addresses the hook on every
+# management/delete door. A ``/`` (or a trailing newline) in either would mint a
+# record no webhook delivery can ever route to and no door can address — so the
+# charset is bounded to a single lowercase path segment, mirroring the sub-MCP
+# slug rule. ``\Z`` (not ``$``) anchors the true end of string so a trailing
+# ``\n`` cannot slip through.
+_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 
 
 class TopicVerifierBinding(BaseModel):
@@ -35,6 +45,16 @@ class HookRegister(ConditionMixin, ExprMixin):
     name: str = Field(min_length=1)
     topic: str = Field(min_length=1)
     tool: str = Field(min_length=1)
+
+    @field_validator("name", "topic")
+    @classmethod
+    def _require_url_safe_segment(cls, value: str, info: ValidationInfo) -> str:
+        if not _SEGMENT_RE.match(value):
+            raise ValueError(
+                f"{info.field_name} {value!r} must match {_SEGMENT_RE.pattern} (one lowercase URL path segment)"
+            )
+        return value
+
     execution_key: str = Field(
         min_length=1,
         description=(

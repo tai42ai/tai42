@@ -1,7 +1,7 @@
-"""The process app singleton: ``instance.app`` is a built ``TaiMCP`` with the
-catalog refresh wired as a startup+reload handler, and its ``lifespan`` context
-opens (and, on exit, closes) the sub-app router lifespan. Process-wide resource
-teardown lives on ``app_context`` (see ``test_lifecycle``), not here.
+"""The process app singleton: ``instance.app`` is a built ``TaiMCP`` whose
+``lifespan`` context opens (and, on exit, closes) the sub-app router lifespan.
+Process-wide resource teardown lives on ``app_context`` (see ``test_lifecycle``),
+not here.
 """
 
 from __future__ import annotations
@@ -9,13 +9,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from tai42_contract.connectors.models import ConnectorRef
-from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.app.instance as instance
 from tai42_skeleton.app.server import TaiMCP
-from tai42_skeleton.manifest import Manifest
 
 
 def test_app_singleton_is_taimcp():
@@ -26,11 +23,6 @@ def test_app_singleton_is_taimcp():
 def test_build_app_is_idempotent():
     assert instance.build_app() is instance.build_app()
     assert instance.build_app() is instance.app
-
-
-def test_refresh_catalog_wired_as_startup_and_reload():
-    assert instance.refresh_catalog_if_connectors_in_use in instance.app._startup_handlers.values()
-    assert instance.refresh_catalog_if_connectors_in_use in instance.app._reload_handlers.values()
 
 
 def test_rehydrate_presets_wired_as_startup_and_reload():
@@ -62,7 +54,7 @@ def test_fenced_route_audit_wired_as_startup_and_reload_when_enabled():
     assert check_fenced_routes_resolvable in instance.app._reload_handlers.values()
 
 
-# --- catalog-refresh gate ---------------------------------------------------
+# --- connectors gate --------------------------------------------------------
 
 
 def _clear_connector_env(monkeypatch) -> None:
@@ -76,80 +68,18 @@ def _clear_connector_env(monkeypatch) -> None:
     monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
 
 
-def _record_refresh(monkeypatch) -> list[bool]:
-    calls: list[bool] = []
-
-    async def fake_refresh() -> None:
-        calls.append(True)
-
-    monkeypatch.setattr(instance, "refresh_catalog", fake_refresh)
-    return calls
-
-
-async def test_catalog_refresh_skipped_when_store_unconfigured(monkeypatch):
-    # No connector token store configured: the handler skips the catalog load (no
-    # Postgres at boot).
+def test_connectors_gate_off_when_store_unconfigured(monkeypatch):
+    # The connectors gate is the store-configured gate alone: with no store password
+    # (and no shared default) connectors read OFF.
     _clear_connector_env(monkeypatch)
-    calls = _record_refresh(monkeypatch)
-
-    await instance.refresh_catalog_if_connectors_in_use()
-
-    assert calls == []
+    assert instance.connectors_in_use() is False
 
 
-async def test_catalog_refresh_runs_when_store_configured(monkeypatch):
-    # The connectors gate is the store-configured gate: a supplied store password is
-    # the single signal that flips connectors ON and runs the refresh.
+def test_connectors_gate_on_when_store_configured(monkeypatch):
+    # A supplied store password is the single signal that flips connectors ON.
     _clear_connector_env(monkeypatch)
     monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "secret")
-    calls = _record_refresh(monkeypatch)
-
-    await instance.refresh_catalog_if_connectors_in_use()
-
-    assert calls == [True]
-
-
-async def test_catalog_refresh_skipped_when_managed_entry_but_store_unconfigured(monkeypatch):
-    # DELIBERATE semantic change: a connector-managed manifest entry no longer flips
-    # connectors ON. The gate is the store-configured gate alone, so with no store
-    # password the refresh is skipped even though a managed entry is declared.
-    _clear_connector_env(monkeypatch)
-    manifest = Manifest(
-        mcp=[
-            TaiMCPConfig(
-                title="acme_mail_work",
-                include=[],
-                exclude=[],
-                config=MCPConfig(type="http", url="https://mcp.acme.test/"),
-                managed=ConnectorRef(
-                    connection_id="11111111-1111-4111-8111-111111111111",
-                    provider_id="acme",
-                    sub_service="mail",
-                ),
-            )
-        ]
-    )
-    monkeypatch.setattr(instance.build_app(), "_manifest", manifest)
-    calls = _record_refresh(monkeypatch)
-
-    await instance.refresh_catalog_if_connectors_in_use()
-
-    assert calls == []
-
-
-async def test_catalog_refresh_skipped_when_provider_registered_but_store_unconfigured(monkeypatch):
-    # A registered connector provider no longer flips connectors ON either — only the
-    # store-configured gate does. With a provider registered but no store password the
-    # refresh is still skipped.
-    from tai42_skeleton.connectors.providers import registry as provider_registry
-
-    _clear_connector_env(monkeypatch)
-    monkeypatch.setitem(provider_registry._REGISTRY, "acme", object())
-    calls = _record_refresh(monkeypatch)
-
-    await instance.refresh_catalog_if_connectors_in_use()
-
-    assert calls == []
+    assert instance.connectors_in_use() is True
 
 
 def test_default_namespace_env_does_flip_connectors_gate(monkeypatch):

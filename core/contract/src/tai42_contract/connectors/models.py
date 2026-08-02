@@ -231,6 +231,11 @@ class ConnectedAccountView(BaseModel):
     auth_health_state: AuthHealthState
     enabled_sub_services: list[str]
     granted_scopes: list[str]
+    # Sub-services whose MCP server did not answer a live reachability probe.
+    # Populated only on the single-connection GET (the list is probe-free, so it
+    # is always empty there). Reachability is distinct from ``auth_health_state``:
+    # a healthy connection can still have an unreachable (down) sub-service.
+    unreachable_sub_services: list[str] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -250,9 +255,31 @@ class ProviderCatalogEntry(BaseModel):
     config_fields: list[ConfigFieldSpec] = Field(default_factory=list[ConfigFieldSpec])
 
 
+class ConnectorCategoryView(BaseModel):
+    """One ``connector_category`` grouping row — the UI's label + sort key for the
+    providers it groups. Served alongside the provider catalog so clients can
+    group/order/label providers by category."""
+
+    id: str
+    display_name: str
+    sort_order: int
+
+
+class ProviderCatalogResponse(BaseModel):
+    """The provider catalog listing: the providers and the category groupings the
+    UI arranges them under."""
+
+    providers: list[ProviderCatalogEntry]
+    categories: list[ConnectorCategoryView]
+
+
 class ConnectionsListResponse(BaseModel):
     items: list[ConnectedAccountView]
     total: int
+    # Count of connections whose ``auth_health_state`` is not HEALTHY, across the
+    # whole connection set (independent of any ``health`` filter or ``limit``) — the
+    # badge count the UI shows.
+    unhealthy: int
 
 
 class StartConnectRequest(BaseModel):

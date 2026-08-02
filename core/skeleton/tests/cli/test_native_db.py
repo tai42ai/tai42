@@ -26,8 +26,6 @@ def test_expected_tables_match_the_ddl() -> None:
     assert set(tables) == {
         "connector_connections",
         "connector_category",
-        "connector_catalog",
-        "connector_allowed_source",
         "versioned_documents",
         "versioned_document_versions",
         "access_control_policies",

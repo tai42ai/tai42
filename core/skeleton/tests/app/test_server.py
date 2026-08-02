@@ -237,6 +237,69 @@ def test_http_app_builds_and_finalizes():
     assert result.app is sentinel
 
 
+def test_sse_app_registers_internal_error_handler():
+    # S1: the uniform-500 handler is installed on the base app's own
+    # ServerErrorMiddleware, so every adapter route on the SSE serving path answers
+    # the generic {"error", "error_id"} envelope instead of a plain-text 500.
+    a = _fresh()
+    sentinel = MagicMock()
+    with patch.object(server_module, "create_sse_app", return_value=sentinel):
+        a.sse_app()
+    sentinel.add_exception_handler.assert_called_once_with(Exception, server_module._internal_error_handler)
+
+
+def test_http_app_registers_internal_error_handler():
+    # S1: the same handler is installed on the http serving path's base app.
+    a = _fresh()
+    sentinel = MagicMock()
+    a._fast_mcp = MagicMock()
+    a._fast_mcp.http_app.return_value = sentinel
+    a.http_app(path="/mcp", transport="http")
+    sentinel.add_exception_handler.assert_called_once_with(Exception, server_module._internal_error_handler)
+
+
+def test_internal_error_handler_mints_id_and_hides_detail():
+    # S1: the handler mints a correlation id, hides internal exception text, and
+    # stamps the id on the exception for the embedding factory's dispatch net.
+    import json as _json
+
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "GET", "path": "/api/secret-path", "query_string": b"", "headers": []}
+    exc = RuntimeError("host db://user:pw@internal boom")
+    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == "Internal Server Error"
+    assert body["error_id"]  # a non-empty correlation id
+    assert "boom" not in bytes(resp.body).decode()  # internal text never reaches the client
+    assert getattr(exc, "error_id", None) == body["error_id"]  # stamped for the dispatch net to correlate
+
+
+def test_internal_error_handler_survives_unstampable_exception():
+    # S1: a future exception that cannot accept the id stamp — here a read-only
+    # ``error_id`` property, whose assignment raises AttributeError — must not make
+    # the stamp raise INSIDE the last-resort handler and defeat the uniform-500 net.
+    # The id already rides the body and the log line, so a failed stamp is harmless.
+    import json as _json
+
+    from starlette.requests import Request
+
+    class _Unstampable(Exception):
+        @property
+        def error_id(self) -> str:  # read-only: ``exc.error_id = ...`` raises AttributeError
+            return "sealed"
+
+    scope = {"type": "http", "method": "GET", "path": "/api/x", "query_string": b"", "headers": []}
+    exc = _Unstampable("boom")
+    resp = asyncio.run(server_module._internal_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body == {"error": "Internal Server Error", "error_id": body["error_id"]}
+    assert body["error_id"]  # a non-empty correlation id still reaches the client
+    assert exc.error_id == "sealed"  # the failed stamp was suppressed, not raised
+
+
 def test_remove_tool_forwards():
     a = _fresh()
     a._fast_mcp = MagicMock()

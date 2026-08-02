@@ -42,9 +42,6 @@ class _FakeConfigManager:
     def read_manifest(self):
         return deepcopy(self._manifest)
 
-    def write_manifest(self, m):
-        self.written = m
-
     def read_manifest_preserved(self):
         return deepcopy(self._manifest)
 

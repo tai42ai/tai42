@@ -88,7 +88,7 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
         {"name": "nightly", "cron": "0 0 * * *", "tool": "cleanup", "arguments": {"scope": "all"}},
         {"name": "hourly", "cron": "0 * * * *", "tool": "sync", "arguments": {}},
     ]
-    import_report = {"created": 2, "updated": 0, "skipped": 0, "errors": []}
+    import_report = {"created": 2, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
     tools = _FakeTools(
         {
             "backend_export_schedules": backend_doc,
@@ -102,8 +102,23 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
     assert doc["sections"]["schedules"] == backend_doc
     assert doc["errors"] == {}
 
-    # Import hands the whole document back to the backend under ``schedules``.
+    # Import hands the whole document back to the backend under ``schedules``, forwarding
+    # the per-record mode across the tool boundary (skip is the default).
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["schedules"]})))["data"]
     assert data["ok"] is True
     assert data["sections"]["schedules"] == import_report
-    assert ("backend_import_schedules", {"schedules": backend_doc}) in tools.run_calls
+    assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "skip"}) in tools.run_calls
+
+
+async def test_schedules_import_forwards_overwrite_mode(monkeypatch):
+    backend_doc = [{"name": "nightly", "cron": "0 0 * * *", "tool": "cleanup", "arguments": {}}]
+    import_report = {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
+    tools = _FakeTools({"backend_import_schedules": import_report})
+    _install(monkeypatch, tools)
+
+    document = {"version": 1, "sections": {"schedules": backend_doc}}
+    data = _json(
+        await import_backup(_post_req({"document": document, "sections": ["schedules"], "mode": "overwrite"}))
+    )["data"]
+    assert data["ok"] is True
+    assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "overwrite"}) in tools.run_calls

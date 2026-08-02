@@ -3,7 +3,7 @@
 Every manifest / env mutation must cross the one pipeline
 (:class:`~tai42_skeleton.config.service.ConfigService`), so feature code must never call
 the config manager's raw write seams directly — ``mutate_manifest``,
-``replace_manifest``, ``write_manifest``, and ``write_env`` — only the config layer
+``replace_manifest``, and ``write_env`` — only the config layer
 (``config/``, including ``ConfigService``) and the config managers themselves may.
 This test statically scans the shipped ``tai42_skeleton`` feature modules and asserts
 ZERO direct calls, so a converged writer cannot quietly regress to a raw seam.
@@ -27,8 +27,8 @@ import tai42_skeleton
 # live here), so it is the only package allowed to drive them directly.
 _ALLOWED_PACKAGE = "config"
 
-# The four raw config-manager write seams ConfigService persists through.
-_SEALED_METHODS = frozenset({"mutate_manifest", "replace_manifest", "write_manifest", "write_env"})
+# The raw config-manager write seams ConfigService persists through.
+_SEALED_METHODS = frozenset({"mutate_manifest", "replace_manifest", "write_env"})
 
 _PACKAGE_ROOT = Path(tai42_skeleton.__file__).parent
 
@@ -50,7 +50,7 @@ def _sealed_call_sites(path: Path) -> list[tuple[int, str]]:
     return sites
 
 
-def test_feature_modules_never_call_write_manifest_or_write_env() -> None:
+def test_feature_modules_never_call_raw_write_seams() -> None:
     modules = _feature_modules()
     # The scan must have something to scan — a mis-resolved root would vacuously pass.
     assert modules, "no feature modules discovered under the tai42_skeleton package"

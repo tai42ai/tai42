@@ -18,7 +18,7 @@ def get_mcp_transport(
     and ignores ``uds_protocol``.
     """
     socket_path = config.config.uds
-    if socket_path:  # the ``TaiMCPConfig.is_uds`` rule, inline so it also narrows the type
+    if socket_path:  # a truthy ``uds`` marks a UDS server, and this test narrows its type
         if uds_protocol == "sse":
             return SSEUDSTransport(socket_path=socket_path)
         if uds_protocol == "http":

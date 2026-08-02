@@ -302,14 +302,49 @@ async def test_import_skips_the_second_of_two_colliding_rows_in_one_payload(wire
 
 
 async def test_import_replaces_a_row_on_the_identity_it_already_holds(wired):
-    # A row keeps its own claim across a restore, and its old pair is freed for another row.
+    # A row keeps its own claim across a restore, and its old pair is freed for another
+    # row. Replacing an existing route is an OVERWRITE (skip would leave line-a as it is).
     await wired.put_route(_channel_route("line-a"))
     moved = _channel_route("line-a").model_dump(mode="json") | {"our_identity": "+15559999999"}
     taking_over = _channel_route("line-b").model_dump(mode="json")
 
-    report = await backup.import_conversation_routes({"routes": [moved, taking_over]})
+    report = await backup.import_conversation_routes({"routes": [moved, taking_over]}, "overwrite")
 
     assert report["errors"] == []
     assert report["skipped"] == 0
     assert wired.rows["line-a"].our_identity == "+15559999999"
     assert wired.rows["line-b"].our_identity == "+15550001111"
+
+
+async def test_import_under_skip_leaves_existing_route_and_its_secret_untouched(wired):
+    # An unchanged re-import under skip (the default) must NOT re-mint an existing
+    # route's callback secret — re-minting would break every live signer.
+    await wired.put_route(_api_route("support", "live-secret"))
+    row = _api_route("support", "ignored").model_dump(mode="json")
+    del row["callback_secret"]
+
+    report = await backup.import_conversation_routes({"routes": [row]})
+
+    assert report["created"] == 0
+    assert report["updated"] == 0
+    assert report["skipped_existing"] == 1
+    assert report["new_callback_secrets"] == []
+    # The live secret is preserved verbatim, not re-minted.
+    assert wired.rows["support"].callback_secret == "live-secret"
+
+
+async def test_import_under_overwrite_replaces_route_and_remints_secret(wired):
+    # Overwrite is the deliberate replace: the row is rewritten and its api secret
+    # re-minted, surfaced in new_callback_secrets for redistribution.
+    await wired.put_route(_api_route("support", "live-secret"))
+    row = _api_route("support", "ignored").model_dump(mode="json")
+    del row["callback_secret"]
+
+    report = await backup.import_conversation_routes({"routes": [row]}, "overwrite")
+
+    assert report["updated"] == 1
+    assert report["skipped_existing"] == 0
+    assert len(report["new_callback_secrets"]) == 1
+    new_secret = report["new_callback_secrets"][0]["callback_secret"]
+    assert wired.rows["support"].callback_secret == new_secret
+    assert new_secret != "live-secret"

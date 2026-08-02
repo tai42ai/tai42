@@ -56,9 +56,10 @@ CREATE TABLE IF NOT EXISTS connector_connections (
 -- ------------------------------------------------------------
 -- Connector categories — grouping for the Connectors UI tabs. GLOBAL. One row
 -- per category; `sort_order` drives the display order inside each tab
--- (`other` carries a large sentinel so it always sorts last). Seeded below;
--- new categories are created at runtime only through the provider-add agent
--- tool's category-create path.
+-- (`other` carries a large sentinel so it always sorts last). Seeded below and
+-- otherwise static (backup/restore round-trips the rows; there is no runtime
+-- writer). Served alongside the provider catalog so clients can group/order/
+-- label providers by category (connectors.store.catalog_store.fetch_categories).
 CREATE TABLE IF NOT EXISTS connector_category (
     id            TEXT         NOT NULL,
     display_name  TEXT         NOT NULL,
@@ -74,60 +75,6 @@ INSERT INTO connector_category (id, display_name, sort_order) VALUES
     ('data',          'Data',          4),
     ('ai-ml',         'AI & ML',       5),
     ('other',         'Other',         1000)
-ON CONFLICT (id) DO NOTHING;
-
--- ------------------------------------------------------------
--- Market catalog of no-auth MCP connectors. GLOBAL: a single shared market.
--- One row per offered no-auth
--- provider; `descriptor` is the full no-auth ProviderDescriptor serialized as
--- JSON (id, display_name, icon, mcp_server, sub_services, config_fields,
--- kind="none") WITHOUT origin/category — those live only in the columns, the
--- single source of truth. It is a public template — it holds NO secrets.
--- Per-connection values (env/headers filled at connect time) live encrypted in
--- connector_connections, never here.
---
--- `origin` records who curated the row: 'system' for ops-inserted rows,
--- 'community' for rows added at runtime through the verified agent-tool add
--- path (connectors.store.catalog_write) — those also carry `added_by` (the
--- adding caller) and `source_url` (where the provider was discovered).
---
--- The api and mcp processes load enabled rows into an in-memory cache at
--- startup and on reload (connectors.store.catalog_store.refresh_catalog).
--- Ops add a system MCP by INSERTing a row (ops/SQL); community adds insert
--- through catalog_write and trigger a fleet reload. `enabled` hides a row
--- without deleting it. DDL is applied only by the API (run_schema_ddl), the
--- same deploy-ordering assumption connector_connections already relies on.
-CREATE TABLE IF NOT EXISTS connector_catalog (
-    provider_id   TEXT         NOT NULL,
-    descriptor    JSONB        NOT NULL,
-    origin        TEXT         NOT NULL CHECK (origin IN ('system', 'community')),
-    category      TEXT         NOT NULL REFERENCES connector_category (id),
-    source_url    TEXT,
-    added_by      TEXT,
-    enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    PRIMARY KEY (provider_id)
-);
-
--- ------------------------------------------------------------
--- Allowed discovery sources for the MCP-finder agent. GLOBAL. The discovery
--- tools search/fetch ONLY enabled rows here — any other URL raises. Runtime
--- read-only: ops extend the list by editing this table directly in Postgres;
--- no tool, route, or UI writes it. `enabled` disables a source without
--- deleting it.
-CREATE TABLE IF NOT EXISTS connector_allowed_source (
-    id            TEXT         NOT NULL,
-    url           TEXT         NOT NULL,
-    enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    PRIMARY KEY (id)
-);
-
-INSERT INTO connector_allowed_source (id, url) VALUES
-    ('github',       'https://github.com'),
-    ('mcp-registry', 'https://registry.modelcontextprotocol.io'),
-    ('smithery',     'https://smithery.ai')
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================

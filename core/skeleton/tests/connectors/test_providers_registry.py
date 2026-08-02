@@ -1,4 +1,4 @@
-"""Provider registry: register_connector / set_catalog / lookup + reset hook."""
+"""Provider registry: register_connector / lookup + reset hook."""
 
 from __future__ import annotations
 
@@ -13,25 +13,20 @@ from tai42_skeleton.connectors.providers.registry import (
     get_provider,
     list_providers,
     register_connector,
-    set_catalog,
 )
 from tai42_skeleton.sql.schema import load_ddl
 
-from .conftest import make_noauth_http_descriptor, make_oauth_descriptor
+from .conftest import make_oauth_descriptor
 
 
 @pytest.fixture(autouse=True)
 def _isolate_registry():
-    """Snapshot and restore the module-global registry + catalog around each test."""
+    """Snapshot and restore the module-global registry around each test."""
     reg = dict(registry._REGISTRY)
-    cat = dict(registry._CATALOG_CACHE)
     registry._REGISTRY.clear()
-    registry._CATALOG_CACHE.clear()
     yield
     registry._REGISTRY.clear()
     registry._REGISTRY.update(reg)
-    registry._CATALOG_CACHE.clear()
-    registry._CATALOG_CACHE.update(cat)
 
 
 def test_register_and_get():
@@ -59,42 +54,11 @@ def test_get_provider_unknown_raises_keyerror():
         get_provider("nope")
 
 
-def test_set_catalog_publishes_and_lookup():
-    cat_desc = make_noauth_http_descriptor(provider_id="catprov")
-    set_catalog([cat_desc])
-    assert get_provider("catprov") is cat_desc
-    assert cat_desc in list_providers()
-
-
-def test_set_catalog_collision_with_registry_raises():
+def test_reset_registry_clears():
     register_connector(make_oauth_descriptor(provider_id="acme"))
-    clash = make_noauth_http_descriptor(provider_id="acme")
-    with pytest.raises(ValueError, match="collides with a code-built"):
-        set_catalog([clash])
-
-
-def test_set_catalog_duplicate_id_raises():
-    a = make_noauth_http_descriptor(provider_id="dup")
-    b = make_noauth_http_descriptor(provider_id="dup")
-    with pytest.raises(ValueError, match="duplicate catalog provider"):
-        set_catalog([a, b])
-
-
-def test_set_catalog_replaces_atomically():
-    set_catalog([make_noauth_http_descriptor(provider_id="first")])
-    set_catalog([make_noauth_http_descriptor(provider_id="second")])
-    assert get_provider("second")
+    registry.reset_registry()
     with pytest.raises(KeyError):
-        get_provider("first")
-
-
-def test_clear_caches_drops_catalog_keeps_registry():
-    register_connector(make_oauth_descriptor(provider_id="acme"))
-    set_catalog([make_noauth_http_descriptor(provider_id="catprov")])
-    registry._clear_caches()
-    assert get_provider("acme")  # registry survives
-    with pytest.raises(KeyError):
-        get_provider("catprov")  # catalog cache dropped
+        get_provider("acme")
 
 
 def test_operator_misconfigured_error_carries_fields():

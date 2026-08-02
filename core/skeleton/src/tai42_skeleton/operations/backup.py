@@ -32,6 +32,7 @@ from typing import Any
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.backup.registry import BackupMode, import_mode
 from tai42_skeleton.operations import BadRequestError, operation
 
 logger = logging.getLogger(__name__)
@@ -40,11 +41,16 @@ _DOCUMENT_VERSION = 1
 
 
 class BackupImport(BaseModel):
-    """Import request — a backup ``document`` produced by the export route and the
-    section names to import from it."""
+    """Import request — a backup ``document`` produced by the export route, the
+    section names to import from it, and the per-record ``mode``."""
 
     document: dict[str, Any]
     sections: list[str]
+    # ``skip`` (default) leaves any existing record untouched; ``overwrite`` upserts
+    # it. Applied per keyed record by each section importer, so a partial-collision
+    # document restores its new records either way and only diverges on the records
+    # that already exist. Mode-less sections (manifest, env, tokens) ignore it.
+    mode: BackupMode = "skip"
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -90,7 +96,7 @@ async def list_sections() -> list:
     errors=[BadRequestError],
     request_model=BackupImport,
 )
-async def import_backup(document: dict[str, Any], sections: list[str]) -> dict:
+async def import_backup(document: dict[str, Any], sections: list[str], mode: BackupMode = "skip") -> dict:
     # The envelope shape (a JSON object carrying a ``document`` object + a list of
     # section-name strings) is validated at the HTTP edge by the route's extractor;
     # the document CONTENT (version, its sections map) is the operation's own
@@ -104,37 +110,43 @@ async def import_backup(document: dict[str, Any], sections: list[str]) -> dict:
     registered = _registered_section_names()
     reports: dict[str, Any] = {}
     ok = True
-    for name in _import_order(sections):
-        if name not in registered:
-            # A well-formed request naming a section this host does not register —
-            # a section report error, not a transport failure.
-            reports[name] = {"created": 0, "updated": 0, "skipped": 0, "errors": [f"unknown section: {name!r}"]}
-            ok = False
-            continue
-        if name not in document_sections:
-            reports[name] = {
-                "created": 0,
-                "updated": 0,
-                "skipped": 0,
-                "errors": [f"section {name!r} is not present in the backup document"],
-            }
-            ok = False
-            continue
-        try:
-            report = await _maybe_await(tai42_app.backup.import_section(name, document_sections[name]))
-        except Exception as exc:
-            # An importer that raises is reported with zero counts plus its error
-            # message: importers write record by record with no cross-record
-            # transaction, so records a multi-phase importer committed before the
-            # raising one still stand while the counts here read zero — the failure
-            # itself is never lost. Logged too, so a genuine importer code bug is
-            # visible server-side, not just an absent subsystem indistinguishable from it.
-            logger.warning("backup import of section %r failed: %s", name, exc, exc_info=True)
-            reports[name] = {"created": 0, "updated": 0, "skipped": 0, "errors": [str(exc)]}
-            ok = False
-            continue
-        reports[name] = report
-        if report.get("errors"):
-            ok = False
+    # One mode for the whole import: each mode-aware section importer reads it from
+    # the request-scoped context (the ``import_section`` seam carries no mode arg).
+    with import_mode(mode):
+        for name in _import_order(sections):
+            if name not in registered:
+                # A well-formed request naming a section this host does not register —
+                # a section report error, not a transport failure.
+                reports[name] = _absent_section_report(f"unknown section: {name!r}")
+                ok = False
+                continue
+            if name not in document_sections:
+                reports[name] = _absent_section_report(f"section {name!r} is not present in the backup document")
+                ok = False
+                continue
+            try:
+                report = await _maybe_await(tai42_app.backup.import_section(name, document_sections[name]))
+            except Exception as exc:
+                # An importer that raises is reported with zero counts plus its error
+                # message: importers write record by record with no cross-record
+                # transaction, so records a multi-phase importer committed before the
+                # raising one still stand while the counts here read zero — the failure
+                # itself is never lost. Logged too, so a genuine importer code bug is
+                # visible server-side, not just an absent subsystem indistinguishable from it.
+                logger.warning("backup import of section %r failed: %s", name, exc, exc_info=True)
+                reports[name] = _absent_section_report(str(exc))
+                ok = False
+                continue
+            reports[name] = report
+            if report.get("errors"):
+                ok = False
 
     return {"ok": ok, "sections": reports}
+
+
+def _absent_section_report(error: str) -> dict[str, Any]:
+    """A zero-count section report carrying a single ``error`` — for a section that
+    never ran (unknown, absent from the document, or whose importer raised). Mirrors
+    the ``{created, updated, skipped, skipped_existing, errors}`` shape every importer
+    returns so the per-section reports are uniform."""
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": [error]}

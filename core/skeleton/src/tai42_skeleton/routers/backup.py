@@ -135,9 +135,9 @@ async def export_backup(request: Request) -> Response:
 
 async def _extract_import(request: Request) -> dict:
     """Parse + structurally validate the import body into the operation's flat
-    ``document``/``sections`` arguments, rejecting a malformed envelope with a loud
-    400 before the operation runs (the document CONTENT — version, its sections map
-    — is the operation's own validation)."""
+    ``document``/``sections``/``mode`` arguments, rejecting a malformed envelope with a
+    loud 400 before the operation runs (the document CONTENT — version, its sections
+    map — is the operation's own validation)."""
     try:
         body = await request.json()
     except ValueError as exc:
@@ -150,7 +150,12 @@ async def _extract_import(request: Request) -> dict:
     selected = _require_string_list(body.get("sections"))
     if selected is None:
         raise BadRequestError("body must contain a list of section-name strings 'sections'") from None
-    return {"document": document, "sections": selected}
+    # ``mode`` defaults to the non-destructive ``skip``; an unrecognized value is a
+    # loud 400 rather than a silent fallback to a default.
+    mode = body.get("mode", "skip")
+    if mode not in ("skip", "overwrite"):
+        raise BadRequestError("'mode' must be 'skip' or 'overwrite'") from None
+    return {"document": document, "sections": selected, "mode": mode}
 
 
 import_backup = register_operation_route(

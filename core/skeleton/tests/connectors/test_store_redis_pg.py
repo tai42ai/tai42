@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from psycopg.errors import UniqueViolation
-from tai42_contract.connectors.errors import ConnectorError
+from tai42_contract.connectors.errors import ConnectorError, MalformedConnectionIdError
 from tai42_contract.connectors.service import AliasInUseError
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -255,7 +255,9 @@ def test_rec_key_no_tenant_segment():
 
 
 def test_as_uuid_invalid_raises():
-    with pytest.raises(ValueError, match="not a valid UUID"):
+    # A non-UUID connection_id can key no record: the store raises the typed
+    # MalformedConnectionIdError the persistence boundary maps to a 404.
+    with pytest.raises(MalformedConnectionIdError, match="not a valid UUID"):
         RedisPgConnectorTokenStore._as_uuid("not-a-uuid")
 
 

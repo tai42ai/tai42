@@ -3,8 +3,9 @@ the REAL manifest edit + reload path.
 
 Each case drives the route handlers directly (the router-test pattern) inside a
 live ``app.app_context``, with an in-memory config manager that round-trips the
-manifest dict (``read_manifest``/``write_manifest``) so ``reload_config`` actually
-re-reads the written manifest and rebinds the branch tools — the same flow
+manifest dict (``read_manifest`` + the ``mutate_manifest``/``replace_manifest``
+seams) so ``reload_config`` actually re-reads the written manifest and rebinds the
+branch tools — the same flow
 ``POST /api/mcp-config`` uses. Base tools ``shout``/``ping`` come from
 ``tests.app._fixtures.tools_b``; the extension catalog (WRAPPER ``marka``/``markb``/
 ``argswrap`` + BACKEND ``backendx``/``backendy``) from ``tests.app._fixtures.ext_kinds``.
@@ -115,15 +116,15 @@ def _dup() -> dict[str, Any]:
 
 @pytest.fixture
 def cfg(monkeypatch) -> dict[str, Any]:
-    """An in-memory config manager: ``read_manifest`` returns the stored dict and
-    ``write_manifest`` replaces it, so the route's edit + ``reload_config`` round
+    """An in-memory config manager: ``read_manifest`` returns the stored dict and the
+    transactional seams replace it, so the route's edit + ``reload_config`` round
     trips exactly as against a file."""
     state: dict[str, Any] = {"manifest": {}}
 
     def read_manifest() -> dict[str, Any]:
         return deepcopy(state["manifest"])
 
-    def write_manifest(manifest: dict[str, Any]) -> None:
+    def _persist(manifest: dict[str, Any]) -> None:
         state["manifest"] = deepcopy(manifest)
 
     manager = instance.app.config.config_manager
@@ -134,15 +135,14 @@ def cfg(monkeypatch) -> dict[str, Any]:
         # honored), run the mutator, and persist only if it returns without raising.
         document = manager.read_manifest()
         mutator(document)
-        manager.write_manifest(document)
+        _persist(document)
         return document
 
     def replace_manifest(document: dict[str, Any]) -> dict[str, Any]:
-        manager.write_manifest(document)
+        _persist(document)
         return document
 
     monkeypatch.setattr(manager, "read_manifest", read_manifest)
-    monkeypatch.setattr(manager, "write_manifest", write_manifest)
     monkeypatch.setattr(manager, "read_manifest_preserved", read_manifest)
     monkeypatch.setattr(manager, "mutate_manifest", mutate_manifest)
     monkeypatch.setattr(manager, "replace_manifest", replace_manifest)

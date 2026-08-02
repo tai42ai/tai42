@@ -214,3 +214,54 @@ async def test_round_trip_restores_child_listed_before_parent(pg: FakeBackupPg) 
     report = await import_tool_meta(payload)
     assert report["created"] == 2
     assert pg.folders["child"]["parent_id"] == "parent"
+
+
+async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
+    # A folder id + an overlay row that both already exist, plus one new folder id.
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    pg.folders = {"f1": {"id": "f1", "name": "Old", "parent_id": None, "created_at": ts}}
+    pg.meta = {
+        "weather": {
+            "tool_name": "weather",
+            "display_name": "Old label",
+            "folder_id": "f1",
+            "tags": [],
+            "hidden": None,
+            "created_at": ts,
+        }
+    }
+    payload = {
+        "folders": [
+            {"id": "f1", "name": "Renamed", "parent_id": None, "created_at": ts.isoformat()},
+            {"id": "f2", "name": "Fresh", "parent_id": None, "created_at": ts.isoformat()},
+        ],
+        "rows": [
+            {
+                "tool_name": "weather",
+                "display_name": "New label",
+                "folder_id": "f1",
+                "tags": ["x"],
+                "hidden": None,
+                "created_at": ts.isoformat(),
+            }
+        ],
+    }
+
+    # skip (the default): f2 is new -> created; f1 + weather already exist -> left as
+    # they stand, counted as clean skips.
+    skip = await import_tool_meta(payload)
+    assert skip["created"] == 1
+    assert skip["updated"] == 0
+    assert skip["skipped_existing"] == 2
+    assert pg.folders["f1"]["name"] == "Old"  # untouched
+    assert pg.meta["weather"]["display_name"] == "Old label"  # untouched
+    assert pg.folders["f2"]["name"] == "Fresh"  # the new folder landed
+
+    # overwrite: every row now exists (the skip pass already created f2), so all three
+    # are replaced in place.
+    over = await import_tool_meta(payload, "overwrite")
+    assert over["created"] == 0
+    assert over["updated"] == 3
+    assert over["skipped_existing"] == 0
+    assert pg.folders["f1"]["name"] == "Renamed"
+    assert pg.meta["weather"]["display_name"] == "New label"

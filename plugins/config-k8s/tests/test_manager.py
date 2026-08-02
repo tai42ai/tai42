@@ -379,130 +379,6 @@ def test_read_defaults_manifest_non_mapping_document_raises(manager_and_api) -> 
         manager.read_defaults_manifest()
 
 
-# -- write_manifest ----------------------------------------------------------
-
-
-def test_write_manifest_three_way_merge(manager_and_api) -> None:
-    manager, api = manager_and_api
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "b: 3\nc: 4", DEFAULTS_KEY: "a: 1\nb: 2"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-42"),
-    )
-    manager.write_manifest({"c": 5, "d": 6})
-
-    body = api.patched_configmap
-    assert body is not None
-    written = yaml.safe_load(body.data[MANIFEST_KEY])
-    # defaults {a:1,b:2} | current {b:3,c:4} | new {c:5,d:6}
-    assert written == {"a": 1, "b": 3, "c": 5, "d": 6}
-    # Other ConfigMap keys are preserved alongside the rewritten manifest.
-    assert body.data[DEFAULTS_KEY] == "a: 1\nb: 2"
-    assert body.metadata.name == CONFIGMAP_NAME
-    # The defaults are read from the single fetched ConfigMap — no redundant GET.
-    assert len(api.read_configmap_calls) == 1
-    # The read resourceVersion rides on the patch as the concurrency precondition.
-    assert body.metadata.resource_version == "rv-42"
-    assert api.patched_configmap_call == (CONFIGMAP_NAME, NAMESPACE)
-
-
-def test_write_manifest_no_current_manifest_key(manager_and_api) -> None:
-    manager, api = manager_and_api
-    # ConfigMap exists but holds no manifest key yet -> current stays empty.
-    api.configmap_result = client.V1ConfigMap(
-        data={DEFAULTS_KEY: "a: 1"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-7"),
-    )
-    manager.write_manifest({"b": 2})
-
-    body = api.patched_configmap
-    assert body is not None
-    written = yaml.safe_load(body.data[MANIFEST_KEY])
-    # defaults {a:1} | current {} | new {b:2}
-    assert written == {"a": 1, "b": 2}
-
-
-def test_write_manifest_missing_metadata_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    # No metadata means no resourceVersion precondition; the write refuses.
-    api.configmap_result = client.V1ConfigMap(data={DEFAULTS_KEY: "a: 1"})
-    with pytest.raises(K8sConfigError, match="without metadata"):
-        manager.write_manifest({"b": 2})
-    assert api.patched_configmap is None
-
-
-def test_write_manifest_invalid_current_raises(manager_and_api) -> None:
-    import ruamel.yaml
-
-    manager, api = manager_and_api
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "a: : :", DEFAULTS_KEY: "x: 9"},
-    )
-    # A malformed existing manifest aborts the write (no data loss); nothing patched.
-    with pytest.raises(ruamel.yaml.YAMLError):
-        manager.write_manifest({"y": 1})
-    assert api.patched_configmap is None
-
-
-def test_write_manifest_non_mapping_current_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    # A non-mapping existing manifest (a list) fails the mapping guard; nothing patched.
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "- one\n- two", DEFAULTS_KEY: "x: 9"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-1"),
-    )
-    with pytest.raises(K8sConfigError, match="expected a mapping"):
-        manager.write_manifest({"y": 1})
-    assert api.patched_configmap is None
-
-
-def test_write_manifest_missing_resource_version_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    # Metadata but no resourceVersion means no precondition; the write refuses.
-    api.configmap_result = client.V1ConfigMap(
-        data={DEFAULTS_KEY: "a: 1"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version=None),
-    )
-    with pytest.raises(K8sConfigError, match="without a resourceVersion"):
-        manager.write_manifest({"b": 2})
-    assert api.patched_configmap is None
-
-
-def test_write_manifest_missing_configmap_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    api.configmap_exc = ApiException(status=404, reason="Not Found")
-    with pytest.raises(K8sConfigError, match="Create it before writing"):
-        manager.write_manifest({"a": 1})
-
-
-def test_write_manifest_read_other_error_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    api.configmap_exc = ApiException(status=500, reason="Server Error")
-    with pytest.raises(K8sConfigError, match="Failed to read ConfigMap"):
-        manager.write_manifest({"a": 1})
-
-
-def test_write_manifest_permission_denied_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "a: 1", DEFAULTS_KEY: "b: 2"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-1"),
-    )
-    api.patch_configmap_exc = ApiException(status=403, reason="Forbidden")
-    with pytest.raises(K8sConfigError, match="Permission denied updating ConfigMap"):
-        manager.write_manifest({"c": 3})
-
-
-def test_write_manifest_patch_other_error_raises(manager_and_api) -> None:
-    manager, api = manager_and_api
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "a: 1", DEFAULTS_KEY: "b: 2"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-1"),
-    )
-    api.patch_configmap_exc = ApiException(status=500, reason="Server Error")
-    with pytest.raises(K8sConfigError, match="Failed to update ConfigMap"):
-        manager.write_manifest({"c": 3})
-
-
 # -- mutate_manifest / replace_manifest --------------------------------------
 
 
@@ -646,6 +522,60 @@ def test_mutate_manifest_patch_other_error_raises(manager_and_api) -> None:
         manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
 
 
+def test_mutate_manifest_missing_configmap_raises_create_it_first(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # The write path reads the ConfigMap it must patch; an absent one (404) is a loud
+    # refusal telling the operator to create it, NOT the read path's FileNotFoundError.
+    api.configmap_exc = ApiException(status=404, reason="Not Found")
+    with pytest.raises(K8sConfigError, match="Create it before writing"):
+        manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
+    assert api.patched_configmap is None
+
+
+def test_mutate_manifest_read_other_api_error_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # A non-404 API error reading the ConfigMap to patch fails loudly.
+    api.configmap_exc = ApiException(status=500, reason="Server Error")
+    with pytest.raises(K8sConfigError, match="Failed to read ConfigMap"):
+        manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
+
+
+def test_mutate_manifest_configmap_without_metadata_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # A ConfigMap returned without metadata cannot carry the optimistic-concurrency
+    # precondition, so the write refuses rather than patch without it.
+    api.configmap_result = client.V1ConfigMap(data={MANIFEST_KEY: "a: 1\n"}, metadata=None)
+    with pytest.raises(K8sConfigError, match="without metadata"):
+        manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
+    assert api.patched_configmap is None
+
+
+def test_mutate_manifest_configmap_without_resource_version_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # Metadata present but no resourceVersion: the precondition would serialize without
+    # its concurrency guard (a lost-update window), so the write refuses.
+    api.configmap_result = client.V1ConfigMap(
+        data={MANIFEST_KEY: "a: 1\n"},
+        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version=""),
+    )
+    with pytest.raises(K8sConfigError, match="without a resourceVersion"):
+        manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
+    assert api.patched_configmap is None
+
+
+def test_mutate_manifest_non_mapping_defaults_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # The write merge loads the defaults key as the preserved view; a non-mapping
+    # defaults document (a list) fails the mapping guard loudly before any patch.
+    api.configmap_result = client.V1ConfigMap(
+        data={MANIFEST_KEY: "a: 1\n", DEFAULTS_KEY: "- one\n- two\n"},
+        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-1"),
+    )
+    with pytest.raises(K8sConfigError, match="non-mapping document"):
+        manager.mutate_manifest(lambda document: document.__setitem__("b", 2))
+    assert api.patched_configmap is None
+
+
 def test_replace_manifest_deletes_uninvited_keys(manager_and_api) -> None:
     manager, api = manager_and_api
     api.configmap_result = client.V1ConfigMap(
@@ -709,27 +639,6 @@ def test_replace_manifest_preserves_comments_from_round_trip_document(manager_an
     assert "# top-level note" in written
     assert "# the app name" in written
     assert "token: !ENV ${TAI_MANIFEST_SECRET}" in written
-
-
-def test_write_manifest_defaults_env_marker_never_leaks_plaintext(
-    manager_and_api, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager, api = manager_and_api
-    # An `!ENV` default backfilled for a key absent from the manifest lands as its
-    # marker, never the resolved secret as plaintext.
-    monkeypatch.setenv("SOME_SECRET", "super-secret-plaintext")
-    api.configmap_result = client.V1ConfigMap(
-        data={MANIFEST_KEY: "a: 1\n", DEFAULTS_KEY: "foo: !ENV ${SOME_SECRET}\n"},
-        metadata=client.V1ObjectMeta(name=CONFIGMAP_NAME, resource_version="rv-1"),
-    )
-
-    manager.write_manifest({"a": 2})
-
-    body = api.patched_configmap
-    assert body is not None
-    written = body.data[MANIFEST_KEY]
-    assert "foo: !ENV ${SOME_SECRET}" in written
-    assert "super-secret-plaintext" not in written
 
 
 def test_mutate_manifest_defaults_env_marker_never_leaks_plaintext(

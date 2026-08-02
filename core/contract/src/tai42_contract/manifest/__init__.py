@@ -239,10 +239,6 @@ class TaiMCPConfig(BaseConfig, ExtensionsConfigMixin):
     managed: ConnectorRef | None = None
 
     @property
-    def is_uds(self) -> bool:
-        return self.config.uds is not None
-
-    @property
     def is_managed(self) -> bool:
         return self.managed is not None
 

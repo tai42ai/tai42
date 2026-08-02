@@ -25,6 +25,7 @@ root defense.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from jinja2 import TemplateError
@@ -33,7 +34,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.template import TemplateNotFoundError
-from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
+from tai42_skeleton.template.path_guard import _TEMPLATE_ROOT, UnsafeTemplatePathError, safe_template_path
 
 
 class TemplateFetch(BaseModel):
@@ -55,6 +56,12 @@ class TemplateDelete(BaseModel):
     path: str
 
 
+class TemplateDirDelete(BaseModel):
+    """Delete every stored template under the directory ``path``."""
+
+    path: str
+
+
 class TemplateRender(BaseModel):
     """Render a template — inline ``content`` OR a stored ``template_id`` — with
     ``kwargs``."""
@@ -70,6 +77,19 @@ def _safe_key(key: object) -> str:
         return safe_template_path(key)
     except UnsafeTemplatePathError as exc:
         raise BadRequestError(str(exc)) from exc
+
+
+def _resolves_to_template_root(key: str) -> bool:
+    """True when a guard-passed key targets the template ROOT itself (``.`` /
+    ``a/..``) rather than a subdirectory.
+
+    The shared lexical guard admits a root-resolving key — it rejects only
+    resolution ABOVE the root, not a key that lands EXACTLY on it. Resolving the
+    key under the guard's own anchor and comparing to that anchor detects the
+    exact-root case the guard lets through.
+    """
+    root = os.path.realpath(_TEMPLATE_ROOT)
+    return os.path.realpath(os.path.join(root, key)) == root
 
 
 @operation(summary="List templates", tags=["templates"])
@@ -141,6 +161,41 @@ async def delete_template(path: str) -> dict:
     """
     key = _safe_key(path)
     await tai42_app.storage.resource_manager.delete_template(key)
+    return {"path": key, "deleted": True}
+
+
+@operation(
+    summary="Delete a template directory",
+    tags=["templates"],
+    destructive=True,
+    errors=[BadRequestError, NotFoundError],
+    request_model=TemplateDirDelete,
+)
+async def delete_template_dir(path: str) -> dict:
+    """Delete every stored template under the directory ``path``.
+
+    Unlike the single-template delete (idempotent — an absent key is a no-op
+    ``200``), a directory that matches nothing is a loud ``404``: the provider
+    raises ``FileNotFoundError`` for an absent directory and that surfaces as a
+    :class:`NotFoundError`. A key that resolves to the template ROOT (``.`` /
+    ``a/..``) would wipe the whole store, so it is refused with a ``400`` HERE —
+    ahead of the provider and independent of any backend's own root check; a
+    provider that still reports a root violation as a ``ValueError`` is mapped to a
+    ``400`` as well.
+    """
+    key = _safe_key(path)
+    # Defense in depth for a DESTRUCTIVE dir-delete: the shared guard passes a key
+    # that resolves to EXACTLY the template root (it rejects only escape ABOVE the
+    # root), so refuse a root-resolving key here — before it reaches the provider —
+    # rather than rely on each backend's own root check.
+    if _resolves_to_template_root(key):
+        raise BadRequestError("refusing to delete the template root; a directory path is required")
+    try:
+        await tai42_app.storage.resource_manager.delete_template_dir(key)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"template directory {key!r} not found") from exc
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
     return {"path": key, "deleted": True}
 
 

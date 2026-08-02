@@ -300,6 +300,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/conversations/{route_name}"),
     ("POST", "/api/conversations/{route_name}/messages"),
     ("POST", "/api/delete-template"),
+    ("POST", "/api/delete-template-dir"),
     ("POST", "/api/hooks"),
     ("POST", "/api/hooks/trigger-links"),
     ("PUT", "/api/hooks/topics/{topic}/verifier"),

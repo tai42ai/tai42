@@ -123,17 +123,17 @@ class ProviderDescriptor(BaseModel):
     display_name: str
     description: str = ""
     icon_url: str
-    # "oauth": code-built, runs the OAuth dance; carries ``oauth`` + client envs +
-    # per-sub-service scopes. "none": data-built from the connector_catalog table;
-    # no OAuth, optional client-supplied ``config_fields``.
+    # "oauth": runs the OAuth dance; carries ``oauth`` + client envs +
+    # per-sub-service scopes. "none": no-auth — no OAuth, optional client-supplied
+    # ``config_fields``. Both are built by a provider plugin registered at import.
     kind: Literal["oauth", "none"]
     # Who curated the provider: "system" for shipped/ops-curated providers,
-    # "community" for agent-added catalog rows. Orthogonal to ``kind`` — never
-    # a combined tri-state. Catalog rows fill both from their table columns.
+    # "community" for marketplace-contributed provider plugins. Orthogonal to
+    # ``kind`` — never a combined tri-state.
     origin: Literal["system", "community"]
     # connector_category id grouping the provider in the UI. Shipped builders
     # set a seed-category literal; known-id validation happens at the
-    # registration/fetch boundaries, not per-field.
+    # registration boundary, not per-field.
     category: str
     oauth: OAuthEndpoints | None = None
     client_id_env: str | None = None

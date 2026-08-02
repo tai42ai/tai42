@@ -6,6 +6,7 @@ AUTHED thin adapters over operations in ``tai42_skeleton.operations.templates``:
 - ``POST /api/template``               — fetch one template's content + schema.
 - ``POST /api/upload-template``        — write a template.
 - ``POST /api/delete-template``        — delete a template.
+- ``POST /api/delete-template-dir``    — delete a template directory subtree.
 - ``POST /api/render-template``        — render by id or inline content.
 - ``POST /api/clear-templates-cache``  — drop the compile cache.
 
@@ -27,6 +28,7 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.templates import clear_templates_cache as _clear_templates_cache_op
 from tai42_skeleton.operations.templates import delete_template as _delete_template_op
+from tai42_skeleton.operations.templates import delete_template_dir as _delete_template_dir_op
 from tai42_skeleton.operations.templates import get_template as _get_template_op
 from tai42_skeleton.operations.templates import list_templates as _list_templates_op
 from tai42_skeleton.operations.templates import render_template as _render_template_op
@@ -98,6 +100,15 @@ delete_template = register_operation_route(
     tai42_app,
     operation_metadata_of(_delete_template_op),
     path="/api/delete-template",
+    method="POST",
+    context_extractor=_extract_delete,
+    action="write",
+)
+
+delete_template_dir = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_delete_template_dir_op),
+    path="/api/delete-template-dir",
     method="POST",
     context_extractor=_extract_delete,
     action="write",

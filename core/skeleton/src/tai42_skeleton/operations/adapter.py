@@ -44,6 +44,18 @@ def _path_param_names(path: str) -> tuple[str, ...]:
     return tuple(_PATH_PARAM.findall(path))
 
 
+def validation_error_fields(exc: ValidationError) -> list[dict[str, Any]]:
+    """Field paths + error types from a pydantic ``ValidationError``, values stripped.
+
+    A pydantic v2 error entry carries the offending ``input`` (and a ``ctx`` that can
+    hold values), and ``str(exc)`` renders them inline — a secret in a rejected field
+    (e.g. a connector ``config_values`` value) would otherwise ride the 400/422 body.
+    This yields only the dotted field ``loc`` and the error ``type`` per entry, so a
+    client learns WHICH field failed and HOW, never WHAT was sent.
+    """
+    return [{"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors(include_url=False)]
+
+
 def _declared_metadata(
     op: OperationMetadata, method: str, *, authed: bool, success_status: int
 ) -> DeclaredRouteMetadata:
@@ -110,7 +122,9 @@ def _build_handler(
             try:
                 model = op.request_model.model_validate(raw)
             except ValidationError as exc:
-                return JSONResponse({"error": exc.errors(include_url=False)}, status_code=422)
+                # Field paths + error types only — never the rejected input values,
+                # which a pydantic error entry carries and could leak a secret.
+                return JSONResponse({"error": validation_error_fields(exc)}, status_code=422)
             kwargs.update(model.model_dump())
 
         try:

@@ -74,19 +74,6 @@ class ConfigManager(ABC):
         """Read the defaults / template manifest (empty dict if not found)."""
 
     @abstractmethod
-    def write_manifest(self, manifest: dict[str, Any]) -> None:
-        """Write manifest with three-way merge (defaults + current + new).
-
-        Preserves YAML ``!ENV`` tags in the output.
-
-        Ownership rule: feature code mutates the manifest through
-        :meth:`mutate_manifest` / :meth:`replace_manifest`, whose whole-span
-        transaction protects a read-modify-write against a concurrent writer. A
-        direct ``write_manifest`` is reserved for config-layer internals
-        (startup/bootstrap and the defaults-merge path).
-        """
-
-    @abstractmethod
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         """Atomically read-modify-write the manifest.
 

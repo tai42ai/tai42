@@ -39,7 +39,7 @@ def providers(ctx: typer.Context) -> None:
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.get("/api/connectors/providers")
-    emit_records(ctx_obj, data, ["id", "display_name", "kind", "category"])
+    emit_records(ctx_obj, data, ["id", "display_name", "kind", "category"], items_key="providers")
 
 
 @app.command("connections")

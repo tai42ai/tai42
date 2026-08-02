@@ -1,8 +1,8 @@
 """``tai templates`` — manage prompt and resource templates.
 
 Thin wrappers over the ``/api/templates``, ``/api/template``, ``/api/upload-template``,
-``/api/delete-template``, ``/api/render-template`` and ``/api/clear-templates-cache``
-routes.
+``/api/delete-template``, ``/api/delete-template-dir``, ``/api/render-template`` and
+``/api/clear-templates-cache`` routes.
 """
 
 from __future__ import annotations
@@ -83,6 +83,24 @@ def delete_template(ctx: typer.Context, path: Annotated[str, typer.Argument(help
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.post("/api/delete-template", json={"path": path})
+    emit_result(ctx_obj, data)
+
+
+@app.command("delete-dir")
+@covers(("POST", "/api/delete-template-dir"))
+def delete_template_dir(
+    ctx: typer.Context, path: Annotated[str, typer.Argument(help="Template directory to delete.")]
+) -> None:
+    """Delete every template under a directory.
+
+    A directory that matches no templates is a loud 404 (unlike ``delete``, which
+    is idempotent for an absent single key).
+
+    Example: ``tai templates delete-dir prompts/archive``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.post("/api/delete-template-dir", json={"path": path})
     emit_result(ctx_obj, data)
 
 

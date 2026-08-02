@@ -37,6 +37,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Literal, get_args
+from uuid import uuid4
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -199,19 +200,32 @@ def create_app(
         if "app" in app_state:
             try:
                 await app_state["app"](scope, receive, send)
-            except Exception:
-                logger.exception("Error processing request in mcp app")
+            except Exception as exc:
+                # A normal API exception is caught by the base app's own
+                # ServerErrorMiddleware, which commits the generic {"error",
+                # "error_id"} envelope and stamps that id on the exception before
+                # re-raising it here. When that id is present the response is already
+                # sent and logged under it — do not re-log or attempt a second send.
+                handled_id = getattr(exc, "error_id", None)
+                if handled_id is not None:
+                    return
+                # Backstop for an exception raised OUTSIDE the base app's handler (an
+                # outer finalize wrapper, or dispatch itself): mint a correlation id,
+                # log the traceback under it, and commit the same generic envelope.
+                error_id = uuid4().hex
+                logger.exception("Error processing request in mcp app [error_id=%s]", error_id)
                 try:
                     # Fixed generic body: internal exception text (hosts,
                     # paths) must never reach the client.
-                    response = JSONResponse({"error": "Internal Server Error"}, status_code=500)
+                    response = JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
                     await response(scope, receive, send)
                 except RuntimeError:
                     # The response already started before the failure — nothing
                     # more can be sent on this connection. The original error is
                     # logged above; record the double-fault too.
                     logger.warning(
-                        "could not send the 500 response; response already started",
+                        "could not send the 500 response; response already started [error_id=%s]",
+                        error_id,
                         exc_info=True,
                     )
         else:

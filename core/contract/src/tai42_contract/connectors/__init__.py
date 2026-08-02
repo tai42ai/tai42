@@ -1,8 +1,8 @@
 """Connectors contract — pure interfaces and wire/domain models.
 
 No runtime behaviour lives here: only the token-store ABC, the connection
-service Protocol, provider descriptors, domain + wire models, probe result
-models, and the connector error types.
+service Protocol, provider descriptors, domain + wire models, and the connector
+error types.
 """
 
 from __future__ import annotations
@@ -20,11 +20,13 @@ from tai42_contract.connectors.models import (
     ConnectedAccountView,
     ConnectionRecord,
     ConnectionsListResponse,
+    ConnectorCategoryView,
     ConnectorRef,
     DisconnectResponse,
     PatchSubServicesRequest,
     PatchSubServicesResponse,
     ProviderCatalogEntry,
+    ProviderCatalogResponse,
     StartConnectNoAuthResponse,
     StartConnectRequest,
     StartConnectResponse,
@@ -34,7 +36,6 @@ from tai42_contract.connectors.models import (
     check_slug,
     normalize_uuid,
 )
-from tai42_contract.connectors.probe import ToolSummary, VerifyResult
 from tai42_contract.connectors.providers import (
     ConfigFieldSpec,
     McpServerDescriptor,
@@ -67,6 +68,7 @@ __all__ = [
     "ConnectionRecord",
     "ConnectionService",
     "ConnectionsListResponse",
+    "ConnectorCategoryView",
     "ConnectorError",
     "ConnectorRef",
     "ConnectorTokenStore",
@@ -81,6 +83,7 @@ __all__ = [
     "PatchSubServicesRequest",
     "PatchSubServicesResponse",
     "ProviderCatalogEntry",
+    "ProviderCatalogResponse",
     "ProviderDescriptor",
     "StartConnectNoAuthResponse",
     "StartConnectRequest",
@@ -89,8 +92,6 @@ __all__ = [
     "StartReconnectRequest",
     "SubServiceDescriptor",
     "SubServiceView",
-    "ToolSummary",
-    "VerifyResult",
     "check_alias",
     "check_slug",
     "normalize_uuid",

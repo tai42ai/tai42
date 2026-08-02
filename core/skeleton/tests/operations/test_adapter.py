@@ -115,6 +115,21 @@ def test_validation_error_is_422():
     assert resp.status_code == 422
 
 
+def test_validation_error_422_omits_input_values():
+    # N4: the 422 lists the failing field path + error type, but never the rejected
+    # input value (a pydantic error entry carries it, and it could hold a secret).
+    reg = OperationRegistry()
+    _, handler = _register(reg)
+    resp = _run(handler(_request("POST", "/api/sample/greet", body={"name": ["leaked-99"]})))
+    assert resp.status_code == 422
+    assert "leaked-99" not in bytes(resp.body).decode()
+    entry = json.loads(bytes(resp.body))["error"][0]
+    assert entry["loc"] == ["name"]
+    assert "type" in entry
+    assert "input" not in entry
+    assert "ctx" not in entry
+
+
 def test_malformed_body_is_400():
     reg = OperationRegistry()
     _, handler = _register(reg)

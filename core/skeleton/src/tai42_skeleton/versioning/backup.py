@@ -25,7 +25,7 @@ export UI, treated like a secret), mirroring the connector-connections section.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
@@ -37,7 +37,7 @@ _SectionReport = dict[str, Any]
 
 
 def _empty_report() -> _SectionReport:
-    return {"created": 0, "updated": 0, "skipped": 0, "errors": []}
+    return {"created": 0, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
 
 
 async def export_versioned_documents() -> dict[str, Any]:
@@ -84,15 +84,20 @@ async def export_versioned_documents() -> dict[str, Any]:
     return {"documents": documents, "versions": versions}
 
 
-async def import_versioned_documents(payload: dict[str, Any]) -> _SectionReport:
+async def import_versioned_documents(
+    payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
+) -> _SectionReport:
     """Restore document + version rows under their original ids.
 
-    Documents are written before versions so the ``document_id`` foreign key is
-    satisfied. Every row is an ``ON CONFLICT (id) DO UPDATE`` (idempotent, so a
-    re-import over identical rows is a no-op reported as ``updated``); the created
-    count classifies each document by whether its id already existed. After the
-    writes, both ``BIGSERIAL`` sequences are advanced past the largest restored id
-    so a later insert cannot collide with a restored row.
+    Keyed by row ``id`` (documents counted; versions are the document's append-only
+    history and follow it): under ``overwrite`` every row is an
+    ``ON CONFLICT (id) DO UPDATE`` (idempotent, so a re-import over identical rows is a
+    no-op reported as ``updated``); under ``skip`` an already-present id is left
+    untouched — an existing document is ``skipped_existing`` and an existing version row
+    is left as it stands, while genuinely new rows still restore. Documents are written
+    before versions so the ``document_id`` foreign key is satisfied. After the writes,
+    both ``BIGSERIAL`` sequences are advanced past the largest restored id so a later
+    insert cannot collide with a restored row.
     """
     report = _empty_report()
     documents = payload.get("documents") or []
@@ -107,8 +112,13 @@ async def import_versioned_documents(payload: dict[str, Any]) -> _SectionReport:
         # then-upsert pattern the connector sections use); drives the counts only.
         await cur.execute("SELECT id FROM versioned_documents")
         existing = {row[0] for row in await cur.fetchall()}
+        await cur.execute("SELECT id FROM versioned_document_versions")
+        existing_versions = {row[0] for row in await cur.fetchall()}
 
         for document in documents:
+            if document["id"] in existing and mode == "skip":
+                report["skipped_existing"] += 1
+                continue
             await cur.execute(
                 "INSERT INTO versioned_documents (id, kind, name, active_version, is_active, created_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "
@@ -133,6 +143,9 @@ async def import_versioned_documents(payload: dict[str, Any]) -> _SectionReport:
                 report["created"] += 1
 
         for version in versions:
+            if version["id"] in existing_versions and mode == "skip":
+                # An existing version row is immutable history; leave it as it stands.
+                continue
             await cur.execute(
                 "INSERT INTO versioned_document_versions (id, document_id, version, body, tags, created_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "

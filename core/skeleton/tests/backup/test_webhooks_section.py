@@ -16,6 +16,7 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
 from tai42_skeleton.backup import sections
+from tai42_skeleton.backup.registry import import_mode
 from tai42_skeleton.hooks import trigger_links
 from tai42_skeleton.hooks.cache import get_hooks_manager as _cache_get_manager  # noqa: F401
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
@@ -269,8 +270,16 @@ async def test_live_name_collision_counts_updated(store) -> None:
         "topic_verifiers": {},
         "tombstones": [],
     }
-    report = await sections._import_webhooks(doc)
+    # Under overwrite the live link (keyed by name) is re-keyed: an update.
+    with import_mode("overwrite"):
+        report = await sections._import_webhooks(doc)
     assert report["updated"] == 1
+
+    # Under skip (the default) the live link is left untouched — a clean skip, and its
+    # original hash stands rather than being re-keyed to the imported one.
+    skip = await sections._import_webhooks(doc)
+    assert skip["updated"] == 0
+    assert skip["skipped_existing"] == 1
 
 
 async def test_one_hash_two_names_whole_section_refusal_zero_written(store) -> None:
@@ -959,10 +968,28 @@ async def test_replacing_a_live_binding_counts_updated(store) -> None:
         "trigger_links": [],
         "tombstones": [],
     }
-    report = await sections._import_webhooks(doc)
+    # Overwrite replaces the live binding (keyed by topic): an update.
+    with import_mode("overwrite"):
+        report = await sections._import_webhooks(doc)
     assert report["errors"] == []
     assert (report["updated"], report["created"]) == (1, 0)
     assert (await store.manager.get_topic_verifier("payments"))["verifier"] == "hmac"
+
+
+async def test_skip_leaves_a_live_binding_untouched(store) -> None:
+    await store.manager.set_topic_verifier("payments", {"verifier": "github", "config": {}})
+    doc = {
+        "hooks": [],
+        "topic_verifiers": {"payments": {"verifier": "hmac", "config": {}}},
+        "trigger_links": [],
+        "tombstones": [],
+    }
+    # Skip (the default) leaves the existing verifier in place — the topic's lock is not
+    # swapped and the record is counted as a clean skip.
+    report = await sections._import_webhooks(doc)
+    assert report["errors"] == []
+    assert (report["updated"], report["created"], report["skipped_existing"]) == (0, 0, 1)
+    assert (await store.manager.get_topic_verifier("payments"))["verifier"] == "github"
 
 
 @pytest.mark.parametrize("binding", [{"config": {}}, {"verifier": "", "config": {}}, "hmac", {"verifier": 1}])

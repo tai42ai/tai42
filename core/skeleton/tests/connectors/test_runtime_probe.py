@@ -1,4 +1,4 @@
-"""MCP liveness probe + verbose verify over a faked pooled FastMCP client."""
+"""MCP liveness probe over a faked pooled FastMCP client."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import tai42_skeleton.connectors.runtime.probe as probe_mod
-from tai42_skeleton.connectors.runtime.probe import probe, verify
+from tai42_skeleton.connectors.runtime.probe import probe
 
 from .conftest import make_noauth_stdio_descriptor, make_oauth_descriptor
 
@@ -77,55 +77,9 @@ async def test_probe_stdio_builds_env_from_config_values(install_client):
     assert cfg["config"]["env"]["api_key"] == "k"
 
 
-# -- verify ------------------------------------------------------------------
-
-
-async def test_verify_unknown_sub_service(install_client):
-    desc = make_oauth_descriptor()
-    result = await verify(desc, "nope")
-    assert result.ok is False
-    assert result.error is not None
-    assert "unknown sub_service" in result.error
-
-
-async def test_verify_success_returns_tools(install_client):
-    install_client(
-        tools=[
-            SimpleNamespace(name="send", description="Send a message"),
-            SimpleNamespace(name="read", description=None),
-        ]
-    )
-    desc = make_oauth_descriptor()
-    result = await verify(desc, "mail", access_token="at")
-    assert result.ok is True
-    assert [t.name for t in result.tools] == ["send", "read"]
-    assert result.tools[1].description == ""  # None coalesced
-
-
-async def test_verify_timeout(install_client, monkeypatch):
-    install_client(error=TimeoutError())
-    desc = make_oauth_descriptor()
-    result = await verify(desc, "mail", access_token="at")
-    assert result.ok is False
-    assert result.error is not None
-    assert "timeout" in result.error
-
-
-async def test_verify_transport_error_returns_fixed_reason(install_client):
-    # The raw exception text is attacker-influenceable, so verify() must return a
-    # fixed reason and never echo the exception type or its message to the caller.
-    install_client(error=ValueError("bad handshake from upstream"))
-    desc = make_oauth_descriptor()
-    result = await verify(desc, "mail", access_token="at")
-    assert result.ok is False
-    assert result.error == "transport error: could not complete the MCP handshake"
-    assert "ValueError" not in result.error
-    assert "bad handshake" not in result.error
-
-
-async def test_verify_http_sets_bearer_header(install_client):
+async def test_probe_http_sets_bearer_header(install_client):
     captured = install_client(tools=[])
     desc = make_oauth_descriptor()
-    await verify(desc, "mail", access_token="my-token")
+    await probe(desc, "mail", access_token="my-token")
     cfg = captured["kwargs"]["config"]
     assert cfg["config"]["headers"]["Authorization"] == "Bearer my-token"

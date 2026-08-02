@@ -246,6 +246,23 @@ async def test_register_hook_rejects_invalid_params(monkeypatch: pytest.MonkeyPa
     assert manager.registered == []
 
 
+@pytest.mark.parametrize("field", ["name", "topic"])
+async def test_register_hook_rejects_bad_charset_naming_the_rule(field: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A ``/`` in the topic would mint a hook the webhook URL can never route to; the
+    # charset guard rejects it at the registration door with a 400 that names the rule.
+    manager = _MgmtManager()
+    monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
+    payload = {"name": "c", "topic": "orders", "tool": "notify", "execution_key": "k-fire"}
+    payload[field] = "bad/segment"
+    response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
+    assert response.status_code == 400
+    error = _body(response)["error"]
+    assert "invalid hook params" in error
+    assert field in error
+    assert "one lowercase URL path segment" in error
+    assert manager.registered == []
+
+
 async def test_register_hook_rejects_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from cryptography.exceptions import InvalidTag
 from pydantic import ValidationError
+from tai42_contract.connectors.errors import MalformedConnectionIdError
 from tai42_contract.connectors.models import ConnectionRecord
 from tai42_kit.settings import reset_all_settings
 
@@ -254,6 +255,40 @@ async def test_load_record_or_none_broken_kek_config_raises(install_store, monke
         await load_record_or_none(CID)
 
     assert [r for r in caplog.records if r.name == persistence.logger.name] == []
+
+
+# -- C3: a malformed (non-UUID) connection_id maps to not-found, no shape oracle --
+
+
+class _MalformedIdStore:
+    """Models the real store: a non-UUID id raises MalformedConnectionIdError from
+    ``get`` (its ``_as_uuid`` gate) before any record could exist."""
+
+    async def get(self, connection_id: str, *, include_expired: bool = False) -> bytes:
+        raise MalformedConnectionIdError(f"connection_id is not a valid UUID: {connection_id!r}")
+
+
+@pytest.fixture
+def install_malformed_store(monkeypatch):
+    monkeypatch.setattr(persistence, "token_store", lambda: _MalformedIdStore())
+
+
+async def test_load_record_or_none_malformed_id_returns_none(install_malformed_store):
+    # A malformed id keys no record — the projection path returns None, byte-identical
+    # to a genuine miss (no format oracle).
+    assert await load_record_or_none("not-a-uuid") is None
+
+
+async def test_load_record_malformed_id_is_not_found(install_malformed_store):
+    # The single-record path raises the same ConnectionNotFoundError an absent id does,
+    # so the door answers 404, never a 500 from an escaped malformed-id error.
+    with pytest.raises(ConnectionNotFoundError):
+        await load_record("not-a-uuid")
+
+
+async def test_load_record_with_blob_malformed_id_is_not_found(install_malformed_store):
+    with pytest.raises(ConnectionNotFoundError):
+        await load_record_with_blob("not-a-uuid", include_expired=True)
 
 
 async def test_list_connections_projection_raises_on_broken_kek_config(install_store, monkeypatch):

@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from tai42_contract.connectors.errors import MalformedConnectionIdError
 from tai42_contract.connectors.models import ConnectionRecord
 
 from tai42_skeleton.connectors.oauth import crypto
@@ -63,13 +64,20 @@ async def load_record_with_blob(
     serving read (an expired session reads as missing), set ``True`` ONLY by the
     cleanup path (disconnect) so an expired connection stays loadable-to-purge.
 
+    A ``connection_id`` that is not a well-formed identifier can key no record, so it
+    surfaces as the same :class:`ConnectionNotFoundError` a genuinely-absent id does —
+    the 404 is no oracle for the id's shape.
+
     Decrypt failures log at ERROR (a ``CONNECTORS_KEK`` that is not the one this blob
     was written with, or a corrupted blob, are operator-visible incidents) and re-raise
     the underlying exception unchanged. A missing or malformed ``CONNECTORS_KEK`` is
     excluded: it raises :class:`ConnectorEncryptionConfigError` for EVERY blob, so it
     propagates unlogged here rather than blaming one blob for a deployment fault.
     """
-    blob = await token_store().get(connection_id, include_expired=include_expired)
+    try:
+        blob = await token_store().get(connection_id, include_expired=include_expired)
+    except MalformedConnectionIdError as exc:
+        raise ConnectionNotFoundError(connection_id) from exc
     if blob is None:
         raise ConnectionNotFoundError(connection_id)
     try:
@@ -117,8 +125,15 @@ async def load_record_or_none(connection_id: str) -> ConnectionRecord | None:
     The first two skip the one bad row so it never poisons a whole
     list/projection; the config fault propagates. The single-record
     :func:`load_record` path raises loudly on all three.
+
+    A ``connection_id`` that is not a well-formed identifier keys no record — it
+    returns ``None`` here, indistinguishable from a genuine miss, so a projection
+    skips it exactly like an absent row and a door built on it is no shape oracle.
     """
-    blob = await token_store().get(connection_id)
+    try:
+        blob = await token_store().get(connection_id)
+    except MalformedConnectionIdError:
+        return None
     if blob is None:
         return None
     try:

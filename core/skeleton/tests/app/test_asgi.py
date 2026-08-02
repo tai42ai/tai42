@@ -397,6 +397,66 @@ async def test_dispatch_503_before_lifespan_init(patch_factory_seam) -> None:
     assert json.loads(body["body"]) == {"error": "Service Unavailable", "detail": "Initializing..."}
 
 
+# --- S1: uniform 500 + error_id from the dispatch net ---------------------
+
+
+class _RaisingInnerApp(_FakeInnerApp):
+    """An inner app that raises without committing a response — models an exception
+    the base app's error handler did NOT catch (an outer wrapper / dispatch itself)."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        raise RuntimeError("internal boom at db://secret")
+
+
+class _StampedError(RuntimeError):
+    """Models the exception the base app's handler re-raises after committing the
+    500: it carries the handler's ``error_id`` for the dispatch net to correlate."""
+
+    def __init__(self, message: str, error_id: str) -> None:
+        super().__init__(message)
+        self.error_id = error_id
+
+
+class _HandledInnerApp(_FakeInnerApp):
+    """An inner app that commits the generic 500 (as the base app's handler would) and
+    re-raises the SAME exception carrying the handler's ``error_id`` stamp."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 500, "headers": [(b"content-type", b"application/json")]})
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"error": "Internal Server Error", "error_id": "handler-id-1"}',
+            }
+        )
+        raise _StampedError("boom", "handler-id-1")
+
+
+def test_dispatch_net_answers_uniform_500_with_error_id(patch_factory_seam) -> None:
+    # An exception the base handler did not catch reaches the dispatch net: it mints a
+    # correlation id, answers the generic envelope, and never leaks internal text.
+    patch_factory_seam(_FakeApp(inner=_RaisingInnerApp()))
+    with TestClient(asgi.create_app(), raise_server_exceptions=False) as client:
+        resp = client.get("/")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["error"] == "Internal Server Error"
+    assert body["error_id"]  # a non-empty correlation id
+    assert "boom" not in resp.text
+    assert "secret" not in resp.text
+
+
+def test_dispatch_net_defers_to_base_handler_committed_response(patch_factory_seam) -> None:
+    # When the base app's handler already committed the 500 (stamping its id on the
+    # re-raised exception), the dispatch net correlates by that id and does NOT try a
+    # second send — the handler's response stands, and there is no double-fault crash.
+    patch_factory_seam(_FakeApp(inner=_HandledInnerApp()))
+    with TestClient(asgi.create_app(), raise_server_exceptions=False) as client:
+        resp = client.get("/")
+    assert resp.status_code == 500
+    assert resp.json()["error_id"] == "handler-id-1"
+
+
 # --- root logger untouched by a factory boot ------------------------------
 
 

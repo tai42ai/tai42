@@ -1,10 +1,14 @@
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
 
 from fastmcp import FastMCP
 from fastmcp.server.http import StarletteWithLifespan, create_sse_app
 from fastmcp.server.server import Transport
 from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.manifest import TaiMCPConfig
@@ -62,6 +66,34 @@ if TYPE_CHECKING:
     from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 logger = logging.getLogger(__name__)
+
+
+async def _internal_error_handler(request: Request, exc: Exception) -> Response:
+    """Uniform 500 for an unexpected application exception on any adapter route.
+
+    Registered as the base app's ``Exception`` handler so ``ServerErrorMiddleware``
+    invokes it on BOTH serving paths (``http_app`` / ``sse_app``). It mints a
+    correlation ``error_id``, logs the traceback under it, and returns the generic
+    envelope — internal exception text (hosts, paths, stack frames) never reaches the
+    client. The id is stamped on the exception so the embedding factory's dispatch
+    net, which sees the same exception re-raised by ``ServerErrorMiddleware``,
+    correlates its own log line and skips a duplicate response.
+    """
+    error_id = uuid4().hex
+    logger.error(
+        "unhandled application error [error_id=%s] on %s %s",
+        error_id,
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    # Attach the id to the arbitrary raised exception so the embedding factory's
+    # dispatch net reads it off the re-raised instance. A slotted exception with no
+    # ``__dict__`` cannot accept the stamp; the id already rides the response body
+    # and the log line, so a failed stamp must never break this last-resort handler.
+    with contextlib.suppress(AttributeError):
+        exc.error_id = error_id  # pyright: ignore[reportAttributeAccessIssue]
+    return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
 
 
 class TaiMCP(TaiMCPLifecycleMixin):
@@ -327,6 +359,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
             middleware=self._base_middleware(middleware),
         )
 
+        # Install the uniform-500 handler on the base app's own ServerErrorMiddleware
+        # so every adapter route answers the generic {"error", "error_id"} envelope
+        # instead of a plain-text 500 with internal detail.
+        base_app.add_exception_handler(Exception, _internal_error_handler)
+
         return self._http_surface.finalize(base_app)
 
     def http_app(
@@ -345,6 +382,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
             stateless_http=stateless_http,
             transport=transport,
         )
+
+        # Install the uniform-500 handler on the base app's own ServerErrorMiddleware
+        # so every adapter route answers the generic {"error", "error_id"} envelope
+        # instead of a plain-text 500 with internal detail.
+        base_app.add_exception_handler(Exception, _internal_error_handler)
 
         return self._http_surface.finalize(base_app)
 

@@ -1,29 +1,16 @@
-"""Catalog cache refresh wiring on the MCP app.
+"""Reload-handler rerun on the in-place ``update()`` path.
 
-A community provider add propagates fleet-wide through the backend reload
-dispatch, so the catalog refresh must be registered for BOTH process startup
-and the in-place re-init (``update()``) — startup-only registration would
-leave running workers blind to new catalog rows until a restart.
+``update()`` re-runs the registered reload handlers under ``raise_on_error``, so a
+config reload re-applies every reload-time side effect and a failing handler fails
+the op loudly rather than leaving the worker silently behind.
 """
 
 from __future__ import annotations
 
 import pytest
 
-# Trigger app setup before anything adapter-related — same preamble as
-# test_adapter_dispatch / test_constant_alignment.
-import tai42_skeleton.app.instance as app_mod
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.manifest import Manifest
-
-
-def test_refresh_catalog_registered_for_startup_and_reload() -> None:
-    handler = app_mod.refresh_catalog_if_connectors_in_use
-
-    app = app_mod.app
-    assert handler in app._startup_handlers.values()
-    reload_key = f"{handler.__module__}.{handler.__qualname__}"
-    assert app._reload_handlers.get(reload_key) is handler
 
 
 class _Mixin(TaiMCPLifecycleMixin):
@@ -58,13 +45,13 @@ def test_update_reruns_reload_handlers() -> None:
 
 
 def test_update_raises_when_reload_handler_fails() -> None:
-    # raise_on_error on the update path: a failed refresh must fail the op
-    # loudly, never leave the worker silently behind the catalog.
+    # raise_on_error on the update path: a failed reload handler must fail the op
+    # loudly, never leave the worker silently behind.
     mixin = _Mixin()
 
     @mixin._on_reload
     async def _boom() -> None:
-        raise RuntimeError("refresh blew up")
+        raise RuntimeError("reload blew up")
 
     with pytest.raises(RuntimeError, match="lifecycle handlers failed"):
         mixin._update(Manifest())
