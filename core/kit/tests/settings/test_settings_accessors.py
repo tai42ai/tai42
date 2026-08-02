@@ -59,6 +59,14 @@ def test_checkpoint_ttl_minutes_defaults_to_none():
     assert llm_settings_mod.llm_provider_settings().checkpoint_ttl_minutes is None
 
 
+def test_conn_strings_default_to_none():
+    # No hidden localhost: an unset conn string falls back per provider to the
+    # shared connection namespace at the resource factory, not here.
+    provider = llm_settings_mod.LLMProviderSettings()
+    assert provider.checkpoint_conn_string is None
+    assert provider.store_conn_string is None
+
+
 def test_checkpoint_ttl_minutes_accepts_a_positive_value():
     s = llm_settings_mod.LLMProviderSettings(checkpoint_ttl_minutes=120)
     assert s.checkpoint_ttl_minutes == 120

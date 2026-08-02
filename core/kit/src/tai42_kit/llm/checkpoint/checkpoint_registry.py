@@ -13,7 +13,7 @@ class CheckpointRegistry(ResourceRegistry):
     view of the cached resource on each ``get_checkpointer`` call.
     """
 
-    async def get_checkpointer(self, provider: str, conn_string: str) -> BaseCheckpointSaver:
+    async def get_checkpointer(self, provider: str, conn_string: str | None) -> BaseCheckpointSaver:
         key = f"{provider}::{conn_string}"
         resource = await self._get_or_init_resource(key, lambda: create_checkpoint_resource(provider, conn_string))
         return get_saver_from_resource(provider, resource)

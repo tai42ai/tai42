@@ -4,10 +4,8 @@
 working directory, and ``.env.example`` invites developers to create one with
 ``LLM_MODEL=`` / ``REDIS_URL=`` / ``PG_HOST=`` etc. Any such export or a populated
 repo-root ``.env`` would flip the default-asserting settings tests (in
-``tests/settings``, ``tests/llm`` and
-``tests/clients/test_client_impls.py::test_pg_pool_key_from_settings``, which
-assert the built-in defaults). This autouse fixture gives every test a clean
-slate regardless of the host.
+``tests/settings`` and ``tests/llm``, which assert the built-in defaults). This
+autouse fixture gives every test a clean slate regardless of the host.
 """
 
 import os
@@ -33,6 +31,10 @@ _SETTINGS_ENV_PREFIXES = (
     "MCP_CLIENT_",
     "JQ_",
     "TAI_URL_GUARD_",
+    # The shared connection namespace the Postgres/Redis settings fall back to;
+    # an ambient ``TAI_DEFAULT_*`` would resolve a connection the default-asserting
+    # tests expect to be unconfigured.
+    "TAI_DEFAULT_",
 )
 
 # Exact env-var names that share no prefix with the groups above: the logging

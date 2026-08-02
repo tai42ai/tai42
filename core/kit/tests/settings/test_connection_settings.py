@@ -6,15 +6,35 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from pydantic import SecretStr, ValidationError
+from pydantic_settings import SettingsConfigDict
 
 from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
 
 
 class TestRedisConnectionSettings:
+    def test_redis_url_defaults_to_none(self):
+        # No hidden localhost: an unconfigured store has no URL until env sets it.
+        assert RedisConnectionSettings().redis_url is None
+
     def test_minimal_kwargs_are_serializable(self):
         kwargs = RedisConnectionSettings(redis_url="redis://localhost:6379/0").client_kwargs()
-        assert kwargs == {"url": "redis://localhost:6379/0", "max_connections": None, "decode_responses": True}
+        # ``env_prefix`` rides along (empty for the base) so the client can name
+        # this store's own env var when the URL is unset.
+        assert kwargs == {
+            "url": "redis://localhost:6379/0",
+            "max_connections": None,
+            "decode_responses": True,
+            "env_prefix": "",
+        }
         json.dumps(kwargs)  # pool key must serialize
+
+    def test_env_prefix_rides_in_client_kwargs(self):
+        # A subclass with its own namespace threads its prefix through, so an
+        # unresolved URL names the store-specific env var.
+        class StoreSettings(RedisConnectionSettings):
+            model_config = SettingsConfigDict(env_prefix="MYSTORE_")
+
+        assert StoreSettings(redis_url="redis://x").client_kwargs()["env_prefix"] == "MYSTORE_"
 
     def test_resilience_fields_are_opt_in(self):
         base = RedisConnectionSettings(redis_url="redis://x").client_kwargs()
@@ -44,7 +64,52 @@ class TestRedisConnectionSettings:
             RedisConnectionSettings(redis_url="redis://x", socket_connect_timeout=0)
 
 
+def _pg(**overrides) -> PostgresConnectionSettings:
+    """A Postgres settings object with a concrete connection identity (a localhost
+    host and an empty password) so ``pg_dsn`` builds; individual tests override the
+    fields they exercise."""
+    return PostgresConnectionSettings(**{"pg_host": "localhost", "pg_password": SecretStr(""), **overrides})
+
+
 class TestPostgresConnectionSettings:
+    def test_identity_defaults_to_none(self):
+        # No hidden localhost/passwordless default: host and password are unset
+        # until env supplies them (their own namespace or TAI_DEFAULT_*).
+        settings = PostgresConnectionSettings()
+        assert settings.pg_host is None
+        assert settings.pg_password is None
+        # Load-bearing constants are kept, not nulled.
+        assert settings.pg_port == 5432
+        assert settings.pg_user == "postgres"
+        assert settings.pg_db == "postgres"
+
+    def test_pg_dsn_raises_named_error_without_host(self):
+        # A None host at DSN construction names the env var that sets it and its
+        # shared-namespace alternative, rather than a bare TypeError.
+        with pytest.raises(
+            ValueError, match=r"Postgres connection is not configured: set PG_HOST \(or TAI_DEFAULT_PG_HOST\)\."
+        ):
+            _ = PostgresConnectionSettings(pg_password=SecretStr("")).pg_dsn
+
+    def test_pg_dsn_raises_named_error_without_password(self):
+        # A None password names PG_PASSWORD (and its TAI_DEFAULT_* form) rather
+        # than an AttributeError on None.get_secret_value().
+        with pytest.raises(ValueError, match=r"set PG_PASSWORD \(or TAI_DEFAULT_PG_PASSWORD\)\."):
+            _ = PostgresConnectionSettings(pg_host="db").pg_dsn
+
+    def test_client_kwargs_raises_named_error_on_none_identity(self):
+        # client_kwargs builds the DSN, so the same guard fires through it.
+        with pytest.raises(ValueError, match="Postgres connection is not configured"):
+            PostgresConnectionSettings().client_kwargs()
+
+    def test_pg_dsn_named_error_uses_the_class_env_prefix(self):
+        # A subclass with its own namespace names ITS prefixed env var.
+        class StorePgSettings(PostgresConnectionSettings):
+            model_config = SettingsConfigDict(env_prefix="PGSTORE_")
+
+        with pytest.raises(ValueError, match=r"set PGSTORE_PG_HOST \(or TAI_DEFAULT_PG_HOST\)\."):
+            _ = StorePgSettings().pg_dsn
+
     def test_dsn_is_built_from_fields(self):
         settings = PostgresConnectionSettings(
             pg_host="db", pg_port=5433, pg_db="app", pg_user="u", pg_password=SecretStr("p")
@@ -57,7 +122,7 @@ class TestPostgresConnectionSettings:
         # SecretStr keeps the password out of repr/logs/serialization; the
         # plaintext appears only in the driver DSN. This guards against a silent
         # downgrade back to a plain ``str`` field.
-        settings = PostgresConnectionSettings(pg_user="u", pg_password=SecretStr("s3cr3t"))
+        settings = _pg(pg_user="u", pg_password=SecretStr("s3cr3t"))
         assert "s3cr3t" not in repr(settings)
         assert "s3cr3t" not in settings.model_dump_json()
         assert "s3cr3t" in settings.pg_dsn
@@ -81,7 +146,7 @@ class TestPostgresConnectionSettings:
     def test_dsn_brackets_ipv6_host(self):
         # An IPv6 host literal is bracketed so its colons are not parsed as the
         # port separator; urlsplit then recovers the address and the port.
-        settings = PostgresConnectionSettings(pg_host="::1", pg_port=5432, pg_db="app", pg_user="u")
+        settings = _pg(pg_host="::1", pg_port=5432, pg_db="app", pg_user="u")
         assert "@[::1]:5432/" in settings.pg_dsn
         parts = urlsplit(settings.pg_dsn)
         assert parts.hostname == "::1"
@@ -90,7 +155,7 @@ class TestPostgresConnectionSettings:
     def test_dsn_encodes_reserved_db_chars(self):
         # A db name with reserved characters is percent-encoded so it stays a
         # single path segment rather than opening a new path/query.
-        settings = PostgresConnectionSettings(pg_host="db", pg_db="my/db?x", pg_user="u")
+        settings = _pg(pg_host="db", pg_db="my/db?x", pg_user="u")
         parts = urlsplit(settings.pg_dsn)
         # The db's reserved chars are percent-encoded, so it stays a single path
         # segment; the only query component is the appended libpq timeout params.
@@ -98,8 +163,8 @@ class TestPostgresConnectionSettings:
         assert parts.query.startswith("connect_timeout=")
 
     def test_client_kwargs_carry_dsn_and_bounds(self):
-        # No baked-in credential: the default password is empty.
-        kwargs = PostgresConnectionSettings(pg_min_connections=1, pg_max_connections=4).client_kwargs()
+        # Explicit localhost + empty password: the DSN's netloc form is preserved.
+        kwargs = _pg(pg_min_connections=1, pg_max_connections=4).client_kwargs()
         assert kwargs == {
             "dsn": "postgresql://postgres:@localhost:5432/postgres?connect_timeout=10&options=-c%20statement_timeout%3D60000",
             "min_size": 1,
@@ -110,7 +175,7 @@ class TestPostgresConnectionSettings:
     def test_dsn_carries_default_connect_and_statement_timeouts(self):
         # Default 10s connect + 60s statement -> connect_timeout=10 and a
         # percent-encoded ``-c statement_timeout=60000`` (whole ms).
-        dsn = PostgresConnectionSettings(pg_user="u").pg_dsn
+        dsn = _pg(pg_user="u").pg_dsn
         assert "connect_timeout=10" in dsn
         assert "options=-c%20statement_timeout%3D60000" in dsn
         # The options value survives a standard query parse back to the raw form.
@@ -120,7 +185,7 @@ class TestPostgresConnectionSettings:
 
     def test_dsn_statement_timeout_converts_seconds_to_integer_ms(self):
         # 1.5s -> 1500ms, emitted as an integer (no fractional milliseconds).
-        dsn = PostgresConnectionSettings(pg_user="u", pg_statement_timeout_seconds=1.5).pg_dsn
+        dsn = _pg(pg_user="u", pg_statement_timeout_seconds=1.5).pg_dsn
         assert "options=-c%20statement_timeout%3D1500" in dsn
         assert parse_qs(urlsplit(dsn).query)["options"] == ["-c statement_timeout=1500"]
 
@@ -128,11 +193,11 @@ class TestPostgresConnectionSettings:
         # A positive sub-millisecond value (gt=0 admits it) must round UP to 1 ms, not
         # floor to ``statement_timeout=0`` — which Postgres reads as DISABLED
         # (unbounded), the opposite of a configured bound.
-        dsn = PostgresConnectionSettings(pg_user="u", pg_statement_timeout_seconds=0.0009).pg_dsn
+        dsn = _pg(pg_user="u", pg_statement_timeout_seconds=0.0009).pg_dsn
         assert parse_qs(urlsplit(dsn).query)["options"] == ["-c statement_timeout=1"]
 
     def test_dsn_respects_custom_connect_timeout(self):
-        dsn = PostgresConnectionSettings(pg_user="u", pg_connect_timeout=3).pg_dsn
+        dsn = _pg(pg_user="u", pg_connect_timeout=3).pg_dsn
         assert parse_qs(urlsplit(dsn).query)["connect_timeout"] == ["3"]
 
     def test_non_positive_timeouts_are_rejected(self):

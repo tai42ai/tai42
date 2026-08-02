@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 from pydantic import SecretStr
+from pydantic_settings import SettingsConfigDict
 
 # httpx/fastmcp ride on base deps and import unconditionally; redis/curl/postgres
 # are loaded lazily in their sections via importorskip.
@@ -94,10 +95,21 @@ def test_redis_validate_url_errors():
     redis_mod = _redis_mod()
     with pytest.raises(KeyError):
         redis_mod._validate_url({})
-    with pytest.raises(ValueError, match="cannot be empty"):
+    # An empty URL is an unconfigured connection: the named error tells the
+    # operator which env var to set (defaulting to the unprefixed base name).
+    with pytest.raises(
+        ValueError, match=r"Redis connection is not configured: set REDIS_URL \(or TAI_DEFAULT_REDIS_URL\)\."
+    ):
         redis_mod._validate_url({"url": ""})
     with pytest.raises(TypeError):
         redis_mod._validate_url({"url": 123})
+
+
+def test_redis_validate_url_names_the_store_env_prefix():
+    # env_prefix rides in the kwargs so a store-specific missing URL names its own var.
+    redis_mod = _redis_mod()
+    with pytest.raises(ValueError, match=r"set CHANNEL_TELEGRAM_REDIS_URL \(or TAI_DEFAULT_REDIS_URL\)\."):
+        redis_mod._validate_url({"url": "", "env_prefix": "CHANNEL_TELEGRAM_"})
 
 
 async def test_redis_create_rejects_unknown_kwarg():
@@ -219,6 +231,28 @@ def test_redis_pool_key_from_settings_is_serializable():
     import json
 
     json.dumps(kw)  # must be JSON-serializable for the pool key
+
+
+def test_redis_pool_key_excludes_env_prefix():
+    # env_prefix rides in client_kwargs only to name a missing URL; it is not
+    # connection identity. Two settings classes with different namespaces that
+    # resolve to the same URL must share ONE pool (equal pool key); a different
+    # URL still keys to a different pool.
+    redis_mod = _redis_mod()
+
+    class StoreA(RedisConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="STORE_A_")
+
+    class StoreB(RedisConnectionSettings):
+        model_config = SettingsConfigDict(env_prefix="STORE_B_")
+
+    a = StoreA(redis_url="redis://h:6379/0").client_kwargs()
+    b = StoreB(redis_url="redis://h:6379/0").client_kwargs()
+    assert a["env_prefix"] != b["env_prefix"]  # the namespaces really differ
+    for client_cls in (redis_mod.RedisClient, redis_mod.SyncRedisClient):
+        assert client_cls._key(**a) == client_cls._key(**b)
+    other = StoreA(redis_url="redis://other:6379/0").client_kwargs()
+    assert redis_mod.RedisClient._key(**a) != redis_mod.RedisClient._key(**other)
 
 
 # ---------------------------------------------------------------------------

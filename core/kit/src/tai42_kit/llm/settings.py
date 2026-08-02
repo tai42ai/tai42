@@ -6,7 +6,9 @@ builders unwrap any ``SecretStr`` kwarg at their seam, so the plaintext is
 revealed from the unwrap onward (the JSON cache key and provider construction) —
 masked everywhere upstream of that seam. The LangGraph ``checkpoint_conn_string``
 / ``store_conn_string`` stay opaque connection URLs (addresses, not discrete
-secrets) handed straight to the LangGraph savers.
+secrets); they default to ``None`` and are resolved per provider at the
+checkpoint/store call sites, falling back to the shared connection settings when
+left unset.
 """
 
 from collections.abc import Sequence
@@ -126,10 +128,13 @@ class LLMProviderSettings(TaiBaseSettings):
     llm: str = "openai"
     embedding: str = "openai"
     checkpoint: str = "redis"
-    checkpoint_conn_string: str = "redis://localhost:6379/0"
+    # None: no explicit conn string. The resource factory falls back per provider
+    # to the shared connection namespace (redis -> the base Redis URL, postgres ->
+    # the base Postgres DSN); a double-None raises a named error there.
+    checkpoint_conn_string: str | None = None
     checkpoint_ttl_minutes: int | None = None  # idle-TTL (minutes); None = keep forever
     store: str = "redis"
-    store_conn_string: str = "redis://localhost:6379/0"
+    store_conn_string: str | None = None
 
     @field_validator("checkpoint_ttl_minutes")
     @classmethod

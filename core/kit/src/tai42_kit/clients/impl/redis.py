@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from typing import Any, cast
 
@@ -6,10 +7,13 @@ from redis import Redis as SyncRedis
 from redis.asyncio import Redis as AsyncRedis
 
 from tai42_kit.clients.base import PooledClient, reject_unknown_connection_kwargs
+from tai42_kit.settings import not_configured_message
 
 # Connection kwargs a Redis client accepts — the JSON-serializable identity
-# produced by ``RedisConnectionSettings.client_kwargs``. Anything else is a typo
-# or a stray value and is rejected so it can't silently split the pool key.
+# produced by ``RedisConnectionSettings.client_kwargs``. ``env_prefix`` rides
+# along only to name the missing env var when the URL is unset; it is dropped
+# before ``from_url`` and excluded from the pool key. Anything else is a typo or
+# a stray value and is rejected so it can't silently split the pool key.
 _ALLOWED_KWARGS = frozenset(
     {
         "url",
@@ -19,8 +23,20 @@ _ALLOWED_KWARGS = frozenset(
         "socket_connect_timeout",
         "retry_on_timeout",
         "retry_attempts",
+        "env_prefix",
     }
 )
+
+
+def _pool_key(**kwargs: Any) -> str:
+    """The pool key for a Redis client — connection identity only.
+
+    ``env_prefix`` travels in the connection kwargs so an unresolved URL can name
+    the env var that would set it, but it is not connection identity; dropping it
+    here keeps two settings classes that resolve to the same URL on one shared
+    pool rather than splitting it per namespace."""
+    identity = {key: value for key, value in kwargs.items() if key != "env_prefix"}
+    return json.dumps(identity, sort_keys=True)
 
 
 def _validate_kwargs(kwargs: dict[str, Any]) -> None:
@@ -33,12 +49,19 @@ def _validate_url(kwargs: dict[str, Any]) -> None:
         raise KeyError("Redis client requires a 'url' kwarg")
     url = kwargs["url"]
     if not url:
-        raise ValueError("Redis client 'url' cannot be empty")
+        env_prefix = kwargs.get("env_prefix") or ""
+        raise ValueError(
+            not_configured_message("the Redis connection", f"{env_prefix}REDIS_URL", "TAI_DEFAULT_REDIS_URL")
+        )
     if not isinstance(url, str):
         raise TypeError("Redis client 'url' must be a string (e.g., 'redis://localhost:6379/0')")
 
 
 class RedisClient(PooledClient[AsyncRedis]):
+    @staticmethod
+    def _key(**kwargs: Any) -> str:
+        return _pool_key(**kwargs)
+
     async def _create(self, **kwargs) -> AsyncRedis:
         _validate_kwargs(kwargs)
         return await AsyncRedis.from_url(**_with_retry(kwargs)).initialize()
@@ -54,6 +77,10 @@ class RedisClient(PooledClient[AsyncRedis]):
 
 
 class SyncRedisClient(PooledClient[SyncRedis]):
+    @staticmethod
+    def _key(**kwargs: Any) -> str:
+        return _pool_key(**kwargs)
+
     async def _create(self, **kwargs) -> SyncRedis:
         _validate_kwargs(kwargs)
         return SyncRedis.from_url(**_with_retry(kwargs, sync=True))
@@ -79,6 +106,8 @@ def _with_retry(kwargs: dict[str, Any], *, sync: bool = False) -> dict[str, Any]
     errors — built per client because a ``Retry`` instance is not serializable.
     The sync and async clients import ``Retry`` from their own subpackage.
     """
+    # ``env_prefix`` is a message-only passenger, not a ``from_url`` argument.
+    kwargs.pop("env_prefix", None)
     retry_attempts = kwargs.pop("retry_attempts", 0)
     if retry_attempts > 0:
         if sync:

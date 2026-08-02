@@ -5,6 +5,9 @@ from typing import Any
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
+from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.settings import not_configured_message
+
 logger = logging.getLogger(__name__)
 
 CleanupFn = Callable[[], Awaitable[None]]
@@ -14,6 +17,12 @@ Resource = Any
 async def create_store_resource(provider: str, conn_string: str | None = None, **kwargs) -> tuple[Resource, CleanupFn]:
     """
     Creates a long-lived connection resource for the Store.
+
+    A ``None`` conn string falls back per provider to the shared connection
+    namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
+    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*`` /
+    ``TAI_DEFAULT_PG_*``). ``sqlite`` requires an explicit path; ``memory`` needs
+    none.
 
     ARCHITECTURAL NOTES:
         Resources are cached indefinitely (no LRU) as this is a single-deployment instance.
@@ -58,7 +67,9 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
 
         case "postgres":
             if conn_string is None:
-                raise ValueError("postgres store provider requires a conn_string")
+                # An unset conn string means the base Postgres namespace; the DSN
+                # builder raises a named error if that identity is also unset.
+                conn_string = PostgresConnectionSettings().pg_dsn
 
             from langgraph.store.postgres import AsyncPostgresStore  # pyright: ignore[reportMissingImports]
             from psycopg.rows import dict_row
@@ -90,7 +101,10 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
 
         case "redis":
             if conn_string is None:
-                raise ValueError("redis store provider requires a conn_string")
+                # An unset conn string means the base Redis namespace.
+                conn_string = RedisConnectionSettings().redis_url
+            if conn_string is None:
+                raise ValueError(not_configured_message("the Redis store", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
 
             from langgraph.store.redis import AsyncRedisStore
 

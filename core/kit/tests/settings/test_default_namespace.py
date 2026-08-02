@@ -108,6 +108,7 @@ def test_per_field_mixing_specific_and_default_in_one_instance(monkeypatch):
     assert settings.pg_db == "store-db"  # specific wins
     assert settings.pg_host == "shared-db"
     assert settings.pg_user == "shared-user"
+    assert isinstance(settings.pg_password, SecretStr)
     assert settings.pg_password.get_secret_value() == "shared-secret"
 
 
@@ -156,10 +157,10 @@ def test_default_dotenv_resolves_alone(tmp_path):
 
 def test_empty_string_default_is_ignored(monkeypatch):
     # An empty-string TAI_DEFAULT_* value is skipped (env_ignore_empty parity), so
-    # the field keeps its class default rather than becoming "".
+    # the field keeps its class default (None) rather than becoming "".
     monkeypatch.setenv("TAI_DEFAULT_PG_HOST", "")
 
-    assert PgStoreSettings().pg_host == "localhost"
+    assert PgStoreSettings().pg_host is None
 
 
 def test_non_identity_fields_never_fall_back(monkeypatch):

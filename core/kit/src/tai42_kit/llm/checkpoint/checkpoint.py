@@ -5,6 +5,9 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.settings import not_configured_message
+
 logger = logging.getLogger(__name__)
 
 CleanupFn = Callable[[], Awaitable[None]]
@@ -17,6 +20,12 @@ async def create_checkpoint_resource(
 ) -> tuple[Resource, CleanupFn]:
     """
     Creates a long-lived connection resource for checkpoints.
+
+    A ``None`` conn string falls back per provider to the shared connection
+    namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
+    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*`` /
+    ``TAI_DEFAULT_PG_*``). ``sqlite`` requires an explicit path; ``memory`` needs
+    none.
 
     ARCHITECTURAL NOTES:
         This resource is intended to be cached indefinitely in the registry.
@@ -61,7 +70,9 @@ async def create_checkpoint_resource(
 
         case "postgres":
             if conn_string is None:
-                raise ValueError("postgres checkpoint provider requires a conn_string")
+                # An unset conn string means the base Postgres namespace; the DSN
+                # builder raises a named error if that identity is also unset.
+                conn_string = PostgresConnectionSettings().pg_dsn
 
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
             from psycopg.rows import dict_row
@@ -96,7 +107,10 @@ async def create_checkpoint_resource(
 
         case "redis":
             if conn_string is None:
-                raise ValueError("redis checkpoint provider requires a conn_string")
+                # An unset conn string means the base Redis namespace.
+                conn_string = RedisConnectionSettings().redis_url
+            if conn_string is None:
+                raise ValueError(not_configured_message("the Redis checkpoint", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
 
             from langgraph.checkpoint.redis import AsyncRedisSaver
 

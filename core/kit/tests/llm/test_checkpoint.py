@@ -41,19 +41,101 @@ async def test_sqlite_requires_conn_string():
         await cp.create_checkpoint_resource("sqlite", None)
 
 
-async def test_postgres_requires_conn_string():
-    with pytest.raises(ValueError, match="postgres checkpoint provider requires"):
+async def test_postgres_none_conn_string_raises_named_error_without_identity():
+    # None + postgres falls back to the base Postgres DSN, which raises a named
+    # error naming PG_HOST when its identity is unset (env is cleared by the
+    # autouse suite fixture).
+    with pytest.raises(ValueError, match="Postgres connection is not configured"):
         await cp.create_checkpoint_resource("postgres", None)
 
 
-async def test_redis_requires_conn_string(monkeypatch):
-    # A fake module without AsyncRedisSaver would make the langgraph redis
-    # import fail, so reaching the ValueError proves the conn_string guard
-    # fires before the import.
+async def test_redis_none_conn_string_raises_named_error_without_url(monkeypatch):
+    # None + redis falls back to the base Redis URL; with none configured the
+    # named error fires BEFORE the langgraph import (a fake module without
+    # AsyncRedisSaver would fail to import, so reaching the ValueError proves the
+    # guard runs first).
     fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
-    with pytest.raises(ValueError, match="redis checkpoint provider requires"):
+    with pytest.raises(
+        ValueError, match=r"Redis checkpoint is not configured: set REDIS_URL \(or TAI_DEFAULT_REDIS_URL\)\."
+    ):
         await cp.create_checkpoint_resource("redis", None)
+
+
+async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
+    # None + redis + a TAI_DEFAULT_REDIS_URL resolves the checkpoint end-to-end
+    # from the shared namespace: the saver is built from that resolved URL.
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+    setups = []
+
+    class _FakeSaver:
+        def __init__(self, redis_url, ttl=None):
+            self.redis_url = redis_url
+
+        async def asetup(self):
+            setups.append(self.redis_url)
+
+        async def __aexit__(self, *exc):
+            pass
+
+    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
+    fake_mod.AsyncRedisSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+
+    resource, closer = await cp.create_checkpoint_resource("redis", None)
+    assert resource.redis_url == "redis://shared:6379/0"
+    assert setups == ["redis://shared:6379/0"]
+    await closer()
+
+
+async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypatch):
+    # None + postgres resolves to the base Postgres DSN, so the pool is opened
+    # against the identity from the shared namespace.
+    monkeypatch.setenv("TAI_DEFAULT_PG_HOST", "shared-db")
+    monkeypatch.setenv("TAI_DEFAULT_PG_PASSWORD", "shared-secret")
+    captured: dict[str, Any] = {}
+
+    class _FakeConnCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakePool:
+        def __init__(self, conn_string, **kwargs):
+            captured["conn_string"] = conn_string
+
+        async def open(self):
+            pass
+
+        def connection(self):
+            return _FakeConnCtx()
+
+        async def close(self):
+            pass
+
+    class _FakeSaver:
+        def __init__(self, conn):
+            pass
+
+        async def setup(self):
+            pass
+
+    pool_mod: Any = types.ModuleType("psycopg_pool")
+    pool_mod.AsyncConnectionPool = _FakePool
+    saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
+    saver_mod.AsyncPostgresSaver = _FakeSaver
+    rows_mod: Any = types.ModuleType("psycopg.rows")
+    rows_mod.dict_row = object()
+    monkeypatch.setitem(sys.modules, "psycopg_pool", pool_mod)
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", rows_mod)
+
+    _resource, closer = await cp.create_checkpoint_resource("postgres", None)
+    assert captured["conn_string"].startswith("postgresql://")
+    assert "shared-db" in captured["conn_string"]
+    await closer()
 
 
 async def test_redis_resource_setup_called(monkeypatch):

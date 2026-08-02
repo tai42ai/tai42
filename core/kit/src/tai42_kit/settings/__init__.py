@@ -17,6 +17,11 @@ from tai42_kit.settings.registry import (
     SettingsFieldInfo,
     registered_settings,
 )
+from tai42_kit.settings.require import (
+    not_configured_message,
+    require,
+    require_secret,
+)
 
 __all__ = [
     "TAI_DEFAULT_ENV_PREFIX",
@@ -24,8 +29,11 @@ __all__ = [
     "SettingsClassInfo",
     "SettingsFieldInfo",
     "TaiBaseSettings",
+    "not_configured_message",
     "register_settings_reset",
     "registered_settings",
+    "require",
+    "require_secret",
     "reset_all_settings",
     "settings_cache",
 ]

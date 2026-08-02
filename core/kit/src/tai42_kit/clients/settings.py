@@ -15,7 +15,7 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
 
-from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
+from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, require, settings_cache
 
 
 class ClientSettings(DefaultNamespaceMixin, TaiBaseSettings):
@@ -67,11 +67,16 @@ class RedisConnectionSettings(ClientSettings):
         value must be JSON-serializable. ``retry_attempts`` travels as an int;
         the redis client turns it into a ``Retry`` object at construction time —
         a ``Retry`` instance is not serializable and would break the pool key.
+
+        ``env_prefix`` rides along so the client can name this store's own env var
+        when ``redis_url`` is unset; it is not connection identity, so the redis
+        client drops it from the pool key.
         """
         kwargs: dict[str, Any] = {
             "url": self.redis_url,
             "max_connections": self.redis_max_connections,
             "decode_responses": self.decode_responses,
+            "env_prefix": self.model_config.get("env_prefix") or "",
         }
         if self.socket_timeout is not None:
             kwargs["socket_timeout"] = self.socket_timeout
@@ -101,15 +106,19 @@ class PostgresConnectionSettings(ClientSettings):
         "pg_password": "pg_password",
     }
 
-    pg_host: str = "localhost"
+    # No hidden localhost default: an unset host means the feature is OFF, not a
+    # silent connection to localhost. Resolved from this store's own namespace or
+    # TAI_DEFAULT_PG_HOST; None reaching DSN construction raises a named error.
+    pg_host: str | None = None
     pg_port: int = 5432
     pg_db: str = "postgres"
     pg_user: str = "postgres"
-    # No baked-in credential — supply via env (PG_PASSWORD). Empty by default so a
-    # missing password fails at connect time rather than shipping a real secret.
+    # No baked-in credential — supply via env (PG_PASSWORD) or TAI_DEFAULT_PG_PASSWORD.
+    # None by default so a missing password raises a named error at DSN construction
+    # rather than shipping a real secret or silently connecting passwordless.
     # SecretStr keeps it out of repr/logs/tracebacks; the plaintext is read only
     # when composing the DSN handed to the driver.
-    pg_password: SecretStr = SecretStr("")
+    pg_password: SecretStr | None = None
     pg_min_connections: int = 2
     pg_max_connections: int = 10
     # libpq connect_timeout (seconds) for each new pool connection. Must be positive.
@@ -121,6 +130,15 @@ class PostgresConnectionSettings(ClientSettings):
 
     @property
     def pg_dsn(self) -> str:
+        # None must never reach connection building unnoticed: a missing host or
+        # password raises a named error telling the operator which env var to set,
+        # rather than an AttributeError on None.get_secret_value() or a bare
+        # TypeError at the ``":" in host`` check.
+        prefix = self.model_config.get("env_prefix") or ""
+        pg_host = require(self.pg_host, "the Postgres connection", f"{prefix}PG_HOST", "TAI_DEFAULT_PG_HOST")
+        pg_password = require(
+            self.pg_password, "the Postgres connection", f"{prefix}PG_PASSWORD", "TAI_DEFAULT_PG_PASSWORD"
+        )
         # Percent-encode every user-controlled component so reserved characters
         # can't break the URL or reroute the host:
         #  - credentials (@ / : # ?) in a generated password/user,
@@ -129,9 +147,9 @@ class PostgresConnectionSettings(ClientSettings):
         # and bracket an IPv6 host so its colons aren't read as the port
         # separator (``[::1]:5432`` rather than ``::1:5432``).
         user = quote(self.pg_user, safe="")
-        password = quote(self.pg_password.get_secret_value(), safe="")
+        password = quote(pg_password.get_secret_value(), safe="")
         db = quote(self.pg_db, safe="")
-        host = self.pg_host
+        host = pg_host
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         # Two libpq conninfo params carried in the DSN's query string: the

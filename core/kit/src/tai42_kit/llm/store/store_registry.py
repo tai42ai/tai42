@@ -26,14 +26,14 @@ class StoreRegistry(ResourceRegistry):
     lifetime.
     """
 
-    def _generate_key(self, provider: str, conn_string: str, kwargs: dict[str, Any]) -> str:
+    def _generate_key(self, provider: str, conn_string: str | None, kwargs: dict[str, Any]) -> str:
         clean_kwargs = kwargs.copy()
         if provider == "postgres":
             clean_kwargs.pop("index", None)
         config_str = json.dumps(clean_kwargs, sort_keys=True, default=repr)
         return f"{provider}::{conn_string}::{config_str}"
 
-    async def get_store(self, provider: str, conn_string: str, **kwargs) -> BaseStore:
+    async def get_store(self, provider: str, conn_string: str | None, **kwargs) -> BaseStore:
         key = self._generate_key(provider, conn_string, kwargs)
         resource = await self._get_or_init_resource(key, lambda: create_store_resource(provider, conn_string, **kwargs))
         return get_store_from_resource(provider, resource, **kwargs)
