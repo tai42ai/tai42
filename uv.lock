@@ -5015,7 +5015,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5072,7 +5072,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5790,7 +5790,7 @@ provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xa
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "langchain" },
