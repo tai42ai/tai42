@@ -56,8 +56,12 @@ def _tampered_cases() -> dict[str, dict[str, str]]:
             "X-Slack-Request-Timestamp": "\xa0" + valid["X-Slack-Request-Timestamp"],
         },
         "non-ascii digit timestamp": {**valid, "X-Slack-Request-Timestamp": "\xb9" * 10},
-        "timestamp 301s in the past": signed_headers(_RAW_BODY, TEST_SIGNING_SECRET, timestamp=now - 301),
-        "timestamp 301s in the future": signed_headers(_RAW_BODY, TEST_SIGNING_SECRET, timestamp=now + 301),
+        # Far outside the skew window so the reject reason is timing-independent —
+        # these cases are captured once at parametrize time, and the exact
+        # one-second boundary is pinned deterministically by
+        # ``test_timestamp_just_outside_window_rejected`` under frozen time.
+        "timestamp far in the past": signed_headers(_RAW_BODY, TEST_SIGNING_SECRET, timestamp=now - 100_000),
+        "timestamp far in the future": signed_headers(_RAW_BODY, TEST_SIGNING_SECRET, timestamp=now + 100_000),
         "missing signature header": {"X-Slack-Request-Timestamp": valid["X-Slack-Request-Timestamp"]},
         "wrong prefix": {**valid, "X-Slack-Signature": "v1=" + valid["X-Slack-Signature"][3:]},
         "digest not 64 chars": {**valid, "X-Slack-Signature": "v0=abc123"},
@@ -69,8 +73,8 @@ def _tampered_cases() -> dict[str, dict[str, str]]:
 
 @pytest.mark.parametrize("case", _tampered_cases())
 async def test_fail_closed_matrix_uniform_401(case):
-    # Rebuilt per test so the timestamps are fresh; every reject shares one
-    # constant body — no oracle distinguishing the failure modes.
+    # Every reject shares one constant body — no oracle distinguishing the
+    # failure modes; all answer the same uniform 401.
     headers = _tampered_cases()[case]
 
     response = await inbound.slack_inbound(make_request(_RAW_BODY, headers))
