@@ -4846,7 +4846,7 @@ wheels = [
 
 [[package]]
 name = "tai42-accounts-oidc"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "plugins/accounts-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -4878,7 +4878,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -5542,7 +5542,7 @@ dev = [
 
 [[package]]
 name = "tai42-identity-oidc"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "plugins/identity-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -6174,7 +6174,7 @@ docs = [
 
 [[package]]
 name = "tai42-tools-stripe"
-version = "0.3.5"
+version = "0.3.6"
 source = { editable = "plugins/tools-stripe" }
 dependencies = [
     { name = "pydantic" },
