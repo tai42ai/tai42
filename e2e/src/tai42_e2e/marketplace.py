@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 # opt-in marketplace suite installs it out-of-band at boot from this pinned ref
 # (the git insteadOf token config rewrites the URL — no token handling here).
 _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
-_MARKETPLACE_PIN = "aa61a77a7eb776c7b12a149c56589d5b95bd8126"
+_MARKETPLACE_PIN = "6fb0a97cea603a73091a366291db018c84e2cae1"
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"
 # The in-repo fixture-plugin sources (outside ``src`` so uv never installs them,
