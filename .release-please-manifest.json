@@ -1,7 +1,7 @@
 {
   "core/contract": "0.3.0",
   "core/kit": "0.4.0",
-  "core/skeleton": "0.6.0",
+  "core/skeleton": "0.6.1",
   "plugins/accounts-oidc": "0.2.2",
   "plugins/accounts-postgres": "0.4.1",
   "plugins/agents": "0.3.5",
@@ -25,5 +25,5 @@
   "plugins/tools-stripe": "0.3.5",
   "plugins/webhook-verifier-github": "0.2.1",
   "plugins/webhook-verifier-stripe": "0.2.1",
-  "e2e": "0.4.2"
+  "e2e": "0.4.3"
 }
