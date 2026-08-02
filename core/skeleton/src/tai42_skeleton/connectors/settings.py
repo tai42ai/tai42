@@ -231,9 +231,7 @@ def connectors_store_configured() -> bool:
     fresh — not the cached singleton — so a config reload re-evaluates. Postgres is
     the durable authority for ``connector_connections``, so a supplied password is
     the signal a real store is wired up; without one the connectors router surface
-    answers OFF rather than reaching for an absent Postgres. Distinct from
-    ``connectors_in_use()`` (the intent gate boot/readiness use — deliberately
-    unchanged)."""
+    answers OFF rather than reaching for an absent Postgres."""
     s = ConnectorStorePgSettings()
     return bool(s.pg_password and s.pg_password.get_secret_value())
 

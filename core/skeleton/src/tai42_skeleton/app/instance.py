@@ -1,5 +1,4 @@
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from tai42_kit.logging import logging_settings, setup_logging
@@ -18,7 +17,7 @@ from tai42_skeleton.access_control.startup import (
 from tai42_skeleton.access_control.verifier import reset_registered_reserved_paths
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
-from tai42_skeleton.connectors.providers.registry import list_providers
+from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.connectors.store.catalog_store import refresh_catalog
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.versioning import versioned_store_configured
@@ -27,42 +26,27 @@ logger = logging.getLogger(__name__)
 
 _app: TaiMCP | None = None
 
-# Env prefixes that carry connector configuration; a non-empty value under
-# either means the operator wired up the connector engine.
-_CONNECTOR_ENV_PREFIXES = ("CONNECTORS_", "CONNECTOR_STORE_")
-
 
 def connectors_in_use() -> bool:
     """Whether this deployment uses connectors at all.
 
-    True when the loaded manifest carries a connector-managed MCP entry, a
-    manifest-named plugin module registered a provider, or any non-empty
-    ``CONNECTORS_*`` / ``CONNECTOR_STORE_*`` env var is set. Runs inside a
-    startup/reload handler, i.e. after ``start()`` bound the manifest and
-    imported its plugin modules.
+    Thin alias for :func:`tai42_skeleton.connectors.settings.connectors_store_configured`
+    (the single source of truth) so the boot/reload hook skips the Postgres open when the
+    connector token store is unconfigured, mirroring the versioned-store gate.
     """
-    manifest = build_app()._manifest
-    if manifest is not None and any(entry.managed is not None for entry in manifest.mcp):
-        return True
-    if list_providers():
-        return True
-    return any(key.startswith(_CONNECTOR_ENV_PREFIXES) and value for key, value in os.environ.items())
+    return connectors_store_configured()
 
 
 async def refresh_catalog_if_connectors_in_use() -> None:
-    """Startup/reload handler: load the connector catalog only when connectors
-    are in play. A deployment with no managed manifest entries, no registered
-    providers, and no connector env config has nothing the catalog could serve,
-    and refreshing it would only stall boot retrying an absent Postgres. When
-    connectors ARE in use the refresh runs and an unreachable Postgres fails it
-    loudly; a skipped refresh still fails loudly at first real connector use via
+    """Startup/reload handler: load the connector catalog only when the connector
+    token store is configured. A deployment with no store configured has nothing the
+    catalog could serve, and refreshing it would only stall boot retrying an absent
+    Postgres. When the store IS configured the refresh runs and an unreachable Postgres
+    fails it loudly; a skipped refresh still fails loudly at first real connector use via
     the ``get_provider`` miss or the store's connection error.
     """
     if not connectors_in_use():
-        logger.info(
-            "connectors: skipping catalog refresh — no managed manifest entries, no "
-            "registered providers, and no CONNECTORS_*/CONNECTOR_STORE_* env configuration"
-        )
+        logger.info("connectors: skipping catalog refresh — the connector token store is not configured")
         return
     await refresh_catalog()
 

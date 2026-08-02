@@ -26,7 +26,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app import instance
-from tai42_skeleton.connectors.settings import connector_store_settings
+from tai42_skeleton.connectors.settings import connector_store_settings, connectors_store_configured
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.marketplace.settings import marketplace_store_configured, marketplace_store_settings
@@ -101,10 +101,17 @@ def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
     if not sub_mcp.in_memory:
         conns.append(("sub_mcp", RedisClient, sub_mcp.redis))
 
-    if instance.connectors_in_use():
+    # The durable connector token store: Postgres-backed whenever a password is
+    # configured (its own namespace or TAI_DEFAULT_PG_PASSWORD) — the same
+    # store-configured gate as marketplace/tool_meta. Its Redis cache is an
+    # additional ping, ridden only when a connector-store Redis URL resolves (its
+    # own namespace or TAI_DEFAULT_REDIS_URL), so a Postgres-only deploy readies on
+    # the PG row alone rather than 503ing on a Redis it never wired.
+    if connectors_store_configured():
         store = connector_store_settings()
-        conns.append(("connectors", RedisClient, store.redis))
         conns.append(("connectors", PostgresClient, store.pg))
+        if store.redis.redis_url:
+            conns.append(("connectors", RedisClient, store.redis))
 
     if instance.versioned_store_in_use():
         conns.append(("versioning", PostgresClient, versioning_store_settings()))

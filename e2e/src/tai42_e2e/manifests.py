@@ -123,9 +123,6 @@ def _toolbox_tools_entry() -> dict:
 def _redis_feature_env(res: StackResources) -> dict[str, str]:
     """Point every per-feature Redis URL at the stack's logical DB, and the
     probe-record client at DB 0."""
-    # CONNECTOR_STORE_REDIS_URL is deliberately absent: any CONNECTOR_STORE_* env flips
-    # the ``connectors_in_use()`` gate on, so the startup catalog refresh would stall
-    # retrying an absent Postgres. Only the connectors profile sets it (redis AND pg).
     return {
         "ACCESS_CONTROL_REDIS_URL": res.redis_url,
         "INTERACTIONS_REDIS_URL": res.redis_url,
@@ -133,6 +130,7 @@ def _redis_feature_env(res: StackResources) -> dict[str, str]:
         "TAI_RATE_LIMIT_REDIS_URL": res.redis_url,
         "HOOKS_REDIS_URL": res.redis_url,
         "SUB_MCP_REDIS_URL": res.redis_url,
+        "CONNECTOR_STORE_REDIS_URL": res.redis_url,
         "E2E_PROBE_REDIS_URL": res.probe_redis_url,
     }
 
@@ -1137,12 +1135,11 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         env["LLM_BASE_URL"] = res.llm_base_url
         env["LLM_API_KEY"] = "e2e-test"
         env["LLM_MODEL"] = "e2e-scripted"
-    # The connectors surface: point BOTH halves of the connector store at this
-    # stack's isolated resources (any CONNECTOR_STORE_* env flips the connector
-    # catalog refresh on, so redis and pg must travel together), and wire the
-    # fixture provider's crypto keys + stub-IdP endpoints when the runner supplied
-    # them — mirroring build_connectors_stack.
-    env["CONNECTOR_STORE_REDIS_URL"] = res.redis_url
+    # The connectors surface: the connector-store PG password is what flips connectors
+    # on (store-configured), so point the store's Postgres half at this stack's isolated
+    # resources; its Redis cache rides the shared ``_redis_feature_env``. Wire the fixture
+    # provider's crypto keys + stub-IdP endpoints when the runner supplied them —
+    # mirroring build_connectors_stack.
     env.update(_pg_env("CONNECTOR_STORE_", res))
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek
@@ -1197,9 +1194,9 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
         "user_tools": ["ask_user", "reload_config"],
     }
     env = _base_env(res, variants)
-    # The connector store's redis + pg halves must travel together (any CONNECTOR_STORE_*
-    # env flips the catalog refresh on), both at this stack's isolated resources.
-    env["CONNECTOR_STORE_REDIS_URL"] = res.redis_url
+    # The connector-store PG password is what flips connectors on (store-configured), so
+    # point the store's Postgres half at this stack's isolated resources; its Redis cache
+    # rides the shared ``_redis_feature_env``.
     env.update(_pg_env("CONNECTOR_STORE_", res))
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek

@@ -31,6 +31,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.connectors.providers.registry import list_providers
 from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.marketplace.settings import marketplace_store_configured
@@ -230,6 +231,14 @@ def _gated_feature_row(kind: str, configured: bool, enabling_var: str) -> KindSt
     return KindStatus(kind=kind, state="off", plugin=None, detail=f"{enabling_var} not configured")
 
 
+def _connectors_row(configured: bool, enabling_var: str) -> KindStatus:
+    """The connectors feature row: the shared store-configured gate, with the count of
+    registered providers appended so the table shows how many providers are wired even
+    when the store — and thus the connectors surface — is off."""
+    row = _gated_feature_row("connectors", configured, enabling_var)
+    return row.model_copy(update={"detail": f"{row.detail}, {len(list_providers())} provider(s)"})
+
+
 def collect_kind_status() -> list[KindStatus]:
     """Snapshot every pluggable kind's live status, read-only.
 
@@ -252,7 +261,10 @@ def collect_kind_status() -> list[KindStatus]:
         _webhook_verifiers_row(),
         _config_row(),
         _studio_plugins_row(),
-        *(_gated_feature_row(kind, configured(), var) for kind, configured, var in _GATED_FEATURES),
+        *(
+            _connectors_row(configured(), var) if kind == "connectors" else _gated_feature_row(kind, configured(), var)
+            for kind, configured, var in _GATED_FEATURES
+        ),
     ]
 
 

@@ -71,6 +71,9 @@ def _clear_connector_env(monkeypatch) -> None:
     for key in list(os.environ):
         if key.startswith(("CONNECTORS_", "CONNECTOR_STORE_")):
             monkeypatch.delenv(key, raising=False)
+    # The store also resolves through the shared TAI_DEFAULT_PG_PASSWORD fallback, so
+    # an ambient one would leave connectors ON — clear it too for a true OFF state.
+    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
 
 
 def _record_refresh(monkeypatch) -> list[bool]:
@@ -83,12 +86,10 @@ def _record_refresh(monkeypatch) -> list[bool]:
     return calls
 
 
-async def test_catalog_refresh_skipped_when_connectors_unused(monkeypatch):
-    # No managed manifest entries, no registered providers, no connector env:
-    # the handler skips the catalog load (no Postgres at boot).
+async def test_catalog_refresh_skipped_when_store_unconfigured(monkeypatch):
+    # No connector token store configured: the handler skips the catalog load (no
+    # Postgres at boot).
     _clear_connector_env(monkeypatch)
-    monkeypatch.setattr(instance, "list_providers", list)
-    monkeypatch.setattr(instance.build_app(), "_manifest", Manifest())
     calls = _record_refresh(monkeypatch)
 
     await instance.refresh_catalog_if_connectors_in_use()
@@ -96,11 +97,11 @@ async def test_catalog_refresh_skipped_when_connectors_unused(monkeypatch):
     assert calls == []
 
 
-async def test_catalog_refresh_runs_when_connector_env_present(monkeypatch):
+async def test_catalog_refresh_runs_when_store_configured(monkeypatch):
+    # The connectors gate is the store-configured gate: a supplied store password is
+    # the single signal that flips connectors ON and runs the refresh.
     _clear_connector_env(monkeypatch)
-    monkeypatch.setattr(instance, "list_providers", list)
-    monkeypatch.setattr(instance.build_app(), "_manifest", Manifest())
-    monkeypatch.setenv("CONNECTORS_KEK", "some-key")
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "secret")
     calls = _record_refresh(monkeypatch)
 
     await instance.refresh_catalog_if_connectors_in_use()
@@ -108,9 +109,11 @@ async def test_catalog_refresh_runs_when_connector_env_present(monkeypatch):
     assert calls == [True]
 
 
-async def test_catalog_refresh_runs_when_manifest_declares_managed_entry(monkeypatch):
+async def test_catalog_refresh_skipped_when_managed_entry_but_store_unconfigured(monkeypatch):
+    # DELIBERATE semantic change: a connector-managed manifest entry no longer flips
+    # connectors ON. The gate is the store-configured gate alone, so with no store
+    # password the refresh is skipped even though a managed entry is declared.
     _clear_connector_env(monkeypatch)
-    monkeypatch.setattr(instance, "list_providers", list)
     manifest = Manifest(
         mcp=[
             TaiMCPConfig(
@@ -131,31 +134,32 @@ async def test_catalog_refresh_runs_when_manifest_declares_managed_entry(monkeyp
 
     await instance.refresh_catalog_if_connectors_in_use()
 
-    assert calls == [True]
+    assert calls == []
 
 
-async def test_catalog_refresh_runs_when_a_provider_is_registered(monkeypatch):
+async def test_catalog_refresh_skipped_when_provider_registered_but_store_unconfigured(monkeypatch):
+    # A registered connector provider no longer flips connectors ON either — only the
+    # store-configured gate does. With a provider registered but no store password the
+    # refresh is still skipped.
+    from tai42_skeleton.connectors.providers import registry as provider_registry
+
     _clear_connector_env(monkeypatch)
-    monkeypatch.setattr(instance, "list_providers", lambda: [object()])
-    monkeypatch.setattr(instance.build_app(), "_manifest", Manifest())
+    monkeypatch.setitem(provider_registry._REGISTRY, "acme", object())
     calls = _record_refresh(monkeypatch)
 
     await instance.refresh_catalog_if_connectors_in_use()
 
-    assert calls == [True]
+    assert calls == []
 
 
-def test_default_namespace_env_does_not_flip_connectors_gate(monkeypatch):
-    # The gate reads raw CONNECTORS_*/CONNECTOR_STORE_* keys; the TAI_DEFAULT_*
-    # connection fallback is a different namespace, so setting it must not make a
-    # connector-less deployment look connector-backed.
+def test_default_namespace_env_does_flip_connectors_gate(monkeypatch):
+    # The connectors gate is the store-configured gate, which resolves through the
+    # shared TAI_DEFAULT_PG_PASSWORD fallback — so setting it flips connectors ON,
+    # exactly like the versioning/marketplace/tool_meta store gates.
     _clear_connector_env(monkeypatch)
-    monkeypatch.setattr(instance, "list_providers", list)
-    monkeypatch.setattr(instance.build_app(), "_manifest", Manifest())
-    monkeypatch.setenv("TAI_DEFAULT_PG_HOST", "shared-db")
-    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+    monkeypatch.setenv("TAI_DEFAULT_PG_PASSWORD", "shared-secret")
 
-    assert instance.connectors_in_use() is False
+    assert instance.connectors_in_use() is True
 
 
 # --- versioned-preset rehydration gate --------------------------------------

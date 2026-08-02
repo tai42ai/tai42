@@ -196,13 +196,18 @@ async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) ->
 
 
 async def test_wired_connections_gates_in_stores_when_wired(monkeypatch) -> None:
-    monkeypatch.setattr(health.instance, "connectors_in_use", lambda: True)
+    _quiet_stores(monkeypatch)
     monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: True)
+    # A connector store password wires connectors in; a connector Redis URL rides the
+    # additional Redis row on top of the Postgres row.
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "pw")
+    monkeypatch.setenv("CONNECTOR_STORE_REDIS_URL", "redis://connectors")
     monkeypatch.setenv("HOOKS_REDIS_URL", "redis://hooks")
     reset_all_settings()
     try:
         conns = health._wired_connections()
     finally:
+        monkeypatch.delenv("CONNECTOR_STORE_REDIS_URL", raising=False)
         reset_all_settings()
 
     names = [name for name, _, _ in conns]
@@ -210,16 +215,44 @@ async def test_wired_connections_gates_in_stores_when_wired(monkeypatch) -> None
     assert "connectors" in names
     assert "versioning" in names
     assert "hooks" in names
-    # connectors contributes a Postgres connection; so does versioning.
+    # connectors contributes both a Postgres and a Redis connection here; versioning
+    # contributes a Postgres one.
+    connector_classes = {cls for name, cls, _ in conns if name == "connectors"}
+    assert connector_classes == {PostgresClient, RedisClient}
     assert PostgresClient in classes
+
+
+async def test_ready_connectors_pg_only_readies_without_connector_redis(monkeypatch) -> None:
+    # The connectors split: a store password wires the Postgres row, but with no
+    # connector Redis URL resolving (own var or TAI_DEFAULT_REDIS_URL), no Redis row is
+    # emitted — so a Postgres-only connector deploy readies (200) instead of 503ing on a
+    # Redis it never wired. Mirrors the tool_runs/interactions redis-url gate shape.
+    calls: list = []
+    monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
+    _quiet_stores(monkeypatch)
+    # A password wires connectors on; a host lets the Postgres row compose its DSN.
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "pw")
+    monkeypatch.setenv("CONNECTOR_STORE_PG_HOST", "db")
+    reset_all_settings()
+    try:
+        wired = health._wired_connections()
+        resp = await health.readiness_check(_request())
+    finally:
+        reset_all_settings()
+
+    rows = {(name, cls) for name, cls, _ in wired}
+    assert ("connectors", PostgresClient) in rows
+    assert ("connectors", RedisClient) not in rows
+    assert resp.status_code == 200
+    body = json.loads(bytes(resp.body))
+    assert body["checks"]["connectors"] == "ok"
 
 
 async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None:
     # The durable sub-MCP registration store joins the readiness set exactly when
     # SUB_MCP_REDIS_URL is set (same gate shape as hooks): a ``sub_mcp`` Redis check
     # appears with it set, and no ``sub_mcp`` check appears with it unset.
-    monkeypatch.setattr(health.instance, "connectors_in_use", lambda: False)
-    monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
+    _quiet_stores(monkeypatch)
     for key in list(os.environ):
         if key.startswith("SUB_MCP_"):
             monkeypatch.delenv(key, raising=False)
@@ -244,8 +277,8 @@ async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None
 
 def _quiet_stores(monkeypatch) -> None:
     # Keep the readiness set to just the feature under test: no connectors/versioning,
-    # and none of the shared TAI_DEFAULT_* / feature stores leaking a row in.
-    monkeypatch.setattr(health.instance, "connectors_in_use", lambda: False)
+    # and none of the shared TAI_DEFAULT_* / feature stores leaking a row in. Connectors
+    # gates on its store password (own var or TAI_DEFAULT_PG_PASSWORD), so both are cleared.
     monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
     for var in (
         "TAI_DEFAULT_REDIS_URL",
@@ -254,6 +287,7 @@ def _quiet_stores(monkeypatch) -> None:
         "INTERACTIONS_REDIS_URL",
         "MARKETPLACE_STORE_PG_PASSWORD",
         "TOOL_META_STORE_PG_PASSWORD",
+        "CONNECTOR_STORE_PG_PASSWORD",
     ):
         monkeypatch.delenv(var, raising=False)
 
