@@ -28,8 +28,8 @@ dependencies = [
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=0.3,<0.4",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.3,<0.4",
-    "tai42-skeleton[toolbox,files]>=0.5,<0.6",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.4,<0.5",
+    "tai42-skeleton[toolbox,files]>=0.6,<0.7",
     "tai42-toolbox[http,prometheus,chain,proxy]>=0.3,<0.4",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -54,10 +54,10 @@ dependencies = [
     "tai42-webhook-verifier-github>=0.2,<0.3",
     "tai42-webhook-verifier-stripe>=0.2,<0.3",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=0.3,<0.4",
-    "tai42-channel-slack>=0.3,<0.4",
-    "tai42-channel-twilio>=0.2,<0.3",
-    "tai42-channel-whatsapp>=0.2,<0.3",
+    "tai42-channel-telegram>=0.4,<0.5",
+    "tai42-channel-slack>=0.4,<0.5",
+    "tai42-channel-twilio>=0.3,<0.4",
+    "tai42-channel-whatsapp>=0.3,<0.4",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=0.2,<0.3",
 

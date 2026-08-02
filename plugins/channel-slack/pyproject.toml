@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-slack"
-version = "0.3.2"
+version = "0.4.0"
 description = "Slack channel plugin for the TAI ecosystem — delivers ask_user questions to a Slack channel and bridges threaded replies back to the interactions callback door."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -28,7 +28,7 @@ dependencies = [
     "tai42-contract>=0.3,<0.4",
     # HttpxClient + RedisClient pooling, TaiBaseSettings + the settings cache
     # registry. The [redis] extra carries the correlation store's driver.
-    "tai42-kit[redis]>=0.3,<0.4",
+    "tai42-kit[redis]>=0.4,<0.5",
     # The whole Slack surface is two HTTPS POSTs — no slack_sdk, no Bolt.
     "httpx>=0.28",
     # Request/Response types of the inbound route handler (the contract's
