@@ -16,11 +16,12 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 class RateLimitRedisSettings(RedisConnectionSettings):
     """Redis holding the per-bucket fixed-window counters. Connection values come
-    from the ``TAI_RATE_LIMIT_REDIS_*`` env; defaults to local dev."""
+    from the ``TAI_RATE_LIMIT_REDIS_*`` env, or the shared ``TAI_DEFAULT_REDIS_URL``;
+    absent = rate limiting is OFF (pass-through)."""
 
     model_config = SettingsConfigDict(env_prefix="TAI_RATE_LIMIT_")
 
-    redis_url: str | None = "redis://localhost:6379/0"
+    redis_url: str | None = None
     redis_max_connections: int | None = 10
 
     # A black-holed Redis fails the rate-limit counter op loudly within 5s instead

@@ -46,14 +46,21 @@ from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
     NotFoundError,
-    UnavailableError,
+    NotSupportedError,
     operation,
 )
 from tai42_skeleton.operations._broadcast import log_non_convergence
 from tai42_skeleton.presets.manager import is_valid_preset_name
+from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
 from tai42_skeleton.versioning import versioned_store_configured
 
 logger = logging.getLogger(__name__)
+
+# The machine-readable code + message every preset OFF refusal carries when the
+# versioned-document store is unconfigured. A 501 (a capability the deployment
+# lacks), never a transient 503 — the store is absent, not momentarily down.
+_NOT_CONFIGURED_CODE = "versioning-not-configured"
+_NOT_CONFIGURED_MESSAGE = "presets require a configured versioned-document store"
 
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
@@ -546,7 +553,7 @@ async def list_presets() -> list[dict[str, Any]]:
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, UnavailableError],
+    errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=PresetCreate,
 )
 async def create_preset(
@@ -621,14 +628,16 @@ async def create_preset(
     # list / delete / reconcile paths gate on — rather than let create open Postgres
     # and fail with an opaque 500.
     if not versioned_store_configured():
-        raise UnavailableError("presets require a configured versioned-document store")
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
 
     # Clean slate: a dangling overlay row for this name (left by a DIFFERENT tool that
     # once held it, kept across a plugin uninstall) must never be inherited by the
     # fresh preset, so drop it before the claim. A no-op when no row exists; and if the
     # create below rolls back, the deleted ghost belonged to a vanished tool and needs
-    # no restoring.
-    await instance.app.tool_meta.store.delete_meta(name)
+    # no restoring. Guarded on the overlay store: with tool_meta OFF the cascade is a
+    # no-op rather than a 500 opening an absent Postgres.
+    if tool_meta_store_configured():
+        await instance.app.tool_meta.store.delete_meta(name)
 
     # The pre-checks already ran, so the store write is safe. Persist THEN register;
     # if register fails, roll the store row fully back through the generic HARD
@@ -998,8 +1007,10 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # reload failure rolled the versioned store back to the old name. The re-key
     # atomically drops any pre-existing ``new_name`` overlay row before moving the old
     # one (clean slate); a failure here raises loudly, leaving only a dangling old-name
-    # row that the next claim reclaims.
-    await instance.app.tool_meta.store.rename_tool(name, new_name)
+    # row that the next claim reclaims. Guarded on the overlay store: with tool_meta
+    # OFF the re-key is a no-op rather than a 500 opening an absent Postgres.
+    if tool_meta_store_configured():
+        await instance.app.tool_meta.store.rename_tool(name, new_name)
 
     # A rename changes the tool listing by definition (old gone, new present), so the
     # emit is unconditional — no wire-diff guard.
@@ -1044,8 +1055,10 @@ async def delete_preset(name: str) -> dict[str, Any]:
             logger.exception("failed to hard-delete conflicted preset record %r", name)
             raise
         # Cascade the overlay row (R5): the tool is gone, so its organizational
-        # metadata goes with it. A no-op when the preset never got a row.
-        await instance.app.tool_meta.store.delete_meta(name)
+        # metadata goes with it. A no-op when the preset never got a row, and skipped
+        # entirely when the overlay store is OFF (no absent-Postgres open).
+        if tool_meta_store_configured():
+            await instance.app.tool_meta.store.delete_meta(name)
         mgr.drop_quarantine(name)
         await _fanout_remove(name)
         return {"name": name, "deleted": True}
@@ -1061,8 +1074,10 @@ async def delete_preset(name: str) -> dict[str, Any]:
     await mgr.remove(name)
     # Cascade the overlay row (R5) once the preset is soft-deleted and torn down.
     # Keyed by tool name, so the soft-delete ghost in ``versioned_documents`` is
-    # irrelevant; a no-op when the preset never got a row.
-    await instance.app.tool_meta.store.delete_meta(name)
+    # irrelevant; a no-op when the preset never got a row, and skipped entirely when
+    # the overlay store is OFF (no absent-Postgres open).
+    if tool_meta_store_configured():
+        await instance.app.tool_meta.store.delete_meta(name)
     await instance.app.emit_list_changed("tool")
     await _fanout_remove(name)
     return {"name": name, "deleted": True}
@@ -1175,7 +1190,7 @@ async def _verdict_bind_chain(
 @operation(
     summary="Validate a preset draft (dry-run)",
     tags=["presets"],
-    errors=[BadRequestError, UnavailableError],
+    errors=[BadRequestError, NotSupportedError],
     request_model=PresetValidate,
 )
 async def validate_preset(
@@ -1195,7 +1210,7 @@ async def validate_preset(
     # Mode resolution needs the store; refuse cleanly on a store-less deploy exactly
     # as the create route does before anything else.
     if not versioned_store_configured():
-        raise UnavailableError("presets require a configured versioned-document store")
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
 
     store = instance.app.presets.store
     try:
@@ -1265,21 +1280,22 @@ async def validate_preset(
     summary="Set a preset version's tags",
     tags=["presets"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError, UnavailableError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PresetVersionTags,
 )
 async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> dict[str, Any]:
     """Replace one version's ``tags`` annotation. Tags are labels on an immutable
     version body, so this edits only the annotation and never rebinds the live tool
-    (no reload / no fan-out). 404 for an unknown preset or version; the create
-    route's 503 on a store-less deploy."""
+    (no reload / no fan-out). 404 for an unknown preset or version; a 501
+    ``NotSupportedError`` (versioning-not-configured) on a store-less deploy, exactly as
+    the create route refuses."""
     try:
         version_num = int(version)
     except ValueError as exc:
         raise BadRequestError("version must be an integer") from exc
 
     if not versioned_store_configured():
-        raise UnavailableError("presets require a configured versioned-document store")
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
 
     try:
         await instance.app.presets.set_version_tags(name, version_num, tags)

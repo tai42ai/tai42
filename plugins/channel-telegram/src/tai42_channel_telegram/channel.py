@@ -32,10 +32,11 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_kit.settings import require, require_secret
 
 from tai42_channel_telegram.client import telegram_http
 from tai42_channel_telegram.correlation import store_correlation
-from tai42_channel_telegram.settings import bot_numeric_id, require, require_secret, telegram_settings
+from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
 # Tier-1 (confirm/external) is answered at the callback door via a tappable URL
 # button; text/select are Tier-2 (ForceReply + correlation, answered by typing).
@@ -59,7 +60,7 @@ def _require_delivery[T](value: T | None, env_name: str) -> T:
     """The configured value, or raise :class:`ChannelDeliveryError` naming the
     missing env var (retyping :func:`require` for the deliver/notify path)."""
     try:
-        return require(value, env_name)
+        return require(value, "the telegram channel", env_name)
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
 
@@ -69,7 +70,7 @@ def _require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
     unset/EMPTY (fail CLOSED; retyping :func:`require_secret`, message names only
     the env var)."""
     try:
-        return require_secret(value, env_name)
+        return require_secret(value, "the telegram channel", env_name)
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
 

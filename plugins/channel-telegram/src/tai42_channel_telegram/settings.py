@@ -5,8 +5,8 @@ credential, recipient allowlist + default, webhook secret, public base URL, HTTP
 budget) and :class:`TelegramCorrelationSettings` (the correlation store's Redis
 connection). Both are exposed through ``@settings_cache`` accessors (dropped on a
 soft restart). Credentials are ``SecretStr`` (masked in repr/logs/model_dump);
-fields default ``None`` so importing never demands config, and the
-``require``/``require_secret`` helpers raise loudly naming the missing env var.
+fields default ``None`` so importing never demands config, and the kit's
+``require``/``require_secret`` raise loudly at use, naming the missing env var.
 """
 
 from __future__ import annotations
@@ -83,23 +83,6 @@ def telegram_settings() -> TelegramSettings:
 @settings_cache
 def telegram_correlation_settings() -> TelegramCorrelationSettings:
     return TelegramCorrelationSettings()
-
-
-def require[T](value: T | None, env_name: str) -> T:
-    """The configured value, or raise naming the missing env var (a manifest-named
-    channel missing config must fail loudly at use, never a silent no-op)."""
-    if value is None:
-        raise ValueError(f"the telegram channel is not configured: set {env_name}")
-    return value
-
-
-def require_secret(value: SecretStr | None, env_name: str) -> str:
-    """The secret's plaintext, or raise on unset/EMPTY — fail CLOSED. An empty
-    webhook secret would let any client forge "the human answered", so both raise."""
-    secret = require(value, env_name).get_secret_value()
-    if not secret:
-        raise ValueError(f"{env_name} is set but empty")
-    return secret
 
 
 def bot_numeric_id(token: str) -> str:

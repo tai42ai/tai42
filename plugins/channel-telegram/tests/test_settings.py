@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.settings import (
     TelegramSettings,
     bot_numeric_id,
-    require,
-    require_secret,
     telegram_correlation_settings,
     telegram_settings,
 )
@@ -105,29 +103,6 @@ def test_correlation_settings_client_kwargs():
     kwargs = telegram_correlation_settings().client_kwargs()
     assert kwargs["url"] == "redis://localhost:6379/0"
     assert kwargs["decode_responses"] is True
-
-
-def test_require_returns_configured_value():
-    assert require("777", "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT") == "777"
-
-
-def test_require_raises_naming_env_var():
-    with pytest.raises(ValueError, match="set CHANNEL_TELEGRAM_DEFAULT_RECIPIENT"):
-        require(None, "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT")
-
-
-def test_require_secret_returns_plaintext():
-    assert require_secret(SecretStr("tok"), "CHANNEL_TELEGRAM_BOT_TOKEN") == "tok"
-
-
-def test_require_secret_unset_raises():
-    with pytest.raises(ValueError, match="set CHANNEL_TELEGRAM_BOT_TOKEN"):
-        require_secret(None, "CHANNEL_TELEGRAM_BOT_TOKEN")
-
-
-def test_require_secret_empty_raises_fail_closed():
-    with pytest.raises(ValueError, match="CHANNEL_TELEGRAM_WEBHOOK_SECRET is set but empty"):
-        require_secret(SecretStr(""), "CHANNEL_TELEGRAM_WEBHOOK_SECRET")
 
 
 def test_zero_timeout_rejected(monkeypatch: pytest.MonkeyPatch):

@@ -31,6 +31,14 @@ from tai42_skeleton.routers import interactions as router
 from tests._helpers import DeliverOnlyChannel, await_add_event
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 class FakeChannel(DeliverOnlyChannel):
     """Records every delivery; the test then plays the plugin's part by POSTing
     the human's typed answer to the recorded ``callback_url``."""

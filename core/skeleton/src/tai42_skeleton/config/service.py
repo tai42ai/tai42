@@ -59,7 +59,7 @@ from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app.boot_rules import check_backend_needs_bus
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
-from tai42_skeleton.app.bus_settings import bus_settings
+from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
 from tai42_skeleton.manifest import Manifest
@@ -69,10 +69,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from ruamel.yaml.comments import CommentedMap
-
-# The env var that configures the worker bus; an env change that empties it removes
-# the bus. Kept in sync with the boot rules' bus-var name.
-_BUS_VAR = "TAI_BUS_REDIS_URL"
 
 
 class _ManifestStore(Protocol):
@@ -223,7 +219,12 @@ class ConfigService:
         effective = self._effective_env(changes)
         with _environ(effective):
             manifest = self._validated_projection(self._read_preserved_manifest())
-        bus_configured = bool(effective.get(_BUS_VAR, "").strip())
+            # Resolve the bus through its settings against the effective env (a fresh
+            # read, NOT the cached singleton) so a bus configured only via
+            # ``TAI_DEFAULT_REDIS_URL`` — not ``TAI_BUS_REDIS_URL`` — is still seen as
+            # enabled; a raw ``TAI_BUS_REDIS_URL`` read would falsely reject every
+            # Studio env edit on a default-only deployment.
+            bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
 
     def _validated_projection(self, document: Mapping[str, Any]) -> Manifest:

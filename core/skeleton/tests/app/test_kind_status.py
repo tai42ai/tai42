@@ -1,6 +1,7 @@
-"""``collect_kind_status`` reports exactly the nine pluggable kinds, each with the
-live ``active``/``default``/``off`` state of its registry, and the NoOp-monitoring
-warning fires once per process only when NoOp is the active recorder."""
+"""``collect_kind_status`` reports the nine pluggable kinds plus one row per
+DB-backed gated feature, each with the live ``active``/``default``/``off`` state of
+its registry or store config, and the NoOp-monitoring warning fires once per
+process only when NoOp is the active recorder."""
 
 from __future__ import annotations
 
@@ -29,6 +30,14 @@ _EXPECTED_KINDS = [
     "webhook_verifiers",
     "config",
     "studio_plugins",
+    # one row per DB-backed gated feature, appended after the pluggable kinds.
+    "tool_runs",
+    "interactions",
+    "rate_limit",
+    "marketplace_store",
+    "tool_meta",
+    "connectors",
+    "versioning",
 ]
 
 
@@ -89,8 +98,41 @@ def _row(kind: str) -> KindStatus:
     return next(row for row in collect_kind_status() if row.kind == kind)
 
 
-def test_nine_rows_exact_kind_set(bound_app) -> None:
+def test_exact_kind_set(bound_app) -> None:
     assert [row.kind for row in collect_kind_status()] == _EXPECTED_KINDS
+
+
+def test_gated_features_off_when_unconfigured(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store env, every DB-backed gated feature reports ``off`` naming the env
+    # var that turns it on — the honest introspection state, never an error.
+    for var in (
+        "TAI_TOOL_RUNS_REDIS_URL",
+        "INTERACTIONS_REDIS_URL",
+        "TAI_RATE_LIMIT_REDIS_URL",
+        "MARKETPLACE_STORE_PG_PASSWORD",
+        "TOOL_META_STORE_PG_PASSWORD",
+        "CONNECTOR_STORE_PG_PASSWORD",
+        "VERSIONING_STORE_PG_PASSWORD",
+        "TAI_DEFAULT_REDIS_URL",
+        "TAI_DEFAULT_PG_PASSWORD",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    for kind in (
+        "tool_runs",
+        "interactions",
+        "rate_limit",
+        "marketplace_store",
+        "tool_meta",
+        "connectors",
+        "versioning",
+    ):
+        assert _row(kind).state == "off"
+
+
+def test_gated_feature_active_when_configured(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A configured store flips the row to ``active`` — the row tracks the live env.
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
+    assert _row("tool_runs").state == "active"
 
 
 # -- identity ------------------------------------------------------------------

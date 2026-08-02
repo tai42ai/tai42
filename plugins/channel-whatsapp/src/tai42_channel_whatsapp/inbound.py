@@ -32,6 +32,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
@@ -42,7 +43,7 @@ from tai42_channel_whatsapp.correlation import (
     pop_pending,
     restore_pending,
 )
-from tai42_channel_whatsapp.settings import require_secret, whatsapp_settings
+from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def _authenticated_body(request: Request) -> bytes:
     Nothing in the body is trusted until the signature validates. Raises
     ``ValueError`` (app secret unset → logged 500), ``PayloadTooLargeError``
     (→ 413), or ``SignatureRejectedError`` (→ 401)."""
-    app_secret = require_secret(whatsapp_settings().app_secret, "CHANNEL_WHATSAPP_APP_SECRET")
+    app_secret = require_secret(whatsapp_settings().app_secret, "WhatsApp channel", "CHANNEL_WHATSAPP_APP_SECRET")
     raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
     _validate_signature(app_secret, raw, request.headers.get(_SIGNATURE_HEADER))
     return raw
@@ -143,7 +144,7 @@ def _verify_handshake(request: Request) -> Response:
     if params.get("hub.mode") != "subscribe":
         return PlainTextResponse("unsupported hub.mode", status_code=403)
     try:
-        expected = require_secret(whatsapp_settings().verify_token, "CHANNEL_WHATSAPP_VERIFY_TOKEN")
+        expected = require_secret(whatsapp_settings().verify_token, "WhatsApp channel", "CHANNEL_WHATSAPP_VERIFY_TOKEN")
     except ValueError:
         logger.error("whatsapp verify: CHANNEL_WHATSAPP_VERIFY_TOKEN is unset or empty; failing closed")
         return JSONResponse({"error": "channel misconfigured"}, status_code=500)

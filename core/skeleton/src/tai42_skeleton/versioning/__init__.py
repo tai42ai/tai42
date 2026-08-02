@@ -26,7 +26,8 @@ def versioned_store_configured() -> bool:
     reconcile / versioned create) skip the Postgres open rather than fail to
     connect. Read fresh (not the cached settings singleton) so it always reflects
     the live env after a config reload."""
-    return bool(VersioningStorePgSettings().pg_password.get_secret_value())
+    s = VersioningStorePgSettings()
+    return bool(s.pg_password and s.pg_password.get_secret_value())
 
 
 def versioned_store() -> PostgresVersionedStore:

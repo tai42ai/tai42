@@ -25,10 +25,11 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_kit.settings import require, require_secret
 
 from tai42_channel_slack.client import slack_http
 from tai42_channel_slack.correlation import remaining_seconds, store_correlation
-from tai42_channel_slack.settings import SlackSettings, require, require_secret, slack_settings
+from tai42_channel_slack.settings import SlackSettings, slack_settings
 
 # Answered through the callback door directly (tappable plain link), never a typed
 # thread reply: confirm (door records a bool from the tap) and external (structured POST).
@@ -40,7 +41,7 @@ def _require_for_delivery[T](value: T | None, env_name: str) -> T:
     (a config gap on the deliver/notify path is a delivery failure; wraps
     ``require``, raised before any network call)."""
     try:
-        return require(value, env_name)
+        return require(value, "the slack channel", env_name)
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
 
@@ -49,7 +50,7 @@ def _require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
     """The secret's plaintext, or :class:`ChannelDeliveryError` on unset/EMPTY
     (fail closed; wraps ``require_secret``, message names only the env var)."""
     try:
-        return require_secret(value, env_name)
+        return require_secret(value, "the slack channel", env_name)
     except ValueError as exc:
         raise ChannelDeliveryError(str(exc)) from exc
 

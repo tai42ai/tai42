@@ -38,6 +38,14 @@ from tai42_skeleton.operations import notifications as notifications_ops
 from tai42_skeleton.operations.projection import project_operations
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @contextmanager
 def _restricted(own_id: str, owner: str | None = None) -> Iterator[None]:
     """Bind a RESTRICTED owned-key caller isolated to its OWN id ``own_id``. The owner
@@ -341,3 +349,71 @@ def test_notify_user_projects_with_destructive_hint() -> None:
     names = project_operations(app, ApiToolsConfig(expose_destructive=True), registry=reg)
     assert "notify_user" in names
     assert app.tools.registered["notify_user"]["annotations"].destructiveHint is True
+
+
+# -- the store-unconfigured OFF gate ------------------------------------
+# The internal feed lives on the interactions Redis; with none configured the read is
+# honestly empty and a channel-less send refuses with the feature's named 501. Force
+# OFF by delenv-ing BOTH vars, overriding the autouse setenv.
+
+
+async def test_list_notifications_off_when_store_unconfigured_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store the honest answer is the empty collection — no store touched.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    assert await notifications_ops.list_notifications() == {"notifications": []}
+
+
+async def test_notify_user_off_when_store_unconfigured_raises_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A channel-less send targets the internal sink; with no store it refuses with the
+    # named 501 code, served by the boundary guard at the sole feed writer
+    # (record_notification) — the record write is the first store access on this path.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await notifications_ops.notify_user("status update", channel=None)
+    assert exc_info.value.extra["code"] == "interactions-not-configured"
+
+
+async def test_notify_user_off_restricted_channel_send_refuses_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A restricted (owned-key) caller's audience is clamped to its own identity, so its
+    # channel send ALWAYS records to the in-app feed too. With the interactions store
+    # OFF that feed write refuses with the named 501 at the boundary guard BEFORE the
+    # channel is notified — no phantom feed entry, no partial delivery. This pins the
+    # gate at the store-access choke point, not only the channel-less path.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    app._channel_registry.reset()
+    channel = _RecordingChannel()
+    tai42_app.channels.register("fake", channel)
+    try:
+        with _restricted("bob"), pytest.raises(NotSupportedError) as exc_info:
+            await notifications_ops.notify_user("status", channel="fake")
+    finally:
+        app._channel_registry.reset()
+
+    assert exc_info.value.extra["code"] == "interactions-not-configured"
+    # The channel was NEVER notified — the refuse fires before delivery.
+    assert channel.notifications == []
+
+
+async def test_notify_user_off_unrestricted_channel_send_no_audience_delivers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unrestricted caller's channel send with no audience never touches the in-app
+    # feed, so it delivers normally even with the store OFF — the boundary guard is
+    # reached only when a feed write actually happens.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    app._channel_registry.reset()
+    channel = _RecordingChannel()
+    tai42_app.channels.register("fake", channel)
+    try:
+        result = await notifications_ops.notify_user("hi", channel="fake")
+    finally:
+        app._channel_registry.reset()
+
+    assert result == "notification sent via 'fake'"
+    assert len(channel.notifications) == 1

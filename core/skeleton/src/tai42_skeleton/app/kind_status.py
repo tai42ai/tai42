@@ -21,6 +21,7 @@ registry surfaces loudly instead of as a silent partial table.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel
@@ -30,9 +31,16 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.connectors.settings import connectors_store_configured
+from tai42_skeleton.interactions.settings import interactions_store_configured
+from tai42_skeleton.marketplace.settings import marketplace_store_configured
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
+from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
+from tai42_skeleton.settings.rate_limit import RateLimitSettings
+from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
+from tai42_skeleton.versioning import versioned_store_configured
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -197,11 +205,40 @@ def _studio_plugins_row() -> KindStatus:
     )
 
 
-def collect_kind_status() -> list[KindStatus]:
-    """Snapshot every pluggable kind's live status — nine rows, read-only.
+# The DB-backed feature gates: each is a kind whose ``off`` state is the honest
+# answer when no store is configured. ``(kind, is-configured predicate, enabling
+# env var)`` — the predicate reads the same fresh pydantic-settings the feature
+# gates on, so the row tracks the live config after a reload. Access control is
+# deliberately absent: its off-state already surfaces through the ``identity`` row.
+_GATED_FEATURES: list[tuple[str, Callable[[], bool], str]] = [
+    ("tool_runs", tool_runs_store_configured, "TAI_TOOL_RUNS_REDIS_URL"),
+    ("interactions", interactions_store_configured, "INTERACTIONS_REDIS_URL"),
+    ("rate_limit", lambda: bool(RateLimitSettings().redis.redis_url), "TAI_RATE_LIMIT_REDIS_URL"),
+    ("marketplace_store", marketplace_store_configured, "MARKETPLACE_STORE_PG_PASSWORD"),
+    ("tool_meta", tool_meta_store_configured, "TOOL_META_STORE_PG_PASSWORD"),
+    ("connectors", connectors_store_configured, "CONNECTOR_STORE_PG_PASSWORD"),
+    ("versioning", versioned_store_configured, "VERSIONING_STORE_PG_PASSWORD"),
+]
 
-    Reads the process/app registries as they stand; each row is ``active``,
-    ``default``, or ``off`` per that kind's registration. The only swallowed error
+
+def _gated_feature_row(kind: str, configured: bool, enabling_var: str) -> KindStatus:
+    """One DB-backed feature's live status: ``active`` when its store is configured,
+    ``off`` (a legal, reported state — never an error) when it is not, naming the env
+    var that turns it on."""
+    if configured:
+        return KindStatus(kind=kind, state="active", plugin=None, detail=f"{enabling_var} configured")
+    return KindStatus(kind=kind, state="off", plugin=None, detail=f"{enabling_var} not configured")
+
+
+def collect_kind_status() -> list[KindStatus]:
+    """Snapshot every pluggable kind's live status, read-only.
+
+    Nine pluggable-kind rows (identity, accounts, monitoring, storage, backend,
+    channels, webhook verifiers, config, studio plugins) plus one row per DB-backed
+    gated feature (tool_runs, interactions, rate_limit, marketplace store, tool_meta,
+    connectors, versioning) whose ``off`` state is the honest answer when no store is
+    configured. Reads the process/app registries and the feature settings as they
+    stand; each row is ``active``, ``default``, or ``off``. The only swallowed error
     is the documented not-built :class:`StudioPluginError` (reported as an ``off``
     studio-plugins row); every other error propagates so a broken registry is loud.
     """
@@ -215,6 +252,7 @@ def collect_kind_status() -> list[KindStatus]:
         _webhook_verifiers_row(),
         _config_row(),
         _studio_plugins_row(),
+        *(_gated_feature_row(kind, configured(), var) for kind, configured, var in _GATED_FEATURES),
     ]
 
 

@@ -26,3 +26,16 @@ class ToolMetaStorePgSettings(PostgresConnectionSettings):
 @settings_cache
 def tool_meta_store_settings() -> ToolMetaStorePgSettings:
     return ToolMetaStorePgSettings()
+
+
+def tool_meta_store_configured() -> bool:
+    """Whether this deployment configures the tool-metadata Postgres store at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``TOOL_META_STORE_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. The store
+    carries no baked-in credential, so a supplied password is the signal a real
+    store is wired up; without one the overlay reads answer empty and its writes
+    refuse rather than reaching for an absent Postgres."""
+    s = ToolMetaStorePgSettings()
+    return bool(s.pg_password and s.pg_password.get_secret_value())

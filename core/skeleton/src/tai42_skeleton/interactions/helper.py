@@ -30,6 +30,7 @@ from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryErr
 from tai42_contract.interactions import AnswerFormat, InteractionRequest, MediaItem
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.settings import require
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
@@ -289,6 +290,11 @@ async def ask_user(
             raise ValueError("verifier is only valid with answer_format 'external'")
 
     settings = interactions_settings()
+    # OFF gate — a loud, named raise before any state is written (surfaces as a
+    # ToolError, matching this helper's existing loud contract): an unconfigured
+    # interactions store cannot hold the question, so ``ask_user`` fails naming the
+    # env var that turns the feature on rather than reaching for an absent Redis.
+    require(settings.redis.redis_url, "the interactions store", "INTERACTIONS_REDIS_URL", "TAI_DEFAULT_REDIS_URL")
     budget = settings.answer_timeout_seconds if timeout is None else timeout
     if budget <= 0:
         # Redis BLPOP treats 0 as "block forever" — the opposite of no-wait —

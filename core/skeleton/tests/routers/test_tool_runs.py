@@ -40,6 +40,15 @@ from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
 from tests._fakes.tool_runs_redis import FakeRedis
 
+
+@pytest.fixture(autouse=True)
+def _tool_runs_store_configured(monkeypatch):
+    # the tool-run surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
+
+
 # -- request builders --------------------------------------------------------
 
 

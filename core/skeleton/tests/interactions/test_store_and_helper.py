@@ -22,6 +22,14 @@ from tai42_skeleton.interactions import helper as helper_module
 from tests._helpers import await_add_event
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 def _request(interaction_id: str, group_id: str, store: InteractionStore) -> InteractionRequest:
     now = datetime.now(UTC)
     return InteractionRequest(

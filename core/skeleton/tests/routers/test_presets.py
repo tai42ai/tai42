@@ -1305,16 +1305,18 @@ def test_list_store_less_empty_without_opening_store(store_less, emit):
     asyncio.run(run())
 
 
-def test_create_store_less_refuses_with_503_without_opening_store(store_less, emit):
-    """A create on a store-less deploy is refused with 503 (the same
-    versioned_store_configured predicate the list/delete/reconcile paths gate on)
-    BEFORE any Postgres open — never a 500 from a failed store connection."""
+def test_create_store_less_refuses_with_501_without_opening_store(store_less, emit):
+    """A create on a store-less deploy is refused with 501 + the
+    ``versioning-not-configured`` code (the same versioned_store_configured predicate
+    the list/delete/reconcile paths gate on) BEFORE any Postgres open — a capability
+    the deployment lacks, never a transient 503 nor a 500 from a failed connection."""
 
     async def run():
         async with instance.app.app_context(_manifest()):
             resp = await router.create_preset(_request("POST", "/api/presets", body=_create_body("vers")))
-            assert resp.status_code == 503
+            assert resp.status_code == 501
             assert "versioned-document store" in _err(resp)
+            assert json.loads(bytes(resp.body))["code"] == "versioning-not-configured"
             # Nothing was registered — the refusal is total, not a partial create.
             assert not instance.app.preset_manager.is_registered("vers")
 
@@ -2165,14 +2167,16 @@ def test_validate_version_quarantined_is_invalid(pg, emit):
     asyncio.run(run())
 
 
-def test_validate_store_less_503(monkeypatch, emit):
-    # No VERSIONING_STORE_* env: mode resolution needs the store, so refuse cleanly.
+def test_validate_store_less_501(monkeypatch, emit):
+    # No VERSIONING_STORE_* env: mode resolution needs the store, so refuse cleanly
+    # with 501 + the versioning-not-configured code (a capability the deployment lacks).
     monkeypatch.delenv("VERSIONING_STORE_PG_PASSWORD", raising=False)
 
     async def run():
         async with instance.app.app_context(_manifest()):
             resp = await _validate({"name": "newp", "base_tool": "weather"})
-            assert resp.status_code == 503
+            assert resp.status_code == 501
+            assert json.loads(bytes(resp.body))["code"] == "versioning-not-configured"
 
     asyncio.run(run())
 

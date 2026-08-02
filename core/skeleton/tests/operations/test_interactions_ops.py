@@ -28,6 +28,14 @@ from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.operations.decorator import operation_metadata_of
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @pytest.fixture
 def wired(monkeypatch, fake_redis, fake_client_ctx):
     settings = InteractionsSettings()
@@ -95,3 +103,16 @@ def test_metadata_declares_destructive_and_the_full_error_set():
         NotFoundError,
         PayloadTooLargeError,
     }
+
+
+# -- the store-unconfigured OFF gate ------------------------------------
+
+
+async def test_answer_off_when_store_unconfigured_raises_not_found(monkeypatch):
+    # With no interactions Redis no interaction can exist — the answer door raises the
+    # SAME 404 as a genuine miss (delenv BOTH vars, overriding the autouse setenv), so
+    # the door is no oracle for the store's absence.
+    monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    with pytest.raises(NotFoundError, match="Interaction not found"):
+        await ops.answer_interaction("ghost", "hi")

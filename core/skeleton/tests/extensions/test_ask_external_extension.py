@@ -26,6 +26,14 @@ _BUILTIN_MODULE = "tai42_skeleton.extensions.builtin.ask_external"
 
 
 @pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
+@pytest.fixture(autouse=True)
 def _clean_server():
     """Clear the singleton FastMCP server's tools around each test — it outlives
     one ``app_context``, so a tool a prior apply-site test bound would collide

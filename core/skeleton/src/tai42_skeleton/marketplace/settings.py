@@ -61,3 +61,17 @@ class MarketplaceStorePgSettings(PostgresConnectionSettings):
 @settings_cache
 def marketplace_store_settings() -> MarketplaceStorePgSettings:
     return MarketplaceStorePgSettings()
+
+
+def marketplace_store_configured() -> bool:
+    """Whether this deployment configures the marketplace install-attribution
+    Postgres store at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``MARKETPLACE_STORE_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. The store
+    carries no baked-in credential, so a supplied password is the signal a real
+    store is wired up; without one the install/inventory paths answer OFF rather
+    than reaching for an absent Postgres."""
+    s = MarketplaceStorePgSettings()
+    return bool(s.pg_password and s.pg_password.get_secret_value())

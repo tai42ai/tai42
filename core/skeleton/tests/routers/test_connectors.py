@@ -31,6 +31,13 @@ from tai42_skeleton.connectors.oauth import state
 _FANOUT = {"mode": "fleet", "op": "reload_config", "results": [{"origin": "serve-x", "outcome": "applied"}]}
 
 
+@pytest.fixture(autouse=True)
+def _connector_store_configured(monkeypatch):
+    # the connector surface answers OFF with no store configured. These tests
+    # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "x")
+
+
 def _req(body=None, **path_params) -> Request:
     async def _json():
         return body
@@ -341,6 +348,17 @@ async def test_disconnect_does_not_serving_filter_expired(wiring, monkeypatch):
 
 
 # -- oauth/complete (decode) -------------------------------------------------
+
+
+async def test_oauth_complete_off_is_not_configured(monkeypatch):
+    # OFF state: with no connector store the flow cannot complete. This door
+    # carries a discriminated body with a load-bearing status, so the OFF state rides
+    # that native envelope — a 400 with ``kind: "not_configured"``, never ``{"error"}``.
+    monkeypatch.delenv("CONNECTOR_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    resp = await router.oauth_complete(_req({"state": "ok", "code": "c"}))
+    assert resp.status_code == 400
+    assert _data(resp) == {"data": {"kind": "not_configured"}}
 
 
 async def test_oauth_complete_cancelled(wiring):

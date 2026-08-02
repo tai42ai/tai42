@@ -45,7 +45,12 @@ from redis.asyncio import Redis
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.settings import (
+    INTERACTIONS_NOT_CONFIGURED_CODE,
+    INTERACTIONS_NOT_CONFIGURED_MESSAGE,
+    interactions_settings,
+    interactions_store_configured,
+)
 
 # The sink's suffix within the shared interactions key namespace. The feed key is
 # ``{key_prefix}notifications:feed`` — the interactions ``key_prefix`` threads
@@ -144,6 +149,16 @@ async def record_notification(message: str, recipient: str | None = None, audien
     on that identity's per-identity feed. Every Redis or serialization failure
     propagates loudly.
     """
+    # The in-app feed is interactions-Redis-backed, so every feed write refuses with
+    # the feature's named 501 when the store is unconfigured — this is the sole writer
+    # of the feed, so no path reaches an absent store and opaquely 500s. The
+    # NotSupportedError import is function-local: the operations package pulls in the app
+    # surface, which imports back through this channels module, so a module-level import
+    # would cycle.
+    from tai42_skeleton.operations import NotSupportedError
+
+    if not interactions_store_configured():
+        raise NotSupportedError(INTERACTIONS_NOT_CONFIGURED_MESSAGE, extra={"code": INTERACTIONS_NOT_CONFIGURED_CODE})
     settings = interactions_settings()
     sink = NotificationSink(settings.key_prefix, settings.notifications_feed_max)
     async with client_ctx(RedisClient, settings.redis) as r:

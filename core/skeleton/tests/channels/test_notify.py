@@ -274,7 +274,10 @@ async def test_cannot_notify_channel_surfaces_not_implemented(register_channel):
 @pytest.fixture
 def sink_redis(monkeypatch, fake_redis):
     """Point the internal sink's Redis at the shared fake so ``channel=None``
-    writes land somewhere readable back in the test."""
+    writes land somewhere readable back in the test, and configure the interactions
+    store so the feed write's OFF guard passes (only the presence gate reads the env;
+    the fake connection still stands in)."""
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):

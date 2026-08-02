@@ -189,11 +189,16 @@ def test_connector_engine_config_is_cached():
 # -- ConnectorStoreSettings --------------------------------------------------
 
 
-def test_store_settings_defaults():
+def test_store_settings_defaults(monkeypatch):
+    # No hidden localhost default: an unconfigured connector store carries a
+    # None Redis URL — its own CONNECTOR_STORE_REDIS_URL or TAI_DEFAULT_REDIS_URL is
+    # what wires it up, absence means the connectors router surface answers OFF.
+    monkeypatch.delenv("CONNECTOR_STORE_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     s = ConnectorStoreSettings()
     assert s.key_prefix == "connectors:"
     assert s.redis.decode_responses is False
-    assert s.redis.redis_url == "redis://localhost:6379/0"
+    assert s.redis.redis_url is None
     assert s.pg.pg_db == "tai"
 
 

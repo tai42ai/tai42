@@ -26,10 +26,11 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import telegram_http
 from tai42_channel_telegram.correlation import clear_correlation, lookup_callback_url
-from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, require_secret, telegram_settings
+from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, telegram_settings
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,9 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
     if not isinstance(update_id, int):
         return JSONResponse({"error": "update carries no integer update_id"}, status_code=400)
     try:
-        our_identity = bot_numeric_id(require_secret(settings.bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN"))
+        our_identity = bot_numeric_id(
+            require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
+        )
     except ValueError:
         return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
 

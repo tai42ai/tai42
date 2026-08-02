@@ -22,12 +22,13 @@ _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 class InteractionsRedisSettings(RedisConnectionSettings):
     """Per-deploy Redis holding the group streams, state hashes, pending index,
     reply channels, and the events tail. Connection values come from the
-    ``INTERACTIONS_REDIS_*`` env (``INTERACTIONS_REDIS_URL`` ...); defaults to
-    local dev."""
+    ``INTERACTIONS_REDIS_*`` env (``INTERACTIONS_REDIS_URL`` ...), or the shared
+    ``TAI_DEFAULT_REDIS_URL``; absent = the interactions store is unconfigured and
+    the feature answers OFF."""
 
     model_config = SettingsConfigDict(env_prefix="INTERACTIONS_")
 
-    redis_url: str | None = "redis://localhost:6379/0"
+    redis_url: str | None = None
     redis_max_connections: int | None = 10
 
     # A black-holed Redis fails the interactions op loudly within 5s instead of
@@ -109,3 +110,24 @@ class InteractionsSettings(TaiBaseSettings):
 @settings_cache
 def interactions_settings() -> InteractionsSettings:
     return InteractionsSettings()
+
+
+# The machine-readable code + message every interactions OFF refusal carries. The
+# notifications sink stores on this same Redis, so the notifications surface shares
+# this feature vocabulary. Hoisted so the several raise sites read identically.
+INTERACTIONS_NOT_CONFIGURED_CODE = "interactions-not-configured"
+INTERACTIONS_NOT_CONFIGURED_MESSAGE = (
+    "the interactions store is not configured: set INTERACTIONS_REDIS_URL (or TAI_DEFAULT_REDIS_URL)"
+)
+
+
+def interactions_store_configured() -> bool:
+    """Whether this deployment configures the interactions Redis store at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``INTERACTIONS_REDIS_*`` env or the shared ``TAI_DEFAULT_REDIS_URL``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. A set
+    ``redis_url`` signals the store is wired up; without one, the interactions and
+    internal-notifications surfaces answer OFF rather than reaching for an absent
+    Redis."""
+    return bool(InteractionsRedisSettings().redis_url)

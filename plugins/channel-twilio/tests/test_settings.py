@@ -5,14 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 from tai42_contract.channels import ChannelDeliveryError
-from tai42_kit.settings import reset_all_settings
+from tai42_kit.settings import require_secret, reset_all_settings
 
 from tai42_channel_twilio.settings import (
     TwilioRedisSettings,
     TwilioSettings,
     require_delivery_secret,
     require_delivery_setting,
-    require_secret,
     twilio_redis_settings,
     twilio_settings,
 )
@@ -116,22 +115,6 @@ def test_require_delivery_secret_returns_plaintext():
     assert require_delivery_secret(SecretStr("tok"), "CHANNEL_TWILIO_AUTH_TOKEN") == "tok"
 
 
-def test_require_secret_unset_raises_naming_env_var():
-    # The inbound webhook path keeps ValueError — its handler maps it to a
-    # logged 500, never a delivery failure.
-    with pytest.raises(ValueError, match="set CHANNEL_TWILIO_AUTH_TOKEN"):
-        require_secret(None, "CHANNEL_TWILIO_AUTH_TOKEN")
-
-
-def test_require_secret_empty_fails_closed():
-    with pytest.raises(ValueError, match="set CHANNEL_TWILIO_AUTH_TOKEN"):
-        require_secret(SecretStr(""), "CHANNEL_TWILIO_AUTH_TOKEN")
-
-
-def test_require_secret_returns_plaintext():
-    assert require_secret(SecretStr("tok"), "CHANNEL_TWILIO_AUTH_TOKEN") == "tok"
-
-
 def test_empty_env_secret_is_treated_as_missing(no_twilio_env, monkeypatch: pytest.MonkeyPatch):
     # env_ignore_empty: an empty CHANNEL_TWILIO_AUTH_TOKEN= leaves the field
     # None, so require_secret raises through the same fail-closed helper.
@@ -140,7 +123,7 @@ def test_empty_env_secret_is_treated_as_missing(no_twilio_env, monkeypatch: pyte
     settings = TwilioSettings()
     assert settings.auth_token is None
     with pytest.raises(ValueError, match="CHANNEL_TWILIO_AUTH_TOKEN"):
-        require_secret(settings.auth_token, "CHANNEL_TWILIO_AUTH_TOKEN")
+        require_secret(settings.auth_token, "Twilio channel", "CHANNEL_TWILIO_AUTH_TOKEN")
 
 
 def test_api_base_url_default_and_override(no_twilio_env, monkeypatch: pytest.MonkeyPatch):

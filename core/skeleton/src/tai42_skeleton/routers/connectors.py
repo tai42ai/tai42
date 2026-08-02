@@ -51,6 +51,7 @@ from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import state
 from tai42_skeleton.connectors.oauth.redirect import compute_deployment_origin, compute_redirect_uri
 from tai42_skeleton.connectors.service import connection_service
+from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.connectors import disconnect as _disconnect_op
 from tai42_skeleton.operations.connectors import get_connection as _get_connection_op
@@ -224,6 +225,12 @@ patch_sub_services = register_operation_route(
     action="write",
 )
 async def oauth_complete(request: Request) -> Response:
+    # OFF gate: with no connector store configured the flow cannot complete. This
+    # door carries a discriminated ``{"data": {"kind": ...}}`` body with a
+    # load-bearing status, so the OFF state rides that native envelope — a 400 with
+    # ``kind: "not_configured"`` — never the ``{"error": ...}`` shape and never a 501.
+    if not connectors_store_configured():
+        return JSONResponse({"data": {"kind": "not_configured"}}, status_code=400)
     try:
         body = await _json_body(request)
     except _BadRequest as exc:

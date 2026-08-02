@@ -54,11 +54,23 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, UnavailableError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ForbiddenError,
+    NotFoundError,
+    NotSupportedError,
+    UnavailableError,
+    operation,
+)
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
-from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_settings
+from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings, tool_runs_settings, tool_runs_store_configured
 
 logger = logging.getLogger(__name__)
+
+# The machine-readable code + message the tool-run OFF refusal carries when the
+# store is unconfigured. Hoisted so the submit refusal reads one way.
+_NOT_CONFIGURED_CODE = "tool-runs-not-configured"
+_NOT_CONFIGURED_MESSAGE = "the tool-run store is not configured: set TAI_TOOL_RUNS_REDIS_URL (or TAI_DEFAULT_REDIS_URL)"
 
 # The spawned supervisor tasks are held here so the event loop keeps a strong
 # reference (``asyncio`` only holds a weak one) — a dropped task would be
@@ -453,7 +465,7 @@ def _list_view(run_id: str, record: dict[str, str]) -> dict[str, Any]:
     destructive=True,
     reload_gated=True,
     meta_executor=True,
-    errors=[BadRequestError, NotFoundError, UnavailableError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError, UnavailableError],
     request_model=ToolRunSubmission,
 )
 async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
@@ -463,6 +475,13 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     The submitted tool is authorized against the caller with the full tool-edge decision
     before anything is recorded, so a fenced/secret target is admin-only here exactly as
     at the sync door and the MCP edge."""
+    # OFF gate — before ANY side effect (the concurrency slot, the authorize
+    # decision, the registry read): with no store configured the surface is cleanly
+    # OFF and refuses with a named, machine-readable reason rather than reaching for
+    # an absent Redis.
+    if not tool_runs_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+
     settings = tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
 
@@ -519,6 +538,10 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     errors=[ForbiddenError, NotFoundError],
 )
 async def get_run(run_id: str) -> dict:
+    # OFF gate: with no store, no run can exist — a 404 byte-identical to the
+    # genuine miss below, so the door is no oracle for the store's absence.
+    if not tool_runs_store_configured():
+        raise NotFoundError(f"run {run_id!r} not found")
     settings = tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
     _user_id, restricted = request_identity()
@@ -552,6 +575,10 @@ async def list_tool_runs(tool_name: str) -> list[dict]:
     is the honest answer to "my runs of this tool" — this filters a collection to the
     caller's own slice (distinct from GET-by-id, which raises ``403`` for a NAMED run
     owned by another identity)."""
+    # OFF gate: with no store, the honest answer to "my runs of this tool" is the
+    # empty collection — no store touched.
+    if not tool_runs_store_configured():
+        return []
     settings = tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
     _user_id, restricted = request_identity()

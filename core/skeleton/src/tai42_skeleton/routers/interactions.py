@@ -59,7 +59,13 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
-from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
+from tai42_skeleton.interactions.settings import (
+    INTERACTIONS_NOT_CONFIGURED_CODE,
+    INTERACTIONS_NOT_CONFIGURED_MESSAGE,
+    InteractionsSettings,
+    interactions_settings,
+    interactions_store_configured,
+)
 from tai42_skeleton.interactions.store import (
     ADD_EVENT,
     ANSWERED_EVENT,
@@ -353,12 +359,20 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
-        error_statuses=(401,),
+        error_statuses=(401, 501),
         success_status=200,
     ),
     action="read",
 )
 async def stream(request: Request) -> Response:
+    # OFF gate — BEFORE the StreamingResponse is constructed: an unconfigured store
+    # answers a plain 501+code up front rather than sending 200 + SSE headers and
+    # then dying mid-body when the generator reaches for an absent Redis.
+    if not interactions_store_configured():
+        return JSONResponse(
+            {"error": INTERACTIONS_NOT_CONFIGURED_MESSAGE, "code": INTERACTIONS_NOT_CONFIGURED_CODE},
+            status_code=501,
+        )
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
     return StreamingResponse(
@@ -406,7 +420,12 @@ answer = register_operation_route(
 
 async def _read_bounded_body(request: Request, cap: int) -> bytes:
     """Read the request body on ACTUAL bytes, never a client ``Content-Length``.
-    Raise ``_PayloadTooLarge`` past ``cap`` before parsing — loud, never truncated."""
+    Raise ``_PayloadTooLarge`` past ``cap`` before parsing — loud, never truncated.
+
+    Idempotent: the fully-read body is cached on the request (Starlette's own
+    ``_body`` slot) so a later re-read replays it instead of re-consuming the stream —
+    the size guard and the callback handler can each read it once without a
+    "stream consumed" error."""
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
@@ -414,7 +433,26 @@ async def _read_bounded_body(request: Request, cap: int) -> bytes:
         if total > cap:
             raise _PayloadTooLarge("request body exceeds the configured cap")
         chunks.append(chunk)
-    return b"".join(chunks)
+    body = b"".join(chunks)
+    request._body = body
+    return body
+
+
+async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | None:
+    """Enforce ``callback_max_body_bytes`` on BOTH the raw query string (the
+    confirm-flow answer rides the URL) and the actual body bytes. Return the 413
+    response when either exceeds the cap, or ``None`` when both are within it.
+
+    Runs identically in the OFF gate and the configured POST path so an oversized
+    POST answers the SAME 413 whether or not the store is configured — the public
+    door leaks no configured-vs-off oracle through the size cap."""
+    if len(request.url.query.encode()) > settings.callback_max_body_bytes:
+        return _callback_json({"error": "payload too large"}, 413)
+    try:
+        await _read_bounded_body(request, settings.callback_max_body_bytes)
+    except _PayloadTooLarge:
+        return _callback_json({"error": "payload too large"}, 413)
+    return None
 
 
 def _params_to_answer(request: Request) -> dict:
@@ -536,14 +574,13 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
 async def _callback_post(request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings) -> Response:
     ticket = request.path_params["ticket"]
 
-    # Size caps: the raw query string (the confirm-flow answer rides the URL) and
-    # the actual body bytes both obey ``callback_max_body_bytes``.
-    if len(request.url.query.encode()) > settings.callback_max_body_bytes:
-        return _callback_json({"error": "payload too large"}, 413)
-    try:
-        raw = await _read_bounded_body(request, settings.callback_max_body_bytes)
-    except _PayloadTooLarge:
-        return _callback_json({"error": "payload too large"}, 413)
+    # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
+    # gate runs, so an oversized POST answers 413 in both states. On success the body is
+    # cached, so the re-read below replays it.
+    oversized = await _callback_post_size_guard(request, settings)
+    if oversized is not None:
+        return oversized
+    raw = await _read_bounded_body(request, settings.callback_max_body_bytes)
 
     interaction_id = await store.resolve_ticket(r, ticket)
     if interaction_id is None:
@@ -681,6 +718,21 @@ async def callback(request: Request) -> Response:
     # the interactions-callback door family.
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
+
+    # OFF gate — BEFORE client_ctx. This is an UNAUTHENTICATED door, so an
+    # unconfigured store must answer the door's OWN uniform 404 (indistinguishable
+    # from an unknown/expired ticket), never a discriminable 501 that would oracle
+    # the store's absence to an outsider.
+    if not interactions_store_configured():
+        if request.method == "GET":
+            return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
+        # A POST still runs the SAME size guard the configured path runs BEFORE the
+        # uniform 404, so an oversized POST answers 413 identically in both states —
+        # the size cap is not a configured-vs-off oracle on this public door.
+        oversized = await _callback_post_size_guard(request, settings)
+        if oversized is not None:
+            return oversized
+        return _callback_json({"error": "not found"}, 404)
 
     async with client_ctx(RedisClient, settings.redis) as r:
         if request.method == "GET":

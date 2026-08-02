@@ -62,6 +62,10 @@ async def _probe_postgres(settings: SchemaAdminSettings) -> Check:
             await conn.execute("SELECT 1")
     except psycopg.OperationalError as exc:
         return Check("postgres", _FAIL, f"cannot connect to {_pg_target(settings)}: {exc}")
+    except ValueError as exc:
+        # The kit's named not-configured error (an unset TAI_DB_PG_HOST/PG_PASSWORD
+        # with no TAI_DEFAULT_* fallback) — a clean check line, never a traceback.
+        return Check("postgres", _FAIL, str(exc))
     return Check("postgres", _OK, f"connected to {_pg_target(settings)}")
 
 
@@ -104,6 +108,10 @@ async def _probe_redis() -> Check:
             await cast("Awaitable[bool]", client.ping())
     except (RedisConnectionError, RedisTimeoutError, OSError) as exc:
         return Check("redis", _FAIL, f"cannot connect to {target}: {exc}")
+    except ValueError as exc:
+        # The kit's named not-configured error (an unset CONNECTOR_STORE_REDIS_URL
+        # with no TAI_DEFAULT_REDIS_URL) — a clean check line, never a traceback.
+        return Check("redis", _FAIL, str(exc))
     return Check("redis", _OK, f"connected to {target}")
 
 

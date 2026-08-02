@@ -43,6 +43,14 @@ from tai42_skeleton.routers import interactions as router
 from tests._helpers import await_add_event
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @pytest.fixture
 def wired(monkeypatch, fake_redis, fake_client_ctx):
     settings = InteractionsSettings(public_base_url="https://cb.example")
@@ -1727,3 +1735,83 @@ async def test_add_data_channel_is_conditional(wired):
     assert router._add_data(with_channel)["channel"] == "chan"
     without_channel = _external_request(wired.store)
     assert "channel" not in router._add_data(without_channel)
+
+
+# -- the store-unconfigured OFF gate ------------------------------------
+# With no interactions Redis the surface is honestly OFF. The gate reads the presence
+# env fresh, so delenv-ing BOTH the feature var and the shared default (overriding the
+# autouse setenv) forces it.
+
+
+async def test_stream_off_when_store_unconfigured_returns_501(wired):
+    # The stream door answers a plain 501+code up front rather than opening a 200 SSE
+    # body that dies mid-stream reaching for an absent Redis — never a StreamingResponse.
+    from starlette.responses import JSONResponse, StreamingResponse
+
+    wired.monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    wired.monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    resp = await router.stream(make_request("GET"))
+    assert isinstance(resp, JSONResponse)
+    assert not isinstance(resp, StreamingResponse)
+    assert resp.status_code == 501
+    body = json.loads(bytes(resp.body))
+    assert body["code"] == "interactions-not-configured"
+    assert "error" in body
+
+
+async def test_callback_get_off_when_store_unconfigured_plain_404(wired):
+    # The unauthenticated callback door answers its OWN uniform 404 when the store is
+    # OFF — byte-identical to an unknown ticket, never a discriminable 501 oracle.
+    wired.monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    wired.monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 404
+    assert bytes(resp.body) == b"Not Found"
+
+
+async def test_callback_post_off_when_store_unconfigured_json_404(wired):
+    # The POST callback door mirrors the unknown-ticket 404 JSON body when the store
+    # is OFF — the outsider learns nothing about the store's absence.
+    wired.monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    wired.monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b"{}"))
+    assert resp.status_code == 404
+    assert _json(resp) == {"error": "not found"}
+
+
+def _off(wired) -> None:
+    wired.monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
+    wired.monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+
+
+async def test_callback_post_size_cap_identical_off_and_configured(wired):
+    # The size cap must not oracle the store's presence: an oversized POST answers a
+    # byte-identical 413 whether the store is OFF or configured-but-ticket-unknown, and a
+    # normal POST answers the byte-identical uniform 404 in both states. (Configured uses
+    # the wired fake Redis; the ticket "NOPE" resolves to nothing → the same 404 an OFF
+    # door serves, so the size guard is the ONLY reason 413 differs from 404.)
+    wired.settings.callback_max_body_bytes = 10
+    oversized = b"x" * 100
+
+    # Configured-but-ticket-unknown (autouse fixture leaves the store on).
+    big_on = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, body=oversized))
+    small_on = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, body=b"{}"))
+
+    # OFF: same door, no store.
+    _off(wired)
+    big_off = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, body=oversized))
+    small_off = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, body=b"{}"))
+
+    assert big_on.status_code == big_off.status_code == 413
+    assert bytes(big_on.body) == bytes(big_off.body)
+    assert small_on.status_code == small_off.status_code == 404
+    assert bytes(small_on.body) == bytes(small_off.body)
+
+
+async def test_callback_post_oversized_query_413_when_off(wired):
+    # The query-string leg of the cap fires in the OFF gate too — an oversized query
+    # answers 413, not the uniform 404.
+    wired.settings.callback_max_body_bytes = 10
+    _off(wired)
+    resp = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, query="a=" + "z" * 100))
+    assert resp.status_code == 413

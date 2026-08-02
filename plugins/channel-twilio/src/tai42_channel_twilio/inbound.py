@@ -32,6 +32,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.settings import require_secret
 
 from tai42_channel_twilio.correlation import (
     PendingQuestion,
@@ -40,7 +41,7 @@ from tai42_channel_twilio.correlation import (
     pop_pending,
     restore_pending,
 )
-from tai42_channel_twilio.settings import require_secret, twilio_settings
+from tai42_channel_twilio.settings import twilio_settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ async def _authenticated_form_pairs(request: Request) -> list[tuple[str, str]]:
     pairs (duplicates kept). Nothing in the body is trusted until the signature
     validates. Raises ``ValueError`` (auth token unset → logged 500),
     ``PayloadTooLargeError`` (→ 413), or ``SignatureRejectedError`` (→ 401)."""
-    auth_token = require_secret(twilio_settings().auth_token, "CHANNEL_TWILIO_AUTH_TOKEN")
+    auth_token = require_secret(twilio_settings().auth_token, "Twilio channel", "CHANNEL_TWILIO_AUTH_TOKEN")
     raw = await _read_bounded_body(request, _MAX_BODY_BYTES)
     try:
         body_text = raw.decode("utf-8")

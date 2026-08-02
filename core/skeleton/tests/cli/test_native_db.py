@@ -136,6 +136,23 @@ def test_apply_is_loud_and_credential_free_on_connection_failure(monkeypatch: py
     assert "s3cr3t-should-not-leak" not in result.output
 
 
+def test_apply_is_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kit's named not-configured error (unset TAI_DB_PG_PASSWORD, no TAI_DEFAULT
+    # fallback) yields a clean, actionable message and exit 1 — never a raw traceback.
+    async def _boom(settings: object) -> None:
+        raise ValueError(
+            "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
+        )
+
+    monkeypatch.setattr(db, "_apply_schema", _boom)
+
+    result = CliRunner().invoke(app_module.app, ["db", "apply"])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "is not configured: set TAI_DB_PG_PASSWORD" in result.output
+
+
 # --- check ----------------------------------------------------------------
 
 
@@ -172,3 +189,17 @@ def test_check_is_loud_on_connection_failure(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 1
     assert "could not connect to Postgres" in result.output
+
+
+def test_check_is_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(settings: object) -> list[str]:
+        raise ValueError(
+            "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
+        )
+
+    monkeypatch.setattr(db, "_missing_tables", _boom)
+
+    result = CliRunner().invoke(app_module.app, ["db", "check"])
+
+    assert result.exit_code == 1
+    assert "is not configured: set TAI_DB_PG_PASSWORD" in result.output

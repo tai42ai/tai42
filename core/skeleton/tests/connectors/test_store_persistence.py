@@ -26,6 +26,13 @@ from tai42_skeleton.connectors.store.persistence import (
 from .conftest import CID, CID2, make_oauth_record
 
 
+@pytest.fixture(autouse=True)
+def _connector_store_configured(monkeypatch):
+    # the connector surface answers OFF with no store configured. These tests
+    # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "x")
+
+
 class _FakeStore:
     def __init__(self, blob: bytes | None, *, expired: bool = False) -> None:
         self._blob = blob

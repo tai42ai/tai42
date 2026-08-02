@@ -618,7 +618,7 @@ def test_referees_store_less_404(monkeypatch) -> None:
     asyncio.run(run())
 
 
-# -- version tags: bad version + store-less 503 ------------------------------
+# -- version tags: bad version + store-less 501 ------------------------------
 
 
 def test_set_version_tags_non_int_version_400(pg) -> None:
@@ -630,12 +630,13 @@ def test_set_version_tags_non_int_version_400(pg) -> None:
     asyncio.run(run())
 
 
-def test_set_version_tags_store_less_503(monkeypatch) -> None:
+def test_set_version_tags_store_less_501(monkeypatch) -> None:
     monkeypatch.delenv("VERSIONING_STORE_PG_PASSWORD", raising=False)
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
-            with pytest.raises(preset_ops.UnavailableError, match="configured versioned-document store"):
+            with pytest.raises(preset_ops.NotSupportedError, match="configured versioned-document store") as exc_info:
                 await preset_ops.set_preset_version_tags(name="x", version="1", tags=[])
+            assert exc_info.value.extra["code"] == "versioning-not-configured"
 
     asyncio.run(run())

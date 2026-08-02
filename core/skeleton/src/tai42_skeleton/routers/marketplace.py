@@ -43,12 +43,14 @@ the adapter's request-model parse.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.marketplace import advisories
+from tai42_skeleton.marketplace.settings import marketplace_store_configured
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.marketplace import marketplace_advisories as _marketplace_advisories_op
 from tai42_skeleton.operations.marketplace import marketplace_categories as _marketplace_categories_op
@@ -64,6 +66,8 @@ from tai42_skeleton.operations.marketplace import marketplace_upgrade_all as _ma
 # The single-valued search facets forwarded to the registry; ``tags`` is handled
 # separately as a multi-value param. Unknown query params are ignored (they never
 # reach the registry).
+logger = logging.getLogger(__name__)
+
 _SEARCH_SINGLE_PARAMS = ("q", "kind", "category", "namespace", "tier", "contract", "sort", "page", "page_size")
 
 
@@ -174,7 +178,18 @@ marketplace_advisories = register_operation_route(
 @tai42_app.lifecycle.on_startup
 def _start_advisories_poll() -> None:
     """Start the advisory poll on the serving loop (the startup hook runs inside
-    the lifespan). It is a no-op when ``MARKETPLACE_ADVISORIES_POLL`` is off."""
+    the lifespan). It is a no-op when ``MARKETPLACE_ADVISORIES_POLL`` is off.
+
+    Skipped entirely with no install-attribution store configured: the poll would
+    otherwise fail every interval reaching for an absent Postgres inventory, so a
+    store-less deployment logs one INFO line and starts nothing (matching
+    ``start_poll``'s own documented-silence contract)."""
+    if not marketplace_store_configured():
+        logger.info(
+            "marketplace: advisory poll skipped — no install store configured "
+            "(MARKETPLACE_STORE_PG_PASSWORD or TAI_DEFAULT_PG_PASSWORD); no installed inventory to poll"
+        )
+        return
     advisories.start_poll()
 
 

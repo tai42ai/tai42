@@ -32,7 +32,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
-from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -166,6 +166,10 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
     configured channel (never on any read/stream frame), so the unauthenticated
     callback door stays the sole ticket-bearing surface and no filtered stream leaks
     it."""
+    # OFF gate: with no store configured no interaction can exist — a 404
+    # byte-identical to the genuine miss below, so the door is no oracle.
+    if not interactions_store_configured():
+        raise NotFoundError("Interaction not found")
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
     user_id, restricted = request_identity()

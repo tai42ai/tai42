@@ -10,11 +10,12 @@ startup. Importing the package ``__init__`` alone does NOT register (library use
 from __future__ import annotations
 
 from tai42_contract.app import tai42_app
+from tai42_kit.settings import require, require_secret
 
 import tai42_channel_telegram.inbound  # noqa: F401  (import registers the inbound route)
 from tai42_channel_telegram.channel import TelegramChannel
 from tai42_channel_telegram.client import telegram_http
-from tai42_channel_telegram.settings import require, require_secret, telegram_settings
+from tai42_channel_telegram.settings import telegram_settings
 
 tai42_app.channels.register("telegram", TelegramChannel())
 
@@ -28,9 +29,9 @@ async def _register_telegram_webhook() -> None:
     ``getUpdates`` polling for this token (mutually exclusive by API design).
     """
     settings = telegram_settings()
-    token = require_secret(settings.bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
-    secret = require_secret(settings.webhook_secret, "CHANNEL_TELEGRAM_WEBHOOK_SECRET")
-    base = require(settings.public_base_url, "CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
+    token = require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
+    secret = require_secret(settings.webhook_secret, "the telegram channel", "CHANNEL_TELEGRAM_WEBHOOK_SECRET")
+    base = require(settings.public_base_url, "the telegram channel", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
     # No default recipient AND an empty allowlist can never deliver — abort startup.
     if settings.default_recipient is None and not settings.allowed_recipients:
         raise ValueError(

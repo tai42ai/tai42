@@ -5,14 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 from tai42_contract.channels import ChannelDeliveryError
-from tai42_kit.settings import reset_all_settings
+from tai42_kit.settings import require_secret, reset_all_settings
 
 from tai42_channel_whatsapp.settings import (
     WhatsAppRedisSettings,
     WhatsAppSettings,
     require_delivery_secret,
     require_delivery_setting,
-    require_secret,
     whatsapp_redis_settings,
     whatsapp_settings,
 )
@@ -119,22 +118,6 @@ def test_require_delivery_secret_returns_plaintext():
     assert require_delivery_secret(SecretStr("tok"), "CHANNEL_WHATSAPP_ACCESS_TOKEN") == "tok"
 
 
-def test_require_secret_unset_raises_naming_env_var():
-    # The inbound webhook path keeps ValueError — its handler maps it to a
-    # logged 500, never a delivery failure.
-    with pytest.raises(ValueError, match="set CHANNEL_WHATSAPP_APP_SECRET"):
-        require_secret(None, "CHANNEL_WHATSAPP_APP_SECRET")
-
-
-def test_require_secret_empty_fails_closed():
-    with pytest.raises(ValueError, match="set CHANNEL_WHATSAPP_APP_SECRET"):
-        require_secret(SecretStr(""), "CHANNEL_WHATSAPP_APP_SECRET")
-
-
-def test_require_secret_returns_plaintext():
-    assert require_secret(SecretStr("tok"), "CHANNEL_WHATSAPP_APP_SECRET") == "tok"
-
-
 def test_empty_env_secret_is_treated_as_missing(no_whatsapp_env, monkeypatch: pytest.MonkeyPatch):
     # env_ignore_empty: an empty CHANNEL_WHATSAPP_APP_SECRET= leaves the
     # field None, so require_secret raises through the same fail-closed helper.
@@ -143,7 +126,7 @@ def test_empty_env_secret_is_treated_as_missing(no_whatsapp_env, monkeypatch: py
     settings = WhatsAppSettings()
     assert settings.app_secret is None
     with pytest.raises(ValueError, match="CHANNEL_WHATSAPP_APP_SECRET"):
-        require_secret(settings.app_secret, "CHANNEL_WHATSAPP_APP_SECRET")
+        require_secret(settings.app_secret, "WhatsApp channel", "CHANNEL_WHATSAPP_APP_SECRET")
 
 
 def test_api_base_url_default_and_override(no_whatsapp_env, monkeypatch: pytest.MonkeyPatch):

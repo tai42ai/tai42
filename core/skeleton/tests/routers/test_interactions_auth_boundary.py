@@ -47,6 +47,14 @@ class _AcFake:
         return {}
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # The callback door answers its uniform 404 when the interactions store is OFF
+    # this boundary test exercises the ON door (a fake store stands in), so
+    # configure it so the handler is reached.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @pytest.fixture
 def boundary_client(monkeypatch):
     ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)

@@ -161,6 +161,38 @@ def test_probe_postgres_fail_reports_target(monkeypatch: pytest.MonkeyPatch) -> 
     assert "cannot connect to db:5432/tai" in check.detail
 
 
+def _unconfigured():
+    @asynccontextmanager
+    async def factory(*args: object, **kwargs: object):
+        # The kit's named not-configured error, raised at DSN/URL construction.
+        raise ValueError(
+            "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
+        )
+        yield  # pragma: no cover - unreachable, marks this an async generator
+
+    return factory
+
+
+def test_probe_postgres_clean_on_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kit's named not-configured error becomes a clean FAIL check line, not a traceback.
+    monkeypatch.setattr(doctor, "client_ctx", _unconfigured())
+    check = asyncio.run(doctor._probe_postgres(_TARGET))
+    assert check.status == doctor._FAIL
+    assert "is not configured" in check.detail
+
+
+def test_probe_redis_clean_on_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_settings = SimpleNamespace(redis=SimpleNamespace(redis_url=None))
+    monkeypatch.setattr(
+        "tai42_skeleton.connectors.settings.connector_store_settings",
+        lambda: fake_settings,
+    )
+    monkeypatch.setattr(doctor, "client_ctx", _unconfigured())
+    check = asyncio.run(doctor._probe_redis())
+    assert check.status == doctor._FAIL
+    assert "is not configured" in check.detail
+
+
 def test_probe_schema_all_present(monkeypatch: pytest.MonkeyPatch) -> None:
     from tai42_skeleton.cli.native import doctor as doctor_mod
 

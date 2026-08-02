@@ -41,6 +41,14 @@ OWNER = "alice"
 RINGER = "k-bob"
 
 
+@pytest.fixture(autouse=True)
+def _feature_stores_configured(monkeypatch):
+    # these features are OFF with no store configured. This suite exercises them
+    # ON (fakes stand in for the connections), so satisfy the presence gates.
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @contextmanager
 def _fire(*, owned: bool) -> Iterator[None]:
     """Run the body as execution key ``KEY``, with the foreign caller ``RINGER`` — a

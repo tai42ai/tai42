@@ -29,10 +29,12 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.connectors.settings import connector_store_settings
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.marketplace.settings import marketplace_store_configured, marketplace_store_settings
 from tai42_skeleton.plugins.quarantine import quarantine_count
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
 from tai42_skeleton.settings.rate_limit import rate_limit_settings
 from tai42_skeleton.sub_mcp.settings import sub_mcp_settings
+from tai42_skeleton.tool_meta.settings import tool_meta_store_configured, tool_meta_store_settings
 from tai42_skeleton.versioning.settings import versioning_store_settings
 
 logger = logging.getLogger(__name__)
@@ -85,7 +87,7 @@ def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
         conns.append(("interactions", RedisClient, inter.redis))
 
     rl = rate_limit_settings()
-    if (rl.webhook_enabled or rl.interactions_callback_enabled) and rl.redis.redis_url:
+    if (rl.webhook_enabled or rl.interactions_callback_enabled or rl.trigger_enabled) and rl.redis.redis_url:
         conns.append(("rate_limit", RedisClient, rl.redis))
 
     hooks = HooksSettings()
@@ -106,6 +108,16 @@ def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
 
     if instance.versioned_store_in_use():
         conns.append(("versioning", PostgresClient, versioning_store_settings()))
+
+    # The durable install-attribution store: Postgres-backed whenever a password is
+    # configured (its own namespace or TAI_DEFAULT_PG_PASSWORD), omitted otherwise.
+    if marketplace_store_configured():
+        conns.append(("marketplace", PostgresClient, marketplace_store_settings()))
+
+    # The tool-metadata overlay store: same store-configured gate — a supplied
+    # password is the signal a real Postgres backs the overlay.
+    if tool_meta_store_configured():
+        conns.append(("tool_meta", PostgresClient, tool_meta_store_settings()))
 
     return conns
 
@@ -175,9 +187,9 @@ async def readiness_check(request: Request) -> JSONResponse:
     """
     conns = _wired_connections()
 
-    # Dedupe by (client class, connection identity): several subsystems default to
-    # one shared redis://localhost:6379/0, so a shared connection is pinged once and
-    # every subsystem on it reports that one result.
+    # Dedupe by (client class, connection identity): subsystems that share one
+    # connection via an explicit TAI_DEFAULT_REDIS_URL resolve to the same identity, so
+    # that connection is pinged once and every subsystem on it reports that one result.
     distinct: dict[tuple[type, str], tuple[type, ClientSettings]] = {}
     subsystem_keys: dict[str, list[tuple[type, str]]] = {}
     for name, client_cls, settings in conns:

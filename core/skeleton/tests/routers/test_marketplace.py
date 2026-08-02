@@ -43,7 +43,15 @@ from tai42_skeleton.marketplace.errors import (
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.store import InstallRecord
+from tai42_skeleton.operations import NotSupportedError
 from tai42_skeleton.plugins.quarantine import quarantine_plugin, reset_quarantine
+
+
+@pytest.fixture(autouse=True)
+def _marketplace_store_configured(monkeypatch):
+    # the marketplace surface answers OFF with no store configured. These tests
+    # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
+    monkeypatch.setenv("MARKETPLACE_STORE_PG_PASSWORD", "x")
 
 
 def _get(path: str = "/", query: bytes = b"", **path_params: str) -> Request:
@@ -530,3 +538,71 @@ async def test_upgrade_all_reload_gate_locked_is_503_reloading(monkeypatch: pyte
         resp = await router.marketplace_upgrade_all(_post({}))
     assert resp.status_code == 503
     assert _data(resp)["reloading"] is True
+
+
+# -- OFF state: no install-attribution store configured -----------------
+
+
+def _off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force the OFF gate: drop the feature's own password AND the shared default so
+    # the fresh-read presence probe answers unconfigured (overrides the autouse ON).
+    monkeypatch.delenv("MARKETPLACE_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+
+
+async def test_installed_off_answers_empty_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store the inventory is empty, but the in-process quarantine list is
+    # independent of the store and MUST still be served truthfully (a list).
+    _off(monkeypatch)
+    body = await mkt_ops.marketplace_installed()
+    assert body["installed"] == []
+    assert isinstance(body["quarantined"], list)
+
+
+async def test_advisories_off_answers_empty_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With nothing installed the advisory snapshot is empty, fetched now.
+    _off(monkeypatch)
+    body = await mkt_ops.marketplace_advisories()
+    assert body["advisories"] == []
+    assert isinstance(body["fetched_at"], str)
+
+
+async def test_install_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An install with no attribution store refuses with a named, machine-readable reason.
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await mkt_ops.marketplace_install("tai42/toolbox")
+    assert exc_info.value.extra["code"] == "marketplace-not-configured"
+
+
+async def test_uninstall_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await mkt_ops.marketplace_uninstall("tai42/toolbox")
+    assert exc_info.value.extra["code"] == "marketplace-not-configured"
+
+
+async def test_update_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await mkt_ops.marketplace_update("tai42/toolbox")
+    assert exc_info.value.extra["code"] == "marketplace-not-configured"
+
+
+async def test_upgrade_all_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await mkt_ops.marketplace_upgrade_all()
+    assert exc_info.value.extra["code"] == "marketplace-not-configured"
+
+
+def test_advisories_poll_skipped_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    # Store-less: the startup hook logs one INFO skip line and starts nothing, killing
+    # the forever-hourly warning loop against an absent inventory.
+    _off(monkeypatch)
+    started: list[bool] = []
+    monkeypatch.setattr(router.advisories, "start_poll", lambda: started.append(True))
+    with caplog.at_level("INFO", logger=router.logger.name):
+        router._start_advisories_poll()
+    assert started == []
+    assert any("advisory poll skipped" in rec.getMessage() for rec in caplog.records)

@@ -36,6 +36,7 @@ from tai42_skeleton.connectors.providers.registry import reset_registry
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.registry import operation_registry
@@ -604,6 +605,9 @@ class TaiMCPLifecycleMixin(ABC):
             suffix = f" ({row.plugin})" if row.plugin else ""
             logger.info(f"\t. {row.kind}: {row.state}{suffix} — {row.detail}")
         warn_if_noop_monitoring(kind_rows, logger)
+        # The public doors run unthrottled when no Redis backs the rate limiter —
+        # one loud once-per-process WARNING here (never a boot refusal, R2).
+        warn_if_rate_limiting_off(logger)
 
     def _update(self, manifest: Manifest):
         # Reload-time re-check of the backend-needs-bus invariant, BEFORE registries

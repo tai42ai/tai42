@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import SecretStr, ValidationError
-from tai42_kit.settings import reset_all_settings
+from pydantic import ValidationError
+from tai42_kit.settings import require_secret, reset_all_settings
 
 from tai42_channel_slack.settings import (
     SlackRedisSettings,
     SlackSettings,
-    require,
-    require_secret,
     slack_redis_settings,
     slack_settings,
 )
@@ -98,25 +96,6 @@ def test_allowed_recipients_rejects_other_types_loudly(no_slack_env):
         SlackSettings.model_validate({"allowed_recipients": 42})
 
 
-def test_require_raises_naming_env_var():
-    with pytest.raises(ValueError, match="CHANNEL_SLACK_DEFAULT_RECIPIENT"):
-        require(None, "CHANNEL_SLACK_DEFAULT_RECIPIENT")
-
-
-def test_require_passes_value_through():
-    assert require("C123", "CHANNEL_SLACK_DEFAULT_RECIPIENT") == "C123"
-
-
-def test_require_secret_unset_raises_naming_env_var():
-    with pytest.raises(ValueError, match="CHANNEL_SLACK_BOT_TOKEN"):
-        require_secret(None, "CHANNEL_SLACK_BOT_TOKEN")
-
-
-def test_require_secret_empty_fails_closed():
-    with pytest.raises(ValueError, match="CHANNEL_SLACK_SIGNING_SECRET is set but empty"):
-        require_secret(SecretStr(""), "CHANNEL_SLACK_SIGNING_SECRET")
-
-
 def test_empty_env_secret_is_treated_as_missing(no_slack_env, monkeypatch):
     # env_ignore_empty: an empty CHANNEL_SLACK_SIGNING_SECRET= leaves the field
     # None, so require_secret raises through the same fail-closed helper.
@@ -125,7 +104,7 @@ def test_empty_env_secret_is_treated_as_missing(no_slack_env, monkeypatch):
     settings = SlackSettings()
     assert settings.signing_secret is None
     with pytest.raises(ValueError, match="CHANNEL_SLACK_SIGNING_SECRET"):
-        require_secret(settings.signing_secret, "CHANNEL_SLACK_SIGNING_SECRET")
+        require_secret(settings.signing_secret, "the slack channel", "CHANNEL_SLACK_SIGNING_SECRET")
 
 
 def test_api_base_url_default_and_override(no_slack_env, monkeypatch):

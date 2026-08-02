@@ -23,6 +23,14 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tests._helpers import await_add_event
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 def _wire(monkeypatch, fake_redis, fake_client_ctx, **settings_kw) -> InteractionsSettings:
     settings_kw.setdefault("public_base_url", "https://cb.example")
     settings = InteractionsSettings(**settings_kw)

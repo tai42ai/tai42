@@ -92,15 +92,3 @@ def require_delivery_secret(value: SecretStr | None, env_name: str) -> str:
     if not secret:
         raise ChannelDeliveryError(f"Twilio channel is not configured: set {env_name}.")
     return secret
-
-
-def require_secret(value: SecretStr | None, env_name: str) -> str:
-    """The plaintext secret the inbound signature check needs; raises ``ValueError``
-    (webhook maps it to a logged 500) when unset. An empty token would key a
-    forgeable HMAC, so empty fails CLOSED, never a soft mismatch. Names only the
-    env var.
-    """
-    secret = value.get_secret_value() if value is not None else ""
-    if not secret:
-        raise ValueError(f"Twilio channel is not configured: set {env_name}.")
-    return secret

@@ -44,6 +44,7 @@ so the adapter answers a retriable 503 while a reload is in flight).
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -73,12 +74,13 @@ from tai42_skeleton.marketplace.errors import (
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.installer import Installer
-from tai42_skeleton.marketplace.settings import marketplace_settings
+from tai42_skeleton.marketplace.settings import marketplace_settings, marketplace_store_configured
 from tai42_skeleton.marketplace.store import MarketplaceInstallStore
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
     NotFoundError,
+    NotSupportedError,
     OperationError,
     OperationFailed,
     UnavailableError,
@@ -88,6 +90,14 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
 logger = logging.getLogger(__name__)
+
+# The machine-readable code + message every marketplace mutation OFF refusal
+# carries when the install-attribution store is unconfigured. Hoisted so the four
+# mutation refusals read one way.
+_NOT_CONFIGURED_CODE = "marketplace-not-configured"
+_NOT_CONFIGURED_MESSAGE = (
+    "the marketplace install store is not configured: set MARKETPLACE_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
+)
 
 # Keep the tail of an oversized detail (a pip failure's captured output) for the
 # error envelope; the full text is logged whole. The prefix marks a cut.
@@ -282,6 +292,12 @@ async def marketplace_installed() -> dict[str, Any]:
     plugins this worker SKIPPED (incompatible or import-broken) with the
     human-readable reason each.
     """
+    # OFF gate: with no install-attribution store there is no installed inventory —
+    # the honest answer is an empty ``installed`` list. The in-process quarantine
+    # list is independent of the store and MUST still be served truthfully.
+    if not marketplace_store_configured():
+        quarantined = [{"name": name, "reason": reason} for name, reason in sorted(quarantined_plugins().items())]
+        return {"installed": [], "quarantined": quarantined}
     registry = RegistryClient()
     contract = running_contract_version()
     rows: list[dict[str, Any]] = []
@@ -325,6 +341,11 @@ async def marketplace_advisories() -> dict[str, Any]:
     """The advisory snapshot for the installed plugins, no older than the
     configured poll interval (a stale snapshot is refreshed on demand, and a
     refresh failure raises a loud 502 rather than serving stale data)."""
+    # OFF gate: advisories are computed for the installed inventory; with no store
+    # there is nothing installed, so the honest answer is an empty snapshot fetched
+    # now (never a Postgres open for an absent inventory).
+    if not marketplace_store_configured():
+        return {"advisories": [], "fetched_at": datetime.now(UTC).isoformat()}
     try:
         state = await advisories.current(marketplace_settings().advisories_interval_s)
     except MarketplaceError as exc:
@@ -338,12 +359,24 @@ async def marketplace_advisories() -> dict[str, Any]:
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[BadRequestError, NotFoundError, ConflictError, UpstreamError, UnavailableError, OperationFailed],
+    errors=[
+        BadRequestError,
+        NotFoundError,
+        ConflictError,
+        UpstreamError,
+        NotSupportedError,
+        UnavailableError,
+        OperationFailed,
+    ],
     request_model=MarketplaceInstall,
 )
 async def marketplace_install(ref: str, version: str | None = None) -> dict[str, Any]:
     """Resolve, pip install, patch the manifest, reload, and record attribution —
     aborting and unwinding on any failure (see :meth:`Installer.install`)."""
+    # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
+    # install cannot record, so it refuses with a named, machine-readable reason.
+    if not marketplace_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     try:
         return await Installer().install(ref, version)
     except MarketplaceError as exc:
@@ -356,12 +389,16 @@ async def marketplace_install(ref: str, version: str | None = None) -> dict[str,
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[NotFoundError, UnavailableError, OperationFailed],
+    errors=[NotFoundError, NotSupportedError, UnavailableError, OperationFailed],
     request_model=MarketplaceUninstall,
 )
 async def marketplace_uninstall(ref: str) -> dict[str, Any]:
     """Unpatch the manifest, reload, pip uninstall, and drop attribution —
     convergent and registry-free (see :meth:`Installer.uninstall`)."""
+    # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store there
+    # is nothing recorded to uninstall, so it refuses with a named reason.
+    if not marketplace_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     try:
         return await Installer().uninstall(ref)
     except MarketplaceError as exc:
@@ -374,13 +411,25 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[BadRequestError, NotFoundError, ConflictError, UpstreamError, UnavailableError, OperationFailed],
+    errors=[
+        BadRequestError,
+        NotFoundError,
+        ConflictError,
+        UpstreamError,
+        NotSupportedError,
+        UnavailableError,
+        OperationFailed,
+    ],
     request_model=MarketplaceUpdate,
 )
 async def marketplace_update(ref: str, version: str | None = None) -> dict[str, Any]:
     """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert
     attribution — with the same pre-flights as install (see
     :meth:`Installer.update`)."""
+    # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
+    # update cannot upsert, so it refuses with a named reason.
+    if not marketplace_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     try:
         return await Installer().update(ref, version)
     except MarketplaceError as exc:
@@ -393,7 +442,7 @@ async def marketplace_update(ref: str, version: str | None = None) -> dict[str, 
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[UnavailableError],
+    errors=[NotSupportedError, UnavailableError],
 )
 async def marketplace_upgrade_all() -> dict[str, Any]:
     """Move every installed plugin onto its latest COMPATIBLE version in one
@@ -404,6 +453,10 @@ async def marketplace_upgrade_all() -> dict[str, Any]:
     fleet marketplace lock being held elsewhere (the retriable 503). See
     :meth:`Installer.upgrade_all` for the outcome vocabulary.
     """
+    # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store there
+    # is no installed inventory to upgrade, so it refuses with a named reason.
+    if not marketplace_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     try:
         return {"results": await Installer().upgrade_all()}
     except MarketplaceError as exc:

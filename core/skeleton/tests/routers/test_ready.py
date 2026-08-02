@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 import pytest
+from pydantic import SecretStr
 from starlette.requests import Request
 from tai42_contract.access_control import registry
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider, ReadinessTarget
@@ -98,7 +99,9 @@ async def test_ready_all_healthy_returns_200(monkeypatch) -> None:
         ("access_control", RedisClient, RedisConnectionSettings(redis_url="redis://ac")),
         ("tool_runs", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
         ("interactions", RedisClient, RedisConnectionSettings(redis_url="redis://shared")),
-        ("versioning", PostgresClient, PostgresConnectionSettings(pg_host="db")),
+        # A Postgres connection needs a password to compose its DSN dedup key (no
+        # hidden default), so the wired versioning target supplies one.
+        ("versioning", PostgresClient, PostgresConnectionSettings(pg_host="db", pg_password=SecretStr("pw"))),
     ]
     monkeypatch.setattr(health, "_wired_connections", lambda: wired)
 
@@ -169,14 +172,20 @@ async def test_ready_dedupes_shared_connection(monkeypatch) -> None:
 
 async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) -> None:
     # connectors + versioning not wired, hooks in-memory: no Postgres check and no
-    # hooks check are produced.
-    monkeypatch.setattr(health.instance, "connectors_in_use", lambda: False)
-    monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
+    # hooks check are produced. Hermetic against ambient PG passwords — the
+    # marketplace/tool_meta rows are password-gated, so an ambient
+    # MARKETPLACE_STORE_PG_PASSWORD / TOOL_META_STORE_PG_PASSWORD / TAI_DEFAULT_PG_PASSWORD
+    # would otherwise leak a PostgresClient row and flip the assertion below.
+    _quiet_stores(monkeypatch)
     for key in list(os.environ):
         if key.startswith("HOOKS_"):
             monkeypatch.delenv(key, raising=False)
 
-    conns = health._wired_connections()
+    reset_all_settings()
+    try:
+        conns = health._wired_connections()
+    finally:
+        reset_all_settings()
 
     names = [name for name, _, _ in conns]
     classes = [cls for _, cls, _ in conns]
@@ -231,6 +240,84 @@ async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None
     finally:
         reset_all_settings()
     assert "sub_mcp" not in [name for name, _, _ in wired_unset]
+
+
+def _quiet_stores(monkeypatch) -> None:
+    # Keep the readiness set to just the feature under test: no connectors/versioning,
+    # and none of the shared TAI_DEFAULT_* / feature stores leaking a row in.
+    monkeypatch.setattr(health.instance, "connectors_in_use", lambda: False)
+    monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
+    for var in (
+        "TAI_DEFAULT_REDIS_URL",
+        "TAI_DEFAULT_PG_PASSWORD",
+        "TAI_TOOL_RUNS_REDIS_URL",
+        "INTERACTIONS_REDIS_URL",
+        "MARKETPLACE_STORE_PG_PASSWORD",
+        "TOOL_META_STORE_PG_PASSWORD",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+async def test_wired_connections_gates_marketplace_and_tool_meta_on_pg_password(monkeypatch) -> None:
+    # the marketplace + tool-metadata Postgres stores join the readiness set
+    # exactly when their password is configured (own var or TAI_DEFAULT_PG_PASSWORD).
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("MARKETPLACE_STORE_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TOOL_META_STORE_PG_PASSWORD", "pw")
+    reset_all_settings()
+    try:
+        wired = health._wired_connections()
+    finally:
+        reset_all_settings()
+    rows = {(name, cls) for name, cls, _ in wired}
+    assert ("marketplace", PostgresClient) in rows
+    assert ("tool_meta", PostgresClient) in rows
+
+
+async def test_wired_connections_omits_marketplace_and_tool_meta_when_unconfigured(monkeypatch) -> None:
+    _quiet_stores(monkeypatch)
+    reset_all_settings()
+    try:
+        names = [name for name, _, _ in health._wired_connections()]
+    finally:
+        reset_all_settings()
+    assert "marketplace" not in names
+    assert "tool_meta" not in names
+
+
+async def test_wired_connections_omits_tool_runs_and_interactions_when_redis_unset(monkeypatch) -> None:
+    # with no localhost default, an unconfigured tool-runs / interactions Redis
+    # contributes no readiness row (the feature is cleanly OFF).
+    _quiet_stores(monkeypatch)
+    reset_all_settings()
+    try:
+        names = [name for name, _, _ in health._wired_connections()]
+    finally:
+        reset_all_settings()
+    assert "tool_runs" not in names
+    assert "interactions" not in names
+
+
+async def test_wired_connections_gates_rate_limit_on_trigger_only(monkeypatch) -> None:
+    # The rate-limit readiness row rides the FULL enable disjunction, including the
+    # trigger door: with webhook + interactions-callback disabled and ONLY trigger
+    # enabled, a configured rate-limit Redis still contributes the rate_limit ping.
+    # (A regression dropping ``trigger_enabled`` from the disjunction would gate the
+    # row out here and fail this test.)
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("TAI_RATE_LIMIT_WEBHOOK_ENABLED", "false")
+    monkeypatch.setenv("TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_ENABLED", "false")
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRIGGER_ENABLED", "true")
+    monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://rl")
+    reset_all_settings()
+    try:
+        wired = health._wired_connections()
+    finally:
+        monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+        reset_all_settings()
+
+    rate_limit = [(name, cls) for name, cls, _ in wired if name == "rate_limit"]
+    assert rate_limit == [("rate_limit", RedisClient)]
 
 
 async def test_wired_connections_enumerates_identity_provider_generically(monkeypatch) -> None:

@@ -16,12 +16,13 @@ from tai42_kit.settings import TaiBaseSettings, settings_cache
 class ToolRunsRedisSettings(RedisConnectionSettings):
     """Per-deploy Redis holding the run records, per-run liveness keys, and the
     per-tool recent-runs index. Connection values come from the
-    ``TAI_TOOL_RUNS_REDIS_*`` env (``TAI_TOOL_RUNS_REDIS_URL`` ...); defaults to
-    local dev."""
+    ``TAI_TOOL_RUNS_REDIS_*`` env (``TAI_TOOL_RUNS_REDIS_URL`` ...), or the shared
+    ``TAI_DEFAULT_REDIS_URL``; absent = the tool-run store is unconfigured and the
+    feature answers OFF."""
 
     model_config = SettingsConfigDict(env_prefix="TAI_TOOL_RUNS_")
 
-    redis_url: str | None = "redis://localhost:6379/0"
+    redis_url: str | None = None
     redis_max_connections: int | None = 10
 
     # A black-holed Redis fails the tool-run store op loudly within 5s instead of
@@ -72,3 +73,14 @@ class ToolRunsSettings(TaiBaseSettings):
 @settings_cache
 def tool_runs_settings() -> ToolRunsSettings:
     return ToolRunsSettings()
+
+
+def tool_runs_store_configured() -> bool:
+    """Whether this deployment configures the tool-run Redis store at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``TAI_TOOL_RUNS_REDIS_*`` env or the shared ``TAI_DEFAULT_REDIS_URL``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. A set
+    ``redis_url`` is the signal the store is wired up; without one, the tool-run
+    surface answers OFF rather than reaching for an absent Redis."""
+    return bool(ToolRunsRedisSettings().redis_url)

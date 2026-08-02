@@ -15,9 +15,16 @@ import pytest
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.manifest import ApiToolsConfig
 
-from tai42_skeleton.operations import NotFoundError, OperationRegistry, operation_metadata_of
+from tai42_skeleton.operations import NotFoundError, NotSupportedError, OperationRegistry, operation_metadata_of
 from tai42_skeleton.operations import connectors as conn_ops
 from tai42_skeleton.operations.projection import project_operations
+
+
+@pytest.fixture(autouse=True)
+def _connector_store_configured(monkeypatch):
+    # the connector surface answers OFF with no store configured. These tests
+    # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
+    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "x")
 
 
 def _missing_loader():
@@ -101,6 +108,77 @@ async def test_patch_sub_services_returns_result_view(monkeypatch: pytest.Monkey
     assert result["consent_required"] is False
     # The patch that mutated the manifest threads the service's fleet report through.
     assert result["fanout"] == {"mode": "local-only"}
+
+
+# -- OFF state: no connector store configured --------------------------
+
+
+def _off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force the OFF gate: drop the feature's own password AND the shared default so
+    # the fresh-read presence probe answers unconfigured (overrides the autouse ON).
+    monkeypatch.delenv("CONNECTOR_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+
+
+async def test_list_connections_off_answers_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store the read degrades to the honest empty collection, no store touched.
+    _off(monkeypatch)
+    assert await conn_ops.list_connections() == {"items": [], "total": 0}
+
+
+async def test_get_connection_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store no connection can exist — the miss is byte-identical to a genuine 404.
+    _off(monkeypatch)
+    with pytest.raises(NotFoundError, match="connection not found"):
+        await conn_ops.get_connection(connection_id="c1")
+
+
+async def test_start_connect_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Opening a flow needs the store to persist the connection — refuse with a named,
+    # machine-readable reason rather than reaching for an absent store.
+    _off(monkeypatch)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await conn_ops.start_connect(
+            provider_id="github",
+            alias="work",
+            enabled_sub_services=["repo"],
+            config_values={},
+            return_url="/connectors",
+            redirect_uri="https://app/oauth-bridge.html",
+            origin="https://app",
+        )
+    assert exc_info.value.extra["code"] == "connectors-not-configured"
+
+
+async def test_disconnect_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store no connection can exist — a 404 byte-identical to a genuine miss.
+    _off(monkeypatch)
+    with pytest.raises(NotFoundError, match="connection not found"):
+        await conn_ops.disconnect(connection_id="c1")
+
+
+async def test_reconnect_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+    with pytest.raises(NotFoundError, match="connection not found"):
+        await conn_ops.reconnect(
+            connection_id="c1",
+            enabled_sub_services=["repo"],
+            return_url="/connectors",
+            redirect_uri="https://app/oauth-bridge.html",
+            origin="https://app",
+        )
+
+
+async def test_patch_sub_services_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+    with pytest.raises(NotFoundError, match="connection not found"):
+        await conn_ops.patch_sub_services(
+            connection_id="c1",
+            enabled_sub_services=["repo"],
+            return_url="/connectors",
+            redirect_uri="https://app/oauth-bridge.html",
+            origin="https://app",
+        )
 
 
 async def test_reconnect_unknown_connection_is_404(monkeypatch: pytest.MonkeyPatch) -> None:

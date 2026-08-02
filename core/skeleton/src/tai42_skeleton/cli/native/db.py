@@ -106,6 +106,12 @@ def apply_command() -> None:
         # part of the driver's error text); the DSN itself is never echoed.
         typer.echo(f"Error: could not connect to Postgres at {_target(settings)}: {exc}", err=True)
         raise typer.Exit(1) from exc
+    except ValueError as exc:
+        # The kit's named not-configured error (an unset TAI_DB_PG_HOST/PG_PASSWORD,
+        # with no TAI_DEFAULT_* fallback) — a clean, actionable message naming the env
+        # var to set, never a raw traceback.
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"Applied schema to {_target(settings)}.")
 
 
@@ -119,6 +125,10 @@ def check_command() -> None:
         missing = asyncio.run(_missing_tables(settings))
     except psycopg.OperationalError as exc:
         typer.echo(f"Error: could not connect to Postgres at {_target(settings)}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        # The kit's named not-configured error — a clean message, never a traceback.
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
     if missing:

@@ -27,7 +27,7 @@ class AccessControlRedisSettings(RedisConnectionSettings):
 
     model_config = SettingsConfigDict(env_prefix="ACCESS_CONTROL_")
 
-    redis_url: str | None = "redis://localhost:6379/0"
+    redis_url: str | None = None
     redis_max_connections: int | None = 10
     # Bound the connect phase too, so a black-holed redis fails the auth path fast
     # instead of hanging on connect (``socket_timeout`` already bounds each read).

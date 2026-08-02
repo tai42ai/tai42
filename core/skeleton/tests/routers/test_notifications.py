@@ -21,6 +21,14 @@ from tai42_skeleton.operations import notifications as notifications_ops
 from tai42_skeleton.routers import notifications as router
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # the interactions surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @contextmanager
 def _identity(*, user_id: str | None = None, owner: str | None = None) -> Iterator[None]:
     """Bind a caller identity: ``owner`` set makes it a RESTRICTED owned key (reads its

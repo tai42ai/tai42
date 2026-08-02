@@ -191,6 +191,14 @@ def _data_frames(frames: list[str]) -> list[dict]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch):
+    # One test derives its reference headers from the interactions stream route, which
+    # answers 501 (not a StreamingResponse) when the interactions store is OFF;
+    # configure it so the reference is the live streaming response.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 @pytest.fixture
 def one_agent(monkeypatch):
     """Register a single fake agent under ``faker`` on the router's registry

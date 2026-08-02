@@ -24,6 +24,14 @@ _DEFAULT_PREFIX = "interactions:"
 _TEST_FEED_MAX = 1000
 
 
+@pytest.fixture(autouse=True)
+def _interactions_store_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``record_notification`` refuses when the interactions store is OFF; these tests
+    # exercise the ON sink, so configure its store — the fake connection still stands
+    # in, only the presence gate reads this env var.
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+
+
 async def test_record_returns_the_stored_record(fake_redis) -> None:
     sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
 

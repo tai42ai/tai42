@@ -23,6 +23,7 @@ without its flood control. Each family can still be tuned or turned off via its
 from __future__ import annotations
 
 import ipaddress
+import logging
 import math
 import time
 from datetime import UTC, datetime
@@ -38,11 +39,43 @@ from tai42_skeleton.middleware.audit_log import UNAUTHENTICATED, UNMATCHED_ROUTE
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.settings.rate_limit import RateLimitSettings, rate_limit_settings
 
+logger = logging.getLogger(__name__)
+
 # Path prefixes of the three public door families, mapped to the settings key that
 # names their limit/burst/enable fields.
 _WEBHOOK_PREFIX = "/universal_webhook/"
 _CALLBACK_PREFIX = "/api/interactions/callback/"
 _TRIGGER_PREFIX = "/trigger/"
+
+# Once-per-process guard for the rate-limiting-OFF warning: the startup summary
+# fires it at most once even across in-place reloads (each reload re-runs the
+# summary), so a Redis-less deployment logs the warning a single time.
+_RATE_LIMIT_OFF_WARNED = False
+
+# The operator-facing warning emitted once when no Redis backs the rate limiter at
+# startup-summary time — the three public door families are unthrottled.
+_RATE_LIMIT_OFF_WARNING = (
+    "rate limiting: OFF — no Redis configured (TAI_RATE_LIMIT_REDIS_URL or TAI_DEFAULT_REDIS_URL), so the three "
+    "public door families (/universal_webhook/*, /api/interactions/callback/*, /trigger/*) pass through "
+    "UNTHROTTLED. Set TAI_RATE_LIMIT_REDIS_URL to enable flood control."
+)
+
+
+def warn_if_rate_limiting_off(log: logging.Logger) -> None:
+    """Emit the once-per-process rate-limiting-OFF warning when no Redis backs the
+    limiter (the ``_family`` fold then passes every public door through). A no-op
+    after the first warning and when Redis IS configured, so a Redis-less
+    deployment warns exactly once across boots/reloads and a configured deployment
+    never warns. WARNING, not a boot refusal — public doors merely go unthrottled
+    (R2)."""
+    global _RATE_LIMIT_OFF_WARNED
+    if _RATE_LIMIT_OFF_WARNED:
+        return
+    # Read fresh (not the cached singleton) so the warning reflects the live env at
+    # this boot/reload, matching the presence gate ``_family`` folds on.
+    if not RateLimitSettings().redis.redis_url:
+        _RATE_LIMIT_OFF_WARNED = True
+        log.warning(_RATE_LIMIT_OFF_WARNING)
 
 
 def _bucket_ip(ip_str: str) -> str:
@@ -113,6 +146,13 @@ def _family(path: str, settings: RateLimitSettings) -> tuple[str, str, int, int]
     (a disabled family included — an off switch means pass through, not block). The
     prefix is the family's safe route text: the tail past it is caller material
     (a token/ticket) the audit line must never record."""
+    # No Redis configured → rate limiting is OFF for EVERY family (off means
+    # pass-through, the file's own doctrine): the counters have nowhere to live, so
+    # every path the limiter would touch returns None and flows straight through.
+    # The once-per-process boot WARNING (below) is where an operator learns the
+    # public doors are unthrottled — never a boot refusal (R2).
+    if not settings.redis.redis_url:
+        return None
     if path.startswith(_WEBHOOK_PREFIX):
         if not settings.webhook_enabled:
             return None

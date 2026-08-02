@@ -645,3 +645,25 @@ async def test_env_change_keeping_bus_with_backend_is_allowed(monkeypatch: pytes
     assert store.env_writes == [{"SOME_KEY": "v"}]
     assert admin.calls == 1
     assert result.document is None
+
+
+async def test_env_change_with_backend_and_default_namespace_bus_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # D9: the bus configured ONLY through the shared TAI_DEFAULT_REDIS_URL (no
+    # TAI_BUS_REDIS_URL) resolves as ENABLED through BusSettings, so an unrelated env
+    # edit on a backend deployment is NOT falsely rejected (a raw TAI_BUS_REDIS_URL
+    # read would have missed the default and rejected every edit).
+    _no_bus(monkeypatch)
+    monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://localhost:6379/0")
+    reset_all_settings()
+    try:
+        store = FakeConfigStore(manifest={"backend_module": "myapp.backend"}, env={})
+        service, admin, _bus = _service(store)
+
+        result = await service.apply_env_change({"SOME_KEY": "v"})
+
+        assert store.env_writes == [{"SOME_KEY": "v"}]
+        assert admin.calls == 1
+        assert result.document is None
+    finally:
+        reset_all_settings()

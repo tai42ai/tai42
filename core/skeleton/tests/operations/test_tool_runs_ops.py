@@ -17,13 +17,27 @@ from types import SimpleNamespace
 import pytest
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, UnavailableError
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ForbiddenError,
+    NotFoundError,
+    NotSupportedError,
+    UnavailableError,
+)
 from tai42_skeleton.operations import tool_runs as ops
 from tai42_skeleton.operations.decorator import operation_metadata_of
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 from tests._fakes.tool_runs_redis import FakeRedis
+
+
+@pytest.fixture(autouse=True)
+def _tool_runs_store_configured(monkeypatch):
+    # the tool-run surface is OFF with no Redis. These tests exercise the ON
+    # feature, so configure its store — the fake connection still stands in; only the
+    # presence gate reads this env var.
+    monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
 
 
 class _FakeTools:
@@ -158,7 +172,9 @@ def test_metadata_declares_the_tier1_destructive_submit_and_read_ops():
     assert submit.destructive is True
     assert submit.meta_executor is True  # a "run any tool by name" door — never MCP-projected
     assert submit.reload_gated is True
-    assert set(submit.error_classes) == {BadRequestError, NotFoundError, UnavailableError}
+    # the store-unconfigured OFF gate adds NotSupportedError (501) beside the
+    # capacity UnavailableError (503).
+    assert set(submit.error_classes) == {BadRequestError, NotFoundError, NotSupportedError, UnavailableError}
 
     get = operation_metadata_of(ops.get_run)
     assert get.destructive is False
@@ -169,3 +185,35 @@ def test_metadata_declares_the_tier1_destructive_submit_and_read_ops():
     assert listing.destructive is False
     assert listing.meta_executor is False
     assert set(listing.error_classes) == {BadRequestError}
+
+
+# -- the store-unconfigured OFF gate ------------------------------------
+# With no tool-run Redis the surface is honestly OFF. The gate reads the presence
+# env fresh, so delenv-ing BOTH the feature var and the shared default (overriding
+# the autouse setenv) forces it — and it fires BEFORE any registry/record work.
+
+
+async def test_submit_off_when_store_unconfigured_raises_not_supported(monkeypatch):
+    # Submit refuses up front with the named 501 code — no tool is authorized, no
+    # slot reserved, no record written.
+    monkeypatch.delenv("TAI_TOOL_RUNS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    with pytest.raises(NotSupportedError) as exc_info:
+        await ops.submit_run("alpha", {"x": 1})
+    assert exc_info.value.extra["code"] == "tool-runs-not-configured"
+
+
+async def test_get_run_off_when_store_unconfigured_raises_not_found(monkeypatch):
+    # With no store no run can exist — a 404 byte-identical to a genuine miss, so the
+    # door is no oracle for the store's absence.
+    monkeypatch.delenv("TAI_TOOL_RUNS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    with pytest.raises(NotFoundError, match="run 'abc' not found"):
+        await ops.get_run("abc")
+
+
+async def test_list_tool_runs_off_when_store_unconfigured_returns_empty(monkeypatch):
+    # With no store the honest answer to "my runs of this tool" is the empty list.
+    monkeypatch.delenv("TAI_TOOL_RUNS_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    assert await ops.list_tool_runs("alpha") == []

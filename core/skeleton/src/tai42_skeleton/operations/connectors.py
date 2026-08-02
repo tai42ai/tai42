@@ -44,9 +44,18 @@ from tai42_contract.connectors.service import (
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.providers.registry import list_providers
 from tai42_skeleton.connectors.service import connection_service
+from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.persistence import load_record_or_none
-from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
+
+# The machine-readable code + message the connector START refusal carries when the
+# token store is unconfigured. The read/named-entity doors answer the door's own
+# 200-empty / 404 instead; only the mutation that opens a flow refuses named.
+_NOT_CONFIGURED_CODE = "connectors-not-configured"
+_NOT_CONFIGURED_MESSAGE = (
+    "the connector token store is not configured: set CONNECTOR_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
+)
 
 # -- Serialization (through the contract wire models; never leaks secrets) ----
 
@@ -109,6 +118,10 @@ async def list_connector_providers() -> list[dict[str, Any]]:
 @operation(summary="List connections", tags=["connectors"])
 async def list_connections() -> dict[str, Any]:
     """The installed connections as secret-free views."""
+    # OFF gate: with no store configured there are no connections — the honest
+    # empty collection (today this path 500s reaching for an absent store).
+    if not connectors_store_configured():
+        return ConnectionsListResponse(items=[], total=0).model_dump(mode="json")
     ids = await token_store().list()
     records = [await load_record_or_none(cid) for cid in ids]
     items = [_connection_account(r) for r in records if r is not None]
@@ -118,6 +131,10 @@ async def list_connections() -> dict[str, Any]:
 @operation(summary="Get a connection", tags=["connectors"], errors=[NotFoundError])
 async def get_connection(connection_id: str) -> dict[str, Any]:
     """One connection's secret-free view; an unknown id is a loud 404."""
+    # OFF gate: with no store no connection can exist — a 404 byte-identical to the
+    # genuine miss below, so the door is no oracle for the store's absence.
+    if not connectors_store_configured():
+        raise NotFoundError("connection not found")
     record = await load_record_or_none(connection_id)
     if record is None:
         raise NotFoundError("connection not found")
@@ -131,7 +148,7 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
     summary="Start a connection flow",
     tags=["connectors"],
     destructive=True,
-    errors=[BadRequestError, ConflictError],
+    errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=StartConnectRequest,
 )
 async def start_connect(
@@ -144,6 +161,10 @@ async def start_connect(
     origin: str,
 ) -> dict[str, Any]:
     """Begin a Connect (OAuth authorize URL, or an immediate no-auth connection)."""
+    # OFF gate: opening a flow needs the store to persist the connection — refuse
+    # with a named, machine-readable reason rather than reaching for an absent store.
+    if not connectors_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     try:
         result = await connection_service.start_connect(
             provider_id=provider_id,
@@ -166,6 +187,10 @@ async def start_connect(
 @operation(summary="Disconnect a connection", tags=["connectors"], errors=[NotFoundError])
 async def disconnect(connection_id: str) -> dict[str, Any]:
     """Disconnect (purge) a connection; a genuinely-absent connection is a 404."""
+    # OFF gate: with no store no connection can exist — a 404 byte-identical to the
+    # genuine miss below.
+    if not connectors_store_configured():
+        raise NotFoundError("connection not found")
     # Let the service load the record with include_expired so a lapsed connection is
     # still purgeable (a serving-filtered pre-check would 404 an expired connection and
     # strand its blob + manifest entries). A genuinely-absent connection surfaces as
@@ -198,6 +223,10 @@ async def reconnect(
     origin: str,
 ) -> dict[str, Any]:
     """Re-run the OAuth flow for an existing connection; an unknown id is a 404."""
+    # OFF gate: with no store no connection can exist — a 404 byte-identical to the
+    # genuine miss below.
+    if not connectors_store_configured():
+        raise NotFoundError("connection not found")
     if await load_record_or_none(connection_id) is None:
         raise NotFoundError("connection not found")
     try:
@@ -230,6 +259,10 @@ async def patch_sub_services(
     origin: str,
 ) -> dict[str, Any]:
     """Toggle a connection's enabled sub-services; an unknown id is a 404."""
+    # OFF gate: with no store no connection can exist — a 404 byte-identical to the
+    # genuine miss below.
+    if not connectors_store_configured():
+        raise NotFoundError("connection not found")
     if await load_record_or_none(connection_id) is None:
         raise NotFoundError("connection not found")
     try:

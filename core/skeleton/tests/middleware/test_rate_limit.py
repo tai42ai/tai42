@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
@@ -65,6 +66,14 @@ def _build_client(monkeypatch, settings: RateLimitSettings, fake: FakeRedis) -> 
     ]
     app = Starlette(routes=routes)
     return TestClient(rate_limit.RateLimitMiddleware(app))
+
+
+@pytest.fixture(autouse=True)
+def _rate_limit_redis_configured(monkeypatch):
+    # rate limiting is OFF (pass-through) with no Redis. These tests exercise the
+    # ON limiter, so configure its Redis — the fake ``client_ctx`` still stands in for
+    # the connection; only the presence gate in ``_family`` reads this.
+    monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://localhost:6379/0")
 
 
 def _settings(**overrides) -> RateLimitSettings:
@@ -263,3 +272,56 @@ def test_client_bucket_ipv6_client_collapses_to_slash_64():
 def test_client_bucket_no_client_is_unknown():
     conn = _conn(None)
     assert rate_limit._client_bucket(conn, trusted_proxies=[]) == "unknown"
+
+
+# -- OFF (no Redis) → pass-through + one boot WARNING --------------------
+
+
+def test_no_redis_passes_through_every_family_with_zero_client_ctx(monkeypatch):
+    # OFF (no Redis anywhere): ``_family`` folds to None for every public door, so the
+    # limiter opens no client and every public door flows straight through unthrottled.
+    monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    settings = _settings()
+    assert settings.redis.redis_url is None
+
+    calls: list = []
+
+    @asynccontextmanager
+    async def _ctx(cls, s=None, *, fresh=False, **kw):
+        calls.append(cls)
+        yield FakeRedis()
+
+    monkeypatch.setattr(rate_limit, "rate_limit_settings", lambda: settings)
+    monkeypatch.setattr(rate_limit, "client_ctx", _ctx)
+    routes = [
+        Route("/universal_webhook/{topic}", _ok, methods=["GET", "POST"]),
+        Route("/api/interactions/callback/{ticket}", _ok, methods=["GET", "POST"]),
+        Route("/trigger/{token}", _ok, methods=["GET", "POST"]),
+    ]
+    client = TestClient(rate_limit.RateLimitMiddleware(Starlette(routes=routes)))
+    for path in ("/universal_webhook/x", "/api/interactions/callback/x", "/trigger/x"):
+        for _ in range(50):  # far past any burst/minute budget
+            assert client.get(path).status_code == 200
+    assert calls == []  # the counter store was never opened
+
+
+def test_boot_warning_fires_exactly_once_across_two_boots(monkeypatch, caplog):
+    monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.setattr(rate_limit, "_RATE_LIMIT_OFF_WARNED", False)
+    log = logging.getLogger("test.rate_limit_off")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        rate_limit.warn_if_rate_limiting_off(log)
+        rate_limit.warn_if_rate_limiting_off(log)  # second boot/reload — no second line
+    fired = [r for r in caplog.records if "rate limiting: OFF" in r.getMessage()]
+    assert len(fired) == 1
+
+
+def test_boot_warning_silent_when_redis_configured(monkeypatch, caplog):
+    # Redis IS configured (the autouse fixture), so no warning ever fires.
+    monkeypatch.setattr(rate_limit, "_RATE_LIMIT_OFF_WARNED", False)
+    log = logging.getLogger("test.rate_limit_on")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        rate_limit.warn_if_rate_limiting_off(log)
+    assert not [r for r in caplog.records if "rate limiting: OFF" in r.getMessage()]

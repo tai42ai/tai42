@@ -31,6 +31,7 @@ from tai42_skeleton.access_control.user import CrossIdentityAudienceError, reque
 from tai42_skeleton.channels.notifications_sink import read_notifications
 from tai42_skeleton.channels.notify import SenderIdentityNotAllowedError
 from tai42_skeleton.channels.notify import notify_user as _notify_user
+from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotSupportedError, UpstreamError, operation
 
 
@@ -84,6 +85,10 @@ async def list_notifications() -> dict:
     A RESTRICTED caller reads its OWN per-identity feed (complete within its own
     bound — never truncated by other identities' volume, never a broadcast); an
     UNRESTRICTED caller reads the shared feed unchanged (today's operator view)."""
+    # OFF gate: the internal feed lives on the interactions Redis; with none
+    # configured the honest answer is the empty collection — no store touched.
+    if not interactions_store_configured():
+        return {"notifications": []}
     _user_id, restricted = request_identity()
     return {"notifications": await read_notifications(audience=restricted)}
 

@@ -47,7 +47,16 @@ from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
     NotFoundError,
+    NotSupportedError,
     operation,
+)
+from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
+
+# The machine-readable code + message the tool-meta write OFF refusals carry when
+# the overlay store is unconfigured. Hoisted so upsert / folder-create read one way.
+_NOT_CONFIGURED_CODE = "tool-meta-not-configured"
+_NOT_CONFIGURED_MESSAGE = (
+    "the tool-metadata store is not configured: set TOOL_META_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
 )
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
@@ -106,6 +115,10 @@ async def list_tool_meta() -> dict[str, Any]:
     """The whole overlay in one read: every folder (the flat tree) plus every
     per-tool row. The UI builds the tree and merges the rows against the live tool
     list client-side."""
+    # OFF gate: with no overlay store the honest answer is the empty overlay — the
+    # UI degrades perfectly on empty (D7). No store touched.
+    if not tool_meta_store_configured():
+        return {"folders": [], "meta": []}
     store = instance.app.tool_meta.store
     folders = await store.list_folders()
     rows = await store.list_meta()
@@ -119,7 +132,7 @@ async def list_tool_meta() -> dict[str, Any]:
     summary="Upsert a tool's overlay",
     tags=["tool_meta"],
     destructive=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, NotSupportedError],
     request_model=ToolMetaUpsert,
 )
 async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +141,10 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
     the empty defaults when none exists), absent fields unchanged. A blank
     ``display_name`` is refused; a present-null clears; a present ``tags`` array
     replaces the set. An unknown ``folder_id`` is a loud 400."""
+    # OFF gate: a write needs the store — refuse with a named, machine-readable
+    # reason rather than reaching for an absent Postgres.
+    if not tool_meta_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     store = instance.app.tool_meta.store
     # Build a SPARSE patch of only the fields the caller sent (present keys), each
     # already normalized here at the door — a blank ``display_name`` is refused
@@ -156,6 +173,10 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
 async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     """Drop the overlay row for ``tool_name``. Idempotent — deleting a tool with no
     row is a no-op, not an error (most tools never own one)."""
+    # OFF gate: with no store there is no row to drop — the same idempotent success
+    # the documented no-op contract already answers, no store touched.
+    if not tool_meta_store_configured():
+        return {"tool_name": tool_name, "deleted": True}
     await instance.app.tool_meta.store.delete_meta(tool_name)
     return {"tool_name": tool_name, "deleted": True}
 
@@ -167,13 +188,17 @@ async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     summary="Create a folder",
     tags=["tool_meta"],
     destructive=True,
-    errors=[BadRequestError, ConflictError],
+    errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=FolderCreate,
 )
 async def create_folder(name: str, parent_id: str | None = None) -> dict[str, Any]:
     """Create a folder under ``parent_id`` (``null`` = a root folder). A blank name
     is a 400, an unknown ``parent_id`` a 400, and a sibling already holding the name
     a 409."""
+    # OFF gate: a write needs the store — refuse with a named, machine-readable
+    # reason rather than reaching for an absent Postgres.
+    if not tool_meta_store_configured():
+        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
     clean = _clean_label(name, "name")
     try:
         folder = await instance.app.tool_meta.store.create_folder(clean, parent_id)
@@ -194,6 +219,10 @@ async def create_folder(name: str, parent_id: str | None = None) -> dict[str, An
 async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
     """Rename a folder in place. A blank name is a 400, an unknown folder a 404, and
     a sibling collision a 409."""
+    # OFF gate: with no store no folder can exist — a 404 byte-identical to the
+    # genuine miss below, so the door is no oracle for the store's absence.
+    if not tool_meta_store_configured():
+        raise NotFoundError(f"folder {folder_id!r} not found")
     clean = _clean_label(name, "name")
     try:
         folder = await instance.app.tool_meta.store.rename_folder(folder_id, clean)
@@ -215,6 +244,11 @@ async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str,
     """Re-parent a folder (``null`` = move to root). An unknown folder or parent is a
     404, a move that would form a cycle a 400, and a sibling collision at the
     destination a 409."""
+    # OFF gate: with no store no folder can exist — a 404 byte-identical to the
+    # genuine folder-miss below (``FolderNotFoundError(folder_id)`` renders the same
+    # text), so the door is no oracle.
+    if not tool_meta_store_configured():
+        raise NotFoundError(f"folder {folder_id!r} not found")
     try:
         folder = await instance.app.tool_meta.store.move_folder(folder_id, parent_id)
     except FolderCycleError as exc:
@@ -234,6 +268,10 @@ async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str,
 async def delete_folder(folder_id: str) -> dict[str, Any]:
     """Delete an EMPTY folder. An unknown folder is a 404; a folder still holding
     subfolders or overlay rows is a 409 (empty it first)."""
+    # OFF gate: with no store no folder can exist — a 404 byte-identical to the
+    # genuine miss below, so the door is no oracle for the store's absence.
+    if not tool_meta_store_configured():
+        raise NotFoundError(f"folder {folder_id!r} not found")
     try:
         await instance.app.tool_meta.store.delete_folder(folder_id)
     except FolderNotEmptyError as exc:

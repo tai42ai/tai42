@@ -94,7 +94,10 @@ def test_settings_compose_redis_connection_not_inherit():
     settings = _settings()
     # The redis connection is a composed field, not mixed into the feature config.
     assert not hasattr(settings, "client_kwargs")
-    assert settings.redis.client_kwargs()["url"] == "redis://localhost:6379/0"
+    # No hidden localhost default: an unconfigured auth gate carries a None URL,
+    # so an enabled-but-unconfigured deployment fails loudly at the boot probe rather
+    # than silently probing localhost. The resilience knobs still ride the connection.
+    assert settings.redis.client_kwargs()["url"] is None
     assert settings.redis.socket_timeout == 5
     assert settings.redis.retry_on_timeout is True
 
@@ -109,10 +112,13 @@ def test_redis_url_uses_access_control_prefix(monkeypatch):
 
 def test_bare_redis_url_does_not_configure_access_control(monkeypatch):
     # Regression guard: the auth gate must NOT silently read the shared REDIS_URL
-    # (it has its own ACCESS_CONTROL_ prefix).
+    # (it has its own ACCESS_CONTROL_ prefix). With no ACCESS_CONTROL_REDIS_URL and no
+    # TAI_DEFAULT_REDIS_URL, the gate is unconfigured — a None URL, never a
+    # hidden localhost default nor the bare REDIS_URL.
     monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     monkeypatch.setenv("REDIS_URL", "redis://should-not-apply:1/9")
-    assert AccessControlSettings().redis.redis_url == "redis://localhost:6379/0"
+    assert AccessControlSettings().redis.redis_url is None
 
 
 # -- SPA-shell settings validation (supplement + acknowledged allowlist) ------

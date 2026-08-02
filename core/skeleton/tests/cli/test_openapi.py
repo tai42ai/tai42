@@ -114,6 +114,9 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
     ("POST", "/api/mcp-status/{title}/reload"),
+    # ``/api/presets`` create refuses a store-less deploy with a 501 (NotSupportedError),
+    # not a declared 503, so only the reload gate's 503 remains here.
+    ("POST", "/api/presets"),
     ("POST", "/api/presets/{name}/rename"),
     ("POST", "/api/presets/{name}/rollback"),
     ("POST", "/api/presets/{name}/versions"),
@@ -124,22 +127,27 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/tools/{name}/extensions"),
 }
 
+# The versioning store-unconfigured refusal is a 501, not a 503, so ``validate`` and
+# the version-tags PUT (neither reload-gated) declare NO 503 at all and are absent
+# from this set.
 _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/schedules"),
     ("GET", "/api/schedules/server-datetime"),
-    ("POST", "/api/presets/validate"),
-    ("PUT", "/api/presets/{name}/versions/{version}/tags"),
 }
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     ("DELETE", "/api/schedules/{schedule_name}"),
     ("POST", "/api/conversations/{route_name}/messages"),
+    # The marketplace mutations keep a declared 503 beside the reload gate: it is the
+    # transient fleet-advisory-lock UnavailableError (retriable), NOT the store gate,
+    # which refuses with a 501. Both sources coexist here alongside that 501.
     ("POST", "/api/marketplace/install"),
     ("POST", "/api/marketplace/uninstall"),
     ("POST", "/api/marketplace/update"),
     ("POST", "/api/marketplace/upgrade-all"),
-    ("POST", "/api/presets"),
     ("POST", "/api/schedules"),
+    # tool-runs keeps its declared 503: it is the per-worker CAPACITY UnavailableError
+    # (retry later), independent of the store gate, which is a 501.
     ("POST", "/api/tool-runs"),
 }
 
@@ -381,6 +389,53 @@ def test_observability_routes_document_the_501(api_routes: list[RouteMetadata]) 
         assert 501 in meta.error_statuses, f"{meta.path} lost the 501"
 
 
+# The uniform-gating doors that refuse with a 501 ``NotSupportedError`` (carrying
+# a machine-readable ``code``) when their DB-backed feature is OFF — the honest
+# refusal a mutation answers on an unconfigured store, and the SSE stream's
+# before-body 501. Same declared-error mechanics as the observability 501 precedent:
+# ``NotSupportedError`` in the operation's ``errors=`` (or the custom route's
+# ``error_statuses``) puts a 501 in the emitted spec, and the ``code`` rides the
+# error body exactly as observability's does. Pinned as a subset each door must
+# declare, so a lost 501 trips here.
+_OFF_GATE_501_DOORS: set[tuple[str, str]] = {
+    ("POST", "/api/tool-runs"),
+    ("GET", "/api/interactions/stream"),
+    ("POST", "/api/notifications"),
+    ("POST", "/api/marketplace/install"),
+    ("POST", "/api/marketplace/uninstall"),
+    ("POST", "/api/marketplace/update"),
+    ("POST", "/api/marketplace/upgrade-all"),
+    ("PATCH", "/api/tool-meta/tools/{tool_name}"),
+    ("POST", "/api/tool-meta/folders"),
+    ("POST", "/api/connectors/connections/start"),
+    ("POST", "/api/presets"),
+    ("POST", "/api/presets/validate"),
+    ("PUT", "/api/presets/{name}/versions/{version}/tags"),
+    ("POST", "/api/auth/api-keys"),
+    ("PUT", "/api/auth/api-keys/{user_id}"),
+    ("DELETE", "/api/auth/api-keys/{user_id}"),
+    # The residual access-control mutations gate OFF identically when
+    # ACCESS_CONTROL_ENABLE=false — scope/public-route/claim/policy writes all refuse
+    # with the same 501 rather than operate the store under the synthetic admin.
+    ("POST", "/api/auth/scopes"),
+    ("DELETE", "/api/auth/scopes/urls"),
+    ("DELETE", "/api/auth/scopes/{scope_id}"),
+    ("POST", "/api/auth/public-routes"),
+    ("DELETE", "/api/auth/public-routes"),
+    ("POST", "/api/auth/claim-links"),
+    ("POST", "/api/auth/api-keys/{user_id}/policy/rollback"),
+}
+
+
+@pytest.mark.parametrize(("method", "path"), sorted(_OFF_GATE_501_DOORS))
+def test_off_gate_doors_document_the_501(spec: dict, api_routes: list[RouteMetadata], method: str, path: str) -> None:
+    # Both halves are pinned: the route declares the 501 in its metadata, and the
+    # emitted operation publishes a 501 response — so a dropped OFF gate trips here.
+    (meta,) = [m for m in api_routes if m.path == path and method in m.methods]
+    assert 501 in meta.error_statuses, f"{method} {path} lost its OFF-gate 501"
+    assert "501" in spec["paths"][path][method.lower()]["responses"], f"{method} {path} 501 missing from the spec"
+
+
 def test_delete_template_declares_only_its_typed_errors(api_routes: list[RouteMetadata]) -> None:
     # delete-template's operation declares BadRequestError only, so the route
     # documents {400, 401} and no spurious 500.
@@ -399,11 +454,12 @@ def test_scope_url_delete_doors_document_the_400(
     spec: dict, api_routes: list[RouteMetadata], method: str, path: str
 ) -> None:
     # Both delete doors validate their JSON body at the request edge (a blank/missing
-    # ``url`` is a 400) before the operation runs (a url that was never mapped is a 404), so
-    # each documents {400, 401, 404} — the 400 the extractor answers must be in the spec,
+    # ``url`` is a 400) before the operation runs (a url that was never mapped is a 404),
+    # and refuse with a 501 when access control is disabled (the OFF gate), so each
+    # documents {400, 401, 404, 501} — the 400 the extractor answers must be in the spec,
     # not just the runtime.
     (meta,) = [m for m in api_routes if m.path == path and method in m.methods]
-    assert set(meta.error_statuses) == {400, 401, 404}
+    assert set(meta.error_statuses) == {400, 401, 404, 501}
     responses = spec["paths"][path][method.lower()]["responses"]
     assert "400" in responses, f"{method} {path} is missing the 400 response"
 

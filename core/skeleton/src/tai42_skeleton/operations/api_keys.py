@@ -50,7 +50,7 @@ from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.projection import ProjectionResult, build_projection, synthetic_full_projection
 from tai42_skeleton.access_control.roles import role_store
 from tai42_skeleton.access_control.settings import access_control_settings
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations._authority import (
     Caller,
     owner_of,
@@ -59,6 +59,14 @@ from tai42_skeleton.operations._authority import (
     resolve_caller,
 )
 from tai42_skeleton.template import TemplateNotFoundError
+
+# When access control is DISABLED by choice (``ACCESS_CONTROL_ENABLE=false``) the
+# key-management surface must not operate the AC store under the synthetic admin:
+# reads answer empty, writes refuse with this machine-readable reason. The
+# ``-disabled`` suffix is DELIBERATE — the feature is off by choice, not
+# unconfigured — distinct from the ``-not-configured`` codes of the store gates.
+_DISABLED_CODE = "access-control-disabled"
+_DISABLED_MESSAGE = "access control is disabled: set ACCESS_CONTROL_ENABLE=true to manage keys"
 
 # -- Request models (spec metadata; the route extractors do the byte-stable parse) --
 
@@ -178,6 +186,9 @@ async def _record_policy_version(user_id: str, body: dict[str, Any]) -> None:
 @operation(summary="List all scopes", tags=["access-control"])
 async def list_scopes() -> dict[str, str]:
     """Every non-public route mapping as ``{url: scope_id}``."""
+    # OFF: access control disabled → the honest empty mapping, no store touched.
+    if not access_control_settings().enable:
+        return {}
     return await management.get_all_existing_scopes()
 
 
@@ -185,11 +196,15 @@ async def list_scopes() -> dict[str, str]:
     summary="Add a URL to a scope",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, NotSupportedError],
     request_model=ScopeUrlAdd,
 )
 async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[str, str]:
     """Map ``url`` to ``scope_id`` (optionally with a dynamic match ``pattern``)."""
+    # OFF: access control disabled → refuse the write with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     marker = access_control_settings().public_resource_id
     if scope_id == marker:
         # The public marker is a column value, not a scope. Routing it through the
@@ -207,12 +222,16 @@ async def add_scope_url(scope_id: str, url: str, pattern: str | None) -> dict[st
 @operation(
     summary="Remove a URL from all scopes",
     tags=["access-control"],
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=ScopeUrlRemove,
 )
 async def remove_scope_url(url: str) -> dict[str, str]:
     """Unmap ``url`` from every scope that references it; a url that was never mapped
     is a loud 404 (a typo, not a silent success)."""
+    # OFF: access control disabled → refuse the write with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     existed, affected = await management.remove_url_from_scope(url)
     if not existed:
         raise NotFoundError(f"url not mapped: {url!r}")
@@ -226,10 +245,16 @@ async def remove_scope_url(url: str) -> dict[str, str]:
     return {"url": url}
 
 
-@operation(summary="Delete a scope", tags=["access-control"], errors=[BadRequestError, NotFoundError])
+@operation(
+    summary="Delete a scope", tags=["access-control"], errors=[BadRequestError, NotFoundError, NotSupportedError]
+)
 async def delete_scope(scope_id: str) -> dict[str, Any]:
     """Delete a scope, cascading it out of every referencing key; an unknown scope
     (no urls) is a loud 404."""
+    # OFF: access control disabled → refuse the delete with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     try:
         deleted, affected = await management.remove_scope(scope_id)
     except ValueError as exc:
@@ -277,6 +302,10 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     ``HEAD`` to a GET), so the two collections compare like-for-like; a registered route
     whose method set fails to join is a loud STOP (a normalization drift), never a
     silently dropped row."""
+    # OFF: access control disabled → no scope mappings exist, so the honest answer
+    # is the empty route list (no AC store touched under the synthetic admin).
+    if not access_control_settings().enable:
+        return []
     from tai42_skeleton.app.route_registry import load_all_routes
 
     mappings = await management.get_all_route_mappings()
@@ -320,6 +349,9 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
 @operation(summary="List public-pinned routes", tags=["access-control"])
 async def list_public_routes() -> list[str]:
     """Every route pinned to the public marker."""
+    # OFF: access control disabled → no pins exist; the honest empty list.
+    if not access_control_settings().enable:
+        return []
     return await management.get_public_route_pins()
 
 
@@ -327,11 +359,15 @@ async def list_public_routes() -> list[str]:
     summary="Pin a route public",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, NotSupportedError],
     request_model=PublicRoutePin,
 )
 async def pin_public_route(url: str, pattern: str | None) -> dict[str, str]:
     """Pin ``url`` public (optionally with a dynamic match ``pattern``)."""
+    # OFF: access control disabled → refuse the pin with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     try:
         await management.pin_route_public(url, pattern)
     except ValueError as exc:
@@ -346,11 +382,15 @@ async def pin_public_route(url: str, pattern: str | None) -> dict[str, str]:
 @operation(
     summary="Unpin a public route",
     tags=["access-control"],
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PublicRouteUnpin,
 )
 async def unpin_public_route(url: str) -> dict[str, str]:
     """Unpin a public ``url``; a url that is absent or scope-mapped is a loud 404."""
+    # OFF: access control disabled → refuse the unpin with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     if not await management.unpin_public_route(url):
         raise NotFoundError(f"url is not pinned public: {url!r}")
     await management.bump_policy_version()
@@ -364,6 +404,10 @@ async def unpin_public_route(url: str) -> dict[str, str]:
 async def list_tokens_payload() -> list[dict[str, Any]]:
     """Every provisioned key's identity + policy (NEVER key material). Non-admin callers
     see ONLY the keys they own (management/listing owner home); admin sees every key."""
+    # OFF: access control disabled → no provisioned keys; the honest empty list,
+    # never a store read under the synthetic admin.
+    if not access_control_settings().enable:
+        return []
     caller = await resolve_caller()
     payload = await management.get_all_existing_tokens_payload()
     if not caller.is_admin:
@@ -375,7 +419,7 @@ async def list_tokens_payload() -> list[dict[str, Any]]:
     summary="Create an api key",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError],
+    errors=[BadRequestError, ForbiddenError, NotSupportedError],
     request_model=ApiKeyCreate,
 )
 async def create_api_key(
@@ -391,6 +435,10 @@ async def create_api_key(
     """Provision a key, returning ``{"api_key", "key_fingerprint"}``. The raw ``sk-…``
     ``api_key`` is surfaced ONCE; ``key_fingerprint`` is the key's immutable per-mint
     identity a caller binds a hook against so the binding survives only this exact mint."""
+    # OFF: access control disabled → refuse the mint with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await resolve_caller()
     # An owned key cannot mint keys — ownership is exactly one level deep.
     if caller.owner_claim is not None:
@@ -430,7 +478,7 @@ async def create_api_key(
     summary="Edit an api key",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=ApiKeyEdit,
 )
 async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
@@ -440,6 +488,10 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     ``policy_data`` gate. ``updates`` is the sparse set of present fields (a single dict
     rather than flattened params, so "field absent" stays distinct from "field is
     ``null``" — the partial-edit semantics a flat signature cannot express)."""
+    # OFF: access control disabled → refuse the edit with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await resolve_caller()
     # Ownership + owner-claim immutability pre-checks, reading the stored body once when
     # any check needs it (a non-admin ownership gate, or a policy_data edit whose owner
@@ -480,7 +532,7 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
 @operation(
     summary="Revoke an api key",
     tags=["access-control"],
-    errors=[BadRequestError, ForbiddenError, NotFoundError],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
 )
 async def revoke_api_key(user_id: str) -> dict[str, Any]:
     """Revoke a key (immediate: next request fails to auth). Deletes the key record, its
@@ -492,6 +544,10 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
     cache-buster is atomic with the policy-row delete inside
     :func:`~tai42_skeleton.access_control.management.revoke_api_key`, so no fault in the
     steps behind it can leave the revoked key's authority live in a warm cache slot."""
+    # OFF: access control disabled → refuse the revoke with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await resolve_caller()
     if not caller.is_admin:
         # A non-admin may revoke only a key it owns.
@@ -509,7 +565,7 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
     summary="Create a one-time claim link for an API key",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError],
+    errors=[BadRequestError, ForbiddenError, NotSupportedError],
     request_model=ClaimLinkCreate,
 )
 async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, Any]:
@@ -524,6 +580,10 @@ async def create_claim_link(api_key: str, ttl_seconds: int | None) -> dict[str, 
     from garbage. This adds NO capability the ``/api/auth/me`` carve-out does not already
     grant a caller holding a candidate key. The uniform-404 no-oracle rule governs the
     unauthenticated EXCHANGE surface, never this authed creation."""
+    # OFF: access control disabled → refuse the claim-link mint with a named,
+    # machine-readable reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await resolve_caller()
     try:
         return await _create_claim_link(
@@ -565,6 +625,10 @@ async def list_roles() -> list[dict[str, Any]]:
     Admin-only: a listing exposes every role's raw base-tier jq condition, so a non-admin
     caller is denied 403. This op-level check is defense in depth behind the ``secret``
     route action-class that already fences the route."""
+    # OFF: access control disabled → no roles are seeded; the honest empty list, never a
+    # store read under the synthetic admin.
+    if not access_control_settings().enable:
+        return []
     caller = await resolve_caller()
     require_admin(caller)
     from tai42_skeleton.versioning import versioned_store_configured
@@ -690,6 +754,10 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     body carries the raw condition) and admin-only: a non-admin caller is denied 403 so
     it can never read another user's policy history. 404 when the user has no policy
     history."""
+    # OFF: access control disabled → no policy history exists; the honest empty list,
+    # never a store read under the synthetic admin.
+    if not access_control_settings().enable:
+        return []
     caller = await resolve_caller()
     require_admin(caller)
     # A store-less deployment (no versioned store configured) keeps no policy version
@@ -710,7 +778,7 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     summary="Roll a policy back to a version",
     tags=["access-control"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotFoundError],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=PolicyRollback,
 )
 async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
@@ -720,6 +788,10 @@ async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
     follows, then the durable history pointer is advanced. Admin-only: a non-admin caller
     is denied 403 so it can never roll back another user's (or its own) enforced policy.
     404 if the version is absent or the user has no live key."""
+    # OFF: access control disabled → refuse the rollback with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
     caller = await resolve_caller()
     require_admin(caller)
 

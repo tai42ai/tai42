@@ -22,10 +22,19 @@ from tai42_contract.app import tai42_app
 
 import tai42_skeleton.tool_meta.store as store_module
 from tai42_skeleton.app import instance
+from tai42_skeleton.operations import NotFoundError, NotSupportedError
+from tai42_skeleton.operations import tool_meta as ops
 from tai42_skeleton.routers import tool_meta as router
 from tests.tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 
 tai42_app.bind(instance.build_app())
+
+
+@pytest.fixture(autouse=True)
+def _tool_meta_store_configured(monkeypatch):
+    # the tool-meta surface answers OFF with no store configured. These tests
+    # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
+    monkeypatch.setenv("TOOL_META_STORE_PG_PASSWORD", "x")
 
 
 # -- request / response helpers ----------------------------------------------
@@ -327,5 +336,93 @@ def test_folder_create_unknown_parent_is_400(pg: FakeToolMetaPg) -> None:
     async def run() -> None:
         resp = await _create_folder("orphan", "no-such-parent")
         assert resp.status_code == 400
+
+    _run(run)
+
+
+# -- OFF state: no overlay store configured ----------------------------
+
+
+def _off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force the OFF gate: drop the feature's own password AND the shared default so
+    # the fresh-read presence probe answers unconfigured (overrides the autouse ON).
+    monkeypatch.delenv("TOOL_META_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+
+
+def test_list_off_answers_empty_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store the read degrades to the honest empty overlay, no store touched.
+    _off(monkeypatch)
+
+    async def run() -> None:
+        assert await ops.list_tool_meta() == {"folders": [], "meta": []}
+
+    _run(run)
+
+
+def test_upsert_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A write with no store refuses with a named, machine-readable reason.
+    _off(monkeypatch)
+
+    async def run() -> None:
+        with pytest.raises(NotSupportedError) as exc_info:
+            await ops.upsert_tool_meta("weather", {"display_name": "W"})
+        assert exc_info.value.extra["code"] == "tool-meta-not-configured"
+
+    _run(run)
+
+
+def test_create_folder_off_refuses_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A folder create with no store refuses with the same named reason.
+    _off(monkeypatch)
+
+    async def run() -> None:
+        with pytest.raises(NotSupportedError) as exc_info:
+            await ops.create_folder("root")
+        assert exc_info.value.extra["code"] == "tool-meta-not-configured"
+
+    _run(run)
+
+
+def test_rename_folder_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store no folder can exist — the miss is byte-identical to a genuine 404.
+    _off(monkeypatch)
+
+    async def run() -> None:
+        with pytest.raises(NotFoundError) as exc_info:
+            await ops.rename_folder("F", "x")
+        assert str(exc_info.value) == "folder 'F' not found"
+
+    _run(run)
+
+
+def test_move_folder_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+
+    async def run() -> None:
+        with pytest.raises(NotFoundError) as exc_info:
+            await ops.move_folder("F", None)
+        assert str(exc_info.value) == "folder 'F' not found"
+
+    _run(run)
+
+
+def test_delete_folder_off_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    _off(monkeypatch)
+
+    async def run() -> None:
+        with pytest.raises(NotFoundError) as exc_info:
+            await ops.delete_folder("F")
+        assert str(exc_info.value) == "folder 'F' not found"
+
+    _run(run)
+
+
+def test_delete_off_is_idempotent_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no store there is no row to drop — the documented idempotent success.
+    _off(monkeypatch)
+
+    async def run() -> None:
+        assert await ops.delete_tool_meta("weather") == {"tool_name": "weather", "deleted": True}
 
     _run(run)

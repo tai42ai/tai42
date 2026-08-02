@@ -102,10 +102,19 @@ async def read_settings_schema() -> dict:
         fields = []
         for field in cls_info.fields:
             payload = field.model_dump()
+            default_var = field.default_namespace_var
             if field.env_var and field.env_var in os.environ:
                 payload["value"] = os.environ[field.env_var]
             elif field.env_var and field.env_var in stored:
                 payload["value"] = stored[field.env_var]
+            elif field.env_var and default_var and default_var in os.environ:
+                # The field's own var and stored override are both absent, but it
+                # participates in the shared ``TAI_DEFAULT_*`` namespace and that layer
+                # supplies a value — the truth an operator sees, resolved before the
+                # bare field default.
+                payload["value"] = os.environ[default_var]
+            elif field.env_var and default_var and default_var in stored:
+                payload["value"] = stored[default_var]
             elif field.env_var:
                 payload["value"] = field.default
             else:

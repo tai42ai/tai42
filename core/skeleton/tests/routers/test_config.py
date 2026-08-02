@@ -34,6 +34,7 @@ def _field(
     default: object = None,
     type_: str = "string",
     nested_group: str | None = None,
+    default_namespace_var: str | None = None,
 ) -> SettingsFieldInfo:
     return SettingsFieldInfo(
         name=name,
@@ -43,6 +44,7 @@ def _field(
         required=False,
         secret=False,
         description=None,
+        default_namespace_var=default_namespace_var,
         nested_group=nested_group,
     )
 
@@ -211,6 +213,33 @@ async def test_settings_schema_value_overlay(install, monkeypatch):
     assert fields["store"]["value"] == "from_store"  # store-only
     assert fields["dflt"]["value"] == "the_default"  # neither -> default
     assert fields["nested"]["value"] is None  # nested reference: non-editable
+
+
+async def test_settings_schema_resolves_through_tai_default_namespace(install, monkeypatch):
+    # D9: a field whose own var and stored override are absent but which participates
+    # in the shared TAI_DEFAULT_* namespace shows the value resolved through that layer
+    # (process env, then store) BEFORE the bare field default — the server truth an
+    # operator reads.
+    install({"STORE_DEFAULT": "from_store_default"})
+    monkeypatch.delenv("OWN_VAR", raising=False)
+    monkeypatch.delenv("PROC_DEFAULT", raising=False)
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://proc-default")
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        fields=[
+            _field("proc_dflt", "OWN_VAR", default="d", default_namespace_var="TAI_DEFAULT_REDIS_URL"),
+            _field("store_dflt", "OTHER_VAR", default="d", default_namespace_var="STORE_DEFAULT"),
+        ],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+    resp = await router.read_settings_schema(_req())
+    fields = {f["name"]: f for f in _json(resp)["data"]["groups"][0]["fields"]}
+    # Own var + stored override absent → resolve through TAI_DEFAULT_* (process wins).
+    assert fields["proc_dflt"]["value"] == "redis://proc-default"
+    # The default-namespace value can also come from the stored env layer.
+    assert fields["store_dflt"]["value"] == "from_store_default"
 
 
 async def test_settings_schema_secret_value_unmasked(install, monkeypatch):

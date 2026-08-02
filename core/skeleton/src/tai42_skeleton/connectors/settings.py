@@ -181,7 +181,7 @@ class ConnectorStoreRedisSettings(RedisConnectionSettings):
 
     model_config = SettingsConfigDict(env_prefix="CONNECTOR_STORE_")
 
-    redis_url: str | None = "redis://localhost:6379/0"
+    redis_url: str | None = None
     redis_max_connections: int | None = 10
     decode_responses: bool = False
 
@@ -220,6 +220,22 @@ class ConnectorStoreSettings(TaiBaseSettings):
 @settings_cache
 def connector_store_settings() -> ConnectorStoreSettings:
     return ConnectorStoreSettings()
+
+
+def connectors_store_configured() -> bool:
+    """Whether this deployment configures the connector token store's durable
+    Postgres source of truth at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``CONNECTOR_STORE_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. Postgres is
+    the durable authority for ``connector_connections``, so a supplied password is
+    the signal a real store is wired up; without one the connectors router surface
+    answers OFF rather than reaching for an absent Postgres. Distinct from
+    ``connectors_in_use()`` (the intent gate boot/readiness use — deliberately
+    unchanged)."""
+    s = ConnectorStorePgSettings()
+    return bool(s.pg_password and s.pg_password.get_secret_value())
 
 
 # -- Adapter wire-format contract --------------------------------------------
