@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel
@@ -206,36 +207,106 @@ def _studio_plugins_row() -> KindStatus:
     )
 
 
+@dataclass(frozen=True)
+class GatedFeature:
+    """One DB-backed feature gate's registration — the single source both the live
+    ``kinds`` table and the generated OFF-behavior doc read.
+
+    ``kind`` is the pluggable-kind name the row reports; ``label`` is the human name
+    the docs table shows; ``configured`` is the predicate reading the same fresh
+    pydantic-settings the feature gates on, so the row tracks the live config after a
+    reload; ``enabling_var`` is the env var that turns the feature on; ``off_behavior``
+    is the one-line uniform-OFF contract the feature honors when its store is absent.
+    The static fields (``kind``, ``label``, ``enabling_var``, ``off_behavior``) are
+    offline-readable, so a doc generator imports this registry without booting a store.
+    """
+
+    kind: str
+    label: str
+    configured: Callable[[], bool]
+    enabling_var: str
+    off_behavior: str
+
+
 # The DB-backed feature gates: each is a kind whose ``off`` state is the honest
-# answer when no store is configured. ``(kind, is-configured predicate, enabling
-# env var)`` — the predicate reads the same fresh pydantic-settings the feature
-# gates on, so the row tracks the live config after a reload. Access control is
-# deliberately absent: its off-state already surfaces through the ``identity`` row.
-_GATED_FEATURES: list[tuple[str, Callable[[], bool], str]] = [
-    ("tool_runs", tool_runs_store_configured, "TAI_TOOL_RUNS_REDIS_URL"),
-    ("interactions", interactions_store_configured, "INTERACTIONS_REDIS_URL"),
-    ("rate_limit", lambda: bool(RateLimitSettings().redis.redis_url), "TAI_RATE_LIMIT_REDIS_URL"),
-    ("marketplace_store", marketplace_store_configured, "MARKETPLACE_STORE_PG_PASSWORD"),
-    ("tool_meta", tool_meta_store_configured, "TOOL_META_STORE_PG_PASSWORD"),
-    ("connectors", connectors_store_configured, "CONNECTOR_STORE_PG_PASSWORD"),
-    ("versioning", versioned_store_configured, "VERSIONING_STORE_PG_PASSWORD"),
+# answer when no store is configured. Access control is deliberately absent: its
+# off-state already surfaces through the ``identity`` row.
+_GATED_FEATURES: list[GatedFeature] = [
+    GatedFeature(
+        kind="tool_runs",
+        label="Background tool runs",
+        configured=tool_runs_store_configured,
+        enabling_var="TAI_TOOL_RUNS_REDIS_URL",
+        off_behavior=(
+            "Run reads answer 200 empty (a single run reads 404); submit refuses 501 tool-runs-not-configured."
+        ),
+    ),
+    GatedFeature(
+        kind="interactions",
+        label="Interactions + notifications",
+        configured=interactions_store_configured,
+        enabling_var="INTERACTIONS_REDIS_URL",
+        off_behavior=(
+            "The notification feed and stream refuse 501 interactions-not-configured "
+            "(ask_user refuses as a tool error); feed reads answer 200 empty."
+        ),
+    ),
+    GatedFeature(
+        kind="rate_limit",
+        label="Rate limiting",
+        configured=lambda: bool(RateLimitSettings().redis.redis_url),
+        enabling_var="TAI_RATE_LIMIT_REDIS_URL",
+        off_behavior="Pass-through — the three public-door families are unthrottled; one boot WARNING.",
+    ),
+    GatedFeature(
+        kind="marketplace_store",
+        label="Marketplace store",
+        configured=marketplace_store_configured,
+        enabling_var="MARKETPLACE_STORE_PG_PASSWORD",
+        off_behavior=(
+            "Installed and advisory reads answer 200 empty; the registry-proxy catalog is "
+            "store-independent (502 against an unreachable registry); install and attribution "
+            "writes refuse 501 marketplace-not-configured."
+        ),
+    ),
+    GatedFeature(
+        kind="tool_meta",
+        label="Tool-metadata overlay",
+        configured=tool_meta_store_configured,
+        enabling_var="TOOL_META_STORE_PG_PASSWORD",
+        off_behavior="Folder and tag reads answer 200 empty; writes refuse 501 tool-meta-not-configured.",
+    ),
+    GatedFeature(
+        kind="connectors",
+        label="Connectors store",
+        configured=connectors_store_configured,
+        enabling_var="CONNECTOR_STORE_PG_PASSWORD",
+        off_behavior="Connector endpoints answer OFF; writes refuse 501 connectors-not-configured.",
+    ),
+    GatedFeature(
+        kind="versioning",
+        label="Versioning",
+        configured=versioned_store_configured,
+        enabling_var="VERSIONING_STORE_PG_PASSWORD",
+        off_behavior="Preset and version reads answer 200 empty or 404; writes refuse 501 versioning-not-configured.",
+    ),
 ]
 
 
-def _gated_feature_row(kind: str, configured: bool, enabling_var: str) -> KindStatus:
+def _gated_feature_row(feature: GatedFeature) -> KindStatus:
     """One DB-backed feature's live status: ``active`` when its store is configured,
     ``off`` (a legal, reported state — never an error) when it is not, naming the env
     var that turns it on."""
-    if configured:
-        return KindStatus(kind=kind, state="active", plugin=None, detail=f"{enabling_var} configured")
-    return KindStatus(kind=kind, state="off", plugin=None, detail=f"{enabling_var} not configured")
+    if feature.configured():
+        return KindStatus(kind=feature.kind, state="active", plugin=None, detail=f"{feature.enabling_var} configured")
+    return KindStatus(kind=feature.kind, state="off", plugin=None, detail=f"{feature.enabling_var} not configured")
 
 
-def _connectors_row(configured: bool, enabling_var: str) -> KindStatus:
+def _connectors_row(feature: GatedFeature) -> KindStatus:
     """The connectors feature row: the shared store-configured gate, with the count of
     registered providers appended so the table shows how many providers are wired even
     when the store — and thus the connectors surface — is off."""
-    row = _gated_feature_row("connectors", configured, enabling_var)
+    row = _gated_feature_row(feature)
     return row.model_copy(update={"detail": f"{row.detail}, {len(list_providers())} provider(s)"})
 
 
@@ -262,8 +333,8 @@ def collect_kind_status() -> list[KindStatus]:
         _config_row(),
         _studio_plugins_row(),
         *(
-            _connectors_row(configured(), var) if kind == "connectors" else _gated_feature_row(kind, configured(), var)
-            for kind, configured, var in _GATED_FEATURES
+            _connectors_row(feature) if feature.kind == "connectors" else _gated_feature_row(feature)
+            for feature in _GATED_FEATURES
         ),
     ]
 

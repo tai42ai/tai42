@@ -20,7 +20,7 @@ from tai42_skeleton.monitoring.registry import init_monitoring, reset_monitoring
 from tai42_skeleton.plugins.registry import StudioPluginError
 from tests._helpers import DeliverOnlyChannel
 
-_EXPECTED_KINDS = [
+_PLUGGABLE_KINDS = [
     "identity",
     "accounts",
     "monitoring",
@@ -30,7 +30,10 @@ _EXPECTED_KINDS = [
     "webhook_verifiers",
     "config",
     "studio_plugins",
-    # one row per DB-backed gated feature, appended after the pluggable kinds.
+]
+
+# One row per DB-backed gated feature, appended after the pluggable kinds.
+_GATED_KINDS = [
     "tool_runs",
     "interactions",
     "rate_limit",
@@ -39,6 +42,8 @@ _EXPECTED_KINDS = [
     "connectors",
     "versioning",
 ]
+
+_EXPECTED_KINDS = [*_PLUGGABLE_KINDS, *_GATED_KINDS]
 
 
 class _RealMonitoring:
@@ -133,6 +138,26 @@ def test_gated_feature_active_when_configured(bound_app, monkeypatch: pytest.Mon
     # A configured store flips the row to ``active`` — the row tracks the live env.
     monkeypatch.setenv("TAI_TOOL_RUNS_REDIS_URL", "redis://localhost:6379/0")
     assert _row("tool_runs").state == "active"
+
+
+# -- gated-feature descriptor registry -----------------------------------------
+
+
+def test_registry_covers_every_gated_kind() -> None:
+    # The descriptor registry the doc generator reads enumerates exactly the gated
+    # kinds ``collect_kind_status`` appends — no gated kind is missing a descriptor
+    # and none is stale.
+    assert [feature.kind for feature in ks._GATED_FEATURES] == _GATED_KINDS
+
+
+def test_every_gated_feature_has_offline_readable_metadata() -> None:
+    # Each descriptor carries a non-empty human label, enabling var, and one-line
+    # off-behavior contract — the static fields the offline doc generator renders,
+    # readable without booting any store.
+    for feature in ks._GATED_FEATURES:
+        assert feature.label.strip(), f"{feature.kind}: empty label"
+        assert feature.enabling_var.strip(), f"{feature.kind}: empty enabling_var"
+        assert feature.off_behavior.strip(), f"{feature.kind}: empty off_behavior"
 
 
 # -- identity ------------------------------------------------------------------
