@@ -87,7 +87,8 @@ async def _assert_501_code(off_stack: TaiStack, method: str, path: str, code: st
     body = resp.json()
     assert body.get("code") == code, f"{method} {path} code={body.get('code')!r}; body: {resp.text}"
     # The message is a named, actionable reason, never a bare traceback.
-    assert isinstance(body.get("error"), str) and body["error"], resp.text
+    assert isinstance(body.get("error"), str), resp.text
+    assert body["error"], resp.text
 
 
 async def test_mutations_refuse_501_with_named_code(off_stack: TaiStack) -> None:
@@ -266,7 +267,9 @@ async def test_boot_log_names_the_off_state(off_stack: TaiStack) -> None:
 
     # Rate limiting is a gated feature like any other: no Redis -> OFF (pass-through)
     # with exactly ONE loud boot WARNING, never a boot refusal.
-    assert log.count("rate limiting: OFF") == 1, f"expected exactly one rate-limit WARNING; got {log.count('rate limiting: OFF')}"
+    assert log.count("rate limiting: OFF") == 1, (
+        f"expected exactly one rate-limit WARNING; got {log.count('rate limiting: OFF')}"
+    )
 
     # The skip INFO lines name what is off and are present at boot.
     assert "skipping versioned-preset rehydration" in log
