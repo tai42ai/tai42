@@ -41,6 +41,7 @@ from tai42_e2e.manifests import (
     build_extensions_stack,
     build_minimal_stack,
     build_monitoring_stack,
+    build_off_stack,
     build_oidc_stack,
     build_payments_stack,
     build_projection_authz_stack,
@@ -216,6 +217,15 @@ def bare_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterat
     provider and no backend — the absent-provider profile the ``present: false`` /
     501 door assertions drive."""
     yield from _boot(infra, tmp_path_factory.mktemp("bare"), build_bare_stack)
+
+
+@pytest.fixture(scope="module")
+def off_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The all-features-OFF profile (D8): the whole default router surface mounted
+    but no feature Redis and no default PG, so every DB-backed feature is
+    unconfigured. The doctrine spec in ``tests/off`` pins the whole OFF matrix
+    against it. No backend, so the module is ``backendless`` (default leg only)."""
+    yield from _boot(infra, tmp_path_factory.mktemp("off"), build_off_stack)
 
 
 @pytest.fixture(scope="module")

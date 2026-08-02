@@ -1581,3 +1581,67 @@ def build_projection_authz_stack(res: StackResources, variants: Variants) -> Sta
         run_metrics=False,
         auth=True,
     )
+
+
+# ---- OFF profile (D8) ----------------------------------------------------
+#
+# The honest all-features-OFF deployment: no feature Redis, no default PG. Every
+# DB-backed feature resolves NO store, so the whole house OFF pattern is pinned in
+# one spec against one profile — 200-empty collection reads, 501 + named-code
+# writes, 404 miss-identical named reads, uniform-404 public doors, an SSE 501
+# before any body, /ready 200 with empty checks, a kinds off-row per feature, and
+# exactly one rate-limit boot WARNING.
+
+# The registry the marketplace search/detail/categories/kinds routes PROXY to. It
+# is the registry CLIENT, not the install STORE, so it sits OUTSIDE the OFF gate: a
+# store-less deployment still proxies. Pointed at a closed loopback port so the
+# store-less proxy path is exercised hermetically — an unreachable registry maps to
+# a 502 (UpstreamError), which proves the store being OFF does not gate the proxies
+# without any outbound to the real default registry.
+_OFF_UNREACHABLE_REGISTRY_URL = "http://127.0.0.1:9"
+
+
+def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """MULTIWORKER(1), no backend — the all-features-OFF profile (D8).
+
+    Serves the WHOLE default router surface (``default_routers="all"``) so every
+    gated feature's door is mounted, then subtracts the two config anchors that
+    would resolve a store: the per-feature Redis URLs (``_redis_feature_env``) and
+    the shared ``TAI_DEFAULT_*`` PG block (``_pg_env("TAI_DEFAULT_", res)``). With
+    neither present, no DB-backed feature is configured, so each answers OFF: reads
+    200-empty, writes 501 + ``<feature>-not-configured``, named reads 404
+    byte-identical to a genuine miss, public doors uniform-404, the SSE stream 501
+    before any body, ``/ready`` 200 with empty checks, ``GET /api/system/kinds`` an
+    ``off`` row per feature, and exactly one rate-limit boot WARNING. Auth off; no
+    backend, storage, or metrics — an absent provider is itself part of the OFF
+    surface the doctrine covers."""
+    manifest = {
+        "default_routers": "all",
+        # generate_uuid gives the tool-run submit door a real tool to name (the OFF
+        # store gate refuses the submit either way); api_tools off keeps the surface
+        # to the mounted HTTP routers the doctrine is pinned against.
+        "tools": [_toolbox_tools_entry()],
+        "api_tools": {"enabled": False},
+    }
+    env = _base_env(res, variants)
+    # Subtract the two anchors that would resolve a feature store, leaving every
+    # DB-backed feature genuinely unconfigured — the OFF state under test.
+    for key in _redis_feature_env(res):
+        env.pop(key, None)
+    for key in _pg_env("TAI_DEFAULT_", res):
+        env.pop(key, None)
+    # The marketplace registry proxies are the registry CLIENT, not the install
+    # store, so they are outside the OFF gate. Point them at a closed loopback port
+    # so the store-less proxy path is exercised without any outbound to the real
+    # default registry (an unreachable registry maps to 502, never a store refusal).
+    env["MARKETPLACE_URL"] = _OFF_UNREACHABLE_REGISTRY_URL
+    return StackConfig(
+        name="off",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )
