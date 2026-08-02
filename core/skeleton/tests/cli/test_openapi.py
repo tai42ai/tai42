@@ -679,6 +679,24 @@ def test_register_model_allows_idempotent_reregistration() -> None:
     assert _register_model(Gadget, components) == "Gadget"
 
 
+def test_error_schema_documents_the_optional_machine_readable_code(spec: dict) -> None:
+    # The shared Error component documents both fields the adapter emits: the required
+    # human-readable ``error`` and the OPTIONAL machine-readable ``code`` a refusal opts
+    # into (the 501 not-configured family). ``code`` is a string and absent from
+    # ``required``, so an error carrying only ``error`` still validates — additive and
+    # non-breaking.
+    schema = spec["components"]["schemas"]["Error"]
+    assert schema["required"] == ["error"]
+    assert schema["properties"]["error"]["type"] == "string"
+    assert schema["properties"]["code"]["type"] == "string"
+    assert "code" not in schema["required"]
+
+    # A bare error and a coded error both validate against the shared component.
+    validator = Draft202012Validator({**schema, "components": spec["components"]})
+    validator.validate({"error": "boom"})
+    validator.validate({"error": "not configured", "code": "marketplace-not-configured"})
+
+
 def test_reloading_error_schema_matches_the_gate_body(spec: dict) -> None:
     schema = spec["components"]["schemas"]["ReloadingError"]
     assert schema["properties"]["error"]["const"] == REJECT_MESSAGE

@@ -278,7 +278,21 @@ def build_openapi_spec() -> dict[str, Any]:
     components: dict[str, Any] = {
         _ERROR_SCHEMA: {
             "type": "object",
-            "properties": {"error": {"type": "string"}},
+            "properties": {
+                "error": {"type": "string"},
+                # ``code`` is the machine-readable reason a raiser opts into via
+                # ``extra={"code": …}`` (e.g. the 501 not-configured family), merged into
+                # the body beside ``error`` by the route adapter. Optional — absent from
+                # ``required`` — so an error carrying only ``error`` still validates.
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Stable machine-readable reason a client keys a dedicated error state on, "
+                        "present on refusals that opt in (e.g. a 501 not-configured refusal). "
+                        "Optional: absent when the error carries only a human-readable message."
+                    ),
+                },
+            },
             "required": ["error"],
         },
         _RELOADING_ERROR_SCHEMA: {
