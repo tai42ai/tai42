@@ -44,6 +44,6 @@ async def test_connectors_live_via_store_resolution(accounts_stack: TaiStack) ->
     connectors = next(row for row in rows if row["kind"] == "connectors")
     assert connectors["state"] == "active", connectors
 
-    ready = await ApiClient(f"http://{stack.host}:{stack.port_b}").request_raw("GET", "/ready")
+    ready = await stack.api(port=stack.port_b).request_raw("GET", "/ready")
     assert ready.status_code == 200, f"/ready not ready: {ready.status_code} {ready.text}"
     assert ready.json()["checks"].get("connectors") == "ok", ready.text
