@@ -31,7 +31,7 @@ dependencies = [
     # extra is REQUIRED, not optional: that module imports joserfc at module top,
     # so tai42-kit[jwt] must resolve for this plugin to import. NO redis extra —
     # this provider validates only and holds no state.
-    "tai42-kit[jwt]>=0.4,<0.5",
+    "tai42-kit[jwt]>=0.3,<0.4",
 ]
 
 [project.urls]
