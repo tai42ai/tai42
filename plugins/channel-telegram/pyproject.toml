@@ -28,7 +28,7 @@ dependencies = [
     "tai42-contract>=0.3,<0.4",
     # HttpxClient + RedisClient (redis extra) + TaiBaseSettings + the settings
     # cache registry + RedisConnectionSettings.
-    "tai42-kit[redis]>=0.3,<0.4",
+    "tai42-kit[redis]>=0.4,<0.5",
     # The whole transport: Bot API calls, the callback forward, and the error
     # types the channel classifies. No Telegram SDK — the Bot API is flat
     # JSON-over-HTTPS and there is no official Python SDK.

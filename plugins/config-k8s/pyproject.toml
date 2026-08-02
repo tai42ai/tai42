@@ -27,7 +27,7 @@ dependencies = [
     "tai42-contract>=0.3,<0.4",
     # Settings machinery (TaiBaseSettings + settings_cache) and the manifest
     # !ENV-tag yaml utilities (EnvTagLoader / merge_and_dump_manifest).
-    "tai42-kit>=0.3,<0.4",
+    "tai42-kit>=0.4,<0.5",
     # settings.py imports these directly (model_validator + SettingsConfigDict).
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
