@@ -1151,6 +1151,43 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == "fp-live"
 
 
+async def test_import_access_control_existing_token_not_reminted_under_overwrite(monkeypatch):
+    # Tokens are skip-only under EVERY mode: even with mode "overwrite" an already
+    # provisioned user id is a CLEAN skip, never a re-mint. Unlike the scope/route/hook
+    # branches, the token branch does not consult mode — the live key stands.
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import store as store_module
+    from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+    pg = FakeAccessControlPg()
+    pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
+    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
+    _install(monkeypatch)
+
+    document = {
+        "version": 1,
+        "sections": {
+            "access_control": {
+                "scopes": {},
+                "patterns": {},
+                "tokens": [{"user_id": "u1", "description": "d", "scopes": []}],
+            }
+        },
+    }
+    data = _json(
+        await import_backup(_post_req({"document": document, "sections": ["access_control"], "mode": "overwrite"}))
+    )["data"]
+    assert data["ok"] is True  # a clean skip is not an error, even under overwrite
+    report = data["sections"]["access_control"]
+    assert report["skipped_existing"] >= 1
+    assert report["created"] == 0
+    assert report["errors"] == []
+    assert report["new_api_keys"] == []
+    # Overwrite mode does NOT re-mint the token: the live key's fingerprint is unchanged.
+    assert pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM] == "fp-live"
+
+
 async def test_versioned_documents_section_round_trips_through_router(monkeypatch):
     from contextlib import asynccontextmanager
 
