@@ -72,7 +72,7 @@ async def test_collection_reads_answer_200_empty(off_stack: TaiStack) -> None:
 
     # connectors connections + the (store-independent) provider catalog.
     assert await api.get("/api/connectors/connections") == {"items": [], "total": 0, "unhealthy": 0}
-    assert await api.get("/api/connectors/providers") == []
+    assert await api.get("/api/connectors/providers") == {"providers": [], "categories": []}
 
     # presets list degrades to empty, never 501.
     assert await api.get("/api/presets") == []
