@@ -1,19 +1,14 @@
 """Store-level backup export/import for the tool-metadata Postgres tables.
 
-Postgres is the durable source of truth for the overlay, so these helpers operate
-at the SQL layer directly — NOT through the typed store. The export is a faithful
-row-level copy of BOTH tables: ``tool_folders`` (each row's ``id`` carried verbatim
-so the self-referential ``parent_id`` link survives) and ``tool_meta`` (the per-tool
-overlay rows). Import re-inserts each row under its original key
-(``ON CONFLICT DO UPDATE``); folders are restored before overlay rows so the
-``folder_id`` foreign key is satisfied, and folders are restored in TOPOLOGICAL
-order (a parent before its children) with their REAL ``parent_id`` so both the
-self-referential FK and the ``(parent_id, name)`` sibling-unique constraint hold on
-every insert.
+Postgres is the durable source of truth, so these helpers operate at the SQL layer
+directly — NOT through the typed store. The export is a faithful row copy of BOTH
+``tool_folders`` (each ``id`` carried verbatim so the self-referential ``parent_id``
+link survives) and ``tool_meta`` (the per-tool overlay rows). Import restores folders
+before overlay rows (for the ``folder_id`` FK) and in topological order with their
+real ``parent_id`` (see :func:`import_tool_meta`).
 
-Not secret-bearing: the overlay holds organizational metadata (display names,
-folder placement, user tags, a visibility flag) — no credentials — so the section
-is registered ``secret=False`` (default-ON in the export UI).
+Registered ``secret=False`` (default-ON in the export UI): the overlay holds
+organizational metadata only — no credentials.
 """
 
 from __future__ import annotations
@@ -106,19 +101,14 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
     """Restore folder + overlay rows under their original keys.
 
     Folders are keyed by ``id``, overlay rows by ``tool_name``: under ``skip`` an
-    already-present key is left untouched (``skipped_existing``) and only new rows are
-    inserted; under ``overwrite`` each row is an ``ON CONFLICT DO UPDATE``.
+    already-present key is left untouched (``skipped_existing``); under ``overwrite``
+    each row is an ``ON CONFLICT DO UPDATE``.
 
-    Folders are written before overlay rows so the ``folder_id`` foreign key is
-    satisfied, and folders are inserted in TOPOLOGICAL order (a parent before its
-    children) carrying their REAL ``parent_id``. Restoring with the real parent — not
-    a blanket ``NULL`` first pass — is REQUIRED: ``tool_folders`` is
-    ``UNIQUE NULLS NOT DISTINCT (parent_id, name)``, so two folders that legitimately
-    share a ``name`` under different parents would both collapse to ``(NULL, name)``
-    under a NULL-first pass and collide. Topological order keeps every insert's
-    ``(parent_id, name)`` correct while the not-deferrable self-FK still sees its
-    parent already present. The created count classifies each written row by whether
-    its key already existed.
+    Folders are written before overlay rows (for the ``folder_id`` FK) and in
+    TOPOLOGICAL order carrying their REAL ``parent_id`` — a blanket ``NULL`` first
+    pass is WRONG because ``tool_folders`` is
+    ``UNIQUE NULLS NOT DISTINCT (parent_id, name)``, so two folders sharing a ``name``
+    under different parents would both collapse to ``(NULL, name)`` and collide.
     """
     report = _empty_report()
     folders = payload.get("folders") or []
@@ -135,11 +125,8 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
         await cur.execute("SELECT tool_name FROM tool_meta")
         existing_rows = {row[0] for row in await cur.fetchall()}
 
-        # Insert each folder with its REAL parent_id, in topological order (a parent
-        # before its children) so the not-deferrable self-FK always finds its parent
-        # present. A parent that is already in the DB, or absent from the payload
-        # entirely (it references a pre-existing folder), is likewise treated as
-        # satisfied; a genuinely dangling parent surfaces loudly as an FK violation.
+        # Real parent_id in topological order (see _topological); a genuinely
+        # dangling parent surfaces loudly as an FK violation.
         for folder in _topological(folders, existing_folders):
             if folder["id"] in existing_folders and mode == "skip":
                 report["skipped_existing"] += 1

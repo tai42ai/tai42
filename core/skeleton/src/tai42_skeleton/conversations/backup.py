@@ -1,15 +1,13 @@
 """The ``conversations`` backup section — export/import over the routing-row store. Only
 the routing rows are backed up; the record/dedupe/reverse-index keyspaces are transient.
 
-Each row's ``callback_secret`` is EXCLUDED from the export (a live secret never leaves the
-host). Under ``overwrite`` a row is replaced and its ``api`` secret re-minted (surfaced in
-``new_callback_secrets``; callbacks signed with the pre-import secret then stop verifying).
-Under ``skip`` (the default) an existing route is left FULLY untouched — no re-mint — so a
-re-import of an unchanged backup never invalidates a live signer.
+``callback_secret`` is EXCLUDED from the export — a live secret never leaves the host.
+Under ``overwrite`` a row is replaced and its ``api`` secret re-minted (surfaced in
+``new_callback_secrets``); under ``skip`` (the default) an existing route is left FULLY
+untouched — no re-mint — so a re-import never invalidates a live signer.
 
-The ``execution_key_fingerprint`` IS exported: import asserts the live key still carries it
-and is token-free-evaluable, so a key revoked+reminted since the backup is refused per row
-rather than silently rebound.
+``execution_key_fingerprint`` IS exported: import asserts the live key still carries it and
+is token-free-evaluable, refusing per row a key revoked+reminted since the backup.
 """
 
 from __future__ import annotations
@@ -63,19 +61,13 @@ async def export_conversation_routes() -> dict[str, Any]:
 async def import_conversation_routes(
     payload: dict[str, Any], mode: Literal["skip", "overwrite"] = "skip"
 ) -> _SectionReport:
-    """Restore routing rows.
-
-    Keyed by ``route_name``: under ``skip`` (the default) an existing route is left
-    fully untouched — NOT re-minted — so a re-import never breaks a live callback
-    signer; under ``overwrite`` the row is replaced and its ``api`` secret re-minted,
-    surfaced in ``new_callback_secrets``.
+    """Restore routing rows, keyed by ``route_name``.
 
     A malformed envelope raises BEFORE any write. Each row written is validated, its
     execution key asserted usable and token-free-evaluable against the LIVE policy store
-    (pass-role is skipped — the restore door is admin-fenced), and its
-    ``(channel, our_identity)`` claim checked unclaimed, as the create door checks it. A
-    row failing any of these is a per-row rejection in the report, never an aborted
-    restore of the rest."""
+    (pass-role skipped — the restore door is admin-fenced), and its
+    ``(channel, our_identity)`` claim checked unclaimed. A row failing any of these is a
+    per-row rejection in the report, never an aborted restore of the rest."""
     if not isinstance(payload, dict):
         raise ValueError(f"conversations section payload must be an envelope dict, got {type(payload)}")
     if "routes" not in payload:
@@ -85,7 +77,7 @@ async def import_conversation_routes(
 
     report = _empty_report()
     if not payload["routes"]:
-        # Nothing to write, so it is a no-op on every deployment — the mirror of the export.
+        # Nothing to write: a no-op on every deployment.
         return report
 
     manager = get_conversations_manager()
@@ -95,9 +87,8 @@ async def import_conversation_routes(
         raise RuntimeError("conversation routes require the redis conversations backend to restore")
 
     existing = await manager.list_routes()
-    # The live ``(channel, identity)`` claims, tracked across the restore: two channel rows
-    # on one identity make every message to it unresolvable, which the create door refuses
-    # and this write seam must refuse too.
+    # Live ``(channel, identity)`` claims, tracked across the restore: two channel rows on
+    # one identity are unresolvable, refused here as the create door refuses them.
     claimed = {pair: row.route_name for row in existing.values() if (pair := _channel_identity(row)) is not None}
     # ONE scan for the whole restore, so each distinct key is read and rendered once.
     scan = ExecutionKeyScan()
@@ -112,8 +103,7 @@ async def import_conversation_routes(
             report["skipped"] += 1
             continue
         if route.route_name in existing and mode == "skip":
-            # An existing route is left fully untouched — no re-mint of its live
-            # callback secret, no re-assertion of its execution key.
+            # Left fully untouched — no re-mint, no re-assertion of its execution key.
             report["skipped_existing"] += 1
             continue
         try:
@@ -136,8 +126,8 @@ async def import_conversation_routes(
             report["skipped"] += 1
             continue
 
-        # The export carried no secret, so mint one here and show it once. A ``channel``
-        # row signs nothing and carries none.
+        # Export carried no secret; mint one here and show it once. A ``channel`` row
+        # signs nothing and carries none.
         callback_secret = secrets.token_urlsafe(32) if route.door == "api" else None
         restored = route.model_copy(update={"callback_secret": callback_secret})
 

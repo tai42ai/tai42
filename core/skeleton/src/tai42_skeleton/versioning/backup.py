@@ -1,25 +1,18 @@
 """Store-level backup export/import for the versioned-document Postgres tables.
 
-Postgres is the durable source of truth for the versioned-document store, so these
-helpers operate at the SQL layer directly — NOT through any typed view. The store
-is body-opaque and ``kind``-discriminated, so ONE section covers EVERY kind at
-once (presets under ``kind='preset'``, AC policies under ``kind='ac_policy'``,
-authored agents, and any future kind); no per-kind backup code is ever needed.
+Postgres is the durable source of truth, so these helpers operate at the SQL layer
+directly — NOT through any typed view. The store is body-opaque and
+``kind``-discriminated, so ONE section covers EVERY kind at once (presets, AC
+policies, authored agents, any future kind).
 
-The export is a faithful row-level copy of BOTH tables — ``versioned_documents``
-(including soft-deleted ghosts, so the audit history survives) and
-``versioned_document_versions`` (the full append-only version log). Each row's
-synthetic ``id`` is carried verbatim so the ``document_id`` foreign key linking a
-version to its document is preserved across the round-trip; the opaque ``body``
-JSONB is carried as-is and never inspected. Import re-inserts each row under its
-original id (``ON CONFLICT (id) DO UPDATE``), documents before versions so the FK
-is satisfied, then advances both ``BIGSERIAL`` sequences past the restored ids so
-a later insert cannot collide with a restored id.
+The export is a faithful row copy of BOTH ``versioned_documents`` (soft-deleted
+ghosts included, so history survives) and ``versioned_document_versions``. Each
+row's synthetic ``id`` is carried verbatim so the ``document_id`` foreign key
+survives the round-trip; the opaque ``body`` JSONB is never inspected.
 
-Secret constraint: the bodies are opaque and at least one kind is secret-bearing —
-a preset's ``fixed_kwargs`` can embed credentials and an AC-policy condition body
-is sensitive — so the section is registered ``secret=True`` (default-OFF in the
-export UI, treated like a secret), mirroring the connector-connections section.
+Registered ``secret=True`` (default-OFF in the export UI): the opaque bodies are
+secret-bearing — a preset's ``fixed_kwargs`` can embed credentials, an AC-policy
+condition body is sensitive.
 """
 
 from __future__ import annotations
@@ -41,13 +34,9 @@ def _empty_report() -> _SectionReport:
 
 
 async def export_versioned_documents() -> dict[str, Any]:
-    """Export every document row and every version row verbatim.
-
-    Both tables are read whole — soft-deleted ghosts and their history included —
-    and each row keeps its synthetic ``id`` so the version-to-document link
-    survives the round-trip. The ``body`` JSONB is carried as-is (never parsed);
-    ``created_at`` is serialized so the original timestamps restore intact.
-    """
+    """Export every document row and every version row verbatim; each keeps its
+    synthetic ``id`` (so the version-to-document link survives) and ``created_at``
+    is serialized. The ``body`` JSONB is carried as-is."""
     async with (
         client_ctx(PostgresClient, versioning_store_settings()) as pool,
         pool.connection() as conn,
@@ -89,14 +78,12 @@ async def import_versioned_documents(
 ) -> _SectionReport:
     """Restore document + version rows under their original ids.
 
-    Keyed by row ``id`` (documents counted; versions are the document's append-only
-    history and follow it): under ``overwrite`` every row is an
-    ``ON CONFLICT (id) DO UPDATE`` (idempotent, so a re-import over identical rows is a
-    no-op reported as ``updated``); under ``skip`` an already-present id is left
-    untouched — an existing document is ``skipped_existing`` and an existing version row
-    is left as it stands, while genuinely new rows still restore. Documents are written
-    before versions so the ``document_id`` foreign key is satisfied. After the writes,
-    both ``BIGSERIAL`` sequences are advanced past the largest restored id so a later
+    Keyed by row ``id`` (documents counted; versions follow their document): under
+    ``overwrite`` every row is an ``ON CONFLICT (id) DO UPDATE`` (idempotent); under
+    ``skip`` an already-present id is left untouched (documents counted
+    ``skipped_existing``) while new rows still restore. Documents are written before
+    versions so the ``document_id`` foreign key is satisfied; afterward both
+    ``BIGSERIAL`` sequences are advanced past the largest restored id so a later
     insert cannot collide with a restored row.
     """
     report = _empty_report()
@@ -108,8 +95,7 @@ async def import_versioned_documents(
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
-        # Classify created vs updated by pre-existing id (the same read-existing-
-        # then-upsert pattern the connector sections use); drives the counts only.
+        # Pre-existing ids classify created vs updated; drives the counts only.
         await cur.execute("SELECT id FROM versioned_documents")
         existing = {row[0] for row in await cur.fetchall()}
         await cur.execute("SELECT id FROM versioned_document_versions")
@@ -165,9 +151,8 @@ async def import_versioned_documents(
                 ),
             )
 
-        # Advance the serial sequences past the restored ids so the next natural
-        # insert does not collide with a preserved id. Guarded on non-empty so
-        # ``setval`` never sees a NULL ``MAX(id)``.
+        # Advance the serial sequences past the restored ids. Guarded on non-empty
+        # so ``setval`` never sees a NULL ``MAX(id)``.
         if documents:
             await cur.execute(
                 "SELECT setval(pg_get_serial_sequence('versioned_documents', 'id'), "
