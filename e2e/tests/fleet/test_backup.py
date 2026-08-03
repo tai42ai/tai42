@@ -13,11 +13,12 @@ manifest is byte-identical (nothing partial lands).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 import yaml
 from _fleet import (
+    build_backup_populated_stack,
     build_backup_source_stack,
     build_fleet_env_stack_builder,
     converged_baseline,
@@ -25,7 +26,9 @@ from _fleet import (
     manifest_file,
 )
 
-from tai42_e2e.stack import TaiStack
+from tai42_e2e.booting import boot_stack
+from tai42_e2e.llmstub import LlmStub
+from tai42_e2e.stack import Infra, TaiStack
 
 pytestmark = pytest.mark.backendless
 
@@ -78,6 +81,176 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
     assert r_man["ok"], f"manifest import failed: {r_man}"
     await converged_digest(target, differ_from=after_env)
     assert mcp_title in await _manifest_mcp_titles(target)  # the imported entry is live fleet-wide
+
+
+async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """The backup import per-record MODE matrix on a POPULATED instance, over the
+    keyed ``sub_mcp`` section (slug is the natural key). A slug is registered and
+    exported, then DRIFTED (its live tools list re-registered to a different set).
+    Re-importing that same backup exercises both modes on the record that now exists:
+
+    * ``skip`` (the default) LEAVES the drifted live record untouched and reports it
+      under ``skipped_existing`` — a clean skip, never an error, and never a
+      created/updated — so a re-import of an unchanged backup cannot clobber drift;
+    * ``overwrite`` UPSERTS the record back to the backup's tools and reports it under
+      ``updated``.
+
+    This is the keyed-record contract every mode-aware section (conversations, tokens,
+    templates, ...) shares; the section-specific legs (token skip-only, conversations
+    callback-secret non-remint) are exercised on a populated instance by
+    ``test_skip_import_preserves_conversation_secret_and_token`` below.
+    """
+    stack = fresh_stack(build_backup_source_stack)
+    api = stack.api()
+    slug = uniq("submcp").replace("_", "-")
+
+    # -- populate: register a sub-MCP app over a real probe tool, then export the section.
+    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo"]}, retry_on_reloading=True)
+    export = await api.request_raw("POST", "/api/backup/export", json={"sections": ["sub_mcp"]})
+    assert export.status_code == 200, export.text
+    document = export.json()
+    assert document["sections"]["sub_mcp"][slug]["tools"] == ["e2e_echo"], document
+
+    # -- drift: re-register the SAME slug with a different tools set (POST upserts the store).
+    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo", "e2e_fail"]}, retry_on_reloading=True)
+    drifted = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    assert drifted[slug]["tools"] == ["e2e_echo", "e2e_fail"], drifted
+
+    # -- skip: the drifted record is left standing and reported skipped_existing.
+    skip = await api.post(
+        "/api/backup/import",
+        json={"document": document, "sections": ["sub_mcp"], "mode": "skip"},
+        retry_on_reloading=True,
+    )
+    assert skip["ok"], skip
+    report = skip["sections"]["sub_mcp"]
+    assert report["skipped_existing"] == 1, report
+    assert report["created"] == 0, report
+    assert report["updated"] == 0, report
+    assert report["errors"] == [], report
+    after_skip = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    assert after_skip[slug]["tools"] == ["e2e_echo", "e2e_fail"], "skip must not overwrite the drifted record"
+
+    # -- overwrite: the record is upserted back to the backup's tools and reported updated.
+    over = await api.post(
+        "/api/backup/import",
+        json={"document": document, "sections": ["sub_mcp"], "mode": "overwrite"},
+        retry_on_reloading=True,
+    )
+    assert over["ok"], over
+    report = over["sections"]["sub_mcp"]
+    assert report["updated"] == 1, report
+    assert report["created"] == 0, report
+    assert report["skipped_existing"] == 0, report
+    assert report["errors"] == [], report
+    after_over = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    assert after_over[slug]["tools"] == ["e2e_echo"], "overwrite must restore the backup's record fleet-wide"
+
+
+@pytest.fixture(scope="module")
+def backup_populated_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """The access-control-ON backup stack, seeded with a root key BEFORE boot (readiness
+    is denied until the route table pins the probes public), booted once for the module.
+    It carries the redis conversations backend + the api-key store, so a real route and a
+    real token can be populated and round-tripped through a backup."""
+    yield from boot_stack(
+        infra,
+        tmp_path_factory.mktemp("backup_populated"),
+        build_backup_populated_stack,
+        resource_kwargs={"llm_base_url": llm_stub.base_url},
+        seed_auth=True,
+    )
+
+
+async def test_skip_import_preserves_conversation_secret_and_token(
+    backup_populated_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """PLAN_10 §C — a ``skip`` re-import over a POPULATED instance re-mints NOTHING.
+
+    The instance holds an existing ``api``-door conversation route (its ``callback_secret``
+    minted on the host) and an existing api-key token (the route's execution key). Both
+    sections are exported, the backup is then EDITED to carry changed values, and it is
+    re-imported in ``skip`` mode. Skip must ignore the edits and leave both records exactly
+    as they stand:
+
+    * the conversation route is ``skipped_existing`` and its callback secret is NOT
+      re-minted (a re-mint would surface in ``new_callback_secrets``) — matching
+      ``conversations/backup.py`` (no re-mint on skip);
+    * the token is ``skipped_existing`` and NOT re-minted (a mint would surface in
+      ``new_api_keys``) — matching ``access_control`` tokens being STRUCTURALLY skip-only.
+    """
+    stack = backup_populated_stack
+    api = stack.api()
+
+    # -- populate: an api-key token that doubles as the route's execution key, then an
+    # api-door route whose callback_secret is minted on the host and shown once.
+    exec_key = uniq("bkp-exec").replace("_", "-")
+    minted = await api.post(
+        "/api/auth/api-keys",
+        json={"user_id": exec_key, "description": "backup-skip token", "scopes": ["e2e-all"]},
+        retry_on_reloading=True,
+    )
+    assert isinstance(minted, dict), minted
+    assert minted["api_key"].startswith("sk-"), minted
+
+    route_name = uniq("bkp-route").replace("_", "-")
+    created = await api.post(
+        f"/api/conversations/{route_name}",
+        json={
+            "door": "api",
+            "agent_name": "tools_agent",
+            "execution_key": exec_key,
+            "callback_url": "https://127.0.0.1:9/callback",
+        },
+        retry_on_reloading=True,
+    )
+    assert created["callback_secret"], created  # minted once here; reads withhold it
+
+    # -- export both sections. The export withholds the live callback secret (import
+    # re-mints it ONLY under overwrite), so a skip re-import cannot re-mint from it.
+    export = await api.request_raw("POST", "/api/backup/export", json={"sections": ["access_control", "conversations"]})
+    assert export.status_code == 200, export.text
+    document = export.json()
+    routes = document["sections"]["conversations"]["routes"]
+    assert route_name in [route["route_name"] for route in routes], document
+    assert all("callback_secret" not in route for route in routes), routes
+    assert any(token["user_id"] == exec_key for token in document["sections"]["access_control"]["tokens"]), document
+
+    # -- EDIT the backup to carry changed values, then import it in skip mode. Skip must
+    # ignore every edit and leave the live records untouched.
+    for route in document["sections"]["conversations"]["routes"]:
+        if route["route_name"] == route_name:
+            route["callback_url"] = "https://127.0.0.1:9/CHANGED"
+    for token in document["sections"]["access_control"]["tokens"]:
+        if token["user_id"] == exec_key:
+            token["description"] = "CHANGED — skip must ignore this"
+
+    result = await api.post(
+        "/api/backup/import",
+        json={"document": document, "sections": ["access_control", "conversations"], "mode": "skip"},
+        retry_on_reloading=True,
+    )
+    assert result["ok"], result
+
+    # (a) the conversation route is skipped and its callback secret is NOT re-minted.
+    conv = result["sections"]["conversations"]
+    assert conv["skipped_existing"] == 1, conv
+    assert conv["created"] == 0, conv
+    assert conv["updated"] == 0, conv
+    assert conv["new_callback_secrets"] == [], conv  # a re-mint would surface here
+    assert conv["errors"] == [], conv
+
+    # (b) the token is left untouched — skipped_existing, never re-minted (skip-only).
+    ac = result["sections"]["access_control"]
+    assert ac["created"] == 0, ac
+    assert ac["updated"] == 0, ac
+    assert ac["new_api_keys"] == [], ac  # a token mint would surface here
+    assert ac["skipped_existing"] >= 1, ac
+    assert ac["errors"] == [], ac
 
 
 async def test_corrupted_manifest_import_reports_error_and_persists_nothing(

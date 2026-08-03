@@ -84,6 +84,51 @@ def build_backup_source_stack(res: StackResources, variants: Variants) -> StackC
     return _replace(cfg, name="backup-source", manifest=manifest, env=_pin_hashseed(cfg.env), run_metrics=False)
 
 
+def build_backup_populated_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """A SINGLE-worker, access-control-ON backup stack that can hold a REAL conversation
+    route (its ``callback_secret``) AND a REAL api-key token — the populated source for the
+    two mode-less skip-only legs PLAN_10 §C pins at e2e:
+
+    * the ``conversations`` section, over the redis conversations backend
+      (``CONVERSATIONS_REDIS_URL``), so an ``api``-door route row persists and carries a
+      minted ``callback_secret``; a ``skip`` re-import must leave that secret UNCHANGED
+      (never surfaced in the report's ``new_callback_secrets``);
+    * the ``access_control`` section, over the seeded root key + the api-key store, so an
+      existing token is left untouched (``skipped_existing``) under EVERY mode.
+
+    It re-shapes the ``bare`` core surface (proven bootable) by MOUNTING the
+    conversations / api-keys / agents routers plus the backup router, turning access
+    control ON with the Postgres policy store + pluggable identity provider (seeded
+    pre-boot by ``boot_stack(seed_auth=True)``), and registering ``tools_agent`` ONLY so a
+    route's ``agent_name`` resolves — no turn is ever run, so the scripted LLM stub is
+    never dialed. One worker, no backend runtime, no metrics sidecar keeps this opt-in
+    stack's boot cost down; convergence is not asserted on it."""
+    # Local import so the fleet helpers stay a thin re-shape layer over the shared builders.
+    from tai42_e2e.manifests import _llm_stub_env, _memory_agent_state_env, _pg_env
+
+    cfg = build_bare_stack(res, variants)
+    manifest = copy.deepcopy(cfg.manifest)
+    manifest["lifecycle_modules"] = [variants.identity.lifecycle_module]
+    manifest["routers_modules"] = [
+        *manifest["routers_modules"],
+        "tai42_skeleton.routers.conversations",
+        "tai42_skeleton.routers.api_keys",
+        "tai42_skeleton.routers.agents",
+        "tai42_skeleton.routers.backup",
+    ]
+    manifest["agents"] = [
+        {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]}
+    ]
+    env = dict(cfg.env)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env.update(variants.identity.auth_provider_env())
+    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
+    env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    env.update(_memory_agent_state_env())
+    env.update(_llm_stub_env(res))
+    return _replace(cfg, name="backup-populated", manifest=manifest, env=env, run_metrics=False, auth=True)
+
+
 def build_fleet_env_stack_builder(env_key: str) -> Callable[[StackResources, Variants], StackConfig]:
     """A builder for a convergence fleet whose seeded manifest references *env_key* via an
     ``!ENV`` marker (in a zero-transport ``mcp`` entry's ``url``), so writing or
