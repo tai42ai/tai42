@@ -1,27 +1,14 @@
-"""The concrete ``AppBackup`` registry — the impl body behind the ``app.backup``
-facet.
+"""Concrete ``AppBackup`` registry behind the ``app.backup`` facet.
 
-A section is a named ``(exporter, importer)`` pair plus a ``secret`` flag. The
-registry stores sections in registration order, lists them for the UI, and runs
-one section's exporter/importer by name. An unknown name raises loudly — never a
-silent no-op — and a duplicate registration raises rather than overwrite.
+A section is a named ``(exporter, importer)`` pair plus a ``secret`` flag, stored
+in registration order. Exporter/importer may be sync or async; the registry
+returns their result verbatim (a coroutine for an async section) without awaiting
+or inspecting it — pure name-to-callable dispatch, and the caller awaits.
 
-The contract facet is synchronous, but a section's real work (redis, Postgres,
-a run-tool call) is asynchronous. The exporter/importer callables are therefore
-allowed to be either sync or async: :meth:`export_section` / :meth:`import_section`
-run the callable and return its result verbatim (a coroutine for an async
-section), and the async HTTP router awaits an awaitable result. The registry
-itself neither awaits nor inspects the payload — it is a pure name-to-callable
-dispatch.
-
-The per-import ``skip``/``overwrite`` MODE rides a request-scoped context rather
-than the ``import_section(name, payload)`` signature: the facet method is the
-vendor-neutral contract Protocol shape, so widening it is out of the picture, and
-mode is import-wide (set once, honored by every section) rather than per-call.
-:func:`import_mode` sets it around a whole import; each mode-aware importer reads
-it through :func:`current_import_mode`. Absent an active import it is ``skip`` —
-the non-destructive default — so an importer exercised in isolation leaves
-existing records untouched unless a test opts into ``overwrite``.
+The per-import ``skip``/``overwrite`` mode rides a request-scoped contextvar, not
+the ``import_section`` signature (which is the vendor-neutral contract shape):
+:func:`import_mode` binds it for a whole import, each mode-aware importer reads it
+via :func:`current_import_mode`. Default ``skip`` (non-destructive) outside any import.
 """
 
 from __future__ import annotations
@@ -34,9 +21,8 @@ from typing import Any, Literal
 
 from tai42_contract.backup import BackupSectionInfo
 
-# The import mode applied per keyed record: ``skip`` leaves an existing record
-# (matched on its natural key) untouched; ``overwrite`` upserts it. New records are
-# created under both. ``skip`` is the default — the non-destructive choice.
+# Per keyed record: ``skip`` leaves an existing record untouched, ``overwrite``
+# upserts it; new records are created under both.
 BackupMode = Literal["skip", "overwrite"]
 
 _import_mode: ContextVar[BackupMode] = ContextVar("tai42_backup_import_mode", default="skip")
@@ -49,11 +35,7 @@ def current_import_mode() -> BackupMode:
 
 @contextmanager
 def import_mode(mode: BackupMode) -> Iterator[None]:
-    """Bind ``mode`` for the duration of one import, restoring the prior value after.
-
-    An import runs its sections under a single mode; :func:`current_import_mode`
-    reads it from inside each section importer, threading the choice across the
-    ``import_section`` seam without widening the contract facet signature."""
+    """Bind ``mode`` for the duration of one import, restoring the prior value after."""
     token = _import_mode.set(mode)
     try:
         yield
@@ -75,8 +57,7 @@ class BackupRegistry:
     """Ordered registry of named backup sections (``tai42_contract.app.AppBackup``)."""
 
     def __init__(self) -> None:
-        # Insertion-ordered: ``sections()`` reports registration order, so the UI
-        # renders host sections before any plugin-added ones.
+        # Insertion-ordered: ``sections()`` reports registration order.
         self._sections: dict[str, _Section] = {}
 
     def register_section(

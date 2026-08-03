@@ -1,35 +1,23 @@
 """HTTP surface for the backup/restore feature — the Studio's backup UI doors.
 
-Three AUTHED doors over the live ``tai42_app.backup`` registry. The registry lists
-its sections (host sections plus any a plugin registered), and each section runs
-its own subsystem's export/import through a thin exporter/importer pair. An
-export whose section carries secrets stays behind this credential exactly as the
-config-env surface does.
+Three AUTHED doors over the live ``tai42_app.backup`` registry (host sections plus
+any a plugin registered), each running its subsystem's export/import through a thin
+pair. A secret-bearing export stays behind this credential like the config-env surface.
 
-- ``GET  /api/backup/sections`` — the registered sections as ``{name, secret}``,
-  so the UI renders one checkbox per live section (plugins included).
-- ``POST /api/backup/export`` — body ``{"sections": [names]}``. Requesting a
-  section that is not registered is a loud 400. The response is a downloadable
-  JSON document ``{"version", "created_at", "sections": {name: payload},
-  "errors": {name: message}}``: a section that exported cleanly lands under
-  ``sections``; a section whose backing subsystem is absent (its exporter raises)
-  lands under ``errors`` and is omitted from ``sections`` — the export still
-  returns the document as a download, never a 500 and never a silent drop.
-- ``POST /api/backup/import`` — body ``{"document": <export document>,
-  "sections": [names to import]}``. A document whose ``version`` is not 1 is a
-  loud 400. Each SELECTED section is imported and its report collected; a section
-  that fails imports nothing and carries its error, and a selected section that
-  is unknown (not registered) or absent from the document carries an error too —
-  none of these is a transport error, because the request itself is well-formed.
-  The response is HTTP 200 ``{"data": {"ok": <bool>, "sections": {name: report}}}``;
-  ``access_control`` surfaces its freshly-minted keys in its section report.
+- ``GET  /api/backup/sections`` — the registered sections as ``{name, secret}``.
+- ``POST /api/backup/export`` — body ``{"sections": [names]}``. An unregistered
+  section is a loud 400. The response is a downloadable JSON document; a section whose
+  exporter raises lands under ``errors`` and is omitted from ``sections`` — never a 500,
+  never a silent drop.
+- ``POST /api/backup/import`` — body ``{"document", "sections"}``. ``version`` other than
+  1 is a loud 400. Each selected section is imported and its report collected; unknown,
+  absent, or failing sections carry an error without being a transport failure. Response
+  is 200 ``{"data": {"ok", "sections"}}``.
 
-``list_sections`` and ``import_backup`` are thin adapters over operations in
-``tai42_skeleton.operations.backup`` (import's envelope shape is validated here at
-the HTTP edge). The export door is a downloadable attachment — the raw document
-(not a ``{"data": ...}`` envelope) so a saved ``.json`` file is exactly what
-``import`` consumes — so it stays a handler. Success bodies for the other doors
-are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
+``list_sections`` and ``import_backup`` are thin adapters over
+``tai42_skeleton.operations.backup`` (import's envelope shape validated here at the HTTP
+edge). The export door stays a handler because its body is the raw document (a saved
+``.json`` is exactly what ``import`` consumes), not a ``{"data": ...}`` envelope.
 """
 
 from __future__ import annotations
@@ -114,10 +102,8 @@ async def export_backup(request: Request) -> Response:
     for name in requested:
         try:
             payload = await _maybe_await(tai42_app.backup.export_section(name))
-        except Exception as exc:  # a section whose subsystem is absent — record, don't 500
-            # Still surfaced in the returned report; also logged so a genuine
-            # exporter code bug is visible server-side, not just an absent
-            # subsystem indistinguishable from it.
+        except Exception as exc:  # absent subsystem — record, don't 500
+            # Also logged, so a genuine exporter code bug is visible server-side.
             logger.warning("backup export of section %r failed: %s", name, exc, exc_info=True)
             errors[name] = str(exc)
             continue
@@ -134,10 +120,9 @@ async def export_backup(request: Request) -> Response:
 
 
 async def _extract_import(request: Request) -> dict:
-    """Parse + structurally validate the import body into the operation's flat
+    """Parse + validate the import body into the operation's flat
     ``document``/``sections``/``mode`` arguments, rejecting a malformed envelope with a
-    loud 400 before the operation runs (the document CONTENT — version, its sections
-    map — is the operation's own validation)."""
+    loud 400 (the document CONTENT is the operation's own validation)."""
     try:
         body = await request.json()
     except ValueError as exc:
@@ -150,8 +135,7 @@ async def _extract_import(request: Request) -> dict:
     selected = _require_string_list(body.get("sections"))
     if selected is None:
         raise BadRequestError("body must contain a list of section-name strings 'sections'") from None
-    # ``mode`` defaults to the non-destructive ``skip``; an unrecognized value is a
-    # loud 400 rather than a silent fallback to a default.
+    # ``mode`` defaults to ``skip``; an unrecognized value is a loud 400, not a silent fallback.
     mode = body.get("mode", "skip")
     if mode not in ("skip", "overwrite"):
         raise BadRequestError("'mode' must be 'skip' or 'overwrite'") from None

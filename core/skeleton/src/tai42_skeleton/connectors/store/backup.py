@@ -1,39 +1,16 @@
 """Store-level backup export/import for the connector Postgres tables.
 
-Postgres is the durable source of truth for every connector table, so these
-helpers operate at the SQL layer directly — NOT the network-gated service layer.
-No provider is re-probed and no OAuth flow is replayed; a backup is a faithful
-row-level copy of what the tables already hold.
+Postgres is the durable source of truth, so these helpers operate at the SQL layer
+directly — NOT the network-gated service layer; no provider re-probe, no OAuth
+replay. Two independent section pairs cover the two halves of connector state:
 
-Two independent section pairs back the two halves of the connector state:
+  * categories — the public, secret-free ``connector_category`` grouping rows.
+  * connections — the per-connection token records, each carrying its AES-GCM
+    ciphertext verbatim (base64, NEVER decrypted).
 
-  * :func:`export_connector_categories` / :func:`import_connector_categories` —
-    the public, secret-free ``connector_category`` grouping rows (the UI's
-    provider grouping labels + sort order). Each row's ``created_at`` is exported
-    and restored so the original creation time survives a round-trip; import
-    upserts each row idempotently (``ON CONFLICT (id) DO UPDATE``).
-
-  * :func:`export_connector_connections` / :func:`import_connector_connections`
-    — the per-connection token records. Each entry carries the AES-GCM
-    ciphertext verbatim (base64-encoded, NEVER decrypted); the ``encrypted_blob``
-    bytes cross the backup as-is. Import re-inserts the ciphertext and its
-    ``session_expires_at`` under the original ``connection_id``
-    (``ON CONFLICT (connection_id) DO UPDATE``). ``cache_version`` and the
-    timestamps are store-regenerated and omitted. After the durable Postgres
-    write each restored ``connection_id``'s Redis cache key is invalidated
-    (``DEL``) so the next ``get`` repopulates from Postgres:
-    :meth:`RedisPgConnectorTokenStore.get` serves a warm cache HIT WITHOUT a
-    read-side version check, so restoring into a running deployment with a warm
-    cache would otherwise keep serving the pre-import (stale) token for an
-    already-cached connection until its key expired. A failed invalidation raises
-    loudly.
-
-KEK constraint: the blobs are ciphertext under ``CONNECTORS_KEK``. A restore is
-usable only if the SAME ``CONNECTORS_KEK`` is present in the target deployment;
-under a different KEK the ciphertext is intact but undecryptable, and the record
-load path (``connectors.store.persistence``) fails loudly on the first use of a
-connection — the restore never silently produces a working-looking-but-dead
-token.
+KEK constraint: a restore is usable only under the SAME ``CONNECTORS_KEK``; under a
+different KEK the ciphertext is intact but undecryptable and the load path fails loudly
+on first use — never a working-looking-but-dead token.
 """
 
 from __future__ import annotations
@@ -51,9 +28,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.connectors.settings import connector_store_settings
 from tai42_skeleton.connectors.store.redis_pg import _ALIAS_UNIQUE_CONSTRAINT, RedisPgConnectorTokenStore
 
-# The report shape every importer returns, matching the backup section contract
-# (``connectors.store.backup`` is a separate subsystem from ``backup.sections``,
-# so it builds its own report rather than importing across the seam).
+# The backup section report shape, built here rather than imported across the seam.
 _SectionReport = dict[str, Any]
 
 
@@ -65,11 +40,8 @@ def _empty_report() -> _SectionReport:
 
 
 async def export_connector_categories() -> dict[str, Any]:
-    """Export the ``connector_category`` grouping rows.
-
-    Every row is read raw. Each row's ``created_at`` is exported so the original
-    creation time survives a round-trip; the export is a faithful row copy.
-    """
+    """Export the ``connector_category`` grouping rows as a faithful row copy;
+    ``created_at`` is carried so the original creation time survives a round-trip."""
     async with (
         client_ctx(PostgresClient, connector_store_settings().pg) as pool,
         pool.connection() as conn,
@@ -95,12 +67,9 @@ async def import_connector_categories(
 ) -> _SectionReport:
     """Restore the ``connector_category`` grouping rows, keyed by ``id``.
 
-    Under ``overwrite`` each row is an ``ON CONFLICT (id) DO UPDATE`` (idempotent), so a
-    re-import over identical rows is a no-op change reported as ``updated``. Under
-    ``skip`` an already-present id is left untouched (``skipped_existing``) and only new
-    ids are inserted. The backed-up ``created_at`` is written on the INSERT so the
-    original creation time survives a restore into a fresh table; it is immutable, so
-    the ``DO UPDATE`` branch leaves the existing value untouched.
+    Under ``overwrite`` each row is an ``ON CONFLICT (id) DO UPDATE``; under ``skip`` an
+    already-present id is left untouched. ``created_at`` is written on INSERT and immutable,
+    so the ``DO UPDATE`` branch leaves the existing value untouched.
     """
     report = _empty_report()
     categories = payload.get("categories") or []
@@ -110,9 +79,7 @@ async def import_connector_categories(
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
-        # Read the current keys first so each upsert is classified created vs
-        # updated (the same read-existing-then-upsert pattern the other sections
-        # use); this drives only the report counts, not the write itself.
+        # Current keys drive the created-vs-updated report counts only, not the write.
         await cur.execute("SELECT id FROM connector_category")
         existing_categories = {row[0] for row in await cur.fetchall()}
 
@@ -141,11 +108,9 @@ async def import_connector_categories(
 
 
 async def export_connector_connections() -> list[dict[str, Any]]:
-    """Export every connection record with its ciphertext carried verbatim.
-
-    The ``encrypted_blob`` bytes are base64-encoded AS-IS — never decrypted — so
-    the KEK boundary is never crossed. ``cache_version`` and the timestamps are
-    store-regenerated on restore and therefore omitted.
+    """Export every connection record, ``encrypted_blob`` base64-encoded AS-IS (never
+    decrypted, so the KEK boundary is never crossed). ``cache_version`` and timestamps are
+    store-regenerated on restore and omitted.
     """
     async with (
         client_ctx(PostgresClient, connector_store_settings().pg) as pool,
@@ -174,21 +139,11 @@ async def import_connector_connections(
 ) -> _SectionReport:
     """Re-insert each connection's ciphertext under its original connection id.
 
-    Keyed by ``connection_id``: under ``skip`` an already-present connection is left
-    untouched (``skipped_existing``, its cached token undisturbed) and only new ones are
-    inserted; under ``overwrite`` the ciphertext is upserted and the stale cache key
-    dropped.
-
-    Each row runs inside its own savepoint (``conn.transaction()``) so a
-    per-provider alias collision isolates to that row: an ``(provider_id, alias)``
-    already held by a DIFFERENT ``connection_id`` trips the durable
-    ``UNIQUE (provider_id, alias)`` constraint, which is caught and reported as a
-    per-row error (never silently dropped) while the remaining rows still
-    restore. Any other database error raises loudly and aborts the section.
-
-    After the Postgres writes commit, each restored ``connection_id``'s Redis
-    cache key is invalidated so a warm cache in a running deployment cannot keep
-    serving the pre-import (stale) token — see :func:`_invalidate_connection_cache`.
+    Keyed by ``connection_id``: ``skip`` leaves an already-present connection untouched,
+    ``overwrite`` upserts and drops the stale cache key. Each row runs in its own savepoint
+    so a per-provider alias collision (the durable ``UNIQUE (provider_id, alias)``) isolates
+    to a per-row error while the rest restore; any other DB error aborts the section.
+    Restored cache keys are invalidated after commit — see :func:`_invalidate_connection_cache`.
     """
     report = _empty_report()
     restored_ids: list[str] = []
@@ -203,8 +158,7 @@ async def import_connector_connections(
         for entry in payload:
             connection_id = entry["connection_id"]
             if connection_id in existing and mode == "skip":
-                # An existing connection is left untouched — its stored ciphertext and
-                # warm cache entry stand, so no cache invalidation is needed either.
+                # Left untouched — stored ciphertext and warm cache stand, no invalidation needed.
                 report["skipped_existing"] += 1
                 continue
             conn_uuid = uuid.UUID(connection_id)
@@ -236,31 +190,23 @@ async def import_connector_connections(
                     continue
                 raise
             _count(report, connection_id in existing)
-            # Invalidate on the canonical UUID the row is stored under (and that
-            # get() is always handed), not the raw backup string — a non-canonical
-            # id in a foreign backup would otherwise drop the wrong cache key.
+            # Invalidate on the canonical UUID the row is stored under (what get() is
+            # handed), not the raw backup string — else a non-canonical id drops the wrong key.
             restored_ids.append(str(conn_uuid))
 
-    # Postgres is now durable; drop the stale cache entries so the next read
-    # repopulates the restored token from Postgres (raises loudly on failure).
+    # Postgres is durable; drop stale cache entries so the next read repopulates.
     await _invalidate_connection_cache(restored_ids)
     return report
 
 
 async def _invalidate_connection_cache(connection_ids: list[str]) -> None:
-    """Drop each restored connection's Redis cache key after the durable Postgres
-    write so the next ``get`` repopulates from Postgres.
+    """Drop each restored connection's Redis cache key after the durable write.
 
-    :meth:`RedisPgConnectorTokenStore.get` returns a cached blob on a cache HIT
-    WITHOUT a read-side version check (the ``cache_version`` fence guards only the
-    cache-MISS repopulate). A restore into a running deployment with a warm cache
-    would therefore keep serving the pre-import (stale) token for any
-    already-cached ``connection_id`` until its key expired. Deleting the key
-    forces a version-fenced repopulate from the freshly restored row.
-
-    The key is built through the store's own ``_rec_key`` helper so the cache
-    keyspace stays single-sourced. A failed ``DEL`` raises loudly — the restore
-    must not silently leave a stale token cached.
+    :meth:`RedisPgConnectorTokenStore.get` serves a warm cache HIT WITHOUT a read-side
+    version check (the ``cache_version`` fence guards only the cache-MISS repopulate), so a
+    restore into a warm cache would keep serving the stale token until the key expired.
+    Keyed through the store's own ``_rec_key`` so the keyspace stays single-sourced; a
+    failed ``DEL`` raises loudly.
     """
     if not connection_ids:
         return

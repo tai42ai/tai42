@@ -9,18 +9,11 @@ A thin skin over the app's resource manager (``tai42_app.storage.resource_manage
 * ``render_template`` — render inline content OR a stored template with kwargs.
 * ``clear_templates_cache`` — drop the compiled-template cache.
 
-**Path-argument hardening:** every logical template key that reaches the store —
-the upload/delete ``path`` and the render/fetch ``template_id`` — runs through the
-shared lexical containment guard (:func:`safe_template_path`) INSIDE the operation,
-so the guard defends the MCP tool edge and the CLI as well as the HTTP route: a
-``..`` escape, an absolute key, an embedded backslash/NUL, or an empty key is
-refused loudly (a ``400`` on the route, a ``ToolError`` on the tool). Upload/delete
-are arbitrary-file-write primitives and render/fetch by id are arbitrary-file-read
-primitives; the guard is their first line, defense in depth over the store's own
-root defense.
-
-``upload_template`` and ``delete_template`` mutate the store, so both are
-``destructive``.
+**Path-argument hardening:** every logical template key reaching the store runs
+through the shared lexical containment guard (:func:`safe_template_path`) INSIDE the
+operation, so the guard defends the MCP tool and CLI edges as well as the HTTP route
+(a ``..`` escape, absolute key, embedded backslash/NUL, or empty key is refused loudly).
+Defense in depth over the store's own root check.
 """
 
 from __future__ import annotations
@@ -80,13 +73,10 @@ def _safe_key(key: object) -> str:
 
 
 def _resolves_to_template_root(key: str) -> bool:
-    """True when a guard-passed key targets the template ROOT itself (``.`` /
-    ``a/..``) rather than a subdirectory.
+    """True when a guard-passed key targets the template ROOT itself (``.`` / ``a/..``).
 
-    The shared lexical guard admits a root-resolving key — it rejects only
-    resolution ABOVE the root, not a key that lands EXACTLY on it. Resolving the
-    key under the guard's own anchor and comparing to that anchor detects the
-    exact-root case the guard lets through.
+    The shared lexical guard rejects resolution ABOVE the root but admits a key landing
+    EXACTLY on it; resolving under the guard's anchor and comparing catches that case.
     """
     root = os.path.realpath(_TEMPLATE_ROOT)
     return os.path.realpath(os.path.join(root, key)) == root
@@ -174,20 +164,14 @@ async def delete_template(path: str) -> dict:
 async def delete_template_dir(path: str) -> dict:
     """Delete every stored template under the directory ``path``.
 
-    Unlike the single-template delete (idempotent — an absent key is a no-op
-    ``200``), a directory that matches nothing is a loud ``404``: the provider
-    raises ``FileNotFoundError`` for an absent directory and that surfaces as a
-    :class:`NotFoundError`. A key that resolves to the template ROOT (``.`` /
-    ``a/..``) would wipe the whole store, so it is refused with a ``400`` HERE —
-    ahead of the provider and independent of any backend's own root check; a
-    provider that still reports a root violation as a ``ValueError`` is mapped to a
-    ``400`` as well.
+    Unlike the idempotent single-template delete, a directory matching nothing is a loud
+    ``404`` (the provider's ``FileNotFoundError``). A key resolving to the template ROOT
+    would wipe the whole store, so it is refused with a ``400`` HERE, ahead of the provider;
+    a provider reporting a root violation as ``ValueError`` maps to ``400`` too.
     """
     key = _safe_key(path)
-    # Defense in depth for a DESTRUCTIVE dir-delete: the shared guard passes a key
-    # that resolves to EXACTLY the template root (it rejects only escape ABOVE the
-    # root), so refuse a root-resolving key here — before it reaches the provider —
-    # rather than rely on each backend's own root check.
+    # The shared guard admits a key resolving EXACTLY to the root; refuse it here before
+    # the provider rather than rely on each backend's own root check.
     if _resolves_to_template_root(key):
         raise BadRequestError("refusing to delete the template root; a directory path is required")
     try:
