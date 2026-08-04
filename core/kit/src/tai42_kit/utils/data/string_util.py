@@ -1,4 +1,28 @@
 import hashlib
+import keyword
+import string
+
+_IDENTIFIER_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+
+
+def makefun_func_name(name: str) -> str:
+    """A valid Python identifier for a ``makefun.create_function`` ``func_name``.
+
+    A tool/preset/agent name is a wider charset than a Python identifier — it may
+    carry ``-`` or lead with a digit, could be a keyword, or hold unicode — but
+    makefun emits ``def <func_name>(...)`` and silently falls back to a BROKEN
+    lambda form for a non-identifier name (any signature with a return annotation
+    then fails to compile). ``func_name`` only sets the generated wrapper's
+    cosmetic ``__name__``, so a normalized identifier is a faithful, safe stand-in.
+
+    Every char outside ``[0-9A-Za-z_]`` is substituted IN PLACE with ``_`` (not
+    collapsed to a single constant), then a leading digit / keyword result gets a
+    ``_`` prefix — so distinct inputs stay distinct valid identifiers.
+    """
+    candidate = "".join(char if char in _IDENTIFIER_CHARS else "_" for char in name)
+    if not candidate or candidate[0].isdigit() or keyword.iskeyword(candidate):
+        candidate = f"_{candidate}"
+    return candidate
 
 
 def text_to_md5(string: str) -> str:
