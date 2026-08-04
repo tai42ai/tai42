@@ -4962,7 +4962,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "0.4.3"
+version = "0.4.4"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5015,7 +5015,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.4.3"
+version = "0.4.4"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5072,7 +5072,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.4.4"
+version = "0.4.5"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5460,7 +5460,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "0.4.4"
+version = "0.5.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5643,7 +5643,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5872,7 +5872,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "0.6.3"
+version = "0.6.4"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
@@ -6014,7 +6014,7 @@ provides-extras = ["toolbox", "files", "dev"]
 
 [[package]]
 name = "tai42-storage-github"
-version = "0.2.3"
+version = "0.3.0"
 source = { editable = "plugins/storage-github" }
 dependencies = [
     { name = "httpx" },
@@ -6137,7 +6137,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "0.3.6"
+version = "0.3.7"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
