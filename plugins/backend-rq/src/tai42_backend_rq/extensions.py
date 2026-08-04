@@ -23,6 +23,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import SyncRedisClient
+from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_rq.callback import prepare_backend_kwargs
@@ -77,7 +78,8 @@ def _wait_for_job_result(job: _PollableJob, timeout: float) -> Any:
 def sync_task(func: Any, name: str, description: str) -> Any:
     """Branch ``func`` into ``<name>_sync_task``: queue the call and block
     until the job finishes, returning the job's result."""
-    new_name = f"{name}_sync_task"
+    raw_name = f"{name}_sync_task"
+    safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, RQ_TASK_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> Any:
@@ -86,21 +88,26 @@ def sync_task(func: Any, name: str, description: str) -> Any:
         timeout = rq_settings().task_timeout
         return await asyncio.to_thread(_wait_for_job_result, job, timeout)
 
-    return create_function(
+    branch = create_function(
         func_signature=sig,
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="schedule_task")
 def schedule_task(func: Any, name: str, description: str) -> Any:
     """Branch ``func`` into ``<name>_schedule_task``: register a recurring
     schedule (interval or crontab) that runs the tool via the queue."""
-    new_name = f"{name}_schedule_task"
+    raw_name = f"{name}_schedule_task"
+    safe_name = makefun_func_name(raw_name)
     new_description = f"Scheduled version of '{name}'. Schedules the task to run later via a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
 
@@ -121,21 +128,26 @@ def schedule_task(func: Any, name: str, description: str) -> Any:
             scheduler = Scheduler(connection=r)
             await apply_normalized_schedule(scheduler, norm, tool_execution, list(args), kwargs, schedule_name)
 
-    return create_function(
+    branch = create_function(
         func_signature=sig.replace(return_annotation=inspect.Signature.empty),
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=new_description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="async_task")
 def async_task(func: Any, name: str, description: str) -> Any:
     """Branch ``func`` into ``<name>_async_task``: queue the call and return
     the job id immediately (poll with ``backend_task_result``)."""
-    new_name = f"{name}_async_task"
+    raw_name = f"{name}_async_task"
+    safe_name = makefun_func_name(raw_name)
     new_description = f"Async version of '{name}'. Submits the task to a background queue."
     new_description += f"\n\nOriginal Doc:\n{description}" if description else ""
 
@@ -146,11 +158,15 @@ def async_task(func: Any, name: str, description: str) -> Any:
         job = await enqueue_task(*args, **kwargs)
         return {"task_id": job.id, "status": "submitted"}
 
-    return create_function(
+    branch = create_function(
         func_signature=sig.replace(return_annotation=dict[str, Any]),
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=new_description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch
