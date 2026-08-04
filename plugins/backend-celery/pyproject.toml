@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-celery"
-version = "0.4.3"
+version = "0.4.4"
 description = "Celery execution backend for the TAI ecosystem — worker/beat/flower runtime, prefork-pool turnover on worker-bus ops, and RedBeat scheduling."
 readme = "README.md"
 requires-python = ">=3.13"
