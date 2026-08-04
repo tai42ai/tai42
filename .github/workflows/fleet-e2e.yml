@@ -135,6 +135,22 @@ jobs:
           if [ "$SRC_REPO" = "tai-studio" ]; then
             git -C tai-studio checkout --detach "$SRC_REF"
           fi
+      - name: Record the resolved tai-studio commit (provenance, no pinning)
+        # tai-studio is checked out at the dispatched sha when studio-dispatched, else
+        # at unpinned `main`, so which commit the browser suite actually ran against is
+        # only knowable at run time. Resolve it and record it into (a) the job summary
+        # and (b) the environment as TAI_STUDIO_SHA — the Playwright run below inherits
+        # it (job env), so playwright.config.ts can surface it as report metadata via
+        # `metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA }`.
+        run: |
+          set -euo pipefail
+          studio_sha=$(git -C tai-studio rev-parse HEAD)
+          echo "TAI_STUDIO_SHA=$studio_sha" >> "$GITHUB_ENV"
+          {
+            echo "### tai-studio provenance"
+            echo ""
+            echo "Browser suite ran against tai-studio @ \`$studio_sha\`."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Clone tai-marketplace-web (dispatched sha when web-dispatched, else main)
         if: steps.src.outputs.marketplace == 'true'
         env:

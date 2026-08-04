@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly full-matrix run (Mondays 04:23 UTC). Like workflow_dispatch it forces
+    # core=true so every member + backend leg runs and the monitoring/browser gates
+    # turn on; it additionally opts the celery leg into the pinned-limitation test
+    # (see the e2e job). An off-peak, off-the-hour minute dodges the scheduler
+    # backlog GitHub warns about at the top of the hour.
+    - cron: "23 4 * * 1"
 
 permissions:
   contents: read
@@ -73,13 +80,15 @@ jobs:
           CHANGES_JSON: ${{ toJSON(steps.filter.outputs) }}
           MONITORING: ${{ steps.filter.outputs.monitoring }}
           BROWSERS: ${{ steps.filter.outputs.browsers }}
-          # A manual run has no diff base, so the path filter cannot decide what
-          # changed: treat the whole workspace as changed and force every gate on.
-          DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+          # A manual dispatch has no diff base and the weekly schedule is meant to be
+          # exhaustive, so neither can lean on the path filter to decide what changed:
+          # treat the whole workspace as changed and force every gate on.
+          FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
         run: |
           set -euo pipefail
-          # workflow_dispatch: force the full workspace + every downstream gate.
-          if [ "$DISPATCH" = "true" ]; then
+          # Manual dispatch or the weekly schedule: force the full workspace + every
+          # downstream gate.
+          if [ "$FORCE_FULL" = "true" ]; then
             CORE=true
           fi
           # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode
@@ -102,15 +111,15 @@ jobs:
           channel-telegram|plugins/channel-telegram|tai42-channel-telegram|tai42_channel_telegram||arq|cov
           channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov
           channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
-          config-k8s|plugins/config-k8s|tai42-config-k8s|tai42_config_k8s|||cov
-          connector-atlassian|plugins/connector-atlassian|tai42-connector-atlassian|tai42_connector/atlassian|||cov
-          connector-google|plugins/connector-google|tai42-connector-google|tai42_connector/google|||cov
+          config-k8s|plugins/config-k8s|tai42-config-k8s|tai42_config_k8s||arq|cov
+          connector-atlassian|plugins/connector-atlassian|tai42-connector-atlassian|tai42_connector/atlassian||arq|cov
+          connector-google|plugins/connector-google|tai42-connector-google|tai42_connector/google||arq|cov
           identity-oidc|plugins/identity-oidc|tai42-identity-oidc|tai42_identity_oidc|--extra dev|arq|cov
           identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
           monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov
-          storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github|||cov
+          storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github||arq|cov
           storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov
-          storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3|||cov
+          storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3||arq|cov
           toolbox|plugins/toolbox|tai42-toolbox|tai42_toolbox|--extra dev|arq|cov
           tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
           webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
@@ -146,13 +155,14 @@ jobs:
           fi
           # The monitoring profile runs when its own paths (monitoring-langfuse,
           # core, or e2e) changed; the firefox+webkit browser widening runs when
-          # the ui suite (e2e/ui) changed. A manual dispatch forces both on.
+          # the ui suite (e2e/ui) changed. A manual dispatch or the weekly schedule
+          # forces both on.
           run_monitoring=false
-          if [ "$DISPATCH" = "true" ] || [ "$MONITORING" = "true" ]; then
+          if [ "$FORCE_FULL" = "true" ] || [ "$MONITORING" = "true" ]; then
             run_monitoring=true
           fi
           run_browsers=false
-          if [ "$DISPATCH" = "true" ] || [ "$BROWSERS" = "true" ]; then
+          if [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; then
             run_browsers=true
           fi
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
@@ -351,6 +361,14 @@ jobs:
         if: matrix.backend == 'celery'
         working-directory: e2e
         run: docker compose --profile celery up -d rabbitmq --wait
+      - name: Opt into the pinned celery limitation (scheduled celery leg)
+        # tests/scheduling/test_schedule_reload_limitation.py is skipped unless
+        # TAI_E2E_PIN_LIMITATIONS is set (a timing-dependent celery-prefork wedge that
+        # can hang a worker). The weekly scheduled run opts it in on the celery leg —
+        # the only backend it reproduces on — so the tracked limitation is exercised,
+        # not merely reported. PR/push legs leave it skipped.
+        if: ${{ github.event_name == 'schedule' && matrix.backend == 'celery' }}
+        run: echo "TAI_E2E_PIN_LIMITATIONS=1" >> "$GITHUB_ENV"
       - name: Point the checkpoint Redis at the module-capable service (default leg)
         if: matrix.backend == 'arq'
         run: echo "TAI_E2E_CHECKPOINT_REDIS_URL=redis://localhost:6380" >> "$GITHUB_ENV"
@@ -386,6 +404,28 @@ jobs:
         run: >-
           uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true
           tests/redis_semantics tests/storage tests/harness
+      - name: Run the s3 storage axis (default leg)
+        # Third storage-axis value: the s3 provider against a MinIO object store. A
+        # `services:` block can't set MinIO's `server /data` command, so bring the
+        # compose `storage` profile up here; the variant defaults (endpoint :9002,
+        # user minio / secret miniosecret) match the compose service, so no coordinate
+        # env is needed. Only the storage suite touches this axis.
+        if: matrix.backend == 'arq'
+        working-directory: e2e
+        env:
+          TAI_E2E_STORAGE: s3
+        run: |
+          docker compose --profile storage up -d --wait storage-minio
+          uv run --no-sync pytest -x -q --timeout=120 tests/storage
+      - name: Run the github storage axis (default leg)
+        # Fourth storage-axis value: the github provider against the in-process fake
+        # GitHub REST stub (brought up by tests/storage/conftest; variant default base
+        # :9099), so no external infra. Only the storage suite touches this axis.
+        if: matrix.backend == 'arq'
+        working-directory: e2e
+        env:
+          TAI_E2E_STORAGE: github
+        run: uv run --no-sync pytest -x -q --timeout=120 tests/storage
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -457,6 +497,22 @@ jobs:
         run: uv sync --locked --package tai42-e2e
       - name: Clone tai-studio (public, no token)
         run: git clone --depth 1 https://github.com/tai42ai/tai-studio
+      - name: Record the resolved tai-studio commit (provenance, no pinning)
+        # tai-studio is cloned at unpinned `main`, so which commit the browser suite
+        # actually ran against is only knowable at run time. Resolve it and record it
+        # into (a) the job summary and (b) the environment as TAI_STUDIO_SHA — the
+        # Playwright run below inherits it (job env), so playwright.config.ts can
+        # surface it as report metadata via `metadata: { 'tai-studio-sha':
+        # process.env.TAI_STUDIO_SHA }`. Provenance only; the clone stays unpinned.
+        run: |
+          set -euo pipefail
+          studio_sha=$(git -C tai-studio rev-parse HEAD)
+          echo "TAI_STUDIO_SHA=$studio_sha" >> "$GITHUB_ENV"
+          {
+            echo "### tai-studio provenance"
+            echo ""
+            echo "Browser suite ran against tai-studio \`main\` @ \`$studio_sha\` (unpinned)."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Clone tai-marketplace-web (private, marketplace browser leg)
         if: steps.mp.outputs.enabled == 'true'
         env:
