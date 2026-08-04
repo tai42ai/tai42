@@ -21,6 +21,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 
+import pytest
 from _bridge_support import (
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
@@ -39,6 +40,18 @@ from tai42_e2e.manifests import (
     BRIDGE_WHATSAPP_PHONE_ID,
     BRIDGE_WHATSAPP_PHONE_ID_B,
     BRIDGE_WHATSAPP_PHONE_ID_C,
+)
+from tai42_e2e.settings import HarnessSettings
+
+# The scripted-LLM + FakeWhatsApp round-trips (verify handshake, correlated reply, ask/select)
+# are the mock leg for BOTH the 'whatsapp' channel seam and the 'llm' seam (build_bridge_stack
+# wires the LLM env too, so TAI_E2E_REAL=llm also sends the bridge LLM to the live provider).
+# Either selection real breaks the stub scripting, so the module steps aside; the real legs run
+# on the dedicated e2e creds host (PLAN_2 §F), not in CI. Inert in the default mock run — both
+# is_real checks are False, so collection is byte-for-byte today's.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
+    reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host (PLAN_2 §F)",
 )
 
 

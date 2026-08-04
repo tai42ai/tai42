@@ -32,8 +32,20 @@ import httpx
 import pytest
 
 from tai42_e2e.netfixtures import FakeStripe
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+# Every delivery here is HMAC-signed locally and answered by the in-process FakeStripe stub
+# (session mint, complete_payment, list-cursor introspection), so this is the stripe MOCK leg.
+# A real stripe selection points the tools at the live Stripe host and the webhook arrives from
+# Stripe's servers; that real leg is exercised on the dedicated e2e creds host (PLAN_2 §F), not
+# in CI, so the stub-bound module steps aside for it. Inert in the default mock run —
+# is_real("stripe") is False, so collection is byte-for-byte today's.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("stripe"),
+    reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+)
 
 
 async def _until(fn: Callable[[], Any], *, deadline: float, interval: float = 0.1, message: str) -> Any:

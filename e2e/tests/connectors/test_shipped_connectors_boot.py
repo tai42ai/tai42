@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from tai42_e2e.manifests import ATLASSIAN_CLIENT_ID, GOOGLE_CLIENT_ID
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
 
@@ -42,6 +45,14 @@ async def test_shipped_connector_descriptors_are_registered(shipped_connectors_s
     assert {s["id"] for s in atlassian["sub_services"]} == {"jira", "confluence", "compass"}, atlassian
 
 
+# The launch-URL assertion pins the fixture client_id (``GOOGLE_CLIENT_ID``); under
+# TAI_E2E_REAL=connector-google the real CONNECTORS_GOOGLE_CLIENT_ID replaces it, so this is
+# the connector-google mock leg — the real token/probe leg is PLAN_2's, on the creds host.
+# Inert while TAI_E2E_REAL is empty.
+@pytest.mark.skipif(
+    HarnessSettings().is_real("connector-google"),
+    reason="fixture client_id is the connector-google mock leg; the real leg on the creds host (PLAN_2 §F)",
+)
 async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"
@@ -65,6 +76,12 @@ async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> No
     assert "https://www.googleapis.com/auth/gmail.readonly" in query["scope"].split(" "), query
 
 
+# Same as the google leg: the assertion pins the fixture client_id (``ATLASSIAN_CLIENT_ID``),
+# which the real CONNECTORS_ATLASSIAN_CLIENT_ID replaces under TAI_E2E_REAL=connector-atlassian.
+@pytest.mark.skipif(
+    HarnessSettings().is_real("connector-atlassian"),
+    reason="fixture client_id is the connector-atlassian mock leg; the real leg on the creds host (PLAN_2 §F)",
+)
 async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
     origin = f"http://{shipped_connectors_stack.host}:{shipped_connectors_stack.port_a}"

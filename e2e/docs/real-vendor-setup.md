@@ -11,6 +11,51 @@ Read `REAL_E2E_CREDENTIALS.env.example` alongside this file: it is the source of
 truth for every template var named below. The loop is always template → dashboard
 → run.
 
+## What real-select does to the mock legs
+
+Not every seam is asserted the same way when it goes real. Many seams have a leg
+that reads outbound traffic off an in-process stub (scripted `llm_stub`,
+`FakeStripe`, `FakeTwilio`, `FakeWhatsApp`, `FakeSlack`, `FakeTelegram`, the
+`OAuthIdp` issuer, `FixturePackageIndex`, the fixture connector client_ids). Those
+**mock legs step aside** under real-select via a `skipif(HarnessSettings().is_real(<seam>))`
+guard (or, where a spec is parametrized across channels, a per-param skip), so
+naming that seam real deselects the mock leg rather than running it against a live
+vendor it was never written to reach. The real leg for these is demonstrated on
+the dedicated e2e creds host per PLAN_2 §F, not in CI. The seams that step aside:
+
+- `llm`, `embeddings` — scripted-stub determinism legs.
+- `stripe` — the `FakeStripe` mint / webhook / reconcile legs.
+- `twilio`, `whatsapp`, `slack`, `telegram` — the channel **round-trip / notify /
+  allowlist-delivery** legs (they wait for a send off the stub). Their real-safe
+  negatives, which assert `sends_matching(...) == []`, do NOT step aside — a real
+  send simply never lands. Only `test_callback_origin.py` is a real-aware origin
+  unit test; it is not a stub-delivery leg.
+- `connector-google`, `connector-atlassian` — the launch-URL-shape legs that pin
+  the fixture `client_id`.
+- `oidc` — the `OAuthIdp`-stub login / issuer-JWT legs (`github-login` has **no
+  mock leg to step aside**: it is a real-only additive OIDC provider).
+- `k8s` — the fake-apiserver ConfigMap/Secret round-trip (`test_config_k8s_stack.py`)
+  steps aside; its real leg (`test_config_k8s_real_branch.py`) proves the real-cluster
+  wiring is READY without needing a live cluster in CI.
+- `marketplace-pypi` — steps the **entire** marketplace suite aside (opt-in behind
+  `TAI_E2E_MARKETPLACE=1`): the shared `marketplace_service` fixture seeds a forged
+  fixture catalog through the real seed+ingest pipeline, which can't resolve those
+  packages from real pypi.org, so every module would false-fail at setup.
+- `marketplace-github` — steps aside **only** the github-ingest / webhook leg
+  (`test_webhook_ingest.py`); the pypi override stays set, so the pypi-sourced
+  browse siblings still run.
+
+Because `build_bridge_stack` also wires the LLM env, `TAI_E2E_REAL=llm` steps the
+bridge modules aside too, not only the channel seams. All guards are inert while
+`TAI_E2E_REAL` is empty — the default mock suite collects and runs byte-for-byte
+unchanged.
+
+What still carries **real assertions at the test layer** under its own seam: the
+`storage-s3` / `storage-github` round-trips are axis-driven — the *same* test runs
+against the `*-real` backend (selected by `TAI_E2E_STORAGE`) rather than stepping
+aside; and `langfuse` runs against the real Langfuse either way (self-hosted or
+cloud) — no stub, no gate.
+
 ## 0. The public host — do this first
 
 Real inbound webhooks arrive from the internet; loopback (as CI uses) cannot

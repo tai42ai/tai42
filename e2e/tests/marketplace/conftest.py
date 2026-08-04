@@ -23,6 +23,7 @@ import importlib.metadata
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -52,7 +53,37 @@ from tai42_e2e.marketplace import (
     seed_zeta_listing,
 )
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import Infra, TaiStack
+
+_MARKETPLACE_DIR = Path(__file__).parent
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Step the ENTIRE marketplace suite aside under a real ``marketplace-pypi`` seam.
+
+    The module-scoped ``marketplace_service`` fixture unconditionally seeds the forged fixture
+    catalog (alpha/beta/gamma) through the real seed+ingest pipeline. Under
+    ``TAI_E2E_REAL=marketplace-pypi`` ``_service_env`` drops ``MP_PYPI_BASE_URL``, so the
+    registry resolves wheels from live pypi.org — where the forged packages do not exist — and
+    the shared fixture ERRORS at setup, false-failing every marketplace module (not just the
+    webhook-ingest one). The real marketplace-pypi leg is PLAN_2 §F creds-host work. Inert when
+    marketplace-pypi is not real: the suite still runs normally behind ``TAI_E2E_MARKETPLACE=1``
+    (and this conftest never loads at all when that opt-in is unset). ``marketplace-github``
+    keeps its fixture pypi override, so only its github-ingest leg steps aside — that stays
+    gated in ``test_webhook_ingest.py``."""
+    if not HarnessSettings().is_real("marketplace-pypi"):
+        return
+    skip = pytest.mark.skip(
+        reason="forged fixtures can't resolve from real pypi; real marketplace-pypi leg on the creds host (PLAN_2 §F)"
+    )
+    for item in items:
+        try:
+            item.path.relative_to(_MARKETPLACE_DIR)
+        except ValueError:
+            continue
+        item.add_marker(skip)
+
 
 # The fixture distributions a marketplace install pip-installs into the shared
 # venv. The venv guard asserts none of them linger before or after the area.

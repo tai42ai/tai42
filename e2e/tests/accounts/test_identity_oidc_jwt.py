@@ -11,9 +11,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
+
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+
+# The JWTs are minted by the in-process OAuthIdp stub and validated against the stub issuer the
+# oidc stack pins (TAI_IDENTITY_OIDC_ISSUER = oauth_idp.base_url). Under TAI_E2E_REAL=oidc the
+# stack points that issuer at live Auth0, whose JWKS never verifies the stub's JWTs — so this
+# is the oidc mock leg. The real-issuer leg runs on the dedicated e2e creds host (PLAN_2 §F),
+# not in CI. Inert while TAI_E2E_REAL is empty — is_real("oidc") is False, collection unchanged.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("oidc"),
+    reason="OAuthIdp-stub JWT validation is the oidc mock leg; the real-issuer leg on the creds host (PLAN_2 §F)",
+)
 
 
 def _base(stack: TaiStack, port: int) -> str:

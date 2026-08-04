@@ -22,9 +22,22 @@ from tai42_e2e.marketplace import (
     MarketplaceService,
 )
 from tai42_e2e.pkgsource import FixturePackageIndex
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for_async
 
-pytestmark = pytest.mark.backendless
+pytestmark = [
+    pytest.mark.backendless,
+    # The github-ingest path here reads the in-process FixturePackageIndex (the release
+    # surfaces it serves + the source=github ingest). Under TAI_E2E_REAL=marketplace-github the
+    # ingest goes to real github, so this is the github-ingest mock leg — it steps aside. The
+    # marketplace-pypi seam is handled suite-wide in conftest (it breaks the shared fixture seed
+    # for EVERY module, not just this one), so it is deliberately NOT repeated here. Inert while
+    # TAI_E2E_REAL is empty (and the module is opt-in via TAI_E2E_MARKETPLACE=1 regardless).
+    pytest.mark.skipif(
+        HarnessSettings().is_real("marketplace-github"),
+        reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real on creds host (PLAN_2 §F)",
+    ),
+]
 
 _REPO_FULL_NAME = "tai42ai/tai-e2e-market-delta"
 

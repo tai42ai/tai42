@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+import pytest
 from _bridge_support import (
     TWILIO_INBOUND_PATH,
     BridgeHarness,
@@ -21,6 +22,18 @@ from _bridge_support import (
 )
 
 from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
+from tai42_e2e.settings import HarnessSettings
+
+# The scripted-LLM + FakeTwilio round-trips are the mock leg for BOTH the 'twilio' channel seam
+# and the 'llm' seam (build_bridge_stack wires the LLM env too, so TAI_E2E_REAL=llm also sends
+# the bridge LLM to the live provider). Either selection real breaks the stub scripting, so the
+# module steps aside; the real legs run on the dedicated e2e creds host (PLAN_2 §F), not in CI.
+# Inert in the default mock run — both is_real checks are False, so collection is byte-for-byte
+# today's.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
+    reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host (PLAN_2 §F)",
+)
 
 
 async def test_pending_ask_resolves_then_uncorrelated_starts_a_turn(

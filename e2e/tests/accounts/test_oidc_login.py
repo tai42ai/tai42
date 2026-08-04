@@ -11,10 +11,23 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+
+# The whole flow drives the pinned 'e2e' provider against the in-process OAuthIdp stub (the
+# signed-callback chain + the bad-signature/expired negatives via the stub's knobs). Under
+# TAI_E2E_REAL=oidc build_oidc_stack renames the provider e2e→auth0 and points it at live
+# Auth0, so /oidc/e2e/... no longer exists and the stub knobs don't apply — this is the oidc
+# mock leg. The real Auth0 leg runs on the dedicated e2e creds host (PLAN_2 §F), not in CI.
+# Inert while TAI_E2E_REAL is empty — is_real("oidc") is False, so collection is unchanged.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("oidc"),
+    reason="OAuthIdp-stub e2e login is the oidc mock leg; the real Auth0 leg on the creds host (PLAN_2 §F)",
+)
 
 # The pinned provider slug the oidc stack configures (see build_oidc_stack).
 _PROVIDER = "e2e"

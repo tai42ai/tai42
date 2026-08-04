@@ -14,7 +14,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import pytest
 from _bridge_support import BridgeHarness, script_reply, wait_record_status
+
+from tai42_e2e.settings import HarnessSettings
+
+# Every test scripts llm_stub and asserts the scripted answer flows back through the door, so
+# this is the mock leg for the 'llm' seam — build_bridge_stack wires the bridge LLM env, so
+# TAI_E2E_REAL=llm sends the bridge LLM to the live provider and the scripting no longer holds.
+# The real-provider leg runs on the dedicated e2e creds host (PLAN_2 §F), not in CI, so the
+# module steps aside. Inert in the default mock run — is_real("llm") is False, so collection is
+# byte-for-byte today's.
+pytestmark = pytest.mark.skipif(
+    HarnessSettings().is_real("llm"),
+    reason="scripted llm_stub is the 'llm' mock leg (bridge LLM env); the real leg on the creds host (PLAN_2 §F)",
+)
 
 # An https callback URL with no server behind it — the delivery POST connection-refuses, so
 # the record exhausts its (shortened) attempts and lands terminal ``failed``.
