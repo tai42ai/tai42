@@ -44,22 +44,28 @@ if TYPE_CHECKING:
     from tai42_e2e.variants import BrokerLease, BusOrigin, Variants
 
 
+def venv_console_script(name: str) -> str:
+    """The absolute path to a console script in the active venv (next to the running
+    interpreter). An absolute command needs no PATH in a child's launch env, so a stdio
+    child resolves it regardless of how its launcher shapes that env. A missing script is
+    a mis-provisioned env (the package's wheel is not installed), caught loudly here
+    rather than as a cryptic child-spawn failure at boot."""
+    candidate = Path(sys.executable).parent / name
+    if not candidate.exists():
+        raise RuntimeError(f"console script {name!r} not found next to the interpreter at {candidate}")
+    return str(candidate)
+
+
 def tai_bin() -> str:
     """The ``tai`` console script from the active venv — the real entrypoint
     production runs, never ``python -c``."""
-    candidate = Path(sys.executable).parent / "tai"
-    if not candidate.exists():
-        raise RuntimeError(f"tai console script not found next to interpreter at {candidate}")
-    return str(candidate)
+    return venv_console_script("tai")
 
 
 def uvicorn_bin() -> str:
     """The ``uvicorn`` console script from the active venv — the server a user runs
     to serve their own embed host app. Ships in the skeleton dep tree."""
-    candidate = Path(sys.executable).parent / "uvicorn"
-    if not candidate.exists():
-        raise RuntimeError(f"uvicorn console script not found next to interpreter at {candidate}")
-    return str(candidate)
+    return venv_console_script("uvicorn")
 
 
 def spawn_expect_refusal(argv: list[str], env: dict[str, str], cwd: str | Path, *, timeout: float = 20.0) -> str:
@@ -271,6 +277,26 @@ class StackConfig:
     # telegram ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` (the setWebhook URL) at B.
     # Only meaningful on a REPLICAS stack (two app ports).
     replica_b_origin_env_keys: list[str] = field(default_factory=list)
+    # The REAL-inbound public-URL fill (empty on every mock leg). A real inbound
+    # leg lists here the public-base-URL env keys (e.g. ``INTERACTIONS_PUBLIC_BASE_URL``,
+    # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``, ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL``)
+    # that must carry ``E2E_PUBLIC_BASE_URL`` — the origin the vendor calls back on —
+    # instead of the replica-B loopback origin (loopback is unreachable from the
+    # vendor). Keys named here OVERRIDE the loopback fill, so a leg opts a key into
+    # public mode by adding it here without touching ``replica_b_origin_env_keys``.
+    # ``public_base_url`` must be set (from ``E2E_PUBLIC_BASE_URL``) whenever this is
+    # non-empty; a real inbound leg refuses to start otherwise.
+    public_base_url_env_keys: list[str] = field(default_factory=list)
+    public_base_url: str | None = None
+    # The REAL-inbound public-origin allowlist fill (empty on every mock leg). Mirrors
+    # ``public_base_url_env_keys`` for the ``origin_allowlist_env_keys`` fill site: a real
+    # connector leg lists here the allowlist keys (e.g. ``CONNECTORS_REDIRECT_URI_ALLOWLIST``)
+    # that must carry the PUBLIC origin (``E2E_PUBLIC_BASE_URL``) — the origin the vendor
+    # redirects the OAuth consent back to — instead of this stack's loopback app origins
+    # (loopback is unreachable from the vendor). Keys named here OVERRIDE the loopback fill;
+    # every key must also appear in ``origin_allowlist_env_keys``. ``public_base_url`` must be
+    # set whenever this is non-empty; the leg refuses to start otherwise.
+    public_allowlist_env_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -904,13 +930,33 @@ class TaiStack:
         (self._config_dir / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _origin_allowlist_env(self) -> dict[str, str]:
-        """Fill each ``origin_allowlist_env_keys`` entry with this stack's own
-        loopback app origins (``http://host:port`` for every allocated app port,
-        comma-joined). Empty until boot allocates the ports."""
+        """Fill each ``origin_allowlist_env_keys`` entry, only known after boot.
+
+        Mock legs (the default) fill every entry with this stack's own loopback app
+        origins (``http://host:port`` for every allocated app port, comma-joined).
+
+        A REAL connector leg additionally lists keys in ``public_allowlist_env_keys``:
+        those fill from ``E2E_PUBLIC_BASE_URL`` (the origin the vendor redirects the OAuth
+        consent back to) and OVERRIDE the loopback fill, so the same key the connect flow
+        validates the request-derived redirect_uri against carries the public origin the
+        real redirect is registered at. The leg refuses to start (loud) if it asks for
+        public mode without the URL. Empty until boot allocates the ports."""
         if not self.config.origin_allowlist_env_keys or not self.app_ports:
             return {}
-        origins = ",".join(f"http://{self.host}:{port}" for port in self.app_ports)
-        return dict.fromkeys(self.config.origin_allowlist_env_keys, origins)
+        public_keys = set(self.config.public_allowlist_env_keys)
+        env: dict[str, str] = {}
+        if public_keys:
+            if not self.config.public_base_url:
+                raise RuntimeError(
+                    f"stack {self.config.name!r} routes {sorted(public_keys)} to the public redirect "
+                    "origin but public_base_url is unset (set E2E_PUBLIC_BASE_URL for a real connector leg)"
+                )
+            env.update(dict.fromkeys(public_keys, self.config.public_base_url.rstrip("/")))
+        loopback_keys = [key for key in self.config.origin_allowlist_env_keys if key not in public_keys]
+        if loopback_keys:
+            origins = ",".join(f"http://{self.host}:{port}" for port in self.app_ports)
+            env.update(dict.fromkeys(loopback_keys, origins))
+        return env
 
     def _needs_bus(self) -> bool:
         """Whether this stack joins the app-owned worker bus. The SUT refuses to boot
@@ -934,18 +980,37 @@ class TaiStack:
         }
 
     def _replica_b_origin_env(self) -> dict[str, str]:
-        """Fill each ``replica_b_origin_env_keys`` entry with this stack's SINGLE
-        replica-B loopback origin (``http://host:port_b``), only known after boot
-        allocates the ports. Requires a two-app-port (REPLICAS) topology — a
-        profile that names these keys on a single-port stack is a configuration
-        error, raised loudly rather than silently pointing them at replica A."""
-        keys = self.config.replica_b_origin_env_keys
-        if not keys:
+        """Fill the public-base-URL env keys, only known after boot.
+
+        Mock legs (the default) fill each ``replica_b_origin_env_keys`` entry with
+        this stack's SINGLE replica-B loopback origin (``http://host:port_b``);
+        this requires a two-app-port (REPLICAS) topology — a profile that names
+        these keys on a single-port stack is a configuration error, raised loudly
+        rather than silently pointing them at replica A.
+
+        A REAL inbound leg additionally lists keys in ``public_base_url_env_keys``:
+        those fill from ``E2E_PUBLIC_BASE_URL`` (the vendor-reachable origin) and
+        OVERRIDE the loopback fill, so the same key that reaches the door over
+        loopback in a mock leg reaches it over the public origin in a real one.
+        The leg refuses to start (loud) if it asks for public mode without the URL."""
+        public_keys = set(self.config.public_base_url_env_keys)
+        loopback_keys = [key for key in self.config.replica_b_origin_env_keys if key not in public_keys]
+        if not public_keys and not loopback_keys:
             return {}
-        if len(self.app_ports) < 2:
-            raise RuntimeError(
-                "replica_b_origin_env_keys requires a REPLICAS topology (two app ports); "
-                f"stack {self.config.name!r} has {len(self.app_ports)}"
-            )
-        origin = f"http://{self.host}:{self.app_ports[1]}"
-        return dict.fromkeys(keys, origin)
+        env: dict[str, str] = {}
+        if public_keys:
+            if not self.config.public_base_url:
+                raise RuntimeError(
+                    f"stack {self.config.name!r} routes {sorted(public_keys)} to the public callback "
+                    "origin but public_base_url is unset (set E2E_PUBLIC_BASE_URL for a real inbound leg)"
+                )
+            env.update(dict.fromkeys(public_keys, self.config.public_base_url.rstrip("/")))
+        if loopback_keys:
+            if len(self.app_ports) < 2:
+                raise RuntimeError(
+                    "replica_b_origin_env_keys requires a REPLICAS topology (two app ports); "
+                    f"stack {self.config.name!r} has {len(self.app_ports)}"
+                )
+            origin = f"http://{self.host}:{self.app_ports[1]}"
+            env.update(dict.fromkeys(loopback_keys, origin))
+        return env

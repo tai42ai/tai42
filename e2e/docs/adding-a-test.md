@@ -55,7 +55,7 @@ A stack is rendered through a plugin-variant triple (`TAI_E2E_BACKEND` /
 hard-code a plugin's answer — read it from the variant instead:
 
 - the backend's class/module on the `/api/backend` door → `variants.backend.provider_class`
-- the storage layout / read-back → `variants.storage.stored_object_path()` / `.read_stored()`
+- a stored/absent object assertion → `variants.storage.assert_stored()` / `.assert_absent()` (store-agnostic; each variant reads its own backing through an independent client)
 - an on-disk or in-store assertion about identity → `variants.identity`
 - a bound on a backend's `sync_task` wait → `variants.backend.task_timeout_env()`
 

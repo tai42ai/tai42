@@ -8,14 +8,29 @@ fixtures in ``tests/conftest.py`` allocate the resources and call these."""
 from __future__ import annotations
 
 import json
+import os
 import secrets
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tai42_e2e.harness import STUDIO_PATH_PATTERNS
-from tai42_e2e.stack import StackConfig, StackResources, Topology
+from tai42_e2e.settings import HarnessSettings, real_embedding_provider, real_llm_provider
+from tai42_e2e.stack import StackConfig, StackResources, Topology, venv_console_script
 
 if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
+
+
+def _switch() -> HarnessSettings:
+    """The REAL/MOCK switch for this pytest process, read fresh from the ambient
+    ``TAI_E2E_`` env (the same construction the published plugin uses). Empty
+    ``TAI_E2E_REAL`` = every seam mock, so every ``is_real`` branch below is inert
+    and the rendered env is byte-for-byte today's — the switch is a no-op until a
+    seam is named. The per-service real legs branch on ``settings.is_real(seam)``;
+    the collection-time gate has already loud-failed any selected seam whose
+    credentials (or public base URL) are absent, so a real branch here reads its
+    operator env unconditionally."""
+    return HarnessSettings()
 
 # The manifest title the probe tools load under; the prometheus extension stamps
 # it as the ``title`` label, so metrics assertions reference this constant.
@@ -120,6 +135,27 @@ def _toolbox_tools_entry() -> dict:
     }
 
 
+# Each toolbox tool lives in its own module (one tool per module), so a profile
+# names the module and ``include``s the one tool it registers. ``request`` needs the
+# ``http`` extra (already in the e2e env) and ``generate_embeddings`` the ``embeddings``
+# extra (a PLAN_1 dep addition) — both fail LOUDLY at import when their extra is absent,
+# so a stack carrying them refuses to boot rather than silently dropping the tool.
+_TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
+    {"title": "toolbox-request", "module": "tai42_toolbox.tools.request", "include": ["request"]},
+    {
+        "title": "toolbox-embeddings",
+        "module": "tai42_toolbox.tools.generate_embeddings",
+        "include": ["generate_embeddings"],
+    },
+    {"title": "toolbox-pad-embeddings", "module": "tai42_toolbox.tools.pad_embeddings", "include": ["pad_embeddings"]},
+    {
+        "title": "toolbox-current-time",
+        "module": "tai42_toolbox.tools.current_time_info",
+        "include": ["current_time_info"],
+    },
+]
+
+
 def _redis_feature_env(res: StackResources) -> dict[str, str]:
     """Point every per-feature Redis URL at the stack's logical DB, and the
     probe-record client at DB 0."""
@@ -153,21 +189,47 @@ _AGENT_ENTRIES: list[dict] = [
 ]
 
 
-def _llm_stub_env(res: StackResources) -> dict[str, str]:
-    """Point the agents' model AND embedding access at the scripted stub. The
-    stub serves ``/v1/chat/completions`` and ``/v1/embeddings`` off one origin, so
-    both provider groups share ``res.llm_base_url``. Empty when the stub URL is
-    unset (the studio profile allocates the stub port separately)."""
-    if res.llm_base_url is None:
-        return {}
-    return {
-        "LLM_BASE_URL": res.llm_base_url,
-        "LLM_API_KEY": "e2e-test",
-        "LLM_MODEL": "e2e-scripted",
-        "EMBEDDING_BASE_URL": res.llm_base_url,
-        "EMBEDDING_API_KEY": "e2e-test",
-        "EMBEDDING_MODEL": "e2e-embed",
-    }
+def _llm_env(res: StackResources) -> dict[str, str]:
+    """The agents' model + embedding access, per the ``llm`` / ``embeddings`` seams.
+
+    MOCK (default): both groups point at the scripted stub — it serves
+    ``/v1/chat/completions`` and ``/v1/embeddings`` off one origin, so they share
+    ``res.llm_base_url`` (empty when the stub URL is unset — the studio profile
+    allocates the stub port separately).
+
+    REAL: ``llm`` and ``embeddings`` toggle INDEPENDENTLY, each replacing only its
+    own group with the live provider. Both are PROVIDER-CONFIGURABLE (HARNESS-MAP):
+    ``REAL_E2E_LLM_PROVIDER`` / ``REAL_E2E_EMBEDDING_PROVIDER`` (default ``openai``)
+    picks the provider from ``LLM_PROVIDERS``; the harness sets ``LLM_PROVIDER_LLM`` /
+    ``_EMBEDDING`` to the provider id, maps that provider's template key
+    (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / …) to ``LLM_API_KEY`` /
+    ``EMBEDDING_API_KEY``, and sets the model from ``REAL_E2E_*_MODEL`` (else the
+    provider default). LangChain's native-env fallbacks are never relied on. A group
+    left mock still points at the stub, so a real-``llm`` / mock-``embeddings`` mix is
+    exact."""
+    switch = _switch()
+    env: dict[str, str] = {}
+    if switch.is_real("llm"):
+        provider = real_llm_provider(os.environ)
+        env["LLM_PROVIDER_LLM"] = provider.provider
+        env["LLM_API_KEY"] = os.environ[provider.api_key_env]
+        env["LLM_MODEL"] = os.environ.get("REAL_E2E_LLM_MODEL", provider.default_llm_model)
+    elif res.llm_base_url is not None:
+        env["LLM_BASE_URL"] = res.llm_base_url
+        env["LLM_API_KEY"] = "e2e-test"
+        env["LLM_MODEL"] = "e2e-scripted"
+    if switch.is_real("embeddings"):
+        provider = real_embedding_provider(os.environ)
+        env["LLM_PROVIDER_EMBEDDING"] = provider.provider
+        env["EMBEDDING_API_KEY"] = os.environ[provider.api_key_env]
+        # A provider reaching the embeddings seam always has a non-None default model.
+        default_embedding_model = provider.default_embedding_model or ""
+        env["EMBEDDING_MODEL"] = os.environ.get("REAL_E2E_EMBEDDING_MODEL", default_embedding_model)
+    elif res.llm_base_url is not None:
+        env["EMBEDDING_BASE_URL"] = res.llm_base_url
+        env["EMBEDDING_API_KEY"] = "e2e-test"
+        env["EMBEDDING_MODEL"] = "e2e-embed"
+    return env
 
 
 def _memory_agent_state_env() -> dict[str, str]:
@@ -306,6 +368,11 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
         "tools": [
             _probe_tools_entry(with_backend_branches=True),
             _toolbox_tools_entry(),
+            # The four previously-uncovered toolbox tools (request / generate_embeddings /
+            # pad_embeddings / current_time_info) load on the core profile — its tests drive
+            # ``request`` against the harness target server and the embeddings tools against
+            # the LLM stub's ``/v1/embeddings`` via the tool's per-call ``base_url``.
+            *_TOOLBOX_EXTRA_TOOL_ENTRIES,
             {"title": "builtin-file-loader", "module": "tai42_skeleton.tools.builtin.file_loader"},
             *_builtin_entries(),
         ],
@@ -421,51 +488,136 @@ TWILIO_ALLOWED_RECIPIENTS = ("+15550000200", "+15550000300")
 TWILIO_UNLISTED_RECIPIENT = "+15559990009"
 
 
+# The channel seams whose real leg swaps the recording stub for the live vendor:
+# each drops its ``CHANNEL_<X>_API_BASE_URL`` (the plugin default is the real vendor
+# host) and reads its bot credential + test recipient from the operator template.
+_CHANNEL_SEAMS = ("telegram", "slack", "twilio")
+
+
+def _telegram_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
+    if real:
+        # HARNESS-MAP: TEST_CHAT_ID -> default + sole allowlisted recipient. No
+        # API_BASE_URL (plugin default = real api.telegram.org); the webhook secret
+        # is harness-minted (Telegram echoes whatever we register with setWebhook).
+        chat = os.environ["CHANNEL_TELEGRAM_TEST_CHAT_ID"]
+        return {
+            "CHANNEL_TELEGRAM_BOT_TOKEN": os.environ["CHANNEL_TELEGRAM_BOT_TOKEN"],
+            "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
+            "CHANNEL_TELEGRAM_REDIS_URL": res.redis_url,
+            "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": chat,
+            "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": chat,
+        }
+    return {
+        "CHANNEL_TELEGRAM_BOT_TOKEN": "e2e-telegram-bot-token",
+        "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
+        "CHANNEL_TELEGRAM_API_BASE_URL": _require_stub(res.telegram_api_base_url, "telegram"),
+        "CHANNEL_TELEGRAM_REDIS_URL": res.redis_url,
+        "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": TELEGRAM_DEFAULT_RECIPIENT,
+        "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": ",".join(TELEGRAM_ALLOWED_RECIPIENTS),
+    }
+
+
+def _slack_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
+    if real:
+        # HARNESS-MAP: TEST_CHANNEL_ID -> default + sole allowlisted recipient.
+        # BOT_USER_ID is the operator-copied ``U…`` the bridge route's self-message
+        # filter needs; passed through only when set (notify / ask_user / signature
+        # verification need it not). No API_BASE_URL (default = real slack.com).
+        channel = os.environ["CHANNEL_SLACK_TEST_CHANNEL_ID"]
+        env = {
+            "CHANNEL_SLACK_BOT_TOKEN": os.environ["CHANNEL_SLACK_BOT_TOKEN"],
+            "CHANNEL_SLACK_SIGNING_SECRET": os.environ["CHANNEL_SLACK_SIGNING_SECRET"],
+            "CHANNEL_SLACK_REDIS_URL": res.redis_url,
+            "CHANNEL_SLACK_DEFAULT_RECIPIENT": channel,
+            "CHANNEL_SLACK_ALLOWED_RECIPIENTS": channel,
+        }
+        if os.environ.get("CHANNEL_SLACK_BOT_USER_ID"):
+            env["CHANNEL_SLACK_BOT_USER_ID"] = os.environ["CHANNEL_SLACK_BOT_USER_ID"]
+        return env
+    return {
+        "CHANNEL_SLACK_BOT_TOKEN": "xoxb-e2e-slack-token",
+        "CHANNEL_SLACK_SIGNING_SECRET": secrets.token_hex(16),
+        "CHANNEL_SLACK_API_BASE_URL": _require_stub(res.slack_api_base_url, "slack"),
+        "CHANNEL_SLACK_REDIS_URL": res.redis_url,
+        "CHANNEL_SLACK_DEFAULT_RECIPIENT": SLACK_DEFAULT_RECIPIENT,
+        "CHANNEL_SLACK_ALLOWED_RECIPIENTS": ",".join(SLACK_ALLOWED_RECIPIENTS),
+    }
+
+
+def _twilio_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
+    if real:
+        # HARNESS-MAP: TEST_TO -> default + sole allowlisted recipient; the whatsapp
+        # sandbox leg boots the same stack with a ``whatsapp:``-prefixed FROM/TO (one
+        # CHANNEL_TWILIO_FROM). No API_BASE_URL (default = real api.twilio.com).
+        to = os.environ["CHANNEL_TWILIO_TEST_TO"]
+        return {
+            "CHANNEL_TWILIO_ACCOUNT_SID": os.environ["CHANNEL_TWILIO_ACCOUNT_SID"],
+            "CHANNEL_TWILIO_AUTH_TOKEN": os.environ["CHANNEL_TWILIO_AUTH_TOKEN"],
+            "CHANNEL_TWILIO_FROM": os.environ["CHANNEL_TWILIO_FROM"],
+            "CHANNEL_TWILIO_REDIS_URL": res.redis_url,
+            "CHANNEL_TWILIO_DEFAULT_RECIPIENT": to,
+            "CHANNEL_TWILIO_ALLOWED_RECIPIENTS": to,
+        }
+    return {
+        "CHANNEL_TWILIO_ACCOUNT_SID": "ACe2e00000000000000000000000000000",
+        "CHANNEL_TWILIO_AUTH_TOKEN": secrets.token_hex(16),
+        "CHANNEL_TWILIO_FROM": TWILIO_FROM,
+        "CHANNEL_TWILIO_API_BASE_URL": _require_stub(res.twilio_api_base_url, "twilio"),
+        "CHANNEL_TWILIO_REDIS_URL": res.redis_url,
+        "CHANNEL_TWILIO_DEFAULT_RECIPIENT": TWILIO_DEFAULT_RECIPIENT,
+        "CHANNEL_TWILIO_ALLOWED_RECIPIENTS": ",".join(TWILIO_ALLOWED_RECIPIENTS),
+    }
+
+
+def _require_stub(url: str | None, medium: str) -> str:
+    """A MOCK medium needs its recording-stub base URL on resources (a REAL medium
+    talks to the live vendor and needs none). A mock medium missing its stub is a
+    mis-wired fixture, caught here rather than at boot."""
+    if url is None:
+        raise RuntimeError(
+            f"build_channel_stack (mock {medium}) requires the {medium} stub base URL on resources; "
+            "the channel_stack fixture allocates the stubs and passes them as resource_kwargs"
+        )
+    return url
+
+
 def _channel_env(res: StackResources, variants: Variants) -> dict[str, str]:
     """The ``CHANNEL_*`` env for the channel profile: per-plugin bot credential, a random
     per-stack inbound secret, the API base URL pointed at that medium's recording stub,
     the correlation store on this stack's Redis DB, and the disjoint default/allowlist
     recipient policy. The two public-base-URL keys are filled at boot with replica B's
-    origin (see ``replica_b_origin_env_keys``)."""
-    if res.telegram_api_base_url is None or res.slack_api_base_url is None or res.twilio_api_base_url is None:
-        raise RuntimeError(
-            "build_channel_stack requires the three channel-stub base URLs on resources "
-            "(telegram_api_base_url/slack_api_base_url/twilio_api_base_url); the channel_stack "
-            "fixture allocates the stubs and passes them as resource_kwargs"
-        )
+    origin (see ``replica_b_origin_env_keys``).
+
+    Each of telegram / slack / twilio is independently mock-or-real (``TAI_E2E_REAL``):
+    a real medium drops its stub base URL (plugin default = live vendor) and reads its
+    credential + test recipient from the operator template. All-mock (default) is
+    byte-for-byte today's env."""
+    switch = _switch()
     env = _base_env(res, variants)
-    env.update(
-        {
-            # telegram
-            "CHANNEL_TELEGRAM_BOT_TOKEN": "e2e-telegram-bot-token",
-            "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
-            "CHANNEL_TELEGRAM_API_BASE_URL": res.telegram_api_base_url,
-            "CHANNEL_TELEGRAM_REDIS_URL": res.redis_url,
-            "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": TELEGRAM_DEFAULT_RECIPIENT,
-            "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": ",".join(TELEGRAM_ALLOWED_RECIPIENTS),
-            # slack
-            "CHANNEL_SLACK_BOT_TOKEN": "xoxb-e2e-slack-token",
-            "CHANNEL_SLACK_SIGNING_SECRET": secrets.token_hex(16),
-            "CHANNEL_SLACK_API_BASE_URL": res.slack_api_base_url,
-            "CHANNEL_SLACK_REDIS_URL": res.redis_url,
-            "CHANNEL_SLACK_DEFAULT_RECIPIENT": SLACK_DEFAULT_RECIPIENT,
-            "CHANNEL_SLACK_ALLOWED_RECIPIENTS": ",".join(SLACK_ALLOWED_RECIPIENTS),
-            # twilio
-            "CHANNEL_TWILIO_ACCOUNT_SID": "ACe2e00000000000000000000000000000",
-            "CHANNEL_TWILIO_AUTH_TOKEN": secrets.token_hex(16),
-            "CHANNEL_TWILIO_FROM": TWILIO_FROM,
-            "CHANNEL_TWILIO_API_BASE_URL": res.twilio_api_base_url,
-            "CHANNEL_TWILIO_REDIS_URL": res.redis_url,
-            "CHANNEL_TWILIO_DEFAULT_RECIPIENT": TWILIO_DEFAULT_RECIPIENT,
-            "CHANNEL_TWILIO_ALLOWED_RECIPIENTS": ",".join(TWILIO_ALLOWED_RECIPIENTS),
-        }
-    )
+    env.update(_telegram_channel_env(res, real=switch.is_real("telegram")))
+    env.update(_slack_channel_env(res, real=switch.is_real("slack")))
+    env.update(_twilio_channel_env(res, real=switch.is_real("twilio")))
     # Channel-loop answers forward through the interactions callback door, whose per-IP
     # rate limiter buckets all loopback traffic together. Pin its windows high so the
     # shared 127.0.0.1 bucket never trips on test volume (the limiter stays ON).
     env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_BURST"] = "100000"
     return env
+
+
+def _channel_public_keys(switch: HarnessSettings) -> list[str]:
+    """The public-base-URL env keys the channel stack routes to ``E2E_PUBLIC_BASE_URL``
+    when a channel is real inbound: telegram's setWebhook origin
+    (``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``) when telegram is real, and the ask_user
+    callback origin (``INTERACTIONS_PUBLIC_BASE_URL``) minted into a real medium's
+    outbound whenever any channel is real. Empty on the all-mock default, so the
+    loopback replica-B fill is unchanged."""
+    keys: list[str] = []
+    if switch.is_real("telegram"):
+        keys.append("CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
+    if any(switch.is_real(seam) for seam in _CHANNEL_SEAMS):
+        keys.append("INTERACTIONS_PUBLIC_BASE_URL")
+    return keys
 
 
 def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -494,6 +646,7 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask_user", "notify_user", "reload_config"],
     }
+    switch = _switch()
     return StackConfig(
         name="channel",
         topology=Topology.REPLICAS,
@@ -504,8 +657,11 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
         auth=False,
         # Filled at boot with replica B's origin: the ask minted on A carries a callback
         # URL that resolves on B, and telegram's setWebhook URL points at B. Known only
-        # once ports bind.
+        # once ports bind. A real inbound channel overrides its key to the public origin
+        # (see ``public_base_url_env_keys``), so the vendor reaches it.
         replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"],
+        public_base_url_env_keys=_channel_public_keys(switch),
+        public_base_url=switch.public_base_url,
     )
 
 
@@ -538,34 +694,68 @@ BRIDGE_MAX_CONCURRENT_TURNS = 4
 BRIDGE_PER_ADDRESS_TURNS_PER_HOUR = 5
 
 
-def _bridge_channel_env(res: StackResources) -> dict[str, str]:
-    """The twilio + whatsapp ``CHANNEL_*`` env for the bridge profile: per-plugin
-    credential, a random per-stack inbound secret, the API base URL pointed at that medium's
-    recording stub, the correlation store on this stack's Redis DB, and the ask_user
-    recipient policy (a default twilio recipient; an allowlisted whatsapp wa_id)."""
-    if res.twilio_api_base_url is None or res.whatsapp_api_base_url is None:
-        raise RuntimeError(
-            "build_bridge_stack requires the twilio + whatsapp stub base URLs on resources; the bridge_stack "
-            "fixture allocates the stubs and passes them as resource_kwargs"
-        )
+def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
+    if real:
+        # HARNESS-MAP: TEST_TO -> default + sole allowlisted recipient; no API_BASE_URL
+        # (plugin default = real api.twilio.com).
+        to = os.environ["CHANNEL_TWILIO_TEST_TO"]
+        return {
+            "CHANNEL_TWILIO_ACCOUNT_SID": os.environ["CHANNEL_TWILIO_ACCOUNT_SID"],
+            "CHANNEL_TWILIO_AUTH_TOKEN": os.environ["CHANNEL_TWILIO_AUTH_TOKEN"],
+            "CHANNEL_TWILIO_FROM": os.environ["CHANNEL_TWILIO_FROM"],
+            "CHANNEL_TWILIO_REDIS_URL": res.redis_url,
+            "CHANNEL_TWILIO_DEFAULT_RECIPIENT": to,
+            "CHANNEL_TWILIO_ALLOWED_RECIPIENTS": to,
+        }
     return {
-        # twilio
         "CHANNEL_TWILIO_ACCOUNT_SID": BRIDGE_TWILIO_ACCOUNT_SID,
         "CHANNEL_TWILIO_AUTH_TOKEN": secrets.token_hex(16),
         "CHANNEL_TWILIO_FROM": BRIDGE_TWILIO_FROM,
-        "CHANNEL_TWILIO_API_BASE_URL": res.twilio_api_base_url,
+        "CHANNEL_TWILIO_API_BASE_URL": _require_stub(res.twilio_api_base_url, "twilio"),
         "CHANNEL_TWILIO_REDIS_URL": res.redis_url,
         "CHANNEL_TWILIO_DEFAULT_RECIPIENT": BRIDGE_TWILIO_CLIENT,
         "CHANNEL_TWILIO_ALLOWED_RECIPIENTS": ",".join([BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_CLIENT_B]),
-        # whatsapp
+    }
+
+
+def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
+    if real:
+        # HARNESS-MAP: DEFAULT_PHONE_NUMBER_ID is our_identity, TEST_TO the allowlisted
+        # wa_id; the VERIFY_TOKEN is operator-set (shared with Meta's dashboard
+        # subscription). No API_BASE_URL (plugin default = real graph.facebook.com).
+        return {
+            "CHANNEL_WHATSAPP_ACCESS_TOKEN": os.environ["CHANNEL_WHATSAPP_ACCESS_TOKEN"],
+            "CHANNEL_WHATSAPP_APP_SECRET": os.environ["CHANNEL_WHATSAPP_APP_SECRET"],
+            "CHANNEL_WHATSAPP_VERIFY_TOKEN": os.environ["CHANNEL_WHATSAPP_VERIFY_TOKEN"],
+            "CHANNEL_WHATSAPP_REDIS_URL": res.redis_url,
+            "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID": os.environ["CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"],
+            "CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS": os.environ["CHANNEL_WHATSAPP_TEST_TO"],
+        }
+    return {
         "CHANNEL_WHATSAPP_ACCESS_TOKEN": "e2e-whatsapp-access-token",
         "CHANNEL_WHATSAPP_APP_SECRET": secrets.token_hex(16),
         "CHANNEL_WHATSAPP_VERIFY_TOKEN": secrets.token_hex(16),
-        "CHANNEL_WHATSAPP_API_BASE_URL": res.whatsapp_api_base_url,
+        "CHANNEL_WHATSAPP_API_BASE_URL": _require_stub(res.whatsapp_api_base_url, "whatsapp"),
         "CHANNEL_WHATSAPP_REDIS_URL": res.redis_url,
         "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID": BRIDGE_WHATSAPP_PHONE_ID,
         "CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS": BRIDGE_WHATSAPP_CLIENT,
     }
+
+
+def _bridge_channel_env(res: StackResources) -> dict[str, str]:
+    """The twilio + whatsapp ``CHANNEL_*`` env for the bridge profile: per-plugin
+    credential, a random per-stack inbound secret, the API base URL pointed at that medium's
+    recording stub, the correlation store on this stack's Redis DB, and the ask_user
+    recipient policy (a default twilio recipient; an allowlisted whatsapp wa_id).
+
+    twilio / whatsapp are independently mock-or-real (``TAI_E2E_REAL``): a real medium
+    drops its stub base URL (plugin default = live vendor) and reads its credential +
+    test recipient from the operator template. All-mock (default) is byte-for-byte
+    today's env."""
+    switch = _switch()
+    env = _bridge_twilio_env(res, real=switch.is_real("twilio"))
+    env.update(_bridge_whatsapp_env(res, real=switch.is_real("whatsapp")))
+    return env
 
 
 def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -613,7 +803,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url
     env.update(_memory_agent_state_env())
-    env.update(_llm_stub_env(res))
+    env.update(_llm_env(res))
     env.update(_bridge_channel_env(res))
     # Small delivery ceiling + backoff so an undeliverable answer reaches terminal ``failed`` fast.
     env["CONVERSATIONS_DELIVERY_MAX_ATTEMPTS"] = "2"
@@ -626,6 +816,12 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     # volume never trips it.
     env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_BURST"] = "100000"
+    switch = _switch()
+    # A real inbound channel (twilio/whatsapp) mints the ask_user callback into its
+    # outbound over the public origin instead of replica-B loopback; empty on all-mock.
+    bridge_public_keys = (
+        ["INTERACTIONS_PUBLIC_BASE_URL"] if any(switch.is_real(s) for s in ("twilio", "whatsapp")) else []
+    )
     return StackConfig(
         name="bridge",
         topology=Topology.REPLICAS,
@@ -635,6 +831,8 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         run_metrics=True,
         auth=True,
         replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+        public_base_url_env_keys=bridge_public_keys,
+        public_base_url=switch.public_base_url,
     )
 
 
@@ -701,6 +899,11 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
             # hook and an authed reconcile call can each resolve them by name.
             {"title": "stripe-confirm", "module": "tai42_tools_stripe.tools.confirm_stripe_payment"},
             {"title": "stripe-reconcile", "module": "tai42_tools_stripe.tools.reconcile_stripe_payments"},
+            # The flexible-amount payment-link builder — a fire-and-return hosted link with no
+            # ask/callback. It mints a Checkout Session through the SAME client seam as the
+            # checkout builder, so the FakeStripe stub answers it and no run-time call reaches
+            # a real Stripe host. Kept off every user/agent surface (see ``user_tools`` below).
+            {"title": "stripe-payment-link", "module": "tai42_tools_stripe.tools.create_stripe_payment_link"},
             *_builtin_entries(),
         ],
         "api_tools": _PROJECTED_API_TOOLS,
@@ -708,17 +911,26 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
         # agents are given the money-pinned preset over the composed tool, never these.
         "user_tools": ["ask_user", "reload_config"],
     }
+    switch = _switch()
+    stripe_real = switch.is_real("stripe")
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
     env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
-    # Stripe tool config. The api base points at the in-process FakeStripe stub; no run-time
-    # call reaches a real Stripe host. The test-mode key agrees with the stub's livemode.
-    if res.stripe_stub_base is not None:
-        env["STRIPE_API_BASE"] = res.stripe_stub_base
-    env["STRIPE_SECRET_KEY"] = _STRIPE_TEST_SECRET_KEY
-    # The topic's stripe verifier reads this; the test signs deliveries with the same value.
-    if res.stripe_webhook_secret is not None:
+    # Stripe tool config. MOCK: the api base points at the in-process FakeStripe stub and
+    # the test-mode key agrees with the stub's livemode. REAL: drop the api base (plugin
+    # default = real api.stripe.com) and read the operator's ``sk_test_`` key.
+    if stripe_real:
+        env["STRIPE_SECRET_KEY"] = os.environ["STRIPE_SECRET_KEY"]
+    else:
+        if res.stripe_stub_base is not None:
+            env["STRIPE_API_BASE"] = res.stripe_stub_base
+        env["STRIPE_SECRET_KEY"] = _STRIPE_TEST_SECRET_KEY
+    # The topic's stripe verifier reads this env name; MOCK signs deliveries with the
+    # harness-minted secret, REAL feeds the dashboard endpoint's ``whsec_`` signing secret.
+    if stripe_real:
+        env["E2E_STRIPE_WEBHOOK_SECRET"] = os.environ["STRIPE_WEBHOOK_SECRET"]
+    elif res.stripe_webhook_secret is not None:
         env["E2E_STRIPE_WEBHOOK_SECRET"] = res.stripe_webhook_secret
     # One value read by BOTH the door's shared_secret verifier and the bridge tool.
     if res.bridge_callback_secret is not None:
@@ -736,8 +948,12 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
         run_metrics=False,
         auth=True,
         # Filled at boot with replica B's origin: the callback URL minted on A is dialable
-        # by the bridge, and the SSRF pin's ground truth is this same value.
+        # by the bridge, and the SSRF pin's ground truth is this same value. Real Stripe
+        # delivers ``checkout.session.completed`` to the public origin, so the callback the
+        # bridge answers is minted there instead of loopback.
         replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+        public_base_url_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"] if stripe_real else [],
+        public_base_url=switch.public_base_url,
     )
 
 
@@ -923,10 +1139,21 @@ def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
     ``idp:{issuer}:{sub}``). ``TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL`` is filled at boot
     with replica B's own origin (loopback ``http`` is accepted for e2e), so a login
     spec drives the flow against replica B; ``TAI_IDENTITY_OIDC_AUDIENCE`` is the
-    audience the issuer stamps into machine JWTs a spec mints for replica B."""
+    audience the issuer stamps into machine JWTs a spec mints for replica B.
+
+    The ``oidc`` seam swaps the in-process issuer for a real Auth0 tenant (HARNESS-MAP:
+    ``AUTH0_*`` -> a ``TAI_ACCOUNTS_OIDC_PROVIDERS`` row ``preset:"auth0"`` +
+    ``TAI_IDENTITY_OIDC_ISSUER`` / ``_AUDIENCE``); the ``github-login`` seam ADDS a real
+    ``preset:"github"`` provider row (fed from ``GITHUB_LOGIN_*`` — real-only, no mock
+    issuer exists). Both are inbound, so the login redirect origin routes to the public
+    base URL. All-mock (default) is byte-for-byte today's in-process-issuer wiring."""
     from dataclasses import replace
 
-    if res.oidc_issuer_base_url is None:
+    switch = _switch()
+    oidc_real = switch.is_real("oidc")
+    gh_real = switch.is_real("github-login")
+
+    if not oidc_real and res.oidc_issuer_base_url is None:
         raise RuntimeError("build_oidc_stack requires resources.oidc_issuer_base_url (the signing OIDC issuer origin)")
 
     base = build_accounts_stack(res, variants)
@@ -935,11 +1162,29 @@ def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
     manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_accounts_oidc.routes"]
     env = {**base.env}
     env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", "accounts-oidc", "identity-oidc", "redis"])
-    # accounts-oidc: one login provider whose issuer is the in-process IdP. Its
-    # client_id is the IdP's construction client (the id_token ``aud`` the callback
-    # verifies); the secret is a fixture value the stub IdP never checks.
-    env["TAI_ACCOUNTS_OIDC_PROVIDERS"] = json.dumps(
-        [
+    # accounts-oidc login provider row(s). MOCK: one row whose issuer is the in-process
+    # IdP (client_id is the IdP's construction client — the id_token ``aud`` the callback
+    # verifies; the secret is a fixture value the stub IdP never checks). REAL oidc: a real
+    # Auth0 row (preset fills the label; the operator supplies the per-tenant issuer).
+    providers: list[dict] = []
+    if oidc_real:
+        providers.append(
+            {
+                "name": "auth0",
+                "preset": "auth0",
+                "issuer": os.environ["AUTH0_ISSUER"],
+                "client_id": os.environ["AUTH0_CLIENT_ID"],
+                "client_secret": os.environ["AUTH0_CLIENT_SECRET"],
+                "claim": "sub",
+            }
+        )
+        # identity-oidc validates machine JWTs against the same real issuer + API audience.
+        env["TAI_IDENTITY_OIDC_ISSUER"] = os.environ["AUTH0_ISSUER"]
+        env["TAI_IDENTITY_OIDC_AUDIENCE"] = os.environ["AUTH0_AUDIENCE"]
+    else:
+        # The guard above raised unless the in-process issuer origin is present here.
+        assert res.oidc_issuer_base_url is not None
+        providers.append(
             {
                 "name": _OIDC_PROVIDER_NAME,
                 "issuer": res.oidc_issuer_base_url,
@@ -947,19 +1192,35 @@ def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
                 "client_secret": _OIDC_CLIENT_SECRET,
                 "claim": "sub",
             }
-        ]
-    )
+        )
+        # identity-oidc: validate-only, same issuer, the machine-JWT audience. RS256 is
+        # the default allowed alg (the issuer signs RS256); the subject claim is ``sub``.
+        env["TAI_IDENTITY_OIDC_ISSUER"] = res.oidc_issuer_base_url
+        env["TAI_IDENTITY_OIDC_AUDIENCE"] = _OIDC_MACHINE_AUDIENCE
+    if gh_real:
+        # A real GitHub OAuth app via the plain-OAuth2 ``github`` preset (fixed endpoints,
+        # no discovery/id_token). Real-only — the in-process issuer has no github mode.
+        providers.append(
+            {
+                "name": "github",
+                "preset": "github",
+                "client_id": os.environ["GITHUB_LOGIN_CLIENT_ID"],
+                "client_secret": os.environ["GITHUB_LOGIN_CLIENT_SECRET"],
+            }
+        )
+    env["TAI_ACCOUNTS_OIDC_PROVIDERS"] = json.dumps(providers)
     env["TAI_ACCOUNTS_OIDC_STATE_KEY"] = _OIDC_STATE_KEY
-    # identity-oidc: validate-only, same issuer, the machine-JWT audience. RS256 is
-    # the default allowed alg (the issuer signs RS256); the subject claim is ``sub``.
-    env["TAI_IDENTITY_OIDC_ISSUER"] = res.oidc_issuer_base_url
-    env["TAI_IDENTITY_OIDC_AUDIENCE"] = _OIDC_MACHINE_AUDIENCE
+    # A real login provider registers its OAuth redirect at the public origin, so the
+    # login base URL routes there instead of replica-B loopback; empty on all-mock.
+    oidc_public_keys = ["TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"] if (oidc_real or gh_real) else []
     return replace(
         base,
         name="oidc",
         manifest=manifest,
         env=env,
         replica_b_origin_env_keys=["TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL"],
+        public_base_url_env_keys=oidc_public_keys,
+        public_base_url=switch.public_base_url,
     )
 
 
@@ -984,7 +1245,7 @@ def build_agents_stack(res: StackResources, variants: Variants) -> StackConfig:
     }
     env = _base_env(res, variants)
     env.update(_memory_agent_state_env())
-    env.update(_llm_stub_env(res))
+    env.update(_llm_env(res))
     return StackConfig(
         name="agents",
         topology=Topology.MULTIWORKER,
@@ -1030,7 +1291,7 @@ def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackCo
     }
     env = _base_env(res, variants)
     env.update(_redis_agent_state_env(res))
-    env.update(_llm_stub_env(res))
+    env.update(_llm_env(res))
     return StackConfig(
         name="agents-redis",
         topology=Topology.REPLICAS,
@@ -1223,6 +1484,112 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
     )
 
 
+# ---- shipped-connectors profile (B3) ------------------------------------
+#
+# The two SHIPPED OAuth connector plugins — google + atlassian — loaded as their real
+# descriptor modules (NOT the fixture ``connector_provider``). The descriptors hardcode
+# the vendor authorize/token URLs with no env indirection, so the leg's scope ENDS at
+# descriptor registration + the locally-built authorize (launch) URL: a stub IdP cannot
+# intercept the vendor token exchange, and probe launches the sub-service then calls the
+# real vendor. Token/refresh/probe against live vendors is PLAN_2's real-connector leg.
+
+# The two shipped connector descriptor modules; importing each registers its provider
+# through ``tai42_app.connectors.register_connector`` (google → Gmail/Calendar/Drive,
+# atlassian → Jira/Confluence/Compass).
+_GOOGLE_CONNECTOR_MODULE = "tai42_connector.google.core.connector"
+_ATLASSIAN_CONNECTOR_MODULE = "tai42_connector.atlassian.core.connector"
+
+# The OAuth client credentials each shipped descriptor reads by env name
+# (``client_id_env`` / ``client_secret_env``). Fixed fixture values: the client_id is
+# stamped verbatim into the locally-built authorize URL the leg asserts on; the secret
+# is never used (no token exchange happens on this leg), but the connect flow reads it
+# so it must be present.
+# The client_ids are PUBLIC: the shipped-connectors leg asserts the launch URL stamps
+# them verbatim, so the spec imports these rather than re-hardcoding the literals.
+GOOGLE_CLIENT_ID = "e2e-google-client-id"
+_GOOGLE_CLIENT_SECRET = "e2e-google-client-secret"
+ATLASSIAN_CLIENT_ID = "e2e-atlassian-client-id"
+_ATLASSIAN_CLIENT_SECRET = "e2e-atlassian-client-secret"
+
+
+def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """MULTIWORKER(1), no backend/metrics, auth off — the SHIPPED google + atlassian
+    connector descriptors loaded and their launch (authorize) URLs asserted.
+
+    Mounts the connectors router over a real connector store (the CONNECTOR_STORE PG
+    password is what flips connectors on) with random per-stack crypto keys, and points
+    ``CONNECTORS_<VENDOR>_CLIENT_ID/SECRET`` at fixed fixture values. The connect flow
+    builds the authorize URL PURELY LOCALLY from the descriptor's hardcoded authorize
+    endpoint + the client_id + this stack's own redirect origin (no network to the
+    vendor), so the leg is hermetic. ``CONNECTORS_REDIRECT_URI_ALLOWLIST`` is filled at
+    boot with this stack's own origin (the connect flow validates the request-derived
+    redirect_uri against it fail-closed)."""
+    manifest = {
+        "default_routers": "none",
+        "lifecycle_modules": [_GOOGLE_CONNECTOR_MODULE, _ATLASSIAN_CONNECTOR_MODULE],
+        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.connectors"],
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    # The connector-store PG password flips connectors on (store-configured); its Redis
+    # cache rides the shared ``_redis_feature_env``.
+    env.update(_pg_env("CONNECTOR_STORE_", res))
+    if res.connectors_kek is not None:
+        env["CONNECTORS_KEK"] = res.connectors_kek
+    if res.connectors_state_hmac_key is not None:
+        env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
+    # The client credentials the shipped descriptors resolve by env name (the same var
+    # names the operator template supplies). MOCK: fixed fixture values — only the
+    # client_id is launch-URL-bearing, the secret present-but-unused on the hermetic leg.
+    # REAL: the operator's live OAuth-app credentials, so the launch URL and (on the e2e
+    # host) the real consent + token exchange run against the live vendor. The consent
+    # round-trip itself is real-only test behavior (no mock counterpart) and needs the
+    # OAuth redirect registered at the PUBLIC origin — which the connect flow validates
+    # against CONNECTORS_REDIRECT_URI_ALLOWLIST. MOCK boot-fills that key from the LOOPBACK
+    # origin (``origin_allowlist_env_keys``); a real connector routes it to the PUBLIC origin
+    # instead via ``public_allowlist_env_keys`` (mirrors ``public_base_url_env_keys``).
+    switch = _switch()
+    connectors_real = switch.is_real("connector-google") or switch.is_real("connector-atlassian")
+    if switch.is_real("connector-google"):
+        env["CONNECTORS_GOOGLE_CLIENT_ID"] = os.environ["CONNECTORS_GOOGLE_CLIENT_ID"]
+        env["CONNECTORS_GOOGLE_CLIENT_SECRET"] = os.environ["CONNECTORS_GOOGLE_CLIENT_SECRET"]
+    else:
+        env["CONNECTORS_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
+        env["CONNECTORS_GOOGLE_CLIENT_SECRET"] = _GOOGLE_CLIENT_SECRET
+    if switch.is_real("connector-atlassian"):
+        env["CONNECTORS_ATLASSIAN_CLIENT_ID"] = os.environ["CONNECTORS_ATLASSIAN_CLIENT_ID"]
+        env["CONNECTORS_ATLASSIAN_CLIENT_SECRET"] = os.environ["CONNECTORS_ATLASSIAN_CLIENT_SECRET"]
+    else:
+        env["CONNECTORS_ATLASSIAN_CLIENT_ID"] = ATLASSIAN_CLIENT_ID
+        env["CONNECTORS_ATLASSIAN_CLIENT_SECRET"] = _ATLASSIAN_CLIENT_SECRET
+    return StackConfig(
+        name="shipped-connectors",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+        # The connect flow signs the deployment origin and validates the request-derived
+        # redirect_uri against this allowlist fail-closed; the app port is known only at
+        # boot, so the stack fills it with its own origin (MOCK). A real connector routes
+        # the same key to the PUBLIC origin the OAuth redirect is registered at.
+        origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+        public_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"] if connectors_real else [],
+        public_base_url=switch.public_base_url,
+    )
+
+
+# ---- tool-extensions profile --------------------------------------------
+
 # Extension modules the extensions profile loads so its probe-tool branches resolve —
 # startup extension-validation aborts loudly on a referenced-but-unloaded extension.
 _TOOL_EXTENSION_MODULES = [
@@ -1326,14 +1693,25 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask_user", "reload_config"],
     }
-    if not (res.langfuse_host and res.langfuse_public_key and res.langfuse_secret_key):
-        # A monitoring stack with blank credentials boots and then fails cryptically
-        # inside the plugin; a missing coordinate is a mis-gated fixture, caught here.
-        raise RuntimeError("build_monitoring_stack requires langfuse_host + langfuse_public_key + langfuse_secret_key")
+    # The langfuse monitoring module is real either way — only the host + key pair
+    # change. MOCK: the compose-baked self-hosted coordinates on resources. REAL: the
+    # cloud host + key pair from the operator template (``LANGFUSE_*`` read verbatim).
+    if _switch().is_real("langfuse"):
+        host = os.environ["LANGFUSE_HOST"]
+        public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
+        secret_key = os.environ["LANGFUSE_SECRET_KEY"]
+    else:
+        if not (res.langfuse_host and res.langfuse_public_key and res.langfuse_secret_key):
+            # A monitoring stack with blank credentials boots and then fails cryptically
+            # inside the plugin; a missing coordinate is a mis-gated fixture, caught here.
+            raise RuntimeError(
+                "build_monitoring_stack requires langfuse_host + langfuse_public_key + langfuse_secret_key"
+            )
+        host, public_key, secret_key = res.langfuse_host, res.langfuse_public_key, res.langfuse_secret_key
     env = _base_env(res, variants)
-    env["LANGFUSE_HOST"] = res.langfuse_host
-    env["LANGFUSE_PUBLIC_KEY"] = res.langfuse_public_key
-    env["LANGFUSE_SECRET_KEY"] = res.langfuse_secret_key
+    env["LANGFUSE_HOST"] = host
+    env["LANGFUSE_PUBLIC_KEY"] = public_key
+    env["LANGFUSE_SECRET_KEY"] = secret_key
     return StackConfig(
         name="monitoring",
         topology=Topology.MULTIWORKER,
@@ -1379,8 +1757,12 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
     # which the harness never creates. Point it at the stack's own per-run clone.
     env.update(_pg_env("MARKETPLACE_STORE_", res))
     # The installer shells ``sys.executable -m pip install`` inheriting the worker env,
-    # so this pip knob reaches it; the PEP 503 root is /simple/.
-    env["PIP_INDEX_URL"] = f"{res.package_index_url}/simple/"
+    # so this pip knob reaches it; the PEP 503 root is /simple/. REAL marketplace-pypi
+    # drops the fixture index so pip resolves the tai42 packages from real pypi.org (the
+    # registry-side ingest repoint — MP_PYPI_BASE_URL / MP_GITHUB_API_BASE — lives in the
+    # harness-run marketplace runner, ``marketplace.py``, outside these two files).
+    if not _switch().is_real("marketplace-pypi"):
+        env["PIP_INDEX_URL"] = f"{res.package_index_url}/simple/"
     return StackConfig(
         name="marketplace",
         topology=Topology.MULTIWORKER,
@@ -1637,6 +2019,109 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
         topology=Topology.MULTIWORKER,
         manifest=manifest,
         env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )
+
+
+# ---- manifest-mcp mount profile (B8) ------------------------------------
+#
+# The FIRST manifest-level external MCP mount (``manifest.mcp: [TaiMCPConfig]``) — no
+# existing pattern to copy, ``manifests.py`` carries no ``mcp`` entries today. It mounts
+# the RELEASED PyPI package ``tai42-dynamic-postgres-mcp`` by LAUNCHING its
+# ``tai42-postgres-mcp`` console script as a stdio child, pointed at the harness postgres.
+# This is NOT the ``/api/sub-mcp`` composition router (which only re-exposes tools already
+# registered on this server) — the mounted server's tools are DISCOVERED at boot by the
+# app's MCP loader (each ``manifest.mcp`` entry is probed over the pooled FastMCP client)
+# and bound onto this server's own MCP surface under the entry's title prefix
+# (``{title}_{tool}``, per ``binding.normalized_name``).
+#
+# The shipped package is a DYNAMIC/codegen MCP: its console script INTROSPECTS the live
+# schema at startup (``--overwrite`` defaults ON) and generates one tool per relation per
+# verb — ``<verb>_<schema>_<table>`` for select/insert/update/delete — so a table must
+# pre-exist in the connected database for any tool to exist. It has NO raw ``execute_sql``
+# tool. The connection is passed via its ``PG_*`` pydantic-settings env (``env_prefix`` is
+# ``PG_``: ``db``/``user``/``password`` have no defaults and raise at startup if missing),
+# never a ``DATABASE_URL``.
+
+# The manifest title the mounted server's tools are prefixed with on this server's MCP
+# surface (``postgres_<verb>_<schema>_<table>``).
+POSTGRES_MCP_TITLE = "postgres"
+
+# The probe relation the ``postgres_mcp_stack`` fixture seeds into the stack's Postgres
+# clone BEFORE boot, so the child introspects it into a full CRUD tool set and the round
+# trip reads the seeded row back through the mounted select tool. The child ALSO introspects
+# the clone's skeleton/accounts tables (every one of their column types maps in the package's
+# codegen), so this table is one relation among several — its generated names are the ones
+# the test pins. ``schema`` + ``table`` flatten (``.`` → ``_``) into each generated tool name.
+POSTGRES_MCP_PROBE_SCHEMA = "public"
+POSTGRES_MCP_PROBE_TABLE = "widgets"
+POSTGRES_MCP_PROBE_ROW_NAME = "b8-seed-widget"
+
+
+def postgres_mcp_tool_name(verb: str) -> str:
+    """The name a generated per-table CRUD tool for the probe relation binds under on THIS
+    server's MCP surface: the package names each tool ``<verb>_<schema>_<table>`` and the
+    mount prefixes it with the manifest title (``normalized_name`` lowercases and prefixes,
+    yielding ``postgres_<verb>_<schema>_<table>``)."""
+    return f"{POSTGRES_MCP_TITLE}_{verb}_{POSTGRES_MCP_PROBE_SCHEMA}_{POSTGRES_MCP_PROBE_TABLE}"
+
+
+def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """MULTIWORKER(1), no backend/metrics, auth off — the shipped
+    ``tai42-dynamic-postgres-mcp`` mounted as a product-level external MCP.
+
+    The manifest's single ``mcp`` entry launches the ``tai42-postgres-mcp`` console script
+    over stdio (``command`` = the absolute console-script path, so no PATH is needed in the
+    child's launch env). The child is a DYNAMIC/codegen MCP: at startup it introspects the
+    connected schema and generates per-table CRUD tools (``<verb>_<schema>_<table>``), which
+    the app's boot-time MCP loader binds onto this server's MCP surface under the ``postgres``
+    title prefix — so a test lists them over the server's own ``/mcp`` and drives one query
+    round trip through the product. The ``postgres_mcp_stack`` fixture seeds a known probe
+    table into the clone BEFORE boot so those tools exist to be discovered.
+
+    The connection targets this stack's own isolated per-run Postgres clone (the same database
+    the feature stores use), reached over TCP at the harness pg host/port. It is passed via the
+    package's ``PG_*`` settings env (``env_prefix`` ``PG_``), never ``args`` (credentials in
+    argv would show in the child's process listing). ``TOOLS_DIR`` points the child's generated
+    tool modules at a per-stack directory under the stack root, off the package's shared
+    ``~/.cache`` default so concurrent stacks never race one codegen dir."""
+    # PG_HOST/PG_PORT/PG_DB/PG_USER/PG_PASSWORD — the exact five keys the package's
+    # PostgresSettings reads (bare ``PG_`` prefix); ``_pg_env("")`` renders them verbatim.
+    child_env = _pg_env("", res)
+    child_env["TOOLS_DIR"] = str(Path(res.storage_root).with_name("postgres_mcp_tools"))
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        # The first-of-its-kind manifest-``mcp`` mount: exactly one transport (``command``),
+        # launcher-only ``env`` alongside it (no ``args`` — the child's stdio + overwrite
+        # defaults already generate every CRUD tool). Connection rides the child env, not argv.
+        "mcp": [
+            {
+                "title": POSTGRES_MCP_TITLE,
+                "config": {
+                    "type": "stdio",
+                    "command": venv_console_script("tai42-postgres-mcp"),
+                    "env": child_env,
+                },
+            }
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    return StackConfig(
+        name="postgres-mcp",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=_base_env(res, variants),
         workers=1,
         run_backend=False,
         run_metrics=False,

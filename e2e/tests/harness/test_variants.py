@@ -11,7 +11,15 @@ import pytest
 
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import InfraUnavailable, StackResources
-from tai42_e2e.variants import BACKENDS, IDENTITIES, STORAGES, resolve_variants, short_presence_ttl_env
+from tai42_e2e.variants import (
+    BACKENDS,
+    IDENTITIES,
+    STORAGES,
+    FixtureStorage,
+    LocalStorage,
+    resolve_variants,
+    short_presence_ttl_env,
+)
 
 _RES = StackResources(
     redis_idx=1,
@@ -77,11 +85,16 @@ def test_identity_and_storage_registries_carry_a_second_value() -> None:
     assert fixture_storage.module == "tai42_e2e_fixtures.storage"
     assert fixture_storage.feature_env(_RES) == {"E2E_FIXTURE_STORAGE_ROOT_PATH": _RES.storage_root}
 
-    # The two storage backends store an object at DIFFERENT on-disk paths, so a
+    # The two filesystem backends store an object at DIFFERENT on-disk paths, so a
     # read-back keyed on the wrong variant's layout finds nothing — the property the
-    # storage-variant spec's on-disk assertion rests on.
-    local_path = STORAGES["local"].stored_object_path(_RES.storage_root, "a/b.txt")
-    fixture_path = fixture_storage.stored_object_path(_RES.storage_root, "a/b.txt")
+    # storage-variant spec's on-disk assertion rests on. ``_stored_object_path`` is the
+    # filesystem-only helper (not the store-agnostic seam), so the registry values are
+    # narrowed to their concrete filesystem classes to read it.
+    local = STORAGES["local"]
+    assert isinstance(local, LocalStorage)
+    assert isinstance(fixture_storage, FixtureStorage)
+    local_path = local._stored_object_path(_RES.storage_root, "a/b.txt")
+    fixture_path = fixture_storage._stored_object_path(_RES.storage_root, "a/b.txt")
     assert local_path != fixture_path
 
 

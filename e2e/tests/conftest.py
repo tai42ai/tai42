@@ -14,7 +14,9 @@ import base64
 import secrets
 from collections.abc import Iterator
 
+import psycopg
 import pytest
+from psycopg import sql
 
 from tai42_e2e import diagnostics
 from tai42_e2e.booting import allocate_and_build, boot_stack
@@ -26,6 +28,9 @@ from tai42_e2e.harness import (
 )
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import (
+    POSTGRES_MCP_PROBE_ROW_NAME,
+    POSTGRES_MCP_PROBE_SCHEMA,
+    POSTGRES_MCP_PROBE_TABLE,
     build_accounts_stack,
     build_agents_redis_stack,
     build_agents_stack,
@@ -44,10 +49,12 @@ from tai42_e2e.manifests import (
     build_off_stack,
     build_oidc_stack,
     build_payments_stack,
+    build_postgres_mcp_stack,
     build_projection_authz_stack,
     build_projection_stack,
     build_replicas_stack,
     build_schedule_stack,
+    build_shipped_connectors_stack,
 )
 from tai42_e2e.netfixtures import (
     FakeSlack,
@@ -61,7 +68,7 @@ from tai42_e2e.netfixtures import (
 )
 from tai42_e2e.pytest_plugin import gated_collect_ignore
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.stack import Infra, TaiStack
+from tai42_e2e.stack import Infra, StackResources, TaiStack
 
 # The monitoring / marketplace / fleet suites only collect when their opt-in gate is
 # on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
@@ -409,6 +416,60 @@ def connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, oau
     yield from _boot(
         infra, tmp_path_factory.mktemp("connectors"), build_connectors_stack, resource_kwargs=resource_kwargs
     )
+
+
+@pytest.fixture(scope="module")
+def shipped_connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The stack loading the shipped OAuth connector plugins (google + atlassian).
+    Its connector crypto reads the KEK and state-HMAC key as STANDARD base64
+    (``b64decode(validate=True)``, KEK to exactly 32 bytes), so mint padded
+    standard-base64 keys, not ``token_urlsafe`` which fails that strict decode."""
+    resource_kwargs = {
+        "connectors_kek": base64.b64encode(secrets.token_bytes(32)).decode(),
+        "connectors_state_hmac_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+    }
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("shipped-connectors"),
+        build_shipped_connectors_stack,
+        resource_kwargs=resource_kwargs,
+    )
+
+
+def _seed_postgres_mcp_probe(resources: StackResources) -> None:
+    """Create the probe relation + one known row in the stack's Postgres clone. The dynamic
+    Postgres MCP child introspects the LIVE schema at startup, so the table must exist BEFORE
+    the stack boots (and thus before the mount's child launches) for its CRUD tools to be
+    generated and discovered — the seed row is what the round-trip test reads back."""
+    table = sql.Identifier(POSTGRES_MCP_PROBE_SCHEMA, POSTGRES_MCP_PROBE_TABLE)
+    with psycopg.connect(
+        host=resources.pg_host,
+        port=resources.pg_port,
+        user=resources.pg_user,
+        password=resources.pg_password,
+        dbname=resources.pg_db,
+    ) as conn, conn.cursor() as cur:
+        cur.execute(sql.SQL("CREATE TABLE {} (id bigserial PRIMARY KEY, name text NOT NULL)").format(table))
+        cur.execute(sql.SQL("INSERT INTO {} (name) VALUES (%s)").format(table), (POSTGRES_MCP_PROBE_ROW_NAME,))
+        conn.commit()
+
+
+@pytest.fixture(scope="module")
+def postgres_mcp_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """The stack mounting the dynamic Postgres MCP server (``tai42-postgres-mcp``) as a stdio
+    child over the manifest ``mcp`` seam, exposing its generated per-table CRUD tools through
+    the harness. A known probe table is seeded into the isolated clone BEFORE boot (the child
+    introspects the schema at startup), so the mount discovers its tools when the app comes up."""
+    root = tmp_path_factory.mktemp("postgres-mcp")
+    resources, config = _allocate_and_build(infra, root, build_postgres_mcp_stack, None, False)
+    stack = TaiStack(config, infra, resources, root)
+    try:
+        _seed_postgres_mcp_probe(resources)
+    except BaseException:
+        stack.teardown()
+        raise
+    with stack, diagnostics.track(stack):
+        yield stack
 
 
 @pytest.fixture(scope="module")

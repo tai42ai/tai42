@@ -166,6 +166,32 @@ class ChannelCase:
     def inbound_path(self) -> str:
         return f"/api/channels/{self.name}/inbound"
 
+    @property
+    def callback_origin(self) -> str:
+        """The origin the inbound door reconstructs a signed callback URL from.
+
+        A mock leg reaches the door over the replica-B loopback origin, so the
+        signature is computed over that. A real inbound leg fills the door's public
+        base URL from ``E2E_PUBLIC_BASE_URL``; the vendor then signs over that
+        public origin, so the verification must bind to it — same mechanism, new
+        base.
+
+        The public origin is bound ONLY when THIS case's OWN medium runs real —
+        ``is_real(self.name)``. The stack-wide routing (``public_base_url_env_keys``
+        carries ``INTERACTIONS_PUBLIC_BASE_URL`` whenever ANY channel seam is real)
+        must NOT decide this: in a mixed session (e.g. real telegram alongside a
+        mock twilio parametrization) the key is routed for the stack, yet the mock
+        twilio door still reaches over loopback — gating on the routed key would make
+        it sign over the public origin while POSTing to loopback, a 401. Nor does
+        ``public_base_url`` alone decide it: the manifest carries the ambient
+        ``E2E_PUBLIC_BASE_URL`` onto every leg (including mock). Gating on this
+        medium's own real leg keeps a mock medium bound to loopback regardless of
+        other real channels or of ``E2E_PUBLIC_BASE_URL``."""
+        public = self.stack.config.public_base_url
+        if public is not None and self.stack.infra.settings.is_real(self.name):
+            return public.rstrip("/")
+        return f"http://{self.stack.host}:{self.stack.port_b}"
+
     def assert_inbound_forwarded(self, response: object) -> None:
         """Assert the medium's inbound door acked the forwarded answer (each
         medium picks its own success status/shape)."""
@@ -322,9 +348,10 @@ class TwilioCase(ChannelCase):
 
     def build_reply(self, record: dict, answer: str, *, recipient: str, signature: str = "valid") -> SignedInbound:
         # The door reconstructs the signed URL from scheme + Host + path of the
-        # request the test POSTs to replica B — so the signature is computed over
-        # exactly that origin.
-        public_url = f"http://{self.stack.host}:{self.stack.port_b}{self.inbound_path}"
+        # request the test POSTs to — so the signature is computed over exactly the
+        # origin the door binds to: replica-B loopback on a mock leg, the public
+        # callback origin on a real inbound leg (``callback_origin``).
+        public_url = f"{self.callback_origin}{self.inbound_path}"
         inbound = self.stub.build_inbound(
             auth_token=self._secret,
             public_url=public_url,

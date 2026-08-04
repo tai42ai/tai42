@@ -31,6 +31,9 @@ const baseURL = `http://127.0.0.1:${String(UI_PORT)}`;
 
 export default defineConfig({
   testDir: './tests',
+  // CI stamps the resolved tai-studio commit into the HTML report as provenance;
+  // a local run without the env var records an empty string, never `undefined`.
+  metadata: { 'tai-studio-sha': process.env.TAI_STUDIO_SHA ?? '' },
   // One shared live stack: serial, no auto-rerun (a flaky UI e2e is a real race
   // until proven otherwise — the mission's no-auto-rerun policy).
   fullyParallel: false,

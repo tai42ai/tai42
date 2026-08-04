@@ -30,7 +30,7 @@ dependencies = [
     "tai42-contract>=0.3,<0.4",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.4,<0.5",
     "tai42-skeleton[toolbox,files]>=0.6,<0.7",
-    "tai42-toolbox[http,prometheus,chain,proxy]>=0.3,<0.4",
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.3,<0.4",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=0.3,<0.4",
@@ -48,8 +48,11 @@ dependencies = [
     "tai42-backend-arq>=0.4,<0.5",
     "tai42-backend-celery>=0.4,<0.5",
     "tai42-backend-rq>=0.4,<0.5",
-    # The real Storage plugin.
+    # The real Storage plugins: the local filesystem backing plus the S3 and
+    # GitHub object stores the storage-axis variant sweep boots.
     "tai42-storage-local>=0.2,<0.3",
+    "tai42-storage-s3>=0.2,<0.3",
+    "tai42-storage-github>=0.2,<0.3",
     # The real webhook verifiers.
     "tai42-webhook-verifier-github>=0.2,<0.3",
     "tai42-webhook-verifier-stripe>=0.2,<0.3",
@@ -60,6 +63,12 @@ dependencies = [
     "tai42-channel-whatsapp>=0.3,<0.4",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=0.2,<0.3",
+    # The shipped OAuth connector plugins the shipped-connectors stack boots.
+    "tai42-connector-google>=0.2,<0.3",
+    "tai42-connector-atlassian>=0.2,<0.3",
+    # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
+    # client the K8sConfigManager imports where the provider runs.
+    "tai42-config-k8s[k8s]>=0.2,<0.3",
 
     # Harness runtime.
     "pytest>=8",
@@ -85,6 +94,20 @@ dependencies = [
     # ``application/x-pydantic`` control replies.
     "celery>=5.6,<6",
     "celery-pydantic>=1.0,<2",
+    # The synchronous S3 read-back client the storage-axis harness asserts stored
+    # objects with, aligned to storage-s3's botocore>=1.40,<1.41 floor.
+    "boto3>=1.40,<1.41",
+    # The langgraph checkpoint savers the checkpoint-axis harness drives directly
+    # (the harness IS the checkpoint client) — the Postgres and SQLite backends plus
+    # the async SQLite driver. Pinned to the installed langgraph-checkpoint 4.x line's
+    # 3.x saver releases; psycopg/psycopg-pool are already present above.
+    "langgraph-checkpoint-postgres>=3,<4",
+    "langgraph-checkpoint-sqlite>=3,<4",
+    "aiosqlite>=0.20",
+    # The dynamic Postgres MCP server the mcp-mount stack mounts as a subprocess
+    # (console script ``tai42-postgres-mcp``). A released PyPI package, never a
+    # workspace sibling — it carries no [tool.uv.sources] override.
+    "tai42-dynamic-postgres-mcp>=0.3,<0.4",
 ]
 
 [project.urls]
@@ -164,6 +187,8 @@ tai42-backend-arq = { workspace = true }
 tai42-backend-celery = { workspace = true }
 tai42-backend-rq = { workspace = true }
 tai42-storage-local = { workspace = true }
+tai42-storage-s3 = { workspace = true }
+tai42-storage-github = { workspace = true }
 tai42-webhook-verifier-github = { workspace = true }
 tai42-webhook-verifier-stripe = { workspace = true }
 tai42-channel-telegram = { workspace = true }
@@ -171,6 +196,9 @@ tai42-channel-slack = { workspace = true }
 tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
+tai42-connector-google = { workspace = true }
+tai42-connector-atlassian = { workspace = true }
+tai42-config-k8s = { workspace = true }
 reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 
 # Source-of-truth annotations for the catalog membership of every ecosystem
@@ -195,6 +223,8 @@ tai42-backend-arq = { tier = "oss-public", catalog = true }
 tai42-backend-celery = { tier = "oss-public", catalog = true }
 tai42-backend-rq = { tier = "oss-public", catalog = true }
 tai42-storage-local = { tier = "oss-public", catalog = true }
+tai42-storage-s3 = { tier = "oss-public", catalog = true }
+tai42-storage-github = { tier = "oss-public", catalog = true }
 tai42-webhook-verifier-github = { tier = "oss-public", catalog = true }
 tai42-webhook-verifier-stripe = { tier = "oss-public", catalog = true }
 tai42-channel-telegram = { tier = "oss-public", catalog = true }
@@ -202,6 +232,9 @@ tai42-channel-slack = { tier = "oss-public", catalog = true }
 tai42-channel-twilio = { tier = "oss-public", catalog = true }
 tai42-channel-whatsapp = { tier = "oss-public", catalog = true }
 tai42-monitoring-langfuse = { tier = "oss-public", catalog = true }
+tai42-connector-google = { tier = "oss-public", catalog = true }
+tai42-connector-atlassian = { tier = "oss-public", catalog = true }
+tai42-config-k8s = { tier = "oss-public", catalog = true }
 # The Studio SPA repo (catalog = false); the browser-e2e studio_stack serves its
 # reference plugin, sourced via the git-subdirectory override above.
 tai-studio = { tier = "oss-public", catalog = false }

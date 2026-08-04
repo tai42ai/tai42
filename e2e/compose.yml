@@ -15,6 +15,10 @@
 #                leg (`docker compose --profile agents-redis up -d`). The plain
 #                core redis lacks the modules the langgraph-redis saver/store
 #                need, so this is a SEPARATE server on its own port.
+#   storage    — opt-in: a MinIO server for the s3 storage axis
+#                (`docker compose --profile storage up -d`). Its OWN service, not
+#                the monitoring-profile `langfuse-minio` (langfuse-specific
+#                entrypoint + bucket); the axis bucket is created in fixture setup.
 #   monitoring — opt-in: the self-hosted Langfuse stack for the monitoring
 #                suite (`docker compose --profile monitoring up -d`).
 #
@@ -89,6 +93,30 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  # ---- storage profile: MinIO for the s3 storage axis ------------------
+  # The s3 storage-axis leg's object store. Its OWN service (NOT the
+  # monitoring-profile `langfuse-minio`, which carries a langfuse-specific
+  # entrypoint that pre-creates the `langfuse` bucket). The plain `minio server
+  # /data` command is set here because a GitHub Actions `services:` block cannot
+  # set a container command, so this leg brings MinIO up via the compose path. The
+  # axis bucket is created in fixture setup through the independent client, not
+  # here. Credentials + port are env-overridable and match the s3 variant's
+  # defaults (`TAI_E2E_S3_*`).
+  storage-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["storage"]
+    command: server /data
+    ports:
+      - "127.0.0.1:${TAI_E2E_S3_PORT:-9002}:9000"
+    environment:
+      MINIO_ROOT_USER: "${TAI_E2E_S3_ACCESS_KEY:-minio}"
+      MINIO_ROOT_PASSWORD: "${TAI_E2E_S3_SECRET_KEY:-miniosecret}"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
 
   # ---- monitoring profile: self-hosted Langfuse ------------------------
   # The six services below are Langfuse's OFFICIAL self-hosting compose set

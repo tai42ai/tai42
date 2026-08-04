@@ -9,6 +9,7 @@ and ``fresh_stack`` exactly as this repo's own ``tests/conftest.py`` does.
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
@@ -32,6 +33,53 @@ def gated_collect_ignore(gates: Mapping[str, bool]) -> list[str]:
     ignored at collection whenever its flag is ``False``, so a suite that needs an
     external prerequisite never imports until its flag is set."""
     return [f"{name}/*" for name, on in gates.items() if not on]
+
+
+class RealSelectionError(Exception):
+    """A ``TAI_E2E_REAL`` selection that cannot run as asked: a required credential
+    is absent, or an inbound seam is selected without ``E2E_PUBLIC_BASE_URL``.
+    Raised at collection, never downgraded to a skip or a silent mock — choosing
+    mock is the operator's explicit lever (drop the seam from ``TAI_E2E_REAL``),
+    never an automatic fallback."""
+
+
+def assert_real_selection_ready(settings: HarnessSettings, environ: Mapping[str, str]) -> None:
+    """The loud-fail gate for the REAL/MOCK switch. For every seam selected real,
+    require its credentials (``REAL_SERVICES``) present in ``environ`` and, if any
+    selected seam is inbound, require ``E2E_PUBLIC_BASE_URL``. Any gap raises
+    :class:`RealSelectionError` naming the exact missing env vars and services.
+
+    Distinct from ``gated_collect_ignore`` (which only SKIPs opt-in suites): this
+    is the additive loud-fail the switch introduces — a real leg never boots half
+    configured."""
+    problems: list[str] = []
+    for service, missing in settings.missing_real_creds(environ).items():
+        problems.append(f"{service}: missing required env var(s) {', '.join(missing)}")
+    inbound = settings.real_inbound_services
+    if inbound and not settings.public_base_url:
+        problems.append(
+            f"inbound real seam(s) {', '.join(sorted(inbound))} require E2E_PUBLIC_BASE_URL, which is unset"
+        )
+    # The storage seams are dual-knob: a ``storage-s3`` / ``storage-github`` name on
+    # TAI_E2E_REAL passes the cred gate but runs the hermetic mock unless the storage
+    # AXIS (TAI_E2E_STORAGE) is also set to the matching real variant. Fail loudly on
+    # that mismatch rather than silently no-op back to the mock.
+    problems.extend(settings.storage_axis_mismatches())
+    if problems:
+        raise RealSelectionError(
+            "TAI_E2E_REAL selects real leg(s) that are not fully configured. "
+            "Set the missing env vars, or drop the seam from TAI_E2E_REAL to run it mock:\n  "
+            + "\n  ".join(problems)
+        )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Enforce the REAL/MOCK switch at session start (published to every repo that
+    installs the plugin). With ``TAI_E2E_REAL`` empty this is a no-op, so the mock
+    suite is byte-for-byte today's behavior; a real selection missing creds or the
+    public base URL aborts here, before any stack boots, naming the gap."""
+    del config
+    assert_real_selection_ready(HarnessSettings(), os.environ)
 
 
 def pytest_report_header() -> str:

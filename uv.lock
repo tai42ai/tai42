@@ -5442,16 +5442,37 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
+name = "tai42-dynamic-postgres-mcp"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "fastmcp" },
+    { name = "psycopg", extra = ["binary", "pool"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/b6/f69d36528e34c87b85c444e6d2fc52230fe53901845dd761a2f1d2d90882/tai42_dynamic_postgres_mcp-0.3.0.tar.gz", hash = "sha256:f5cb78701c2f97b6c54d6608dc37d04ffc808776234315e4b7e8f13d3310096f", size = 36993, upload-time = "2026-07-30T15:37:11.333Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/2e/b3cd0ebad4b30afe91ca4333b4ca4de1b54b739efdb22a5a14037f0b9b36/tai42_dynamic_postgres_mcp-0.3.0-py3-none-any.whl", hash = "sha256:7a2579c3d3f355173c96f58a6d3713bf6ca6a258920fb97f50d9b8b3faa8b360", size = 47872, upload-time = "2026-07-30T15:37:09.566Z" },
+]
+
+[[package]]
 name = "tai42-e2e"
 version = "0.4.4"
 source = { editable = "e2e" }
 dependencies = [
+    { name = "aiosqlite" },
+    { name = "boto3" },
     { name = "celery" },
     { name = "celery-pydantic" },
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "joserfc" },
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "langgraph-checkpoint-sqlite" },
     { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -5471,14 +5492,20 @@ dependencies = [
     { name = "tai42-channel-telegram" },
     { name = "tai42-channel-twilio" },
     { name = "tai42-channel-whatsapp" },
+    { name = "tai42-config-k8s", extra = ["k8s"] },
+    { name = "tai42-connector-atlassian" },
+    { name = "tai42-connector-google" },
     { name = "tai42-contract" },
+    { name = "tai42-dynamic-postgres-mcp" },
     { name = "tai42-identity-oidc" },
     { name = "tai42-identity-redis" },
     { name = "tai42-kit", extra = ["curl", "jq", "llm", "postgres", "redis", "uvicorn"] },
     { name = "tai42-monitoring-langfuse" },
     { name = "tai42-skeleton", extra = ["files", "toolbox"] },
+    { name = "tai42-storage-github" },
     { name = "tai42-storage-local" },
-    { name = "tai42-toolbox", extra = ["chain", "http", "prometheus", "proxy"] },
+    { name = "tai42-storage-s3" },
+    { name = "tai42-toolbox", extra = ["chain", "embeddings", "http", "prometheus", "proxy"] },
     { name = "tai42-tools-stripe" },
     { name = "tai42-webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe" },
@@ -5494,12 +5521,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "boto3", specifier = ">=1.40,<1.41" },
     { name = "celery", specifier = ">=5.6,<6" },
     { name = "celery-pydantic", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.135" },
     { name = "fastmcp", specifier = ">=3.2,<4" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "joserfc", specifier = ">=1.7,<2" },
+    { name = "langgraph-checkpoint-postgres", specifier = ">=3,<4" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },
     { name = "prometheus-client", specifier = ">=0.24" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.12" },
@@ -5519,14 +5550,20 @@ requires-dist = [
     { name = "tai42-channel-telegram", editable = "plugins/channel-telegram" },
     { name = "tai42-channel-twilio", editable = "plugins/channel-twilio" },
     { name = "tai42-channel-whatsapp", editable = "plugins/channel-whatsapp" },
+    { name = "tai42-config-k8s", extras = ["k8s"], editable = "plugins/config-k8s" },
+    { name = "tai42-connector-atlassian", editable = "plugins/connector-atlassian" },
+    { name = "tai42-connector-google", editable = "plugins/connector-google" },
     { name = "tai42-contract", editable = "core/contract" },
+    { name = "tai42-dynamic-postgres-mcp", specifier = ">=0.3,<0.4" },
     { name = "tai42-identity-oidc", editable = "plugins/identity-oidc" },
     { name = "tai42-identity-redis", editable = "plugins/identity-redis" },
     { name = "tai42-kit", extras = ["llm", "jq", "uvicorn", "redis", "postgres", "curl"], editable = "core/kit" },
     { name = "tai42-monitoring-langfuse", editable = "plugins/monitoring-langfuse" },
     { name = "tai42-skeleton", extras = ["toolbox", "files"], editable = "core/skeleton" },
+    { name = "tai42-storage-github", editable = "plugins/storage-github" },
     { name = "tai42-storage-local", editable = "plugins/storage-local" },
-    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "proxy"], editable = "plugins/toolbox" },
+    { name = "tai42-storage-s3", editable = "plugins/storage-s3" },
+    { name = "tai42-toolbox", extras = ["http", "prometheus", "chain", "embeddings", "proxy"], editable = "plugins/toolbox" },
     { name = "tai42-tools-stripe", editable = "plugins/tools-stripe" },
     { name = "tai42-webhook-verifier-github", editable = "plugins/webhook-verifier-github" },
     { name = "tai42-webhook-verifier-stripe", editable = "plugins/webhook-verifier-stripe" },

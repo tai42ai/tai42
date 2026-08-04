@@ -43,6 +43,7 @@ from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.waiting import wait_for, wait_for_async
 
 if TYPE_CHECKING:
+    from tai42_e2e.settings import HarnessSettings
     from tai42_e2e.stack import Infra
 
 # The registry lives in its own private repo, kept out of the monorepo lock. The
@@ -155,6 +156,30 @@ class _ProcSpec:
     log_path: Path
 
 
+def _marketplace_source_env(switch: HarnessSettings, index_url: str) -> dict[str, str]:
+    """The registry's outbound ingest-source coordinates (the ``MP_*`` PyPI/GitHub
+    knobs the validator/ingest fetches through).
+
+    MOCK (default): both sources point at the fixture package index, so every fetch
+    lands on the local PyPI JSON/wheel + github-shaped handlers. REAL: the named seam
+    drops its fixture override so the registry resolves from the live vendor — the two
+    seams toggle independently:
+      * ``marketplace-pypi`` real → no ``MP_PYPI_BASE_URL`` (→ real pypi.org; public,
+        so there is no operator credential and nothing to loud-fail on);
+      * ``marketplace-github`` real → no ``MP_GITHUB_API_BASE`` (→ real api.github.com)
+        and ``MP_GITHUB_TOKEN`` carried for the rate limit (the collection-time gate has
+        already loud-failed a real selection whose token is absent).
+    Every mock-side key is byte-for-byte today's fill."""
+    env: dict[str, str] = {}
+    if not switch.is_real("marketplace-pypi"):
+        env["MP_PYPI_BASE_URL"] = index_url
+    if switch.is_real("marketplace-github"):
+        env["MP_GITHUB_TOKEN"] = os.environ["MP_GITHUB_TOKEN"]
+    else:
+        env["MP_GITHUB_API_BASE"] = f"{index_url}/gh-api"
+    return env
+
+
 class MarketplaceService:
     """A booted tai42-marketplace registry: the API server on an isolated
     Postgres database.
@@ -228,11 +253,11 @@ class MarketplaceService:
 
     def _service_env(self) -> dict[str, str]:
         """A from-scratch child env: PATH/HOME plus the ``MP_*`` group. Never an
-        ``os.environ`` passthrough. The outbound PyPI/GitHub bases point at the
-        fixture package index so every fetch the validator/ingest makes lands on
-        the local handlers."""
-        import os
-
+        ``os.environ`` passthrough. The outbound PyPI/GitHub bases default to the
+        fixture package index (MOCK) so every fetch the validator/ingest makes lands
+        on the local handlers; a real ``marketplace-pypi``/``marketplace-github`` seam
+        drops its fixture override so that source resolves from the live vendor
+        (:func:`_marketplace_source_env`)."""
         venv_bin = str(Path(sys.executable).parent)
         return {
             "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
@@ -241,10 +266,7 @@ class MarketplaceService:
             "MP_ADMIN_TOKEN": self.admin_token,
             "MP_GITHUB_WEBHOOK_SECRET": self.webhook_secret,
             "MP_BASE_URL": self.base_url,
-            # Every outbound fetch lands on the fixture index (the PyPI JSON +
-            # wheel handlers and the github-shaped repo/contents/readme handlers).
-            "MP_PYPI_BASE_URL": self._index_url,
-            "MP_GITHUB_API_BASE": f"{self._index_url}/gh-api",
+            **_marketplace_source_env(self._infra.settings, self._index_url),
         }
 
     # ---- lifecycle -------------------------------------------------------
