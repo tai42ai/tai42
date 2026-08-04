@@ -18,6 +18,13 @@ class GithubStorageSettings(TaiBaseSettings):
     repo: str | None = None
     branch: str = "main"
     token: SecretStr | None = None
+    # Base-URL templates for the three REST surfaces the provider speaks, default to
+    # the real GitHub hosts. Overridable (like ``S3Settings.endpoint``) so a test can
+    # point the plugin at a hermetic stand-in; each carries ``{username}``/``{repo}``/
+    # ``{branch}`` placeholders the provider fills per request.
+    raw_base_url: str = "https://raw.githubusercontent.com/{username}/{repo}/refs/heads/{branch}"
+    contents_api_url: str = "https://api.github.com/repos/{username}/{repo}/contents"
+    trees_api_url: str = "https://api.github.com/repos/{username}/{repo}/git/trees/{branch}"
     timeout_total: float = 15.0
     max_connections: int = 200
     max_keepalive_connections: int = 50

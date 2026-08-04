@@ -64,6 +64,11 @@ def settings() -> SimpleNamespace:
         repo="content",
         branch="main",
         token=SimpleNamespace(get_secret_value=lambda: "s3cr3t-token-value"),
+        # Mirror the real ``GithubStorageSettings`` base-URL templates so the provider's
+        # per-request URL construction is exercised exactly as in production.
+        raw_base_url="https://raw.githubusercontent.com/{username}/{repo}/refs/heads/{branch}",
+        contents_api_url="https://api.github.com/repos/{username}/{repo}/contents",
+        trees_api_url="https://api.github.com/repos/{username}/{repo}/git/trees/{branch}",
     )
 
 

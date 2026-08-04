@@ -21,20 +21,36 @@ from tai42_storage_github.settings import GithubStorageSettings, github_storage_
 
 logger = logging.getLogger(__name__)
 
-RAW_BASE_URL = "https://raw.githubusercontent.com/{username}/{repo}/refs/heads/{branch}"
-CONTENTS_API_URL = "https://api.github.com/repos/{username}/{repo}/contents"
-TREES_API_URL = "https://api.github.com/repos/{username}/{repo}/git/trees/{branch}"
-
 # Conservative upload cap below GitHub's Contents API limit; an oversize file
 # raises before the request. Reads are uncapped (raw endpoint).
 MAX_UPLOAD_BYTES = 1024 * 1024
 
 
 def _join(base: str, path: str) -> str:
-    """Join ``path`` onto ``base``, dropping empty and stray-slash segments."""
-    joined = "/".join(segment for segment in path.split("/") if segment)
+    """Join ``path`` onto ``base``, dropping empty and stray-slash segments.
+
+    A ``..`` segment is rejected loudly: preserved, it would climb out of the
+    configured repo/branch base and let a caller-supplied path reach an arbitrary
+    raw/contents URL (path traversal).
+    """
+    segments = [segment for segment in path.split("/") if segment]
+    if ".." in segments:
+        raise ValueError(f"path traversal ('..') is not allowed in storage path: {path!r}")
+    joined = "/".join(segments)
     base = base.rstrip("/")
     return f"{base}/{joined}" if joined else base
+
+
+def _raw_url(settings: GithubStorageSettings, path: str) -> str:
+    """The RAW-endpoint URL for ``path``, from the configured raw base-URL template."""
+    base = settings.raw_base_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
+    return _join(base, path)
+
+
+def _contents_url(settings: GithubStorageSettings, path: str) -> str:
+    """The Contents-API URL for ``path``, from the configured contents base-URL template."""
+    base = settings.contents_api_url.format(username=settings.username, repo=settings.repo)
+    return _join(base, path)
 
 
 def _configured_settings() -> GithubStorageSettings:
@@ -83,7 +99,7 @@ def _raise_for_status(resp: httpx.Response, action: str, path: str, url: str) ->
 class GithubStorage(Storage):
     async def load(self, path: str) -> str:
         settings = _configured_settings()
-        url = _join(RAW_BASE_URL.format(username=settings.username, repo=settings.repo, branch=settings.branch), path)
+        url = _raw_url(settings, path)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
             resp = await client.get(url, headers=_auth_headers(settings))
             self._guard_read(resp, path, url)
@@ -91,7 +107,7 @@ class GithubStorage(Storage):
 
     async def load_bytes(self, path: str) -> bytes:
         settings = _configured_settings()
-        url = _join(RAW_BASE_URL.format(username=settings.username, repo=settings.repo, branch=settings.branch), path)
+        url = _raw_url(settings, path)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
             resp = await client.get(url, headers=_auth_headers(settings))
             self._guard_read(resp, path, url)
@@ -114,7 +130,7 @@ class GithubStorage(Storage):
         raised on loudly rather than acting on a partial listing.
         """
         settings = _configured_settings()
-        url = TREES_API_URL.format(username=settings.username, repo=settings.repo, branch=settings.branch)
+        url = settings.trees_api_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
             resp = await client.get(url, headers=_api_headers(settings), params={"recursive": "1"})
             _raise_for_status(resp, "listing", prefix or "/", url)
@@ -145,7 +161,7 @@ class GithubStorage(Storage):
                 f"{MAX_UPLOAD_BYTES}-byte GitHub Contents API upload cap. Store large objects elsewhere."
             )
         settings = _configured_settings()
-        url = _join(CONTENTS_API_URL.format(username=settings.username, repo=settings.repo), path)
+        url = _contents_url(settings, path)
         headers = _api_headers(settings)
         encoded = base64.b64encode(data).decode("ascii")
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
@@ -169,7 +185,7 @@ class GithubStorage(Storage):
 
     async def delete(self, path: str) -> None:
         settings = _configured_settings()
-        url = _join(CONTENTS_API_URL.format(username=settings.username, repo=settings.repo), path)
+        url = _contents_url(settings, path)
         headers = _api_headers(settings)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
             get_resp = await client.get(url, headers=headers, params={"ref": settings.branch})
