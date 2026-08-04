@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import keyword
 from typing import ClassVar, cast
 from unittest.mock import patch
 
@@ -98,9 +99,11 @@ def test_build_input_model_defaults_when_no_schema():
 
 
 def test_build_output_schema_unwraps_result_envelope():
+    # The ``x-fastmcp-wrap-result`` marker is the authoritative wrap signal.
     tool_schema = {
         "type": "object",
         "properties": {"result": {"type": "string"}},
+        "x-fastmcp-wrap-result": True,
         "$defs": {"X": {"type": "object"}},
     }
 
@@ -116,9 +119,13 @@ def test_build_output_schema_unwraps_result_envelope():
 
 def test_build_output_schema_envelope_without_defs():
     class _T:
-        outputSchema: ClassVar[dict] = {"type": "object", "properties": {"result": {"type": "number"}}}
+        outputSchema: ClassVar[dict] = {
+            "type": "object",
+            "properties": {"result": {"type": "number"}},
+            "x-fastmcp-wrap-result": True,
+        }
 
-    # Result-enveloped but no parent ``$defs`` -> inner schema lifted as-is.
+    # Marked-enveloped but no parent ``$defs`` -> inner schema lifted as-is.
     assert _build_output_schema(_T()) == {"type": "number"}
 
 
@@ -127,6 +134,38 @@ def test_build_output_schema_passthrough_when_not_enveloped():
         outputSchema: ClassVar[dict] = {"type": "integer"}
 
     assert _build_output_schema(_T()) == {"type": "integer"}
+
+
+def test_build_output_schema_preserves_object_with_result_field_without_marker():
+    # A genuine object-returning tool that merely has a ``result`` field but does
+    # NOT carry the ``x-fastmcp-wrap-result`` marker must be forwarded whole — its
+    # sibling fields are not stripped and its schema is not lifted to ``result``.
+    schema = {
+        "type": "object",
+        "properties": {"result": {"type": "string"}, "version": {"type": "integer"}},
+    }
+
+    class _T:
+        outputSchema = schema
+
+    assert _build_output_schema(_T()) == schema
+
+
+def test_unmarked_single_result_field_value_not_unwrapped():
+    # The real false-positive case: a genuine object tool whose sole field is
+    # ``result`` and which does NOT carry the marker. Its value ``{"result": ...}``
+    # must pass through whole, not be unwrapped to the bare inner value.
+    class _T:
+        name = "obj_tool"
+        description = "returns an object"
+        inputSchema: ClassVar[dict] = {"type": "object", "properties": {}}
+        outputSchema: ClassVar[dict] = {"type": "object", "properties": {"result": {"type": "string"}}}
+
+    fake = _FakeMcpClient(_ok_result('{"result": "value"}'))
+    with patch(_CLIENT, return_value=fake):
+        func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _T()), "obj_tool", "mod")
+        out = asyncio.run(func())
+    assert out == {"result": "value"}
 
 
 def test_build_signature_carries_field_default():
@@ -185,6 +224,20 @@ def test_mcp_tool_to_func_builds_signature():
     assert callable(func)
     assert set(inspect.signature(func).parameters) == {"q"}
     assert func.__name__ == "lookup"
+
+
+def test_mcp_tool_to_func_non_identifier_name_binds():
+    # A remote MCP tool name is a wider charset than a Python identifier. makefun
+    # emits ``def <func_name>(...)`` and SyntaxErrors on a non-identifier name, so
+    # the adapter must normalize func_name for the compiled wrapper. Build with a
+    # name carrying a hyphen, a leading digit, and a keyword segment.
+    func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _FakeTool()), name="2-lookup-class", module="srv")
+    assert callable(func)
+    # The cosmetic wrapper name is a real identifier (this is what makefun compiles).
+    assert func.__name__.isidentifier()
+    assert not keyword.iskeyword(func.__name__)
+    # The signature (return annotation included) still compiled correctly.
+    assert set(inspect.signature(func).parameters) == {"q"}
 
 
 def test_wrapper_non_managed_dispatches_and_extracts_output():

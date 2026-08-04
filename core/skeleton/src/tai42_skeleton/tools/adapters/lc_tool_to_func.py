@@ -5,6 +5,7 @@ from typing import Any, cast
 from langchain_core.tools import BaseTool
 from makefun import create_function
 from pydantic import BaseModel
+from tai42_kit.utils.data.string_util import makefun_func_name
 
 
 def build_signature(
@@ -43,7 +44,7 @@ def lc_tool_to_func(
     module: str | None = None,
     output_schema: dict[str, Any] | None = None,  # If you have JSON schema for output
 ) -> Callable:
-    func_name = (name or lc_tool.name).lower()
+    func_name = makefun_func_name((name or lc_tool.name).lower())
     func_desc = description or lc_tool.description
 
     # ``args_schema`` is a Pydantic-model type, a raw JSON-schema dict, or None;

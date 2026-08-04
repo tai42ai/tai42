@@ -27,6 +27,7 @@ from makefun import create_function
 from pydantic_core import to_jsonable_python
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -183,7 +184,10 @@ def _baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
     # makefun's ``doc`` is annotated ``str`` but accepts ``None`` (its own default),
     # falling back to the impl's docstring.
     return create_function(
-        presented, cast(Callable[[Any], Any], impl), func_name=tool_obj.name, doc=cast(str, base_fn.__doc__)
+        presented,
+        cast(Callable[[Any], Any], impl),
+        func_name=makefun_func_name(tool_obj.name),
+        doc=cast(str, base_fn.__doc__),
     )
 
 
@@ -300,7 +304,10 @@ def _validation_wrapper(resolved_fn: Callable[..., Any], offload: bool) -> Calla
         # accepts any callable (it drives the separate signature above); our
         # **kwargs impl is valid at runtime.
         cast(Callable[[Any], Any], safe_impl),
-        func_name=resolved_fn.__name__,
+        # ``resolved_fn.__name__`` may be a branch's raw non-identifier name (a
+        # hyphenated / leading-digit tool + extension); normalize it so makefun
+        # emits a compilable ``def`` for the cosmetic wrapper name.
+        func_name=makefun_func_name(resolved_fn.__name__),
         # makefun's ``doc`` is annotated ``str`` but accepts ``None`` (its own
         # default), falling back to the impl's docstring.
         doc=cast(str, resolved_fn.__doc__),

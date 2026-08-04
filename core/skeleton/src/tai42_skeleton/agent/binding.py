@@ -16,6 +16,7 @@ from makefun import create_function
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.thread_reservation import run_kwargs_from_tool_input
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -204,7 +205,7 @@ class AgentBinding:
         impl = create_function(
             signature,
             cast(Callable[[Any], Any], run_impl),
-            func_name=name,
+            func_name=makefun_func_name(name),
             module_name=module,
             doc=agent.tool_description,
         )

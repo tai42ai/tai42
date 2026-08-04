@@ -186,6 +186,63 @@ def test_monitor_presents_identical_input_schema():
     asyncio.run(run())
 
 
+def test_monitor_branch_keeps_raw_hyphenated_name_and_does_not_collide():
+    # The branch loop registers a branch by its ``__name__``; a hyphenated tool
+    # name must survive to registration, not collapse to its makefun identifier
+    # alias (which would rename ``my-tool_monitor`` -> ``my_tool_monitor`` and let
+    # ``a-b`` and ``a_b`` collide onto one branch name).
+    manifest = Manifest.model_validate({"extensions_modules": [_BUILTIN_MODULE]})
+
+    def base(text: str) -> str:
+        return text
+
+    async def run() -> None:
+        async with app.app_context(manifest):
+            factory = app._extension_registry.get_extension("monitor")
+            assert factory(base, "my-tool", "desc").__name__ == "my-tool_monitor"
+            hyphen = factory(base, "a-b", "desc").__name__
+            underscore = factory(base, "a_b", "desc").__name__
+            assert hyphen == "a-b_monitor"
+            assert underscore == "a_b_monitor"
+            assert hyphen != underscore
+
+    asyncio.run(run())
+
+
+def test_monitor_branch_with_non_identifier_name_invokes_over_run_tool():
+    # The name-only test above proves a branch KEEPS its raw non-identifier name;
+    # this proves such a branch RUNS. ``run_tool`` builds a makefun validation
+    # wrapper named after the resolved branch's ``__name__``, so a hyphenated or
+    # leading-digit branch name (``my-tool_monitor`` / ``2fa_monitor``) must be
+    # normalized before makefun emits its ``def`` — an unguarded name compiles a
+    # ``def my-tool_monitor(...)`` and raises a SyntaxError at first invocation.
+    manifest = Manifest.model_validate(
+        {
+            "extensions_modules": [_BUILTIN_MODULE],
+            "tools": [
+                {
+                    "title": "fxh",
+                    "module": "tests.extensions._fixtures.tools_hyphen",
+                    "include": ["my-tool", "2fa"],
+                    "extensions": {"my-tool": [["monitor"]], "2fa": [["monitor"]]},
+                }
+            ],
+        }
+    )
+
+    async def run() -> tuple[str, str]:
+        async with app.app_context(manifest):
+            tools = await app.tools.get_tools()
+            assert {"my-tool_monitor", "2fa_monitor"} <= set(tools)
+            hyphen = await app.tools.run_tool("my-tool_monitor", {"text": "hi"})
+            leading_digit = await app.tools.run_tool("2fa_monitor", {"text": "yo"})
+            return hyphen, leading_digit
+
+    hyphen, leading_digit = asyncio.run(run())
+    assert hyphen == "hi"
+    assert leading_digit == "yo"
+
+
 def test_monitor_is_config_agnostic_and_rejects_config():
     # monitor takes no author config: it is a config-agnostic three-argument factory,
     # so ``factory_accepts_config`` is False and binding a non-empty config to it

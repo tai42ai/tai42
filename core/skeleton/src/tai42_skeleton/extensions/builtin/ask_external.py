@@ -24,6 +24,7 @@ from typing import Any, cast
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.interactions import ask_user
@@ -120,15 +121,20 @@ def ask_external(
     )
     composed_sig = inspect.Signature(parameters=composed, return_annotation=Any)
 
-    new_name = f"{name}_{ask_external.__name__}"
-    return create_function(
+    raw_name = f"{name}_{ask_external.__name__}"
+    safe_name = makefun_func_name(raw_name)
+    branch = create_function(
         func_signature=composed_sig,
         # makefun's ``func_impl`` is annotated ``Callable[[Any], Any]`` but it
         # drives the separate presented signature above; our keyword-only impl is
         # valid at runtime.
         func_impl=cast("Callable[[Any], Any]", wrapper),
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch

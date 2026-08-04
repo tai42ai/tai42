@@ -17,6 +17,7 @@ from tai42_kit.utils.data.mcp_output_util import (
     extract_tool_output,
     tool_has_error,
 )
+from tai42_kit.utils.data.string_util import makefun_func_name
 
 from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorAuthExpiredError,
@@ -64,13 +65,41 @@ def _build_input_model(tool, schema_max_depth: int, model_name: str = "InputMode
     return json_schema_to_pydantic_model(input_schema_dict, model_name, max_depth=schema_max_depth)
 
 
+def _wraps_result_envelope(output_schema_dict: dict[str, Any]) -> bool:
+    """Whether the child advertised its output under a single ``result`` wrapper.
+
+    A FastMCP server auto-wraps a NON-object tool return (a list or scalar) as
+    ``{"result": <value>}`` and flags the wrap with the ``x-fastmcp-wrap-result``
+    marker on the advertised object output schema. That marker is the
+    AUTHORITATIVE signal — FastMCP itself gates unwrapping on it — so gating
+    structurally (an object schema that merely has a ``result`` property) would
+    false-fire on a genuine object-returning tool with a ``result`` field and
+    wrongly strip its sibling fields / unwrap its value. The mount strips the
+    wrapper from BOTH the forwarded schema (:func:`_build_output_schema`) and —
+    symmetrically — the forwarded value (:func:`_unwrap_result_envelope`), so
+    this server's own FastMCP re-wrap produces a single, schema-matching envelope
+    instead of a double ``{"result": {"result": ...}}`` the strict-client
+    validator rejects.
+    """
+    return output_schema_dict.get("x-fastmcp-wrap-result") is True
+
+
+def _unwrap_result_envelope(output: Any) -> Any:
+    """Strip the child's single ``result`` wrapper off a forwarded structured value.
+
+    Applied only when the child advertised the wrap (see
+    :func:`_wraps_result_envelope`). A ``{"result": <value>}`` dict yields its
+    inner value; any other shape — an error response (a ``CallToolResult``, not a
+    plain dict) or a value the child did not wrap — passes through untouched.
+    """
+    if isinstance(output, dict) and set(output) == {"result"}:
+        return output["result"]
+    return output
+
+
 def _build_output_schema(tool):
     output_schema_dict = tool.outputSchema or {}
-    if (
-        output_schema_dict.get("type") == "object"
-        and "properties" in output_schema_dict
-        and "result" in output_schema_dict["properties"]
-    ):
+    if _wraps_result_envelope(output_schema_dict):
         # Copy the nested schema before annotating it — writing ``$defs`` onto the
         # aliased dict would inject a key into the caller's ``mcp.Tool`` that the
         # server never sent.
@@ -220,17 +249,24 @@ def mcp_tool_to_func(
     tool_input_model = _build_input_model(tool, depth)
     inner_output_schema = _build_output_schema(tool)
     sig = _build_signature(tool_input_model, inner_output_schema, depth)
+    # The output schema forwarded above is unwrapped when the child auto-wrapped a
+    # non-object return under ``result``; the runtime value must be unwrapped the
+    # same way, so re-binding this tool onto THIS server's ``/mcp`` re-wraps it once
+    # (schema and emitted ``structuredContent`` stay a single, consistent wrap).
+    wraps_result = _wraps_result_envelope(tool.outputSchema or {})
 
     async def func_impl(**kwargs):
-        return await mcp_tool_call_wrapper(config, tool_name, tool_input_model, kwargs)
+        output = await mcp_tool_call_wrapper(config, tool_name, tool_input_model, kwargs)
+        return _unwrap_result_envelope(output) if wraps_result else output
 
+    safe_name = makefun_func_name(name)
     return create_function(
         func_signature=sig,
         # makefun's ``func_impl`` is annotated ``Callable[[Any], Any]`` but accepts
         # any callable, driven by ``func_signature``.
         func_impl=cast(Callable[[Any], Any], func_impl),
-        func_name=name,
-        qualname=name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=module,
         # makefun's ``doc`` is annotated ``str`` but accepts ``None`` (its default).
         doc=cast(str, tool.description),
