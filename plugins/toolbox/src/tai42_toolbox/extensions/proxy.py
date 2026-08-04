@@ -16,6 +16,7 @@ import inspect
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.proxy_context import build_route
 from tai42_toolbox._internal.extensions.signature import with_added_params
@@ -47,7 +48,8 @@ def proxy(func, name, description):
     )
     new_sig = with_added_params(sig, proxies_param)
 
-    new_name = f"{name}_{proxy.__name__}"
+    raw_name = f"{name}_{proxy.__name__}"
+    safe_name = makefun_func_name(raw_name)
 
     routed_doc = (
         f"{description}\n\n"
@@ -55,14 +57,18 @@ def proxy(func, name, description):
         "proxy; each call routes independently and can run in parallel with others."
     )
 
-    return create_function(
+    branch = create_function(
         func_signature=new_sig,
         func_impl=wrapper,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=routed_doc,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch
 
 
 # Subtracted from the branch's input schema by the apply site so the WRAPPER schema check ignores it.

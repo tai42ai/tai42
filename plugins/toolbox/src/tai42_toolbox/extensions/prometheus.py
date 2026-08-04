@@ -11,6 +11,7 @@ import time
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.prometheus_counters import record_tool_metrics
 
@@ -40,13 +41,18 @@ def prometheus_metrics(func, name, description):
                 duration=duration,
             )
 
-    new_name = f"{name}_{prometheus_metrics.__name__}"
+    raw_name = f"{name}_{prometheus_metrics.__name__}"
+    safe_name = makefun_func_name(raw_name)
 
-    return create_function(
+    branch = create_function(
         func_signature=inspect.signature(func),
         func_impl=wrapper,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch

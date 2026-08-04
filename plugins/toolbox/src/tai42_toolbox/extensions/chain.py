@@ -12,6 +12,7 @@ from typing import Any
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.chain_executor import execute_chain
 from tai42_toolbox._internal.extensions.signature import with_added_params
@@ -22,7 +23,8 @@ def chain(func, orig_name, orig_desc):
     """Branch ``func`` into a chained ``<orig_name>_chain`` variant."""
     sig = inspect.signature(func)
 
-    new_name = f"{orig_name}_{chain.__name__}"
+    raw_name = f"{orig_name}_{chain.__name__}"
+    safe_name = makefun_func_name(raw_name)
 
     # Keyword-only so the required controls can follow any defaulted parameter and arrive in ``kwargs``.
     composed_sig = with_added_params(
@@ -52,11 +54,15 @@ Original doc:
 {orig_desc}
 """
 
-    return create_function(
+    branch = create_function(
         func_signature=composed_sig,
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch

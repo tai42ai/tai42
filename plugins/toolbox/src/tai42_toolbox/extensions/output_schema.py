@@ -14,7 +14,7 @@ from typing import Any
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
-from tai42_kit.utils.data import snake_to_pascal
+from tai42_kit.utils.data import makefun_func_name, snake_to_pascal
 from tai42_kit.utils.data.json_schema_util import (
     check_json_schema,
     json_schema_to_pydantic_model,
@@ -46,7 +46,8 @@ def output_schema(func, orig_name, orig_desc, config):
     and validates its output against the configured JSON Schema."""
     schema = _configured_schema(config)
 
-    new_name = f"{orig_name}_{output_schema.__name__}"
+    raw_name = f"{orig_name}_{output_schema.__name__}"
+    safe_name = makefun_func_name(raw_name)
     output_model = json_schema_to_pydantic_model(schema, f"{snake_to_pascal(orig_name)}Output")
 
     # Force the return annotation to the configured schema so the branch advertises it.
@@ -62,11 +63,15 @@ Original doc:
 {orig_desc}
 """
 
-    return create_function(
+    branch = create_function(
         func_signature=composed_sig,
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch

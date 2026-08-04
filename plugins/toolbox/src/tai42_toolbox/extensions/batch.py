@@ -14,7 +14,7 @@ from makefun import create_function
 from pydantic import create_model
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
-from tai42_kit.utils.data import snake_to_pascal
+from tai42_kit.utils.data import makefun_func_name, snake_to_pascal
 
 from tai42_toolbox._internal.extensions.batch_executor import execute_batch
 
@@ -41,7 +41,8 @@ def batch(func, orig_name, orig_desc):
     module = sys.modules[func.__module__]
     setattr(module, input_name, input_class)
 
-    new_name = f"{orig_name}_{batch.__name__}"
+    raw_name = f"{orig_name}_{batch.__name__}"
+    safe_name = makefun_func_name(raw_name)
 
     async def func_impl(*args: Any, **kwargs: Any):
         params: list[Any] = kwargs["params"]
@@ -86,11 +87,15 @@ Original doc:
 {orig_desc}
 """
 
-    return create_function(
+    branch = create_function(
         func_signature=composed_sig,
         func_impl=func_impl,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch

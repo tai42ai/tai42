@@ -12,6 +12,7 @@ import inspect
 from makefun import create_function
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.cache_store import MISS, CacheStore, compute_key
 from tai42_toolbox._internal.extensions.signature import with_added_params
@@ -55,16 +56,21 @@ def cache(func, name, description):
     exp_param = inspect.Parameter("exp", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=float | None)
     new_sig = with_added_params(sig, exp_param)
 
-    new_name = f"{name}_{cache.__name__}"
+    raw_name = f"{name}_{cache.__name__}"
+    safe_name = makefun_func_name(raw_name)
 
-    return create_function(
+    branch = create_function(
         func_signature=new_sig,
         func_impl=wrapper,
-        func_name=new_name,
-        qualname=new_name,
+        func_name=safe_name,
+        qualname=safe_name,
         module_name=func.__module__,
         doc=description,
     )
+    # The branch loop registers a branch by its ``__name__``; restore the raw
+    # intended name so a hyphenated name isn't collapsed to its makefun alias.
+    branch.__name__ = raw_name
+    return branch
 
 
 # The apply site subtracts these reserved kwargs from the branch's input schema before checking
