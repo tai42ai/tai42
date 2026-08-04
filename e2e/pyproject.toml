@@ -52,7 +52,7 @@ dependencies = [
     # GitHub object stores the storage-axis variant sweep boots.
     "tai42-storage-local>=0.2,<0.3",
     "tai42-storage-s3>=0.2,<0.3",
-    "tai42-storage-github>=0.2,<0.3",
+    "tai42-storage-github>=0.3,<0.4",
     # The real webhook verifiers.
     "tai42-webhook-verifier-github>=0.2,<0.3",
     "tai42-webhook-verifier-stripe>=0.2,<0.3",
