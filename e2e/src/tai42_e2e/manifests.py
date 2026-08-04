@@ -32,6 +32,7 @@ def _switch() -> HarnessSettings:
     operator env unconditionally."""
     return HarnessSettings()
 
+
 # The manifest title the probe tools load under; the prometheus extension stamps
 # it as the ``title`` label, so metrics assertions reference this constant.
 PROBE_TOOLS_TITLE = "e2e-probes"

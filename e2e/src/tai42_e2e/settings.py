@@ -299,9 +299,7 @@ class HarnessSettings(BaseSettings):
         unknown = sorted(set(names) - REAL_SERVICES.keys())
         if unknown:
             valid = ", ".join(sorted(REAL_SERVICES))
-            raise ValueError(
-                f"TAI_E2E_REAL names unknown service(s): {', '.join(unknown)}; valid services: {valid}"
-            )
+            raise ValueError(f"TAI_E2E_REAL names unknown service(s): {', '.join(unknown)}; valid services: {valid}")
         return frozenset(names)
 
     def is_real(self, service: str) -> bool:

@@ -68,8 +68,7 @@ def assert_real_selection_ready(settings: HarnessSettings, environ: Mapping[str,
     if problems:
         raise RealSelectionError(
             "TAI_E2E_REAL selects real leg(s) that are not fully configured. "
-            "Set the missing env vars, or drop the seam from TAI_E2E_REAL to run it mock:\n  "
-            + "\n  ".join(problems)
+            "Set the missing env vars, or drop the seam from TAI_E2E_REAL to run it mock:\n  " + "\n  ".join(problems)
         )
 
 

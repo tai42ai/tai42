@@ -34,9 +34,7 @@ def test_k8s_selection_predicate() -> None:
 
 def test_real_k8s_config_points_at_operator_kubeconfig_and_namespace() -> None:
     cfg = _k8s_cfg()
-    real = real_k8s_config(
-        cfg, {"KUBECONFIG": "/home/op/.kube/real-cluster", "TAI_K8S_NAMESPACE": "tai-e2e"}
-    )
+    real = real_k8s_config(cfg, {"KUBECONFIG": "/home/op/.kube/real-cluster", "TAI_K8S_NAMESPACE": "tai-e2e"})
     # KUBECONFIG now addresses the live cluster; the config-mode stands.
     assert real.env["KUBECONFIG"] == "/home/op/.kube/real-cluster"
     assert real.env["TAI_CONFIG_MODE"] == "k8s"

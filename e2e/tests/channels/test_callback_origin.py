@@ -25,9 +25,7 @@ def _case(*, public_base_url: str | None, real: Iterable[str] = ()) -> TwilioCas
     real_services = frozenset(real)
     settings = SimpleNamespace(is_real=lambda service: service in real_services)
     config = SimpleNamespace(public_base_url=public_base_url)
-    stack = SimpleNamespace(
-        config=config, infra=SimpleNamespace(settings=settings), host="127.0.0.1", port_b=8002
-    )
+    stack = SimpleNamespace(config=config, infra=SimpleNamespace(settings=settings), host="127.0.0.1", port_b=8002)
     return TwilioCase(stack, None)  # type: ignore[arg-type]
 
 

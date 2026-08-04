@@ -19,9 +19,9 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from _checkpoint_support import checkpoint_conn_string  # pyright: ignore[reportMissingImports]
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, empty_checkpoint
 
 from tai42_e2e.stack import TaiStack
@@ -49,7 +49,7 @@ async def _harness_saver(provider: str, conn_string: str) -> AsyncIterator[BaseC
         raise ValueError(f"unsupported checkpoint provider: {provider!r}")
 
 
-def _thread_config(thread_id: str) -> dict[str, Any]:
+def _thread_config(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
 
 

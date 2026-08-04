@@ -442,13 +442,16 @@ def _seed_postgres_mcp_probe(resources: StackResources) -> None:
     the stack boots (and thus before the mount's child launches) for its CRUD tools to be
     generated and discovered — the seed row is what the round-trip test reads back."""
     table = sql.Identifier(POSTGRES_MCP_PROBE_SCHEMA, POSTGRES_MCP_PROBE_TABLE)
-    with psycopg.connect(
-        host=resources.pg_host,
-        port=resources.pg_port,
-        user=resources.pg_user,
-        password=resources.pg_password,
-        dbname=resources.pg_db,
-    ) as conn, conn.cursor() as cur:
+    with (
+        psycopg.connect(
+            host=resources.pg_host,
+            port=resources.pg_port,
+            user=resources.pg_user,
+            password=resources.pg_password,
+            dbname=resources.pg_db,
+        ) as conn,
+        conn.cursor() as cur,
+    ):
         cur.execute(sql.SQL("CREATE TABLE {} (id bigserial PRIMARY KEY, name text NOT NULL)").format(table))
         cur.execute(sql.SQL("INSERT INTO {} (name) VALUES (%s)").format(table), (POSTGRES_MCP_PROBE_ROW_NAME,))
         conn.commit()
