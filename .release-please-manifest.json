@@ -20,7 +20,7 @@
   "plugins/monitoring-langfuse": "0.2.4",
   "plugins/storage-github": "0.3.0",
   "plugins/storage-local": "0.2.5",
-  "plugins/storage-s3": "0.2.3",
+  "plugins/storage-s3": "0.2.4",
   "plugins/toolbox": "0.3.7",
   "plugins/tools-stripe": "0.3.6",
   "plugins/webhook-verifier-github": "0.2.1",
