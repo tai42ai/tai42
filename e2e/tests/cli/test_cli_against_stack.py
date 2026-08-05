@@ -12,6 +12,7 @@ representative coverage by design, not a full reference sweep of every subcomman
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +26,13 @@ def test_reads_across_groups(cli_stack: TaiStack, tmp_path: Path) -> None:
     # tools: the loaded toolbox tool is listed.
     tools = run_cli(cli_stack, tmp_path, "tools", "list")
     assert "generate_uuid" in tools.stdout, tools.stdout
+
+    # tools run: the meta-executor door runs a registered tool synchronously and
+    # returns its result — a version-4 UUID. This exercises the run-tool body shape
+    # against a live server, where a wrong shape is a 400 the mock unit tests cannot
+    # catch.
+    ran = cli_json(run_cli(cli_stack, tmp_path, "tools", "run", "generate_uuid"))
+    assert uuid.UUID(ran).version == 4, ran
 
     # config mode: this stack boots in file config mode.
     mode = run_cli(cli_stack, tmp_path, "config", "mode")

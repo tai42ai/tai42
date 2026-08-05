@@ -61,6 +61,13 @@ def _intake(message_id: str = "m1", **over) -> ConversationRecord:
     )
 
 
+def test_conversation_record_silent_rejects_answer_text():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="a silent record carries no answer text"):
+        _record(answer_status="silent", answer="leaked")
+
+
 def test_in_memory_backend_refuses(monkeypatch):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
     from tai42_skeleton.operations.errors import NotSupportedError

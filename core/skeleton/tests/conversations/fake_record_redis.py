@@ -163,6 +163,17 @@ class FakeRecordRedis:
             h.update(data=argv[0], delivery_status="pending_delivery", updated_at=argv[1], intake_claim="")  # type: ignore[union-attr]
             self._reindex(indexes, argv[2], argv[3])
             return 1
+        if "conversations:record:complete_silent" in script:
+            if status is None:
+                return -1
+            if status != "accepted":
+                return 0
+            h.update(  # type: ignore[union-attr]
+                data=argv[0], delivery_status="silent", updated_at=argv[1], intake_claim="", claim=""
+            )
+            self.ttl_ms[key] = int(argv[2])
+            self._reindex(indexes, argv[3], argv[4])
+            return 1
         if "conversations:record:intake_claim" in script:
             now, lease, token = float(argv[0]), float(argv[1]), argv[2]
             if status is None:

@@ -97,7 +97,7 @@ def run_tool(
     ctx_obj = app_context(ctx)
     arguments = parse_kwargs(kwargs, kw)
     with ctx_obj.client() as client:
-        data = client.post("/api/run-tool", json={"tool": name, "kwargs": arguments})
+        data = client.post("/api/run-tool", json={"tool_name": name, "arguments": arguments})
     emit_result(ctx_obj, data)
 
 

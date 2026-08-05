@@ -83,7 +83,8 @@ def _api_route(name: str, secret: str, execution_key: str = "svc") -> Conversati
     return ConversationRoute(
         route_name=name,
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key=execution_key,
         callback_url="https://example.com/cb",
         execution_key_fingerprint="fp-1",
@@ -95,7 +96,8 @@ def _channel_route(name: str) -> ConversationRoute:
     return ConversationRoute(
         route_name=name,
         door="channel",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
@@ -150,7 +152,7 @@ async def test_round_trip_preserves_every_field_but_the_secret(monkeypatch):
 
     assert report["created"] == 1
     row = restored.rows["support"]
-    assert row.agent_name == "triage"
+    assert row.target_name == "triage"
     assert row.execution_key == "svc"
     assert row.callback_url == "https://example.com/cb"
     # The secret is a fresh mint, not the pre-export one.
@@ -169,7 +171,8 @@ async def test_import_rejects_a_row_missing_its_fingerprint(wired):
     bad = {
         "route_name": "support",
         "door": "api",
-        "agent_name": "triage",
+        "target_kind": "agent",
+        "target_name": "triage",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         # execution_key_fingerprint missing

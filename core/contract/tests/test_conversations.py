@@ -20,7 +20,8 @@ def _route_kwargs(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "route_name": "support-sms",
         "door": "channel",
-        "agent_name": "concierge",
+        "target_kind": "agent",
+        "target_name": "concierge",
         "execution_key": "svc-bridge",
         "channel": "twilio",
         "our_identity": "+15550001111",
@@ -89,6 +90,31 @@ def test_conversation_answer_rejects_blank_answer(blank: str):
         ConversationAnswer(message_id="m-1", thread_id="t", status="error", answer=blank)
 
 
+@pytest.mark.parametrize("status", ["answered", "error"])
+def test_conversation_answer_requires_answer_text_for_non_silent(status: str):
+    from tai42_contract.conversations import ConversationAnswer
+
+    body: dict[str, Any] = {"message_id": "m-1", "thread_id": "t", "status": status, "answer": None}
+    with pytest.raises(ValidationError, match="non-blank"):
+        ConversationAnswer(**body)
+
+
+def test_conversation_answer_silent_carries_no_answer_text():
+    from tai42_contract.conversations import ConversationAnswer
+
+    silent = ConversationAnswer(message_id="m-1", thread_id="t", status="silent")
+    assert silent.status == "silent"
+    assert silent.answer is None
+
+
+@pytest.mark.parametrize("answer", ["some text", "", "   "])
+def test_conversation_answer_silent_rejects_any_answer_field(answer: str):
+    from tai42_contract.conversations import ConversationAnswer
+
+    with pytest.raises(ValidationError, match="silent answer carries no answer text"):
+        ConversationAnswer(message_id="m-1", thread_id="t", status="silent", answer=answer)
+
+
 # -- Route rows -----------------------------------------------------------------
 
 
@@ -99,7 +125,7 @@ def test_channel_route_round_trips_and_is_frozen():
     assert route.door == "channel"
     assert route.callback_url is None
     with pytest.raises(ValidationError):
-        route.agent_name = "changed"
+        route.target_name = "changed"
 
 
 def test_api_route_requires_https_callback_and_forbids_channel_fields():
@@ -108,7 +134,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
     ok = ConversationRouteCreate(
         route_name="api-desk",
         door="api",
-        agent_name="concierge",
+        target_kind="agent",
+        target_name="concierge",
         execution_key="svc-bridge",
         callback_url="https://host.example/hook",
     )
@@ -118,7 +145,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
-            agent_name="concierge",
+            target_kind="agent",
+            target_name="concierge",
             execution_key="svc-bridge",
             callback_url="http://host.example/hook",
         )
@@ -127,7 +155,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
-            agent_name="concierge",
+            target_kind="agent",
+            target_name="concierge",
             execution_key="svc-bridge",
             callback_url="https://user@evil.example/hook",
         )
@@ -136,7 +165,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
-            agent_name="concierge",
+            target_kind="agent",
+            target_name="concierge",
             execution_key="svc-bridge",
             callback_url="https://[::1/hook",
         )
@@ -145,7 +175,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
-            agent_name="concierge",
+            target_kind="agent",
+            target_name="concierge",
             execution_key="svc-bridge",
             callback_url="https://host.example/hook",
             channel="twilio",
@@ -154,7 +185,8 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         ConversationRouteCreate(
             route_name="api-desk",
             door="api",
-            agent_name="concierge",
+            target_kind="agent",
+            target_name="concierge",
             execution_key="svc-bridge",
             callback_url="https://host.example/hook",
             our_identity="+15550001111",
@@ -170,6 +202,31 @@ def test_channel_route_requires_channel_and_identity_forbids_callback():
         ConversationRouteCreate(**_route_kwargs(our_identity=None))
     with pytest.raises(ValidationError, match="no callback_url"):
         ConversationRouteCreate(**_route_kwargs(callback_url="https://host.example/hook"))
+
+
+def test_tool_target_carries_optional_exprs():
+    from tai42_contract.conversations import ConversationRouteCreate
+
+    route = ConversationRouteCreate(
+        **_route_kwargs(target_kind="tool", target_name="echo", payload_expr="{message: .message}", reply_expr=".x")
+    )
+    assert route.target_kind == "tool"
+    assert route.payload_expr == "{message: .message}"
+    assert route.reply_expr == ".x"
+
+
+@pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
+def test_agent_target_forbids_exprs(field: str):
+    from tai42_contract.conversations import ConversationRouteCreate
+
+    with pytest.raises(ValidationError, match="no payload_expr/reply_expr"):
+        ConversationRouteCreate(**_route_kwargs(**{field: ".x"}))
+
+
+def test_blank_inbound_text_error_is_a_value_error():
+    from tai42_contract.conversations import BlankInboundTextError
+
+    assert issubclass(BlankInboundTextError, ValueError)
 
 
 def test_channel_route_rejects_a_colon_in_the_channel_name():

@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import BlankInboundTextError
 
 from tai42_channel_slack.client import slack_http
 from tai42_channel_slack.correlation import claim_dedupe, delete_correlation, get_callback_url, release_dedupe
@@ -233,9 +234,9 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
     """Hand one uncorrelated human message to the conversation bridge.
 
     ``our_identity`` (the bot user id) is required here — a bridge route with it
-    unset is operator misconfig, raised loudly. A message with no text/channel is
-    nothing to bridge and is acked. No route bound acks with a debug log; an
-    infrastructure failure propagates so Slack redelivers.
+    unset is operator misconfig, raised loudly. A message with no text/channel, or
+    with whitespace-only text, is nothing to bridge and is acked. No route bound acks
+    with a debug log; an infrastructure failure propagates so Slack redelivers.
     """
     if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
         return JSONResponse({"status": "ignored"})
@@ -249,6 +250,9 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
             text=text,
             provider_message_id=event_id,
         )
+    except BlankInboundTextError:
+        logger.debug("slack inbound: blank text for channel=%s; acking", channel)
+        return JSONResponse({"status": "ignored"})
     except LookupError:
         logger.debug("slack inbound: no conversation route for channel=%s; acking", channel)
         return JSONResponse({"status": "ignored"})

@@ -135,7 +135,8 @@ async def _create(execution_key: str) -> dict:
     return await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key=execution_key,
         callback_url="https://cb.example/x",
     )

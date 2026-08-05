@@ -30,7 +30,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
@@ -247,9 +247,10 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = To, ``client_address`` = From (verbatim). A message with no
-    route bound is logged and success-acked (the provider must not retry-storm a
-    permanently-unrouted address); a retryable overflow or infrastructure failure
-    propagates as a 5xx so Twilio redelivers rather than silently dropping it.
+    route bound, or with a blank body, is logged and success-acked (the provider must
+    not retry-storm a permanently-unrouted or empty message); a retryable overflow or
+    infrastructure failure propagates as a 5xx so Twilio redelivers rather than silently
+    dropping it.
     """
     try:
         await tai42_app.conversations.accept(
@@ -259,6 +260,8 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
             text=form.get("Body", ""),
             provider_message_id=message_sid,
         )
+    except BlankInboundTextError as exc:
+        logger.warning("blank Twilio inbound %s dropped: %s", message_sid, exc)
     except LookupError as exc:
         logger.warning("unrouted Twilio inbound %s dropped: %s", message_sid, exc)
     await mark_seen(message_sid)

@@ -37,7 +37,7 @@ def list_routes(ctx: typer.Context) -> None:
     emit_records(
         ctx_obj,
         data,
-        ["route_name", "door", "agent_name", "execution_key", "channel", "our_identity"],
+        ["route_name", "door", "target_kind", "target_name", "execution_key", "channel", "our_identity"],
         items_key="items",
     )
 
@@ -61,7 +61,7 @@ def create_route(
     ctx: typer.Context,
     route_name: Annotated[str, typer.Argument(help="Route name — a slug [a-z0-9-]+ (the thread-key handle).")],
     door: Annotated[str, typer.Option("--door", help="Inbound door: 'api' or 'channel'.")],
-    agent: Annotated[str, typer.Option("--agent", help="The agent the turn runs (must exist).")],
+    target_name: Annotated[str, typer.Option("--target-name", help="The agent or tool the turn runs (must exist).")],
     execution_key: Annotated[
         str,
         typer.Option(
@@ -69,6 +69,15 @@ def create_route(
             help="The api-key user id the turn runs AS; you must own it (or be admin), tokenless-evaluable.",
         ),
     ],
+    target_kind: Annotated[str, typer.Option("--target-kind", help="What the turn runs: 'agent' or 'tool'.")] = "agent",
+    payload_expr: Annotated[
+        str | None,
+        typer.Option("--payload-expr", help="target-kind=tool: jq mapping the inbound message to the tool kwargs."),
+    ] = None,
+    reply_expr: Annotated[
+        str | None,
+        typer.Option("--reply-expr", help="target-kind=tool: jq mapping the tool result to the reply."),
+    ] = None,
     channel: Annotated[
         str | None, typer.Option("--channel", help="door=channel: the channel registry name (e.g. twilio).")
     ] = None,
@@ -85,13 +94,24 @@ def create_route(
     along with everything else (``created`` is ``false`` for a replace). A ``door=api``
     route's ``callback_secret`` is minted server-side and shown ONCE in the result; it
     signs the delivery callback and is never re-readable. There is no check that you can
-    run the agent — the execution key's live grants bound the turn.
+    run the target — the execution key's live grants bound the turn. A ``tool`` target may
+    map the message to the tool kwargs (``--payload-expr``) and the result to the reply
+    (``--reply-expr``); a tool reply of null/blank sends nothing.
 
-    Example: ``tai conversations create support-line --door channel --agent triage \\
+    Example: ``tai conversations create support-line --door channel --target-name triage \\
     --execution-key svc --channel twilio --identity +15550001111``
     """
     ctx_obj = app_context(ctx)
-    body: dict = {"door": door, "agent_name": agent, "execution_key": execution_key}
+    body: dict = {
+        "door": door,
+        "target_kind": target_kind,
+        "target_name": target_name,
+        "execution_key": execution_key,
+    }
+    if payload_expr is not None:
+        body["payload_expr"] = payload_expr
+    if reply_expr is not None:
+        body["reply_expr"] = reply_expr
     if channel is not None:
         body["channel"] = channel
     if our_identity is not None:

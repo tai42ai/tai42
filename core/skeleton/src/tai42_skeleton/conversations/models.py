@@ -19,8 +19,10 @@ class DeliveryStatus(StrEnum):
 
     ``accepted`` is pre-turn intake and carries no answer; ``pending_delivery`` is
     persisted-but-unsent (what a re-drive resumes); ``provisional`` is sent and awaiting an
-    out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed`` are terminal and
-    are the only states carrying the retention TTL. ``shed`` ran no turn and never sends.
+    out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent`` are
+    terminal and are the only states carrying the retention TTL. ``shed`` ran no turn and
+    never sends; ``silent`` ran a tool turn whose reply mapped to nothing and so, by
+    design, sends nothing.
     """
 
     ACCEPTED = "accepted"
@@ -29,13 +31,16 @@ class DeliveryStatus(StrEnum):
     DELIVERED = "delivered"
     FAILED = "failed"
     SHED = "shed"
+    SILENT = "silent"
 
 
 #: The states nothing drives further; the retention TTL is applied on reaching one.
-TERMINAL_STATUSES = frozenset({DeliveryStatus.DELIVERED, DeliveryStatus.FAILED, DeliveryStatus.SHED})
+TERMINAL_STATUSES = frozenset(
+    {DeliveryStatus.DELIVERED, DeliveryStatus.FAILED, DeliveryStatus.SHED, DeliveryStatus.SILENT}
+)
 
 #: The states carrying no produced answer; every other state carries one.
-ANSWERLESS_STATUSES = frozenset({DeliveryStatus.ACCEPTED, DeliveryStatus.SHED})
+ANSWERLESS_STATUSES = frozenset({DeliveryStatus.ACCEPTED, DeliveryStatus.SHED, DeliveryStatus.SILENT})
 
 
 class ConversationRecord(BaseModel):
@@ -66,9 +71,11 @@ class ConversationRecord(BaseModel):
     # then admin-only to read.
     caller_principal: str | None = None
 
-    # ``None`` exactly while the record carries no answer, set on every other status.
+    # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
+    # channel-door ``silent``); set on every state carrying one.
     answer_status: AnswerStatus | None = None
-    # Client-facing text; for an ``error`` turn the internal detail lives in ``error``.
+    # Client-facing text; ``None`` for a ``silent`` outcome, and for an ``error`` turn the
+    # internal detail lives in ``error``.
     answer: str | None = None
     error: str | None = None
 
@@ -83,24 +90,28 @@ class ConversationRecord(BaseModel):
     @model_validator(mode="after")
     def _outcome_matches_status(self) -> ConversationRecord:
         """A record carries a turn outcome exactly when its status says it has one, so
-        nothing reaching the delivery machine can be missing the answer it must send."""
+        nothing reaching the delivery machine can be missing the outcome it must send.
+        An ``answered``/``error`` outcome carries non-blank answer text; a ``silent`` one
+        (an api-door no-reply the delivery machine still marks) carries none."""
         answerless = self.delivery_status in ANSWERLESS_STATUSES
         if answerless != (self.answer_status is None):
             raise ValueError(
                 f"delivery_status {self.delivery_status.value!r} and answer_status "
-                f"{self.answer_status!r} disagree on whether this record carries an answer"
+                f"{self.answer_status!r} disagree on whether this record carries an outcome"
             )
-        if self.answer_status is not None and not (self.answer or "").strip():
-            raise ValueError("a record carrying an answer_status must carry non-blank answer text")
+        if self.answer_status in ("answered", "error") and not (self.answer or "").strip():
+            raise ValueError("an answered/error record must carry non-blank answer text")
+        if self.answer_status == "silent" and self.answer is not None:
+            raise ValueError("a silent record carries no answer text")
         return self
 
     def answer_payload(self) -> ConversationAnswer:
         """The :class:`ConversationAnswer` this record delivers — the one shape both the
-        signed callback body and the sync-wait payload carry. Raises on an answerless
-        record."""
-        if self.answer_status is None or self.answer is None:
+        signed callback body and the sync-wait payload carry. A ``silent`` outcome carries
+        no answer text. Raises on a record with no turn outcome at all."""
+        if self.answer_status is None:
             raise RuntimeError(
-                f"conversation record {self.message_id!r} is {self.delivery_status.value} and carries no answer"
+                f"conversation record {self.message_id!r} is {self.delivery_status.value} and carries no outcome"
             )
         return ConversationAnswer(
             message_id=self.message_id,

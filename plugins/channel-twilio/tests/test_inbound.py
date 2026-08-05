@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 import httpx
 import pytest
 from starlette.responses import Response
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 
 import tai42_channel_twilio.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_twilio.correlation import reserve_pending
@@ -277,6 +277,24 @@ async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
     assert not fake_httpx.calls  # no ask_user forward
     assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted
     assert any("unrouted" in record.message for record in caplog.records)
+    assert _SEEN_KEY in fake_redis.store  # replay of the same sid dedupes
+
+
+async def test_uncorrelated_blank_inbound_logged_ack_no_turn(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # No pending question and a whitespace-only body: accept() raises
+    # BlankInboundTextError -> the bridge logs and success-acks, marks the sid seen,
+    # and starts no forward (never a 5xx retry-storm), no turn produced.
+    stub_app.conversations.accept_error = BlankInboundTextError("inbound text is blank")
+
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(_pairs(Body="   ")))
+
+    assert result.status_code == 204
+    assert not fake_httpx.calls  # no ask_user forward
+    assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted, no turn produced
+    assert any("blank" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store  # replay of the same sid dedupes
 
 

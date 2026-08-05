@@ -26,6 +26,7 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import telegram_http
@@ -117,7 +118,8 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
 
     ``our_identity`` is this bot's numeric id (malformed token -> loud 500);
     ``client_address`` is the numeric chat id; ``provider_message_id`` is the
-    update id. No route bound -> ack + log; a transient failure propagates (500).
+    update id. No route bound or blank text -> ack + log; a transient failure
+    propagates (500).
     """
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
@@ -137,6 +139,11 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
             text=text,
             provider_message_id=str(update_id),
         )
+    except BlankInboundTextError:
+        # A whitespace-only message is nothing to bridge — ack so Telegram stops
+        # redelivering it.
+        logger.warning("telegram inbound: blank text for chat_id=%s; ignoring", chat_id)
+        return _ignored("blank message text")
     except LookupError:
         # No route bound for this identity — ack so Telegram stops redelivering a
         # permanently-unrouted address. A transient failure instead propagates

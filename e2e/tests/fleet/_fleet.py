@@ -100,7 +100,7 @@ def build_backup_populated_stack(res: StackResources, variants: Variants) -> Sta
     conversations / api-keys / agents routers plus the backup router, turning access
     control ON with the Postgres policy store + pluggable identity provider (seeded
     pre-boot by ``boot_stack(seed_auth=True)``), and registering ``tools_agent`` ONLY so a
-    route's ``agent_name`` resolves — no turn is ever run, so the scripted LLM stub is
+    route's ``target_name`` resolves — no turn is ever run, so the scripted LLM stub is
     never dialed. One worker, no backend runtime, no metrics sidecar keeps this opt-in
     stack's boot cost down; convergence is not asserted on it."""
     # Local import so the fleet helpers stay a thin re-shape layer over the shared builders.

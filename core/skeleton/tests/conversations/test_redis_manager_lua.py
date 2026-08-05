@@ -51,7 +51,8 @@ def _api_route(name: str = "support", **over: Any) -> ConversationRoute:
     fields: dict[str, Any] = {
         "route_name": name,
         "door": "api",
-        "agent_name": "triage",
+        "target_kind": "agent",
+        "target_name": "triage",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         "execution_key_fingerprint": "fp-1",
@@ -68,11 +69,11 @@ async def test_put_keys_and_indexes_the_row_atomically(manager, lua_redis):
     assert await lua_redis.smembers(_NAMES_KEY) == {"support"}
     assert await lua_redis.get(ConversationsSettings().route_key("support")) is not None
 
-    assert await manager.put_route(_api_route(agent_name="other")) is False
+    assert await manager.put_route(_api_route(target_kind="agent", target_name="other")) is False
     assert await lua_redis.smembers(_NAMES_KEY) == {"support"}
     got = await manager.get_route("support")
     assert got is not None
-    assert got.agent_name == "other"
+    assert got.target_name == "other"
 
 
 async def test_delete_removes_the_row_and_unindexes_it_atomically(manager, lua_redis):

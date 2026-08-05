@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 import httpx
 import pytest
 from starlette.responses import Response
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_whatsapp.correlation import reserve_pending
@@ -323,6 +323,24 @@ async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
     assert not fake_httpx.calls  # no ask_user forward
     assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted
     assert any("unrouted" in record.message for record in caplog.records)
+    assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes
+
+
+async def test_uncorrelated_blank_inbound_logged_ack_no_turn(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # A whitespace-only body passes the door's own text pre-filter, reaches the
+    # bridge, and accept() raises BlankInboundTextError: the drop is logged and the
+    # webhook still 200-acks (no 5xx that would make Meta retry-storm), no turn made.
+    stub_app.conversations.accept_error = BlankInboundTextError("inbound text is blank")
+
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(message_payload(text="   ")))
+
+    assert result.status_code == 200
+    assert not fake_httpx.calls  # no ask_user forward
+    assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted, no turn produced
+    assert any("blank" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes
 
 

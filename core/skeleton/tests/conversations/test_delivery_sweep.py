@@ -541,7 +541,8 @@ def _api_route() -> ConversationRoute:
     return ConversationRoute(
         route_name="support",
         door="api",
-        agent_name="echo",
+        target_kind="agent",
+        target_name="echo",
         execution_key="svc",
         callback_url=_CALLBACK_URL,
         callback_secret=_CALLBACK_SECRET,

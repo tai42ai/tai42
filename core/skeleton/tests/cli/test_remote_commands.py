@@ -7,12 +7,28 @@ and the download routes stream their raw (unenveloped) body.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
 import pytest
+from starlette.requests import Request
 
+from tai42_skeleton.routers._tool_call import read_tool_call
 from tests.cli.remote_harness import data_response, error_response, run_cli
+
+
+def _parse_tool_call(request: httpx.Request) -> tuple[str, dict[str, object]]:
+    """Drive the posted body through the SAME runtime parser the ``/api/run-tool``
+    and ``/api/tool-runs`` doors use, so a CLI body that drifts from the route's
+    ``{tool_name, arguments}`` shape fails the test instead of silently 400-ing a
+    live server. Returns the parsed ``(tool_name, arguments)``."""
+
+    async def _receive() -> dict[str, object]:
+        return {"type": "http.request", "body": request.content, "more_body": False}
+
+    starlette_request = Request({"type": "http", "headers": []}, _receive)
+    return asyncio.run(read_tool_call(starlette_request))
 
 
 def test_tools_list_happy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,7 +57,10 @@ def test_tools_run_posts_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/run-tool"
-        assert json.loads(request.content) == {"tool": "add", "kwargs": {"a": 1, "b": 2}}
+        # Validate through the route's own parser: the body must be the
+        # ``{tool_name, arguments}`` shape ``read_tool_call`` enforces, or a live
+        # server 400s. Asserting the literal dict alone let the two drift apart.
+        assert _parse_tool_call(request) == ("add", {"a": 1, "b": 2})
         return data_response({"sum": 3})
 
     result = run_cli(monkeypatch, handler, ["tools", "run", "add", "--kw", "a=1", "--kw", "b=2"], json_output=True)
@@ -187,6 +206,19 @@ def test_tools_apply_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> Non
     result = run_cli(monkeypatch, handler, ["tools", "apply", "my_tool", "--combo", "[5]"])
     assert result.exit_code != 0
     assert "must be an extension name or a" in result.output
+
+
+def test_tools_runs_submit_posts_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/tool-runs"
+        # Same ``{tool_name, arguments}`` parser seam the submit door uses.
+        assert _parse_tool_call(request) == ("slow", {"n": 100})
+        return data_response({"run_id": "r1"})
+
+    result = run_cli(monkeypatch, handler, ["tools", "runs", "submit", "slow", "--kw", "n=100"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"run_id": "r1"}
 
 
 def test_tools_runs_list_passes_tool_name(monkeypatch: pytest.MonkeyPatch) -> None:

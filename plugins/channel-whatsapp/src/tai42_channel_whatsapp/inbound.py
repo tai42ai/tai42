@@ -30,7 +30,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
@@ -447,7 +447,8 @@ async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: st
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim). A
-    message with no route bound is logged and skipped; a retryable overflow or
+    message with no route bound, or with blank text (a media-only message or an
+    empty interactive title), is logged and skipped; a retryable overflow or
     infrastructure failure propagates as a 5xx so Meta redelivers.
     """
     try:
@@ -458,6 +459,8 @@ async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: st
             text=text,
             provider_message_id=wamid,
         )
+    except BlankInboundTextError as exc:
+        logger.warning("blank whatsapp inbound %s dropped: %s", wamid, exc)
     except LookupError as exc:
         logger.warning("unrouted whatsapp inbound %s dropped: %s", wamid, exc)
     await mark_seen(wamid)

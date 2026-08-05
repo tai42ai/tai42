@@ -1,10 +1,11 @@
 """Conversation-route management operations — the routing-table surface behind the
 ``/api/conversations*`` doors, the ``tai conversations`` CLI and the MCP tools.
 
-A route binds an inbound door (``api`` or ``channel``) to the ``agent_name`` a turn runs
-and the ``execution_key`` that turn runs AS. A row's ``callback_secret`` is shown ONCE at
-create and withheld from every read. ``create_conversation_route`` DELEGATES authority, so
-it carries the ``authority_changing`` tier and binds the key BEFORE any write.
+A route binds an inbound door (``api`` or ``channel``) to a target — an ``agent`` run or a
+``tool`` dispatch — and the ``execution_key`` that turn runs AS. A row's ``callback_secret``
+is shown ONCE at create and withheld from every read. ``create_conversation_route``
+DELEGATES authority, so it carries the ``authority_changing`` tier and binds the key BEFORE
+any write.
 
 Every routing operation requires the redis conversations backend and otherwise refuses
 with a loud 501 (``NotSupportedError``).
@@ -16,6 +17,7 @@ import secrets
 from typing import Any
 
 from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate
+from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
@@ -46,6 +48,35 @@ def _public_route_view(route: ConversationRoute) -> dict[str, Any]:
 def _validate_route_name(route_name: str) -> None:
     if not ROUTE_NAME_RE.fullmatch(route_name):
         raise BadRequestError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {route_name!r}")
+
+
+async def _assert_target_exists(create: ConversationRouteCreate) -> None:
+    """Existence only: the turn runs as the key, so the key's authority over the target is
+    deliberately not checked here. An ``agent`` target must be registered; a ``tool`` target
+    must resolve on the live tool registry. A miss is a loud 404, mirroring either side."""
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.tools.binding import UnknownToolError
+
+    if create.target_kind == "agent":
+        if create.target_name not in instance.app.agents.all_agents():
+            raise NotFoundError(f"agent not found: {create.target_name!r}")
+        return
+    try:
+        await instance.app.tools.get_tool(create.target_name)
+    except UnknownToolError as exc:
+        raise NotFoundError(f"tool not found: {create.target_name!r}") from exc
+
+
+def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
+    """Compile a tool target's jq programs at create so an invalid one is refused here, not
+    at the first message. The model already forbids exprs on an ``agent`` target."""
+    for field, expr in (("payload_expr", create.payload_expr), ("reply_expr", create.reply_expr)):
+        if expr is None:
+            continue
+        try:
+            get_compiled_jq(expr)
+        except Exception as exc:
+            raise BadRequestError(f"invalid {field}: {exc}") from exc
 
 
 async def _unclaimed_channel_identity(
@@ -110,8 +141,11 @@ async def get_conversation_route(route_name: str) -> dict[str, Any]:
 async def create_conversation_route(
     route_name: str,
     door: str,
-    agent_name: str,
+    target_kind: str,
+    target_name: str,
     execution_key: str,
+    payload_expr: str | None = None,
+    reply_expr: str | None = None,
     channel: str | None = None,
     our_identity: str | None = None,
     callback_url: str | None = None,
@@ -121,11 +155,13 @@ async def create_conversation_route(
 
     ``execution_key`` is the api-key identity the turn runs AS; the caller must be allowed
     to delegate it and it must be usable by a tokenless fire, both decided BEFORE the write
-    so a refusal leaves any existing row untouched. ``agent_name`` must merely EXIST — the
-    key's live grants bound the turn at fire. A ``channel`` row's ``our_identity`` is stored
-    canonicalized and must not already be routed on that channel. An ``api`` row's
-    ``callback_secret`` is minted here and returned ONCE. Returns ``{"created",
-    "route_name", "route", "callback_secret"}``.
+    so a refusal leaves any existing row untouched. ``target_name`` must merely EXIST — the
+    agent (``target_kind=agent``) or tool (``target_kind=tool``) — the key's live grants
+    bound the turn at fire. A tool target's ``payload_expr``/``reply_expr`` jq programs, when
+    given, are compiled here so an invalid one is refused at create, not at first message. A
+    ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
+    on that channel. An ``api`` row's ``callback_secret`` is minted here and returned ONCE.
+    Returns ``{"created", "route_name", "route", "callback_secret"}``.
     """
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a
     # direct call take these flat parameters and bypass the HTTP extractor.
@@ -133,7 +169,10 @@ async def create_conversation_route(
         create = ConversationRouteCreate(
             route_name=route_name,
             door=door,  # pyright: ignore[reportArgumentType]
-            agent_name=agent_name,
+            target_kind=target_kind,  # pyright: ignore[reportArgumentType]
+            target_name=target_name,
+            payload_expr=payload_expr,
+            reply_expr=reply_expr,
             execution_key=execution_key,
             channel=channel,
             our_identity=our_identity,
@@ -144,12 +183,8 @@ async def create_conversation_route(
 
     manager = _require_backend()
 
-    # Existence only: the turn runs as the key, so the key's authority over the agent is
-    # deliberately not checked here.
-    from tai42_skeleton.app import instance
-
-    if create.agent_name not in instance.app.agents.all_agents():
-        raise NotFoundError(f"agent not found: {create.agent_name!r}")
+    await _assert_target_exists(create)
+    _assert_exprs_compile(create)
 
     stored = create.model_dump()
     # Only a ``channel`` row carries both fields; its identity is stored canonicalized.

@@ -1,5 +1,5 @@
-"""The conversation-route CRUD operations: create (pass-role bind + agent-exists +
-callback-secret mint), get/list (secret withheld), delete, and the slug guard."""
+"""The conversation-route CRUD operations: create (pass-role bind + target-exists + jq
+compile + callback-secret mint), get/list (secret withheld), delete, and the slug guard."""
 
 from __future__ import annotations
 
@@ -43,15 +43,29 @@ class _FakeAgents:
         return {name: object() for name in self._names}
 
 
+class _FakeTools:
+    def __init__(self, names: set[str]) -> None:
+        self._names = names
+
+    async def get_tool(self, key: str) -> object:
+        from tai42_skeleton.tools.binding import UnknownToolError
+
+        if key not in self._names:
+            raise UnknownToolError(key)
+        return object()
+
+
 class _FakeApp:
-    def __init__(self, agents: set[str]) -> None:
+    def __init__(self, agents: set[str], tools: set[str]) -> None:
         self.agents = _FakeAgents(agents)
+        self.tools = _FakeTools(tools)
 
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Wire a dict-backed manager, a pass-role bind that returns a fingerprint, and an
-    agent registry holding ``triage`` — the standard happy-path environment."""
+    """Wire a dict-backed manager, a pass-role bind that returns a fingerprint, an agent
+    registry holding ``triage`` and a tool registry holding ``echo-tool`` — the standard
+    happy-path environment."""
     manager = _DictManager()
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
 
@@ -66,7 +80,7 @@ def wired(monkeypatch):
 
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(instance, "app", _FakeApp({"triage"}), raising=False)
+    monkeypatch.setattr(instance, "app", _FakeApp({"triage"}, {"echo-tool"}), raising=False)
     return manager
 
 
@@ -74,7 +88,8 @@ async def test_create_api_route_mints_and_shows_the_secret_once(wired):
     result = await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -91,7 +106,8 @@ async def test_create_channel_route_carries_no_secret(wired):
     result = await ops.create_conversation_route(
         route_name="line",
         door="channel",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
@@ -104,14 +120,16 @@ async def test_create_is_an_upsert(wired):
     await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
     result = await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc2",
         callback_url="https://example.com/cb2",
     )
@@ -125,7 +143,8 @@ async def test_a_channel_identity_is_stored_canonicalized(wired):
     await ops.create_conversation_route(
         route_name="line",
         door="channel",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         channel="twilio",
         our_identity="  +15550001111  ",
@@ -137,7 +156,8 @@ async def test_a_second_route_claiming_one_channel_identity_is_refused(wired):
     await ops.create_conversation_route(
         route_name="line-a",
         door="channel",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111 ",
@@ -148,7 +168,8 @@ async def test_a_second_route_claiming_one_channel_identity_is_refused(wired):
         await ops.create_conversation_route(
             route_name="line-b",
             door="channel",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key="svc",
             channel="twilio",
             our_identity="+15550001111",
@@ -163,7 +184,8 @@ async def test_a_route_may_re_claim_its_own_channel_identity(wired):
         await ops.create_conversation_route(
             route_name="line",
             door="channel",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key=execution_key,
             channel="twilio",
             our_identity="+15550001111",
@@ -178,7 +200,8 @@ async def test_the_same_identity_on_another_channel_is_a_different_route(wired):
         await ops.create_conversation_route(
             route_name=route_name,
             door="channel",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key="svc",
             channel=channel,
             our_identity="+15550001111",
@@ -193,7 +216,8 @@ async def test_create_rejects_a_colon_channel_name(wired):
         await ops.create_conversation_route(
             route_name="line",
             door="channel",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key="svc",
             channel="twi:lio",
             our_identity="+15550001111",
@@ -206,7 +230,78 @@ async def test_create_rejects_unknown_agent(wired):
         await ops.create_conversation_route(
             route_name="support",
             door="api",
-            agent_name="ghost",
+            target_kind="agent",
+            target_name="ghost",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+
+
+async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
+    result = await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        payload_expr="{message: .message, who: .sender}",
+        reply_expr=".reply // null",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    assert result["created"] is True
+    row = wired.rows["support"]
+    assert row.target_kind == "tool"
+    assert row.target_name == "echo-tool"
+    assert row.payload_expr == "{message: .message, who: .sender}"
+    assert row.reply_expr == ".reply // null"
+
+
+async def test_create_rejects_unknown_tool(wired):
+    with pytest.raises(NotFoundError, match="tool not found"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="api",
+            target_kind="tool",
+            target_name="ghost-tool",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+
+
+async def test_create_rejects_invalid_payload_expr(wired):
+    with pytest.raises(BadRequestError, match="invalid payload_expr"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            payload_expr="{unterminated",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+
+
+async def test_create_rejects_invalid_reply_expr(wired):
+    with pytest.raises(BadRequestError, match="invalid reply_expr"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            reply_expr=".[",
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+
+
+async def test_create_rejects_exprs_on_agent_target(wired):
+    with pytest.raises(BadRequestError, match="no payload_expr/reply_expr"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="api",
+            target_kind="agent",
+            target_name="triage",
+            reply_expr=".reply",
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -217,7 +312,8 @@ async def test_create_rejects_a_colon_route_name(wired):
         await ops.create_conversation_route(
             route_name="bad:name",
             door="api",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -232,7 +328,8 @@ async def test_create_bind_refusal_leaves_no_row(wired, monkeypatch):
         await ops.create_conversation_route(
             route_name="support",
             door="api",
-            agent_name="triage",
+            target_kind="agent",
+            target_name="triage",
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -243,7 +340,8 @@ async def test_get_withholds_the_secret_and_404s_unknown(wired):
     await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -263,7 +361,8 @@ async def test_list_withholds_secrets(wired):
     await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -276,7 +375,8 @@ async def test_delete_removes_then_404s(wired):
     await ops.create_conversation_route(
         route_name="support",
         door="api",
-        agent_name="triage",
+        target_kind="agent",
+        target_name="triage",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )

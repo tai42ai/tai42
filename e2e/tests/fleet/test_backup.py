@@ -202,7 +202,8 @@ async def test_skip_import_preserves_conversation_secret_and_token(
         f"/api/conversations/{route_name}",
         json={
             "door": "api",
-            "agent_name": "tools_agent",
+            "target_kind": "agent",
+            "target_name": "tools_agent",
             "execution_key": exec_key,
             "callback_url": "https://127.0.0.1:9/callback",
         },

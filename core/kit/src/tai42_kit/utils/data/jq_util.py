@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from functools import lru_cache
 from typing import Any
 
@@ -43,5 +44,29 @@ async def run_jq_first(expression: str, payload: Any) -> Any:
     timeout = jq_settings().timeout_seconds
     try:
         return await asyncio.wait_for(asyncio.to_thread(lambda: program.input(payload).first()), timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
+
+
+async def run_jq_bounded(expression: str, payload: Any, limit: int) -> list[Any]:
+    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
+    thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted
+    values, taken lazily from the program's iterator.
+
+    For a caller that must enforce an exact emit count: it passes its allowed count as
+    ``limit`` and reads ``len(result) > limit`` as "emitted too many". The extra slot
+    lets an over-emit be distinguished from an exact ``limit`` without ever
+    materializing the full stream. The bound is on the NUMBER of values taken (at most
+    ``limit + 1``); a single value's size is bounded only by the timeout, not by
+    ``limit``. ``limit`` must be positive. Same timeout semantics as :func:`run_jq_first`.
+    """
+    if limit < 1:
+        raise ValueError(f"run_jq_bounded limit must be positive, got {limit}")
+    program = get_compiled_jq(expression)
+    timeout = jq_settings().timeout_seconds
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(lambda: list(itertools.islice(program.input(payload), limit + 1))), timeout
+        )
     except TimeoutError as exc:
         raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc

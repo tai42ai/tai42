@@ -614,12 +614,12 @@ def test_conversation_message_body_documents_the_optional_wait_seconds(spec: dic
     assert body["content"]["application/json"]["schema"]["$ref"].endswith("/ConversationMessage")
 
 
-def test_conversation_route_create_requires_the_agent_and_execution_key(spec: dict) -> None:
-    # Agent and execution key are both required and non-empty: a route naming no agent
-    # or no identity cannot be stored.
+def test_conversation_route_create_requires_the_target_and_execution_key(spec: dict) -> None:
+    # Target kind/name and execution key are all required: a route naming no target or no
+    # identity cannot be stored.
     schema = spec["components"]["schemas"]["ConversationRouteCreate"]
-    assert {"route_name", "door", "agent_name", "execution_key"} <= set(schema["required"])
-    for field in ("agent_name", "execution_key"):
+    assert {"route_name", "door", "target_kind", "target_name", "execution_key"} <= set(schema["required"])
+    for field in ("target_name", "execution_key"):
         assert schema["properties"][field]["minLength"] == 1
 
 

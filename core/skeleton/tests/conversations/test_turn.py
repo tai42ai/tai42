@@ -8,6 +8,7 @@ The execution-identity seam is stubbed here so these isolate the bridge's own be
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 
@@ -83,7 +84,8 @@ def _channel_route(route_name: str = "line", our_identity: str = "+15550001111")
     return ConversationRoute(
         route_name=route_name,
         door="channel",
-        agent_name="echo",
+        target_kind="agent",
+        target_name="echo",
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -95,12 +97,75 @@ def _api_route(route_name: str = "support") -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
         door="api",
-        agent_name="echo",
+        target_kind="agent",
+        target_name="echo",
         execution_key="svc",
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
     )
+
+
+def _tool_channel_route(
+    route_name: str = "tool-line",
+    our_identity: str = "+15550001111",
+    *,
+    target_name: str = "echo-tool",
+    payload_expr: str | None = None,
+    reply_expr: str | None = None,
+) -> ConversationRoute:
+    return ConversationRoute(
+        route_name=route_name,
+        door="channel",
+        target_kind="tool",
+        target_name=target_name,
+        payload_expr=payload_expr,
+        reply_expr=reply_expr,
+        execution_key="svc",
+        channel="twilio",
+        our_identity=our_identity,
+        execution_key_fingerprint="fp-1",
+    )
+
+
+def _tool_api_route(
+    route_name: str = "tool-api",
+    *,
+    target_name: str = "echo-tool",
+    payload_expr: str | None = None,
+    reply_expr: str | None = None,
+) -> ConversationRoute:
+    return ConversationRoute(
+        route_name=route_name,
+        door="api",
+        target_kind="tool",
+        target_name=target_name,
+        payload_expr=payload_expr,
+        reply_expr=reply_expr,
+        execution_key="svc",
+        callback_url="https://cb.example/x",
+        callback_secret="sec-1",
+        execution_key_fingerprint="fp-1",
+    )
+
+
+class _FakeTools:
+    """A tool registry whose ``run_tool`` returns whatever a supplied callable produces from
+    the dispatched kwargs — the stateless dispatch the tool-target turn drives."""
+
+    def __init__(self, fn) -> None:
+        self.fn = fn
+        self.calls: list[dict] = []
+
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False):
+        self.calls.append({"key": key, "arguments": arguments, "offload_sync": offload_sync})
+        return self.fn(arguments)
+
+
+def _wire_tool(monkeypatch, fn) -> _FakeTools:
+    tools = _FakeTools(fn)
+    monkeypatch.setattr(turn_module, "_tools", lambda: tools)
+    return tools
 
 
 @asynccontextmanager
@@ -218,6 +283,320 @@ async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
     assert "denied" in record.error
     # The error outcome is DELIVERED, not silently dropped.
     assert channel.sends  # a message went out
+
+
+# -- tool target -------------------------------------------------------------
+
+
+async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: f"tool saw {kw['message']} from {kw['sender']}")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", "hi", "PID1")
+    await _settle()
+
+    # The default kwargs are exactly {message, sender} — canonical address for the sender —
+    # and the sync tool is offloaded off the event loop.
+    assert tools.calls == [
+        {"key": "echo-tool", "arguments": {"message": "hi", "sender": "+15550002222"}, "offload_sync": True}
+    ]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "answered"
+    assert record.answer == "tool saw hi from +15550002222"
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    assert [n.message for n in channel.sends] == ["tool saw hi from +15550002222"]
+
+
+@pytest.mark.parametrize("reply", [None, "", "   "])
+async def test_tool_target_none_or_blank_reply_is_silent(env, monkeypatch, reply):
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: reply)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    # Terminal SILENT: no answer, no answer_status, nothing sent — by design, not an error.
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert record.answer is None
+    assert record.answer_status is None
+    assert channel.sends == []
+
+
+async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
+    # A flow-preset shape: an expr emitting {"flow_graph_kwargs": {...}}.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr="{flow_graph_kwargs: {text: .message, from: .sender}}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "run it", "PID1")
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"flow_graph_kwargs": {"text": "run it", "from": "+15550002222"}}
+
+
+async def test_tool_target_reply_expr_over_an_envelope_dict(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"result": {"reply": "from the envelope"}})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "from the envelope"
+    assert [n.message for n in channel.sends] == ["from the envelope"]
+
+
+async def test_tool_target_reply_expr_yielding_null_is_silent(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"result": {}})  # .reply // null -> null
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+
+
+async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):
+    # No reply_expr, so a non-null/non-string result is a turn error, not a silent drop.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: {"unexpected": "dict"})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+
+    def _boom(kw):
+        raise RuntimeError("tool blew up")
+
+    _wire_tool(monkeypatch, _boom)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "tool blew up" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_payload_expr_multi_emit_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".message, .sender")  # two emits
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert tools.calls == []  # the tool never ran
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_payload_expr_non_object_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".message")  # emits a string, not an object
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert tools.calls == []  # the mapping failed before the tool ran
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_reply_expr_multi_emit_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".a, .b")  # two emits
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"a": "one", "b": "two"})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_reply_expr_non_string_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".count")  # emits a number
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"count": 42})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_denied_dispatch_is_an_error(env, monkeypatch):
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "unreachable")
+
+    @asynccontextmanager
+    async def _deny_bind(execution_key, *, bound_fingerprint):
+        raise PermissionDenied("the execution key carries no authority")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(turn_module, "bind_execution_identity", _deny_bind)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "denied" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_blank_inbound_text_is_refused_before_any_state(env, monkeypatch):
+    from tai42_contract.conversations import BlankInboundTextError
+
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(BlankInboundTextError):
+            await turn_module.accept("twilio", "+15550001111", "+15550002222", blank, "PID1")
+    await _settle()
+
+    assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
+
+
+async def test_tool_target_dispatch_is_offloaded_off_the_event_loop(env, monkeypatch):
+    # A synchronous tool must run off the loop, or a blocking dispatch starves the turn
+    # engine; the bridge always dispatches with offload_sync set.
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), FakeChannel())
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert tools.calls[0]["offload_sync"] is True
+
+
+async def test_tool_target_payload_expr_reads_our_identity_and_channel(env, monkeypatch):
+    # our_identity and channel reach the tool through payload_expr; on the channel door they
+    # carry the route's real values.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr="{oid: .our_identity, ch: .channel}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"oid": "+15550001111", "ch": "twilio"}
+
+
+async def test_tool_target_payload_expr_our_identity_and_channel_are_null_on_the_api_door(env, monkeypatch):
+    # An api route carries no channel/our_identity, so both read as null through payload_expr.
+    route = _tool_api_route(payload_expr="{oid: .our_identity, ch: .channel}")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"oid": None, "ch": None}
+
+
+async def test_tool_target_over_the_api_door_silent_delivers_a_signed_silent_callback(env, monkeypatch):
+    # A silent api-door tool turn keeps its 202 promise through a signed callback carrying
+    # the explicit silent marker and NO answer field.
+    _wire(monkeypatch, FakeManager(_tool_api_route()))
+    _wire_tool(monkeypatch, lambda kw: None)
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append((url, signature, json.loads(body)))
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=0)
+    assert result.answer is None  # 202: the outcome is delivered out of band
+    await _settle()
+
+    assert len(posted) == 1  # exactly one callback, no double-fire
+    url, signature, body = posted[0]
+    assert url == "https://cb.example/x"
+    assert signature.startswith("sha256=")
+    assert body == {"message_id": result.message_id, "thread_id": result.thread_id, "status": "silent"}
+    assert "answer" not in body
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.answer_status == "silent"
+    assert record.answer is None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_tool_target_over_the_api_door_silent_sync_wait_returns_the_marker(env, monkeypatch):
+    # A silent turn finishing inside the sync wait returns the silent marker inline (200)
+    # with its callback suppressed, exactly as an answered turn is.
+    _wire(monkeypatch, FakeManager(_tool_api_route()))
+    _wire_tool(monkeypatch, lambda kw: None)
+    posted: list = []
+
+    async def _post(url, body, signature, timeout_seconds):
+        posted.append(url)
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    await _settle()
+
+    assert result.answer is not None
+    assert result.answer.status == "silent"
+    assert result.answer.answer is None
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+    assert posted == []  # the sync wait delivered it; no callback fired
 
 
 # -- API door ----------------------------------------------------------------
@@ -352,6 +731,7 @@ async def test_a_caller_cannot_reach_another_callers_thread_by_naming_its_end_us
     # Two threads means two memories: bob's turn never saw alice's message.
     assert sorted(agent.threads) == [alice.thread_id, bob.thread_id]
     assert bob.answer is not None
+    assert bob.answer.answer is not None
     assert "4111" not in bob.answer.answer
     # The record's address matches the thread it ran on, so the two never disagree.
     record = await _store().get_record(bob.message_id)

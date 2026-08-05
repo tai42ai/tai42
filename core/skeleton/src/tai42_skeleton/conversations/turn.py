@@ -15,12 +15,19 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
 
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal
-from tai42_contract.conversations import AnswerStatus, ConversationAnswer, ConversationRoute
+from tai42_contract.conversations import (
+    AnswerStatus,
+    BlankInboundTextError,
+    ConversationAnswer,
+    ConversationRoute,
+)
+from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX
 from tai42_skeleton.authz.execution import authorize_execution_agent_run, bind_execution_identity
@@ -154,18 +161,18 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str:
 
 
 async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str) -> tuple[AnswerStatus, str, str | None]:
-    """Run one turn as the route's execution key and return ``(answer_status, answer,
+    """Run one agent turn as the route's execution key and return ``(answer_status, answer,
     error_detail)``. The identity is bound for the turn's duration and the run authorized
     against it before the agent runs. A denied run, a mid-turn error or an empty answer
     becomes a client-safe ``error`` outcome; its detail is returned, never delivered."""
-    agent = _agent_registry().get(route.agent_name)
+    agent = _agent_registry().get(route.target_name)
     if agent is None:
-        return ("error", _ERROR_ANSWER_TEXT, f"agent {route.agent_name!r} is not registered")
+        return ("error", _ERROR_ANSWER_TEXT, f"agent {route.target_name!r} is not registered")
     try:
         async with bind_execution_identity(
             route.execution_key, bound_fingerprint=route.execution_key_fingerprint
         ) as identity:
-            await authorize_execution_agent_run(identity, route.agent_name)
+            await authorize_execution_agent_run(identity, route.target_name)
             answer = await _drain_answer(agent, text, thread_id)
     except PermissionDenied as exc:
         return ("error", _ERROR_ANSWER_TEXT, f"turn denied: {exc}")
@@ -182,6 +189,120 @@ def _agent_registry() -> dict[str, Agent]:
     from tai42_skeleton.app import instance
 
     return instance.app.agents.all_agents()
+
+
+# -- the tool target ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _SilentOutcome:
+    """A tool turn that produced no reply — a designed no-reply, never an error. On the
+    channel door nothing is ever sent (terminal ``silent``); on the api door an explicit
+    silent marker is delivered through the durable machine."""
+
+
+@dataclass(frozen=True)
+class _ResolvedOutcome:
+    """A tool turn that produced an outcome to deliver: an ``answered`` reply or a
+    client-safe ``error``. Both carry non-blank ``answer`` text — the fields are
+    non-optional, so an outcome missing its answer cannot be represented."""
+
+    answer_status: Literal["answered", "error"]
+    answer: str
+    error: str | None
+
+
+#: A tool turn resolves to exactly one of these two shapes — no third, coercible state.
+_ToolOutcome = _SilentOutcome | _ResolvedOutcome
+
+
+def _tool_error(detail: str) -> _ResolvedOutcome:
+    return _ResolvedOutcome(answer_status="error", answer=_ERROR_ANSWER_TEXT, error=detail)
+
+
+async def _run_tool_turn(route: ConversationRoute, text: str, client_address: str) -> _ToolOutcome:
+    """Dispatch one tool turn as the route's execution key and return its resolved outcome
+    (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
+
+    Stateless per message — no thread, no conversation memory. The inbound payload maps to
+    the tool kwargs (``payload_expr`` or a fixed ``{message, sender}``), the tool runs under
+    the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
+    result maps to the reply (``reply_expr`` or a null/string pass-through). A reply that is
+    ``None`` or blank is a deliberate silent outcome; a mapping fault, a denied or failed
+    dispatch, or a wrong-typed result is a client-safe ``error`` outcome whose detail is
+    logged, never delivered."""
+    payload = {
+        "message": text,
+        "sender": client_address,
+        "our_identity": route.our_identity,
+        "channel": route.channel,
+    }
+    try:
+        kwargs = await _tool_kwargs(route, payload)
+    except Exception as exc:
+        logger.error("conversations: mapping the inbound payload for route %r failed", route.route_name, exc_info=exc)
+        return _tool_error(f"payload_expr error: {exc}")
+    try:
+        async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
+            # ``offload_sync``: a synchronous tool runs off the event loop, matching the
+            # meta-executor door, so a blocking tool cannot starve the turn engine.
+            result = await _tools().run_tool(route.target_name, kwargs, offload_sync=True)
+    except PermissionDenied as exc:
+        return _tool_error(f"turn denied: {exc}")
+    except Exception as exc:
+        logger.error("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
+        return _tool_error(f"turn error: {exc}")
+    try:
+        reply = await _tool_reply(route, result)
+    except Exception as exc:
+        logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
+        return _tool_error(f"reply_expr error: {exc}")
+    if reply is None or not reply.strip():
+        return _SilentOutcome()
+    return _ResolvedOutcome(answer_status="answered", answer=reply, error=None)
+
+
+async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> dict[str, object]:
+    """The kwargs the tool is dispatched with. No ``payload_expr`` → the fixed
+    ``{message, sender}``. Otherwise the jq program over the full payload, which MUST emit
+    exactly one value and it MUST be a JSON object."""
+    if route.payload_expr is None:
+        return {"message": payload["message"], "sender": payload["sender"]}
+    # Bounded at one, so an over-emitting program is capped rather than materialized whole.
+    values = await run_jq_bounded(route.payload_expr, payload, 1)
+    if len(values) != 1:
+        raise ValueError(f"payload_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
+    kwargs = values[0]
+    if not isinstance(kwargs, dict):
+        raise ValueError(f"payload_expr must emit a JSON object, emitted {type(kwargs).__name__}")
+    return kwargs
+
+
+async def _tool_reply(route: ConversationRoute, result: object) -> str | None:
+    """The reply text the tool result maps to, or ``None`` for a silent outcome. No
+    ``reply_expr`` → the result must itself be ``None`` or a string. Otherwise the jq
+    program over the raw result, which MUST emit exactly one value and it MUST be null or a
+    string."""
+    if route.reply_expr is None:
+        if result is None or isinstance(result, str):
+            return result
+        raise ValueError(
+            f"a tool target with no reply_expr must return null or a string, returned {type(result).__name__}"
+        )
+    # Bounded at one, so an over-emitting program is capped rather than materialized whole.
+    values = await run_jq_bounded(route.reply_expr, result, 1)
+    if len(values) != 1:
+        raise ValueError(f"reply_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
+    reply = values[0]
+    if reply is not None and not isinstance(reply, str):
+        raise ValueError(f"reply_expr must emit null or a string, emitted {type(reply).__name__}")
+    return reply
+
+
+def _tools():
+    from tai42_skeleton.app import instance
+
+    return instance.app.tools
 
 
 def _new_record(
@@ -244,19 +365,74 @@ def _with_outcome(
     )
 
 
-async def _complete_turn(*, route: ConversationRoute, intake: ConversationRecord, text: str) -> ConversationRecord:
-    """Run the turn and move its intake record to ``pending_delivery`` carrying the answer
-    (persist before send); delivery is the caller's to spawn. The transition is guarded on
-    the record still being at intake, so a turn finishing after a re-drive resolved its
-    record raises rather than overwriting the outcome the client was given."""
+def _with_channel_silent(intake: ConversationRecord) -> ConversationRecord:
+    """``intake`` moved to terminal ``silent`` — a CHANNEL-door tool turn that produced no
+    reply, so nothing is ever sent. Carries no answer_status, matching
+    :data:`ANSWERLESS_STATUSES`."""
+    return ConversationRecord.model_validate(
+        intake.model_dump()
+        | {
+            "answer_status": None,
+            "answer": None,
+            "error": None,
+            "delivery_status": DeliveryStatus.SILENT,
+            "updated_at": time.time(),
+        }
+    )
+
+
+def _with_api_silent(intake: ConversationRecord) -> ConversationRecord:
+    """``intake`` moved to ``pending_delivery`` carrying a ``silent`` outcome — an API-door
+    tool turn that produced no reply. The api door answered ``202`` promising a callback, so
+    the silent outcome is delivered through the same durable machine an answer takes; it
+    carries no answer text."""
+    return ConversationRecord.model_validate(
+        intake.model_dump()
+        | {
+            "answer_status": "silent",
+            "answer": None,
+            "error": None,
+            "delivery_status": DeliveryStatus.PENDING_DELIVERY,
+            "updated_at": time.time(),
+        }
+    )
+
+
+async def _resolve_turn_record(
+    *, route: ConversationRoute, intake: ConversationRecord, text: str
+) -> ConversationRecord:
+    """Run the route's target and build the completed record the transition persists: an
+    agent or an answered tool turn carries the answer (``pending_delivery``); a silent tool
+    turn is terminal ``silent`` on the channel door and a deliverable ``silent`` marker on
+    the api door."""
+    if route.target_kind == "tool":
+        outcome = await _run_tool_turn(route, text, intake.client_address)
+        if isinstance(outcome, _SilentOutcome):
+            return _with_channel_silent(intake) if route.door == "channel" else _with_api_silent(intake)
+        return _with_outcome(intake, outcome.answer_status, outcome.answer, outcome.error)
     answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id)
-    completed = _with_outcome(intake, answer_status, answer, error_detail)
-    outcome = await _store().complete_turn(completed)
+    return _with_outcome(intake, answer_status, answer, error_detail)
+
+
+async def _complete_turn(*, route: ConversationRoute, intake: ConversationRecord, text: str) -> ConversationRecord:
+    """Run the turn and move its intake record to its outcome (persist before send);
+    delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
+    silent tool turn goes straight to terminal ``silent`` with nothing to deliver. The
+    transition is guarded on the record still being at intake, so a turn finishing after a
+    re-drive resolved its record raises rather than overwriting the outcome the client was
+    given."""
+    completed = await _resolve_turn_record(route=route, intake=intake, text=text)
+    if completed.delivery_status is DeliveryStatus.SILENT:
+        outcome = await _store().complete_silent(completed)
+        verb = "complete_silent"
+    else:
+        outcome = await _store().complete_turn(completed)
+        verb = "complete_turn"
     if outcome != 1:
         raise RuntimeError(
             f"conversations: record {intake.message_id} is no longer at intake "
-            f"(complete_turn answered {outcome}); its outcome was resolved elsewhere and this turn's "
-            "answer is discarded"
+            f"({verb} answered {outcome}); its outcome was resolved elsewhere and this turn's "
+            "outcome is discarded"
         )
     return completed
 
@@ -360,7 +536,15 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
     Idempotent on ``(channel, provider_message_id)``: a redelivery returns the existing
     ``message_id`` and starts no second turn. Every gate that can refuse runs before any
     state is written, so a refusal leaves the pair unclaimed. The turn runs in the
-    background; the caller gets the id immediately."""
+    background; the caller gets the id immediately.
+
+    A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
+    any state is written — there is nothing to run a turn on — for the channel adapter to
+    drop like an unrouted message."""
+    if not text.strip():
+        raise BlankInboundTextError(
+            f"channel {channel!r} inbound {provider_message_id!r} carries blank text; nothing to run a turn on"
+        )
     channel_identity = canonical_address(our_identity)
     address = canonical_address(client_address)
     route = await _resolve_channel_route(channel, channel_identity)
@@ -526,6 +710,8 @@ async def submit_api_message(
         if task in done and task.exception() is None:
             record = task.result()
             if await mark_wait_delivered(message_id):
+                # A turn finished in time — an answer or an explicit silent marker — is
+                # returned inline and its callback suppressed exactly as an answer's is.
                 return ApiSubmitResult(message_id=message_id, thread_id=thread_id, answer=record.answer_payload())
             # Lost the claim to a racing delivery — fall through to the async shape.
 
@@ -637,6 +823,10 @@ def _spawn_delivery_on_success(task: asyncio.Task[ConversationRecord], message_i
             exc_info=exc,
         )
         _spawn_intake_resolution(message_id)
+        return
+    if task.result().delivery_status is DeliveryStatus.SILENT:
+        # A channel-door silent turn is terminal already; nothing is ever delivered. An
+        # api-door silent turn sits at pending_delivery and is delivered like an answer.
         return
     spawn_delivery(message_id)
 

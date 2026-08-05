@@ -20,12 +20,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 #: ``channel`` delivers back through the medium adapter's ``notify``.
 ConversationDoor = Literal["api", "channel"]
 
-#: A turn's answer kind; ``error`` answers carry generic client-safe text only.
-AnswerStatus = Literal["answered", "error"]
+#: What an inbound turn is routed to: ``agent`` runs a registered agent (threaded
+#: conversation memory), ``tool`` dispatches a registered tool statelessly per message.
+ConversationTargetKind = Literal["agent", "tool"]
+
+#: A turn's outcome kind. ``answered``/``error`` carry answer text (``error`` is generic
+#: client-safe text only); ``silent`` is a deliberate no-reply and carries NO answer text.
+AnswerStatus = Literal["answered", "error", "silent"]
 
 # Route names key the ``bridge:{route_name}:{address}`` thread namespace, so the
 # vocabulary must exclude ``:``.
 ROUTE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+class BlankInboundTextError(ValueError):
+    """The channel door was handed a blank/whitespace-only message body — nothing to run
+    a turn on. Raised by ``AppConversations.accept``; a channel adapter catches it and
+    drops the inbound (log + ack), exactly as it drops an unrouted one."""
 
 
 class DeliveryReceipt(StrEnum):
@@ -76,12 +87,13 @@ class ConversationMessage(BaseModel):
 
 
 class ConversationAnswer(BaseModel):
-    """The answer to one conversation turn — the body POSTed (HMAC-signed) to a
+    """The outcome of one conversation turn — the body POSTed (HMAC-signed) to a
     ``door=api`` row's ``callback_url`` AND the bounded sync-wait payload.
 
     ``message_id`` correlates it to the ``202``/``200`` the door returned. On
     ``status="error"`` the ``answer`` is generic client-safe text, never an internal
-    detail. Frozen.
+    detail. On ``status="silent"`` the turn produced no reply and ``answer`` is absent.
+    Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -89,26 +101,32 @@ class ConversationAnswer(BaseModel):
     message_id: str = Field(min_length=1)
     thread_id: str = Field(min_length=1)
     status: AnswerStatus
-    answer: str = Field(min_length=1)
+    answer: str | None = None
 
-    @field_validator("answer")
-    @classmethod
-    def _answer_non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("answer must be non-blank")
-        return value
+    @model_validator(mode="after")
+    def _answer_matches_status(self) -> ConversationAnswer:
+        """``answered``/``error`` carry non-blank answer text; ``silent`` carries none."""
+        if self.status == "silent":
+            if self.answer is not None:
+                raise ValueError("a silent answer carries no answer text")
+        elif not (self.answer or "").strip():
+            raise ValueError("an answered/error answer must carry non-blank text")
+        return self
 
 
 class ConversationRouteCreate(BaseModel):
     """The client-facing create/edit body for a conversation route: the fields a caller
     supplies.
 
-    Binds an ``agent_name`` to an ``execution_key`` the turn runs AS (bound with
-    pass-role at create). ``api`` rows carry an https ``callback_url``; ``channel`` rows
-    carry the registry ``channel`` plus the ``our_identity`` the medium is texted at (N
-    rows may share a channel, each its own identity). The server-derived
-    ``callback_secret`` and ``execution_key_fingerprint`` are deliberately absent;
-    :class:`ConversationRoute` is this shape plus those. Frozen.
+    Binds a ``(target_kind, target_name)`` — an ``agent`` run or a ``tool`` dispatch — to
+    an ``execution_key`` the turn runs AS (bound with pass-role at create). A ``tool``
+    target may carry a ``payload_expr`` (jq mapping the inbound message to the tool's
+    kwargs) and a ``reply_expr`` (jq mapping the tool's result to the reply); both are
+    tool-only. ``api`` rows carry an https ``callback_url``; ``channel`` rows carry the
+    registry ``channel`` plus the ``our_identity`` the medium is texted at (N rows may
+    share a channel, each its own identity). The server-derived ``callback_secret`` and
+    ``execution_key_fingerprint`` are deliberately absent; :class:`ConversationRoute` is
+    this shape plus those. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -117,12 +135,18 @@ class ConversationRouteCreate(BaseModel):
     # namespace, where a ``:`` would let one route's threads collide with another's.
     route_name: str
     door: ConversationDoor
-    agent_name: str = Field(min_length=1)
+    target_kind: ConversationTargetKind
+    target_name: str = Field(min_length=1)
+    # tool targets only: a jq program mapping the inbound payload to the tool kwargs, and
+    # one mapping the tool result to the reply. Compiled at create; an ``agent`` target
+    # carries neither.
+    payload_expr: str | None = None
+    reply_expr: str | None = None
     execution_key: str = Field(
         min_length=1,
         description=(
             "The api-key ``user_id`` the turn runs AS; its live stored grants authorize "
-            "the agent run and every tool call the turn makes."
+            "the agent run or tool dispatch and every tool call the turn makes."
         ),
     )
     channel: str | None = None  # door=channel: the registry name, ``:``-free
@@ -135,6 +159,12 @@ class ConversationRouteCreate(BaseModel):
         if not ROUTE_NAME_RE.fullmatch(value):
             raise ValueError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _check_target_fields(self) -> ConversationRouteCreate:
+        if self.target_kind == "agent" and (self.payload_expr is not None or self.reply_expr is not None):
+            raise ValueError("target_kind=agent carries no payload_expr/reply_expr")
+        return self
 
     @model_validator(mode="after")
     def _check_door_fields(self) -> ConversationRouteCreate:
@@ -183,10 +213,12 @@ class ConversationRoute(ConversationRouteCreate):
 __all__ = [
     "ROUTE_NAME_RE",
     "AnswerStatus",
+    "BlankInboundTextError",
     "ConversationAnswer",
     "ConversationDoor",
     "ConversationMessage",
     "ConversationRoute",
     "ConversationRouteCreate",
+    "ConversationTargetKind",
     "DeliveryReceipt",
 ]

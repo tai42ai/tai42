@@ -160,7 +160,9 @@ async def send_conversation_message(request: Request) -> Response:
     execution key, not the caller. Default answer is ``202 {message_id, thread_id}`` with
     the answer delivered later by signed callback. With a ``wait_seconds`` body field
     (clamped here to ``sync_wait_max_seconds``) a turn finishing in time answers ``200``
-    with the answer inline and its callback suppressed, so it never double-fires; a turn
+    inline — an answered/error turn with the answer, a silent turn with the silent marker
+    (status ``silent``, no answer text) — and its callback (which otherwise carries
+    answered/error/silent) is suppressed the same way, so it never double-fires; a turn
     still running when the wait elapses falls back to ``202``.
     """
     if reload_gate.locked:
@@ -197,7 +199,9 @@ async def send_conversation_message(request: Request) -> Response:
 
     payload: dict[str, object] = {"message_id": result.message_id, "thread_id": result.thread_id}
     if result.answer is not None:
-        payload["answer"] = result.answer.model_dump(mode="json")
+        # ``exclude_none`` drops the ``answer`` field for a silent outcome, so a silent turn
+        # answers 200 with ``{message_id, thread_id, status: "silent"}`` and no answer key.
+        payload["answer"] = result.answer.model_dump(mode="json", exclude_none=True)
         return JSONResponse({"data": payload}, status_code=200)
     return JSONResponse({"data": payload}, status_code=202)
 

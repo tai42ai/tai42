@@ -147,6 +147,12 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     channel_name = record.channel
     if channel_name is None:
         raise RuntimeError(f"channel record {record.message_id!r} carries no channel to deliver on")
+    if record.answer_status == "silent":
+        # A channel-door silent turn is terminal ``silent`` and never reaches delivery; a
+        # ``silent`` answer_status on a channel record is an impossible state, raised loudly.
+        raise RuntimeError(
+            f"channel record {record.message_id!r} carries a silent outcome; the channel door never delivers one"
+        )
     answer = record.answer
     if answer is None:
         raise RuntimeError(
@@ -354,7 +360,9 @@ async def _deliver_api(store: ConversationRecordStore, record: ConversationRecor
         )
         return
 
-    body = record.answer_payload().model_dump_json().encode()
+    # ``exclude_none`` omits the ``answer`` field entirely for a silent outcome, so the
+    # callback body is ``{message_id, thread_id, status: "silent"}`` with no answer key.
+    body = record.answer_payload().model_dump_json(exclude_none=True).encode()
     signature = _sign(route.callback_secret, body)
     while True:
         attempt = await store.bump_attempt(record.message_id)

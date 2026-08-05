@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.inbound import inbound
@@ -235,6 +236,19 @@ async def test_uncorrelated_unrouted_message_is_acked_no_turn(http_recorder, fak
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "ignored"}}
     assert len(conversations.accept_calls) == 1
+
+
+async def test_uncorrelated_blank_message_is_acked_no_turn(http_recorder, fake_redis, conversations, caplog):
+    # A whitespace-only text passes the door's own text pre-filter, reaches the
+    # bridge, and accept() raises BlankInboundTextError; the door acks (200) so
+    # Telegram stops redelivering, never a 5xx retry-storm, and no turn is made.
+    conversations.accept_error = BlankInboundTextError("inbound text is blank")
+    with caplog.at_level("WARNING"):
+        response = await inbound(make_inbound_request(_text_update(text="   "), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert len(conversations.accept_calls) == 1
+    assert any("blank" in record.message for record in caplog.records)
 
 
 async def test_pending_question_reply_resolves_ask_not_bridge(http_recorder, fake_redis, conversations):

@@ -47,8 +47,9 @@ _F_ATTEMPTS = "attempts"
 _F_GRACE = "grace_deadline"
 _F_UPDATED = "updated_at"
 
-# Every record-mutating script takes the same key layout: KEYS[1]=record key, KEYS[2..7]=the
-# per-status indexes, KEYS[8]=the index the transition moves the record INTO.
+# Every record-mutating script takes the same key layout: KEYS[1]=record key, then one
+# key per DeliveryStatus (the per-status indexes), then the index the transition moves the
+# record INTO. The status count is derived below, so the layout tracks the enum.
 _INDEXED_STATUSES = tuple(DeliveryStatus)
 _TARGET_INDEX_KEY = f"KEYS[{2 + len(_INDEXED_STATUSES)}]"
 
@@ -103,6 +104,23 @@ if status ~= 'accepted' then return 0 end
 redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', 'pending_delivery', 'updated_at', ARGV[2],
   'intake_claim', '')
 {_reindex("ARGV[3]", "ARGV[4]")}
+return 1
+"""
+
+# Move an intake record from ``accepted`` straight to terminal ``silent`` — a tool turn
+# whose reply mapped to nothing, so nothing is ever sent — releasing the intake lease and
+# applying the retention TTL in the SAME step: 1 transitioned, 0 no longer at intake, -1
+# gone. Guarded on the current status, so a finishing turn and a re-drive produce ONE
+# outcome. ARGV = content_json, now, ttl_ms, message_id, index_score.
+_COMPLETE_SILENT_LUA = f"""
+-- conversations:record:complete_silent
+local status = redis.call('HGET', KEYS[1], 'delivery_status')
+if not status then return -1 end
+if status ~= 'accepted' then return 0 end
+redis.call('HSET', KEYS[1], 'data', ARGV[1], 'delivery_status', 'silent', 'updated_at', ARGV[2],
+  'intake_claim', '', 'claim', '')
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+{_reindex("ARGV[4]", "ARGV[5]")}
 return 1
 """
 
@@ -377,6 +395,33 @@ class ConversationRecordStore:
                 )
             )
 
+    async def complete_silent(self, record: ConversationRecord) -> int:
+        """Move an intake record from ``accepted`` straight to terminal ``silent`` — a tool
+        turn that produced no reply — applying the retention TTL: 1 transitioned, 0 no
+        longer at intake, -1 gone. Guarded on the current status, so a late turn and a
+        re-drive cannot both write an outcome."""
+        if record.delivery_status is not DeliveryStatus.SILENT:
+            raise ValueError(f"complete_silent writes a silent record, got {record.delivery_status.value!r}")
+        # One fresh ``now`` feeds both the index member's expiry score and the ``updated_at``
+        # field, so the member's score tracks the row's own TTL clock — the sibling terminal
+        # writes' idiom.
+        now = time.time()
+        keys = self._record_keys(record.message_id, DeliveryStatus.SILENT)
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            return int(
+                await eval_script(
+                    r,
+                    _COMPLETE_SILENT_LUA,
+                    len(keys),
+                    *keys,
+                    self._content_blob(record),
+                    now,
+                    self.settings.answer_retention_ttl_seconds * 1000,
+                    record.message_id,
+                    self._index_score(DeliveryStatus.SILENT, now),
+                )
+            )
+
     async def claim_intake(self, message_id: str, now: float, token: str, lease_seconds: float) -> int:
         """Take (or refresh) the intake lease on ``message_id`` under ``token``, leased for
         ``lease_seconds``: 1 when held, 0 when a DIFFERENT worker's lease is still live, -1
@@ -621,8 +666,9 @@ class ConversationRecordStore:
     async def prune_expired_terminal_indexes(self) -> None:
         """Drop the terminal-status index members whose row has already expired under the
         retention TTL. The live and on-demand indexes are pruned lazily on every read; the
-        ``delivered``/``shed`` indexes are read by nothing, so a periodic sweep prunes them
-        or they grow without bound. A member's score is its row's exact expiry moment."""
+        ``delivered``/``shed``/``silent`` indexes are read by nothing, so a periodic sweep
+        prunes them or they grow without bound. A member's score is its row's exact expiry
+        moment."""
         now = time.time()
         async with client_ctx(RedisClient, self.settings.redis) as r:
             for status in TERMINAL_STATUSES:

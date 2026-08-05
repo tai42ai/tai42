@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_slack.inbound import slack_inbound
@@ -88,6 +89,23 @@ async def test_uncorrelated_unrouted_message_is_acked_no_turn(fake_redis, stub_c
     assert len(stub_conversations.accept_calls) == 1  # attempted, then refused
     assert _DEDUPE_KEY in fake_redis.store  # acked, claim kept
     assert any("no conversation route" in record.message for record in caplog.records)
+
+
+async def test_uncorrelated_blank_message_is_acked_no_turn(fake_redis, stub_conversations, caplog):
+    # A whitespace-only body passes the door's own text pre-filter, reaches the
+    # bridge, and accept refuses with BlankInboundTextError: the door acks and logs
+    # rather than 500-storming, and no turn is made.
+    stub_conversations.accept_error = BlankInboundTextError("inbound text is blank")
+
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        response = await slack_inbound(_signed(_event_body(_message(text="   "))))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert len(stub_conversations.accept_calls) == 1  # attempted, then refused
+    assert _DEDUPE_KEY in fake_redis.store  # acked, claim kept
+    assert any("blank" in record.message for record in caplog.records)
 
 
 async def test_bridge_infrastructure_failure_propagates_and_releases_claim(fake_redis, stub_conversations):

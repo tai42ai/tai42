@@ -218,7 +218,7 @@ async def test_extract_route_create_injects_the_path_route_name():
     router = _router()
     fields = await router._extract_route_create(
         _create_request(
-            b'{"door": "api", "agent_name": "triage", "execution_key": "svc", "callback_url": "https://cb.example/x"}'
+            b'{"door": "api", "target_kind": "agent", "target_name": "triage", "execution_key": "svc", "callback_url": "https://cb.example/x"}'
         )
     )
     assert fields["route_name"] == "support"
@@ -241,7 +241,10 @@ async def test_extract_route_create_rejects_a_body_route_name_disagreeing_with_t
     router = _router()
     with pytest.raises(BadRequestError, match="must match"):
         await router._extract_route_create(
-            _create_request(b'{"route_name": "other", "door": "api", "agent_name": "triage", "execution_key": "svc"}')
+            _create_request(
+                b'{"route_name": "other", "door": "api", "target_kind": "agent", '
+                b'"target_name": "triage", "execution_key": "svc"}'
+            )
         )
 
 

@@ -121,7 +121,8 @@ def _route(execution_key: str) -> ConversationRoute:
     return ConversationRoute(
         route_name="line",
         door="channel",
-        agent_name=_AGENT,
+        target_kind="agent",
+        target_name=_AGENT,
         execution_key=execution_key,
         channel="twilio",
         our_identity="+15550001111",

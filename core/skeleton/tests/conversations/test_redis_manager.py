@@ -23,7 +23,8 @@ def _api_route(name: str = "support", **over) -> ConversationRoute:
     fields: dict[str, Any] = {
         "route_name": name,
         "door": "api",
-        "agent_name": "triage",
+        "target_kind": "agent",
+        "target_name": "triage",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         "execution_key_fingerprint": "fp-1",
@@ -37,7 +38,8 @@ def _channel_route(name: str = "line", **over) -> ConversationRoute:
     fields: dict[str, Any] = {
         "route_name": name,
         "door": "channel",
-        "agent_name": "triage",
+        "target_kind": "agent",
+        "target_name": "triage",
         "execution_key": "svc",
         "channel": "twilio",
         "our_identity": "+15550001111",
@@ -52,11 +54,11 @@ async def test_put_creates_then_replaces(monkeypatch):
     manager = _manager(monkeypatch, fake)
 
     assert await manager.put_route(_api_route()) is True  # newly created
-    assert await manager.put_route(_api_route(agent_name="other")) is False  # replace
+    assert await manager.put_route(_api_route(target_kind="agent", target_name="other")) is False  # replace
 
     got = await manager.get_route("support")
     assert got is not None
-    assert got.agent_name == "other"
+    assert got.target_name == "other"
     # The name index and the per-route key stay in lockstep.
     assert fake._sets["conversations:route_names"] == {"support"}
 

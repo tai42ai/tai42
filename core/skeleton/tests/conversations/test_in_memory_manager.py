@@ -19,7 +19,8 @@ def _route() -> ConversationRoute:
     return ConversationRoute(
         route_name="r",
         door="api",
-        agent_name="a",
+        target_kind="agent",
+        target_name="a",
         execution_key="svc",
         callback_url="https://example.com/cb",
         execution_key_fingerprint="fp",

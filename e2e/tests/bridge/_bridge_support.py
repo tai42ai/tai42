@@ -108,13 +108,41 @@ class BridgeHarness:
             f"/api/conversations/{route_name}",
             json={
                 "door": "channel",
-                "agent_name": agent,
+                "target_kind": "agent",
+                "target_name": agent,
                 "execution_key": execution_key,
                 "channel": channel,
                 "our_identity": our_identity,
             },
             expect=expect,
         )
+
+    async def create_tool_channel_route(
+        self,
+        *,
+        route_name: str,
+        tool: str,
+        execution_key: str,
+        channel: str,
+        our_identity: str,
+        payload_expr: str | None = None,
+        reply_expr: str | None = None,
+        token: str | None = None,
+        expect: int = 200,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "door": "channel",
+            "target_kind": "tool",
+            "target_name": tool,
+            "execution_key": execution_key,
+            "channel": channel,
+            "our_identity": our_identity,
+        }
+        if payload_expr is not None:
+            body["payload_expr"] = payload_expr
+        if reply_expr is not None:
+            body["reply_expr"] = reply_expr
+        return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_api_route(
         self,
@@ -130,12 +158,38 @@ class BridgeHarness:
             f"/api/conversations/{route_name}",
             json={
                 "door": "api",
-                "agent_name": agent,
+                "target_kind": "agent",
+                "target_name": agent,
                 "execution_key": execution_key,
                 "callback_url": callback_url,
             },
             expect=expect,
         )
+
+    async def create_tool_api_route(
+        self,
+        *,
+        route_name: str,
+        tool: str,
+        execution_key: str,
+        callback_url: str,
+        payload_expr: str | None = None,
+        reply_expr: str | None = None,
+        token: str | None = None,
+        expect: int = 200,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "door": "api",
+            "target_kind": "tool",
+            "target_name": tool,
+            "execution_key": execution_key,
+            "callback_url": callback_url,
+        }
+        if payload_expr is not None:
+            body["payload_expr"] = payload_expr
+        if reply_expr is not None:
+            body["reply_expr"] = reply_expr
+        return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def get_record(self, route_name: str, message_id: str, *, token: str | None = None, expect: int = 200) -> Any:
         return await self.api(token=token).get(f"/api/conversations/{route_name}/messages/{message_id}", expect=expect)
@@ -279,6 +333,18 @@ async def wait_channel_send_count(fake: Any, text: str, count: int, *, deadline:
     )
     assert len(matches) == count, f"expected exactly {count} sends carrying {text!r}, saw {len(matches)}"
     return matches
+
+
+async def wait_probe_record(bridge: BridgeHarness, key: str, *, deadline: float = 12.0) -> list[dict]:
+    """Wait until an ``e2e_record`` side effect appears under ``key`` and return the decoded
+    entries. A tool turn that RPUSHes this marker has run to completion in the SUT, so the
+    marker is the turn-executed barrier a silent turn (which emits no outbound send) lacks."""
+
+    async def probe() -> list[dict] | None:
+        records = bridge.stack.records(key)
+        return [json.loads(raw) for raw in records] if records else None
+
+    return await wait_for_async(probe, deadline=deadline, message=f"no e2e_record side effect under {key!r} recorded")
 
 
 async def wait_record_status(
