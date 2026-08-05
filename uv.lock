@@ -4846,7 +4846,7 @@ wheels = [
 
 [[package]]
 name = "tai42-accounts-oidc"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "plugins/accounts-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -4878,7 +4878,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -4912,7 +4912,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "0.3.5"
+version = "0.3.6"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -4962,7 +4962,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "0.4.4"
+version = "0.4.5"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5015,7 +5015,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.4.4"
+version = "0.4.5"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5072,7 +5072,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.4.5"
+version = "0.4.6"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5299,7 +5299,7 @@ dev = [
 
 [[package]]
 name = "tai42-config-k8s"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "plugins/config-k8s" }
 dependencies = [
     { name = "pyaml-env" },
@@ -5351,7 +5351,7 @@ dev = [
 
 [[package]]
 name = "tai42-connector-atlassian"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "plugins/connector-atlassian" }
 dependencies = [
     { name = "tai42-contract" },
@@ -5380,7 +5380,7 @@ dev = [
 
 [[package]]
 name = "tai42-connector-google"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "plugins/connector-google" }
 dependencies = [
     { name = "tai42-contract" },
@@ -5579,7 +5579,7 @@ dev = [
 
 [[package]]
 name = "tai42-identity-oidc"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "plugins/identity-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -5611,7 +5611,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-identity-redis"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "plugins/identity-redis" }
 dependencies = [
     { name = "tai42-contract" },
@@ -5827,7 +5827,7 @@ provides-extras = ["llm", "jq", "uvicorn", "anthropic", "mistral", "google", "xa
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "langchain" },
@@ -6014,7 +6014,7 @@ provides-extras = ["toolbox", "files", "dev"]
 
 [[package]]
 name = "tai42-storage-github"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "plugins/storage-github" }
 dependencies = [
     { name = "httpx" },
@@ -6055,7 +6055,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-local"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "plugins/storage-local" }
 dependencies = [
     { name = "aiofiles" },
@@ -6094,7 +6094,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-s3"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
@@ -6137,7 +6137,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "0.3.7"
+version = "0.3.8"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
@@ -6211,7 +6211,7 @@ docs = [
 
 [[package]]
 name = "tai42-tools-stripe"
-version = "0.3.6"
+version = "0.3.7"
 source = { editable = "plugins/tools-stripe" }
 dependencies = [
     { name = "pydantic" },
@@ -6245,7 +6245,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-webhook-verifier-github"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "plugins/webhook-verifier-github" }
 dependencies = [
     { name = "tai42-contract" },
@@ -6274,7 +6274,7 @@ dev = [
 
 [[package]]
 name = "tai42-webhook-verifier-stripe"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "plugins/webhook-verifier-stripe" }
 dependencies = [
     { name = "tai42-contract" },
