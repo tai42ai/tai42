@@ -25,10 +25,10 @@ classifiers = [
 dependencies = [
     # The pure interface contract — the Backend ABC, CallbackSchema, the
     # Manifest model, and the tai42_app handle the plugin registers through.
-    "tai42-contract>=0.3,<0.4",
+    "tai42-contract>=0.4,<0.5",
     # TaiBaseSettings + settings cache, schedule normalization, signature
     # helpers; the jq extra backs the callback condition/expression evaluation.
-    "tai42-kit[jq]>=0.4,<0.5",
+    "tai42-kit[jq]>=0.5,<0.6",
     # The broker SDK: worker runtime, ArqRedis pool, Job status/result API.
     "arq~=0.28.0",
     # Crontab iteration for the Redis-hash scheduler.
