@@ -188,6 +188,41 @@ def _workspace_contract_range() -> str:
     return specifiers.pop()
 
 
+def contract_facet_probe_versions() -> tuple[str, str]:
+    """A contract version INSIDE the workspace contract band and one BELOW its
+    lower bound, both derived from the SAME band the forge stamps onto every
+    fixture (:func:`_workspace_contract_range`).
+
+    The forge stamps each fixture's declared contract range to the workspace band,
+    so a registry ``contract=`` facet probe is window-dependent: the inside probe
+    must land within whatever band the current release window declares (every
+    fixture matches it) and the below probe must fall under its lower bound (no
+    fixture matches). Deriving both from the band tracks the window automatically.
+    Raises loudly if the band exposes no lower bound, or a derived probe falls the
+    wrong side of it."""
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    band = _workspace_contract_range()
+    spec = SpecifierSet(band)
+    lowers = [Version(s.version) for s in spec if s.operator in (">=", ">", "~=", "==")]
+    if not lowers:
+        raise RuntimeError(f"workspace contract band {band!r} has no lower bound to derive facet probes from")
+    lower = max(lowers)
+    inside = f"{lower.major}.{lower.minor}.5"
+    if lower.minor > 0:
+        below = f"{lower.major}.{lower.minor - 1}.5"
+    elif lower.major > 0:
+        below = f"{lower.major - 1}.9.5"
+    else:
+        raise RuntimeError(f"workspace contract band {band!r} lower bound {lower} has nothing below it to probe")
+    if not spec.contains(inside, prereleases=True):
+        raise RuntimeError(f"derived inside probe {inside} is not within the workspace contract band {band!r}")
+    if spec.contains(below, prereleases=True):
+        raise RuntimeError(f"derived below-band probe {below} is within the workspace contract band {band!r}")
+    return inside, below
+
+
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
     """Forge every fixture artifact into ``out_dir``: the five wheels and the two
     delta source tarballs (delta is the github-sourced listing and gets no

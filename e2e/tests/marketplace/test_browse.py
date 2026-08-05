@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from tai42_e2e.marketplace import ALPHA_REF, BETA_REF, GAMMA_REF, MarketplaceService
+from tai42_e2e.marketplace import (
+    ALPHA_REF,
+    BETA_REF,
+    GAMMA_REF,
+    MarketplaceService,
+    contract_facet_probe_versions,
+)
 from tai42_e2e.stack import TaiStack
 
 # The marketplace stack runs no backend worker; skip on non-default backend legs.
@@ -92,11 +98,14 @@ async def test_sort_downloads_returns_complete_set(marketplace_service: Marketpl
 
 async def test_contract_facet(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
-    # Every fixture declares contract ">=0.3,<0.4".
-    inside = _items(await api.get("/api/v1/search?contract=0.3.5"))
+    # The forge stamps every fixture's contract range to the workspace band, so the
+    # facet probes are derived from that same band (inside it → all three; below
+    # its lower bound → none) to stay correct across release-version windows.
+    inside_version, below_version = contract_facet_probe_versions()
+    inside = _items(await api.get(f"/api/v1/search?contract={inside_version}"))
     assert {row["ref"] for row in inside} == {ALPHA_REF, BETA_REF, GAMMA_REF}
 
-    outside = _items(await api.get("/api/v1/search?contract=0.2.5"))
+    outside = _items(await api.get(f"/api/v1/search?contract={below_version}"))
     assert outside == []
 
 
