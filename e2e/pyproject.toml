@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "0.5.0"
+version = "0.6.0"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,9 +27,9 @@ dependencies = [
     # its tai42-contract cap to admit 0.3 — a lower floor lets a pre-0.3 wheel back
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=0.3,<0.4",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.4,<0.5",
-    "tai42-skeleton[toolbox,files]>=0.6,<0.7",
+    "tai42-contract>=0.4,<0.5",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=0.5,<0.6",
+    "tai42-skeleton[toolbox,files]>=0.7,<0.8",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.3,<0.4",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -57,10 +57,10 @@ dependencies = [
     "tai42-webhook-verifier-github>=0.2,<0.3",
     "tai42-webhook-verifier-stripe>=0.2,<0.3",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=0.4,<0.5",
-    "tai42-channel-slack>=0.4,<0.5",
-    "tai42-channel-twilio>=0.3,<0.4",
-    "tai42-channel-whatsapp>=0.3,<0.4",
+    "tai42-channel-telegram>=0.5,<0.6",
+    "tai42-channel-slack>=0.5,<0.6",
+    "tai42-channel-twilio>=0.4,<0.5",
+    "tai42-channel-whatsapp>=0.4,<0.5",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=0.2,<0.3",
     # The shipped OAuth connector plugins the shipped-connectors stack boots.

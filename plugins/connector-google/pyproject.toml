@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract — this plugin's only dependency. It declares a
     # ProviderDescriptor and registers it via the tai42_app handle; it never imports
     # the skeleton or any engine code.
-    "tai42-contract>=0.3,<0.4",
+    "tai42-contract>=0.4,<0.5",
 ]
 
 [project.urls]
