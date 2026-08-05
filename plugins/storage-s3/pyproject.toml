@@ -26,8 +26,7 @@ dependencies = [
     # The pure interface contract — the Storage ABC, ObjectStat, assert_not_root,
     # and the tai42_app handle the backend registers through.
     "tai42-contract>=0.4,<0.5",
-    # PooledClient + TaiBaseSettings + the settings cache registry; floored at the
-    # released kit 0.4 minor so the published wheel resolves against the 0.4 wave.
+    # PooledClient + TaiBaseSettings + the settings cache registry.
     "tai42-kit>=0.5,<0.6",
     # The async S3 driver and its config/exception types (imported directly).
     "aioboto3>=15,<16",

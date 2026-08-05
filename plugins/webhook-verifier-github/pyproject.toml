@@ -24,10 +24,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The pure interface contract this verifier registers through (the global
-    # tai42_app handle and the WebhookVerifier / WebhookVerificationError types).
-    # The HMAC work is pure standard library (hmac / hashlib) — no other tai-*
-    # dependency is needed.
+    # The pure interface contract this verifier registers through — the tai42_app
+    # handle and the WebhookVerifier / WebhookVerificationError types. The HMAC
+    # work is pure standard library (hmac / hashlib); no other tai-* dependency.
     "tai42-contract>=0.4,<0.5",
 ]
 

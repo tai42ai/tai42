@@ -23,8 +23,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The pure interface contract the agents register through (the global
-    # tai42_app handle, the Agent ABC, the StreamEvent taxonomy).
+    # The pure interface contract the agents register through — the tai42_app
+    # handle, the Agent ABC, and the StreamEvent taxonomy.
     "tai42-contract>=0.4,<0.5",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).

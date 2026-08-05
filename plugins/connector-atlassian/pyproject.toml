@@ -23,9 +23,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The pure interface contract — this plugin's only dependency. It imports no
-    # application package: the provider is pure descriptor data registered through
-    # the tai42_app handle.
+    # The pure interface contract — this plugin's only dependency. The provider is
+    # pure descriptor data registered through the tai42_app handle.
     "tai42-contract>=0.4,<0.5",
 ]
 

@@ -23,8 +23,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The pure interface contract this backend registers through (the global
-    # tai42_app handle, the Storage base, the assert_not_root guard, ObjectStat).
+    # The pure interface contract this backend registers through — the tai42_app
+    # handle, the Storage base, the assert_not_root guard, and ObjectStat.
     "tai42-contract>=0.4,<0.5",
     # Leaf helpers: the settings base class and the settings-cache decorator.
     "tai42-kit>=0.5,<0.6",

@@ -23,8 +23,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The pure interface contract — the Backend ABC, CallbackSchema fields, the
-    # Manifest model, and the tai42_app handle the backend registers through.
+    # The pure interface contract the backend registers through — the Backend ABC,
+    # CallbackSchema fields, the Manifest model, and the tai42_app handle.
     "tai42-contract>=0.4,<0.5",
     # TaiBaseSettings + settings cache, pooled Redis clients, schedule
     # normalization, and the signature helpers; [jq] compiles the callback
