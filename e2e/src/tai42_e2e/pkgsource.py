@@ -203,7 +203,14 @@ def build_fixture_wheel(
     return BuiltWheel(project=project, version=version, path=wheel_path, sha256=sha256, plugin_yml=plugin_yml)
 
 
-def build_fixture_source_tarball(source_dir: Path, version: str, out_dir: Path) -> BuiltTarball:
+def build_fixture_source_tarball(
+    source_dir: Path,
+    version: str,
+    out_dir: Path,
+    *,
+    contract_range: str | None = None,
+    requires_dist_range: str | None = None,
+) -> BuiltTarball:
     """Forge a github-tag-shaped source tarball from a fixture source tree.
 
     Copies and version-stamps the tree exactly as the wheel forge does, then
@@ -212,8 +219,12 @@ def build_fixture_source_tarball(source_dir: Path, version: str, out_dir: Path) 
     ``src/<pkg>/`` copy both present and byte-identical. The tarball is a
     realistic github-source artifact for the delta fixture; the version the
     github surface actually serves is the stamped root spec carried on the
-    returned :class:`BuiltTarball`."""
-    tree, plugin_yml = _prepare_stamped_tree(source_dir, version, out_dir)
+    returned :class:`BuiltTarball`. ``contract_range`` / ``requires_dist_range``
+    stamp the declared contract range and the ``tai42-contract`` dependency
+    specifier (see :func:`_prepare_stamped_tree`)."""
+    tree, plugin_yml = _prepare_stamped_tree(
+        source_dir, version, out_dir, contract_range=contract_range, requires_dist_range=requires_dist_range
+    )
     project = _project_name(tree / "pyproject.toml")
     prefix = f"{_normalize_project(project)}-{version}"
     tar_path = out_dir / f"{prefix}.tar.gz"

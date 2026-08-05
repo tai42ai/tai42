@@ -19,6 +19,7 @@ ui/.cache/
 junit.xml
 stack-*/
 tai-e2e-studio-*/
+.tai42-e2e-marketplace-*/
 
 # local env / secrets
 .env

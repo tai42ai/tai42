@@ -18,6 +18,7 @@ which publishes each version synchronously in the seed request.
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import os
 import secrets
 import subprocess
@@ -51,6 +52,33 @@ if TYPE_CHECKING:
 # (the git insteadOf token config rewrites the URL — no token handling here).
 _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 _MARKETPLACE_PIN = "6fb0a97cea603a73091a366291db018c84e2cae1"
+
+
+def _registry_venv_dir() -> Path:
+    """The DEDICATED venv the pinned registry installs into — a per-checkout,
+    per-pin directory under this e2e member (alongside its workspace ``.venv``),
+    built once and reused across modules and sessions.
+
+    Per-checkout, not host-global: a shared system-temp directory lets concurrent
+    runs on separate checkouts race on ``uv venv --clear``, one wiping another's
+    live registry. Keying off this package's own location isolates each checkout.
+
+    The registry must NEVER share the SUT's workspace venv. Its pinned dependency
+    caps (tai42-contract / tai42-kit) are point-in-time: in a release-PR window
+    where the workspace has moved a first-party package past a registry cap, a
+    shared-venv install would DOWNGRADE that workspace package from PyPI and the
+    skeleton would then quarantine its own routers at boot. A separate venv keeps
+    the registry's dependency resolution wholly apart from the SUT's."""
+    return Path(__file__).resolve().parents[2] / f".tai42-e2e-marketplace-{_MARKETPLACE_PIN[:12]}"
+
+
+def _registry_python() -> Path:
+    return _registry_venv_dir() / "bin" / "python"
+
+
+def _registry_bin() -> Path:
+    return _registry_venv_dir() / "bin" / "tai42-marketplace"
+
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"
 # The in-repo fixture-plugin sources (outside ``src`` so uv never installs them,
@@ -128,21 +156,59 @@ class FixtureArtifacts:
     delta_v2: BuiltTarball
 
 
+def _workspace_contract_range() -> str:
+    """The tai42-contract version specifier the running tai42-skeleton declares.
+
+    The fixture plugins import ``tai42_contract`` and install into the skeleton's
+    environment, so their declared contract range must CONTAIN the workspace
+    contract at every release-version window — otherwise a release-PR bump moves
+    the workspace contract past a fixture's static cap and the install can no
+    longer resolve it against the environment's own contract. Mirroring the
+    skeleton's declared range tracks the workspace automatically (the skeleton's
+    cap is the authoritative compat band). Raises loudly if the skeleton declares
+    no tai42-contract specifier, or declares more than one distinct specifier
+    (base + extra-gated with different bands) — there is no single band to mirror."""
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    specifiers: set[str] = set()
+    for raw in importlib.metadata.requires("tai42-skeleton") or []:
+        req = Requirement(raw)
+        if canonicalize_name(req.name) == "tai42-contract":
+            if not req.specifier:
+                raise RuntimeError("tai42-skeleton declares tai42-contract with no version specifier")
+            specifiers.add(str(req.specifier))
+    if not specifiers:
+        raise RuntimeError("tai42-skeleton declares no tai42-contract dependency to mirror in the fixture plugins")
+    if len(specifiers) > 1:
+        raise RuntimeError(
+            "tai42-skeleton declares conflicting tai42-contract specifiers "
+            f"({', '.join(sorted(specifiers))}); no single band to mirror in the fixture plugins"
+        )
+    return specifiers.pop()
+
+
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
     """Forge every fixture artifact into ``out_dir``: the five wheels and the two
     delta source tarballs (delta is the github-sourced listing and gets no
     wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
     ``TAI_E2E_MARKETPLACE_FIXTURES``); each build stamps its version into a copy of
-    the source, never mutating the source tree."""
+    the source, never mutating the source tree.
+
+    Every fixture's declared contract range (and its built ``Requires-Dist``
+    specifier) is stamped to the workspace's own contract band
+    (:func:`_workspace_contract_range`), so the install resolves against the
+    environment's contract at every release-version window."""
     src = _resolve_fixtures_dir(fixtures_dir)
+    contract_range = _workspace_contract_range()
     return FixtureArtifacts(
-        alpha_v1=build_fixture_wheel(src / "alpha", "0.1.0", out_dir),
-        alpha_v2=build_fixture_wheel(src / "alpha", "0.2.0", out_dir),
-        beta_v1=build_fixture_wheel(src / "beta", "0.1.0", out_dir),
-        gamma_v1=build_fixture_wheel(src / "gamma", "0.1.0", out_dir),
-        epsilon_v1=build_fixture_wheel(src / "epsilon", "0.1.0", out_dir),
-        delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir),
-        delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir),
+        alpha_v1=build_fixture_wheel(src / "alpha", "0.1.0", out_dir, contract_range=contract_range),
+        alpha_v2=build_fixture_wheel(src / "alpha", "0.2.0", out_dir, contract_range=contract_range),
+        beta_v1=build_fixture_wheel(src / "beta", "0.1.0", out_dir, contract_range=contract_range),
+        gamma_v1=build_fixture_wheel(src / "gamma", "0.1.0", out_dir, contract_range=contract_range),
+        epsilon_v1=build_fixture_wheel(src / "epsilon", "0.1.0", out_dir, contract_range=contract_range),
+        delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
+        delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),
     )
 
 
@@ -258,7 +324,7 @@ class MarketplaceService:
         on the local handlers; a real ``marketplace-pypi``/``marketplace-github`` seam
         drops its fixture override so that source resolves from the live vendor
         (:func:`_marketplace_source_env`)."""
-        venv_bin = str(Path(sys.executable).parent)
+        venv_bin = str(_registry_venv_dir() / "bin")
         return {
             "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
             "HOME": os.environ.get("HOME", str(self.root)),
@@ -272,32 +338,49 @@ class MarketplaceService:
     # ---- lifecycle -------------------------------------------------------
 
     def _bin(self) -> str:
-        """The ``tai42-marketplace`` console script from the active venv.
+        """The ``tai42-marketplace`` console script from the registry's DEDICATED
+        venv (never the SUT's workspace venv — see :func:`_registry_venv_dir`).
 
-        The registry is absent from the monorepo lock, so the base venv carries
-        no console script: install the pinned registry out-of-band on first use,
-        which lands the script next to the interpreter. Idempotent — once
-        installed the candidate short-circuits."""
-        candidate = Path(sys.executable).parent / "tai42-marketplace"
-        if not candidate.exists():
+        The registry is absent from the monorepo lock, so its venv carries no
+        console script until installed: install the pinned registry into that
+        venv on first use. Idempotent — reuse only when the console script
+        exists AND the venv's base interpreter symlink is still alive (an
+        upgraded/removed base leaves a dead shebang that fails at spawn); else
+        reinstall."""
+        candidate = _registry_bin()
+        if not candidate.exists() or not _registry_python().resolve().exists():
             self._install_marketplace()
         return str(candidate)
 
     @staticmethod
     def _install_marketplace() -> None:
-        """``uv pip install`` the pinned tai42-marketplace registry into the
-        active venv (the git insteadOf token config rewrites the URL — no token
+        """Create the dedicated registry venv and ``uv pip install`` the pinned
+        tai42-marketplace into it — apart from the SUT's workspace venv, so the
+        registry's own dependency caps never mutate the workspace's first-party
+        packages (the git insteadOf token config rewrites the URL — no token
         handling here). Raises loudly on a non-zero exit with the captured output."""
+        venv = _registry_venv_dir()
+        mk = subprocess.run(
+            ["uv", "venv", "--clear", "--python", sys.executable, str(venv)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if mk.returncode != 0:
+            raise RuntimeError(
+                f"creating the registry venv at {venv} failed (exit {mk.returncode}):\n{mk.stdout}\n{mk.stderr}"
+            )
         spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_MARKETPLACE_PIN}"
         proc = subprocess.run(
-            ["uv", "pip", "install", "--python", sys.executable, spec],
+            ["uv", "pip", "install", "--python", str(_registry_python()), spec],
             capture_output=True,
             text=True,
             check=False,
         )
         if proc.returncode != 0:
             raise RuntimeError(
-                f"installing {spec} into the active venv failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+                f"installing {spec} into the registry venv {venv} failed "
+                f"(exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
             )
 
     def boot(self) -> None:
@@ -533,8 +616,6 @@ def assert_zeta_ranges_bracket_running_contract() -> None:
     contract version outside the bracket would assert the wrong compatibility
     verdicts. ``prereleases=True`` on both sides, matching how the compat checks
     treat a dev-versioned editable contract checkout."""
-    import importlib.metadata
-
     from packaging.specifiers import SpecifierSet
 
     running = importlib.metadata.version("tai42-contract")
