@@ -24,6 +24,13 @@ _SLUG = re.compile(r"^[a-z0-9-]+$")
 # The default OIDC scope set (a tuple so no config shares a mutable default).
 _DEFAULT_SCOPES = ("openid", "email", "profile")
 
+# The authorize-request parameters the login flow itself owns and builds. An
+# operator's extra_authorize_params may not name any of these — a collision would
+# silently steer the flow, so it is a config error raised at parse.
+_RESERVED_AUTHORIZE_PARAMS = frozenset(
+    {"response_type", "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method", "nonce"}
+)
+
 
 class ProviderDisplay(BaseModel):
     """Button presentation for one provider.
@@ -51,6 +58,10 @@ class OidcProviderConfig(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: list(_DEFAULT_SCOPES))
     claim: str = Field(default="sub", description="The id_token/userinfo claim mapped into the user id.")
     display: ProviderDisplay = Field(default_factory=ProviderDisplay)
+    extra_authorize_params: dict[str, str] = Field(
+        default_factory=dict,
+        description="Static params merged into the authorize redirect; keys may not collide with the reserved set.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -64,6 +75,17 @@ class OidcProviderConfig(BaseModel):
     def _known_preset(cls, value: str | None) -> str | None:
         if value is not None and value not in PRESET_NAMES:
             raise ValueError(f"unknown preset {value!r}; expected one of {sorted(PRESET_NAMES)}")
+        return value
+
+    @field_validator("extra_authorize_params")
+    @classmethod
+    def _no_reserved_authorize_params(cls, value: dict[str, str]) -> dict[str, str]:
+        for key in value:
+            if key in _RESERVED_AUTHORIZE_PARAMS:
+                raise ValueError(
+                    f"extra_authorize_params key {key!r} collides with the flow-owned authorize parameter set "
+                    f"{sorted(_RESERVED_AUTHORIZE_PARAMS)}"
+                )
         return value
 
 

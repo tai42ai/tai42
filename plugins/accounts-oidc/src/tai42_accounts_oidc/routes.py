@@ -153,6 +153,14 @@ async def oidc_authorize(request: Request) -> Response:
     if config.kind == "oidc":
         params["nonce"] = nonce
 
+    # Merge operator-configured static params (e.g. an org pin) from boot config.
+    # The settings validator rejects any key in the flow-owned reserved set, so a
+    # merge never overrides a param built above — enforce that invariant loudly.
+    for key, value in config.extra_authorize_params.items():
+        if key in params:
+            raise RuntimeError(f"extra_authorize_params key {key!r} collides with a flow-owned authorize param")
+        params[key] = value
+
     if config.kind == "github":
         authorize_endpoint = GITHUB_AUTHORIZE_URL
     else:

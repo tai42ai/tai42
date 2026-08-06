@@ -59,6 +59,9 @@ class ResolvedProvider:
     icon: str | None
     # The OIDC issuer (discovery base). ``None`` exactly when ``kind == "github"``.
     issuer: str | None
+    # Static authorize-redirect params from operator config; always empty for
+    # github (plain OAuth2 exposes no such surface).
+    extra_authorize_params: dict[str, str]
 
 
 def resolve_provider(config: OidcProviderConfig) -> ResolvedProvider:
@@ -73,6 +76,11 @@ def resolve_provider(config: OidcProviderConfig) -> ResolvedProvider:
 
 
 def _resolve_github(config: OidcProviderConfig) -> ResolvedProvider:
+    if config.extra_authorize_params:
+        raise ValueError(
+            f"provider {config.name!r} uses the github preset (plain OAuth2), which has no "
+            "extra_authorize_params surface — remove it"
+        )
     claim = _GITHUB_DEFAULT_CLAIM if config.claim == "sub" else config.claim
     return ResolvedProvider(
         name=config.name,
@@ -84,6 +92,7 @@ def _resolve_github(config: OidcProviderConfig) -> ResolvedProvider:
         label=_label(config, _GITHUB_LABEL),
         icon=config.display.icon,
         issuer=None,
+        extra_authorize_params={},
     )
 
 
@@ -109,6 +118,7 @@ def _resolve_oidc(config: OidcProviderConfig) -> ResolvedProvider:
         label=_label(config, preset_label),
         icon=config.display.icon,
         issuer=issuer,
+        extra_authorize_params=dict(config.extra_authorize_params),
     )
 
 

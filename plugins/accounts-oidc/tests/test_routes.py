@@ -130,6 +130,17 @@ async def test_authorize_binding_cookie_not_secure_on_loopback_http(make_provide
     assert _flow_cookie(response) == record["binding"]
 
 
+async def test_authorize_merges_extra_params(make_provider: Any, oidc_server: Any) -> None:
+    oidc_server.configure_oidc()
+    _, _fake = make_provider([_corp(oidc_server, extra_authorize_params={"organization": "org_1"})])
+    response = await _authorize("corp")
+    query = _location_query(response)
+    # The operator's extra param rides the redirect alongside the flow-owned params.
+    assert query["organization"] == ["org_1"]
+    assert query["response_type"] == ["code"]
+    assert query["state"]
+
+
 # -- full flow ------------------------------------------------------------------
 
 

@@ -58,6 +58,22 @@ def test_per_tenant_preset_without_issuer_rejected() -> None:
         _settings(providers=[_provider(name="corp", preset="okta")])
 
 
+def test_extra_authorize_params_reserved_key_rejected() -> None:
+    with pytest.raises(ValidationError, match="collides with the flow-owned authorize parameter set"):
+        _settings(
+            providers=[_provider(name="corp", issuer="https://corp.example", extra_authorize_params={"state": "x"})]
+        )
+
+
+def test_extra_authorize_params_non_reserved_key_accepted() -> None:
+    settings = _settings(
+        providers=[
+            _provider(name="corp", issuer="https://corp.example", extra_authorize_params={"organization": "org_1"})
+        ]
+    )
+    assert settings.providers[0].extra_authorize_params == {"organization": "org_1"}
+
+
 def test_public_base_url_https_required_non_loopback() -> None:
     with pytest.raises(ValidationError, match="must be https"):
         _settings(public_base_url="http://studio.example.com")

@@ -69,6 +69,24 @@ def test_github_respects_explicit_claim() -> None:
     assert resolved.claim == "login"
 
 
+def test_extra_authorize_params_copied_onto_oidc() -> None:
+    config = _config(name="corp", issuer="https://corp.example", extra_authorize_params={"organization": "org_1"})
+    resolved = resolve_provider(config)
+    assert resolved.extra_authorize_params == {"organization": "org_1"}
+    # A copy, not the config's own mapping (the frozen resolved shape owns its map).
+    assert resolved.extra_authorize_params is not config.extra_authorize_params
+
+
+def test_github_rejects_extra_authorize_params() -> None:
+    with pytest.raises(ValueError, match="no extra_authorize_params surface"):
+        resolve_provider(_config(name="github", preset="github", extra_authorize_params={"organization": "org_1"}))
+
+
+def test_github_empty_extra_authorize_params_ok() -> None:
+    resolved = resolve_provider(_config(name="github", preset="github"))
+    assert resolved.extra_authorize_params == {}
+
+
 def test_icon_passes_through() -> None:
     resolved = resolve_provider(_config(name="google", preset="google", display={"label": "G", "icon": "<svg/>"}))
     assert resolved.icon == "<svg/>"
