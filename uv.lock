@@ -4846,7 +4846,7 @@ wheels = [
 
 [[package]]
 name = "tai42-accounts-oidc"
-version = "0.2.4"
+version = "0.3.0"
 source = { editable = "plugins/accounts-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -4878,7 +4878,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "0.4.3"
+version = "0.5.0"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -5409,7 +5409,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "0.4.0"
+version = "0.4.1"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5460,7 +5460,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5643,7 +5643,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5872,7 +5872,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },

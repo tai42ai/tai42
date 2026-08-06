@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "0.6.0"
+version = "0.7.0"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,8 +41,8 @@ dependencies = [
     # Postgres-backed accounts provider (password login, sessions, invites), the
     # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
     # provider (issuer-minted machine JWTs).
-    "tai42-accounts-postgres>=0.4,<0.5",
-    "tai42-accounts-oidc>=0.2,<0.3",
+    "tai42-accounts-postgres>=0.5,<0.6",
+    "tai42-accounts-oidc>=0.3,<0.4",
     "tai42-identity-oidc>=0.2,<0.3",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
     "tai42-backend-arq>=0.4,<0.5",
