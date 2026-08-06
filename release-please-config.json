@@ -6,16 +6,19 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
+      "release-as": "0.4.1",
       "skip-changelog": true
     },
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
+      "release-as": "0.5.1",
       "skip-changelog": true
     },
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
+      "release-as": "0.7.1",
       "skip-changelog": true
     },
     "plugins/accounts-oidc": {

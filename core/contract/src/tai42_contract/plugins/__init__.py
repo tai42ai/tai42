@@ -70,6 +70,15 @@ LICENSE_RE = re.compile(r"^[A-Za-z0-9.+-]+$")
 # alternative icon form is an ``https://`` URL, matched separately.
 ICON_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
+# A packaged migrations directory: a package-relative POSIX path whose segments
+# are filename-safe characters joined by single forward slashes — no leading
+# ``/`` (absolute), no trailing slash, no backslash or drive, and (checked in
+# the validator) no ``..`` segment. The contract validates only this shape;
+# whether the directory exists in the installed package is a runner-discovery
+# concern (``importlib.resources``), never a contract concern — ``PluginSpec``
+# is also hydrated from stored DB rows and can touch no filesystem.
+MIGRATIONS_DIR_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
 # Longest single-line UI title accepted for ``display_name`` — a listing card's
 # title stays bounded.
 DISPLAY_NAME_MAX_LEN = 80
@@ -370,6 +379,12 @@ class PluginSpec(BaseModel):
     ingest validation both pin that); ``contract`` is the tai42-contract
     compatibility range as a PEP 440 specifier set. ``display_name`` and
     ``icon`` are optional marketplace display metadata.
+
+    ``migrations`` is an OPT-IN, package-relative directory holding the plugin's
+    ordered SQL schema chain — absent means the plugin owns no tables and is not
+    a migrations plugin (most plugins). The contract validates only the path's
+    SHAPE; the directory's existence in the installed package is enforced at
+    runner-discovery time, not here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -390,6 +405,7 @@ class PluginSpec(BaseModel):
     tags: list[str] = Field(default_factory=list)
     permissions: PluginPermissions = Field(default_factory=PluginPermissions)
     provides: list[PluginItem]
+    migrations: str | None = None
 
     @property
     def ref(self) -> str:
@@ -507,6 +523,20 @@ class PluginSpec(BaseModel):
             if key in seen:
                 raise ValueError(f"provides has duplicate item {item.kind.value}/{item.name}")
             seen.add(key)
+        return value
+
+    @field_validator("migrations")
+    @classmethod
+    def _check_migrations(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not MIGRATIONS_DIR_RE.fullmatch(value):
+            raise ValueError(
+                f"migrations {value!r} must be a package-relative POSIX directory path "
+                "(no leading '/', no trailing '/', no drive, no backslash)"
+            )
+        if ".." in value.split("/"):
+            raise ValueError(f"migrations path {value!r} must not contain a '..' segment")
         return value
 
 

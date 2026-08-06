@@ -18,12 +18,11 @@ from tai42_contract.accounts import (
     LoginMethod,
     register_accounts_provider,
 )
-from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_accounts_postgres import service
-from tai42_accounts_postgres.db import declared_tables
+from tai42_accounts_postgres.db import assert_accounts_schema_applied
 from tai42_accounts_postgres.settings import accounts_settings
 
 if TYPE_CHECKING:
@@ -38,10 +37,6 @@ _TOUCH_THROTTLE_SECONDS = 60
 _OPEN_WINDOW_WARNING = (
     "first-owner bootstrap is OPEN — anyone who can reach /api/login/bootstrap can seize the admin "
     "owner; unset TAI_ACCOUNTS_BOOTSTRAP_OPEN to gate it"
-)
-_SCHEMA_MISSING = (
-    "tai42-accounts-postgres schema missing: run 'python -m tai42_accounts_postgres.db apply' "
-    "against the configured database"
 )
 
 
@@ -154,9 +149,9 @@ class PostgresAccountsProvider(AccountsProvider):
         return await service.sessions_store().delete(service.token_hash(token))
 
     async def healthcheck(self) -> None:
-        # Runs once at boot: schema guard, a trivial session query, and the
-        # once-per-deployment bootstrap-token fix.
-        await self._assert_schema()
+        # Runs once at boot: the schema-chain gate and the once-per-deployment
+        # bootstrap-token fix.
+        await assert_accounts_schema_applied()
 
         settings = accounts_settings()
         if settings.bootstrap_open:
@@ -165,24 +160,6 @@ class PostgresAccountsProvider(AccountsProvider):
                 logger.warning(_OPEN_WINDOW_WARNING)
         else:
             await service.ensure_bootstrap_token(self.settings.redis)
-
-    async def _assert_schema(self) -> None:
-        expected = declared_tables()
-        async with (
-            client_ctx(PostgresClient, accounts_settings().pg) as pool,
-            pool.connection() as conn,
-            conn.cursor() as cur,
-        ):
-            await cur.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name = ANY(%s)",
-                (expected,),
-            )
-            present = {row[0] for row in await cur.fetchall()}
-            if any(table not in present for table in expected):
-                raise RuntimeError(_SCHEMA_MISSING)
-            # Trivial read: fail loudly if the sessions table is unreadable.
-            await cur.execute("SELECT 1 FROM accounts_sessions LIMIT 0")
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
         # Both backing stores: the plugin's own Postgres and the injected Redis.

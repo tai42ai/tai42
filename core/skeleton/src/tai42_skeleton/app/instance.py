@@ -18,6 +18,7 @@ from tai42_skeleton.access_control.verifier import reset_registered_reserved_pat
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 from tai42_skeleton.connectors.settings import connectors_store_configured
+from tai42_skeleton.db import assert_skeleton_schema_applied
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
 from tai42_skeleton.versioning import versioned_store_configured
 
@@ -182,6 +183,12 @@ def build_app() -> TaiMCP:
         settings = access_control_settings()
         auth_adapter = AuthAdapter(settings) if settings.enable else None
         app = TaiMCP(name="Tai", auth=auth_adapter, lifespan=lifespan)
+        # The schema gate runs FIRST, before any handler that touches a store: a
+        # database with pending migrations refuses to boot with the ``tai db
+        # migrate`` fix named, rather than failing deeper on a missing table. It
+        # fires only for a CONFIGURED schema-owning feature, so an all-off
+        # deployment is a no-op.
+        app.lifecycle.on_startup(assert_skeleton_schema_applied)
         if settings.enable:
             # The configured identity providers probe their OWN record stores once at
             # startup, so a deployment against a backend a provider cannot use fails

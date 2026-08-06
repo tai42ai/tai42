@@ -1,25 +1,64 @@
-"""Harness-side Postgres: a DDL-applied template database created once per
-session, then a fast ``CREATE DATABASE ... TEMPLATE`` clone per stack.
+"""Harness-side Postgres: a migrated template database created once per session,
+then a fast ``CREATE DATABASE ... TEMPLATE`` clone per stack.
 
-The canonical schema is the skeleton's own idempotent DDL — imported from
-``tai42_skeleton.sql.schema.load_ddl`` so the harness never carries a second copy
-that could drift. The accounts plugin owns its own tables and ships them the same
-way, so its ``tai42_accounts_postgres.db.load_ddl`` is applied right after the
-skeleton's, into the same template. (These are the only plugin/skeleton imports
-the harness makes: it reads the shipped DDL text, it does not run SUT request
-logic.) Neither applies DDL at startup, so the harness owns applying it, and the
-per-stack clones inherit both schemas."""
+The template schema is built by running the SAME migration chains the product
+runs — the skeleton chain plus the accounts-postgres plugin chain — through the
+kit migration runner (:func:`tai42_kit.db.apply_migrations`), against the template
+database. So the template carries the schema a from-scratch ``tai db migrate``
+applies, and the per-stack clones inherit it (the fresh-install leg verifies a
+replay against this template by ``public`` table-NAME set, not a byte-for-byte
+schema diff). The harness is synchronous
+psycopg while the runner is async, so ``ensure_template`` drives it through
+``asyncio.run``; the chains are discovered exactly as production discovers them
+(``skeleton_entry`` / ``plugin_migration_entry``), differing only in the explicit
+connection-settings pointing at the template DB rather than an env-prefix
+resolution."""
 
 from __future__ import annotations
 
-from typing import LiteralString, cast
+import asyncio
+import importlib.resources
 
 import psycopg
 from psycopg import sql
+from pydantic import SecretStr
+from tai42_kit.clients import PostgresConnectionSettings
+from tai42_kit.db import MigrationEntry, apply_migrations
+from tai42_kit.plugins import parse_plugin_spec
+from tai42_skeleton.db.discovery import plugin_migration_entry, skeleton_entry
 
 from tai42_e2e.settings import HarnessSettings
 
 _TEMPLATE_DB = "tai42_e2e_template"
+
+# The accounts plugin's distribution name, used only to load its packaged
+# ``tai-plugin.yml`` so the runner discovers its chain the way production does.
+_ACCOUNTS_IMPORT_PACKAGE = "tai42_accounts_postgres"
+
+
+def _accounts_plugin_entry(settings: PostgresConnectionSettings) -> MigrationEntry:
+    """The accounts-postgres plugin chain as a runner entry, resolved from its
+    packaged ``tai-plugin.yml`` exactly as production discovery does. The plugin
+    declares a ``migrations`` chain, so the entry is never ``None``; a missing
+    declaration is a loud error rather than a silently skipped schema."""
+    spec_path = importlib.resources.files(_ACCOUNTS_IMPORT_PACKAGE).joinpath("tai-plugin.yml")
+    spec = parse_plugin_spec(spec_path.read_bytes(), source=str(spec_path))
+    entry = plugin_migration_entry(spec, settings)
+    if entry is None:
+        raise RuntimeError(
+            "tai42-accounts-postgres declares no 'migrations' chain in its tai-plugin.yml; "
+            "the e2e template cannot be built from the product chains"
+        )
+    return entry
+
+
+def product_migration_entries(settings: PostgresConnectionSettings) -> list[MigrationEntry]:
+    """The migration chains the product applies to a platform database: the
+    skeleton chain plus the accounts-postgres plugin chain, both under
+    ``settings``. Building the template DB and the fresh-install replay leg run
+    this exact set, so the harness template matches a from-scratch ``tai db
+    migrate``."""
+    return [skeleton_entry(settings), _accounts_plugin_entry(settings)]
 
 
 class PostgresAdmin:
@@ -41,6 +80,18 @@ class PostgresAdmin:
         )
         return conn
 
+    def _connection_settings(self, dbname: str) -> PostgresConnectionSettings:
+        """DDL-privileged connection settings for the migration runner, pointing at
+        ``dbname`` on the shared server — explicit per-entry settings, never an
+        env-prefix resolution."""
+        return PostgresConnectionSettings(
+            pg_host=self._settings.pg_host,
+            pg_port=self._settings.pg_port,
+            pg_db=dbname,
+            pg_user=self._settings.pg_user,
+            pg_password=SecretStr(self._settings.pg_password),
+        )
+
     def check_reachable(self) -> None:
         """Connect and round-trip ``SELECT 1`` so an unreachable Postgres fails
         loudly at session start with the compose hint, never mid-suite."""
@@ -50,33 +101,15 @@ class PostgresAdmin:
                 raise RuntimeError("Postgres SELECT 1 did not return 1")
 
     def ensure_template(self) -> None:
-        """Create the template DB (dropping any stale one) and apply the skeleton
-        and accounts-plugin DDL into it exactly once per session."""
-        from tai42_accounts_postgres.db import load_ddl as load_accounts_ddl
-        from tai42_skeleton.sql.schema import load_ddl as load_skeleton_ddl
-
+        """Create the template DB (dropping any stale one) and build its schema
+        once per session by running the product migration chains into it."""
         with self._admin_conn() as conn, conn.cursor() as cur:
             self._drop_db(cur, _TEMPLATE_DB)
             cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(_TEMPLATE_DB)))
-        skeleton_ddl = load_skeleton_ddl()
-        accounts_ddl = load_accounts_ddl()
-        with psycopg.connect(
-            host=self._settings.pg_host,
-            port=self._settings.pg_port,
-            user=self._settings.pg_user,
-            password=self._settings.pg_password,
-            dbname=_TEMPLATE_DB,
-        ) as conn:
-            with conn.cursor() as cur:
-                # Both are trusted, shipped schema text (the skeleton's own tables
-                # and the accounts plugin's own ``accounts_*`` tables); the plugin
-                # DDL is idempotent, so applying it unconditionally is safe.
-                cur.execute(cast(LiteralString, skeleton_ddl))
-                cur.execute(cast(LiteralString, accounts_ddl))
-            conn.commit()
+        asyncio.run(apply_migrations(product_migration_entries(self._connection_settings(_TEMPLATE_DB))))
 
     def create_stack_db(self, dbname: str) -> None:
-        """Clone the template into a per-stack database (DDL-free, fast)."""
+        """Clone the template into a per-stack database (migration-free, fast)."""
         with self._admin_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(sql.Identifier(dbname), sql.Identifier(_TEMPLATE_DB))
@@ -85,7 +118,7 @@ class PostgresAdmin:
     def create_empty_db(self, dbname: str) -> None:
         """Create a fresh, empty per-service database with NO template — for a
         service that OWNS its own schema and applies its own DDL (unlike the
-        skeleton-DDL template clones). The marketplace registry's init DDL runs
+        migrated-template clones). The marketplace registry's init DDL runs
         ``CREATE EXTENSION pg_trgm``, which needs an owned database rather than a
         clone of the shared template."""
         with self._admin_conn() as conn, conn.cursor() as cur:

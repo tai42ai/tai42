@@ -6,6 +6,7 @@ import re
 
 import pytest
 from tai42_contract.connectors.errors import OperatorMisconfiguredError
+from tai42_kit.db import discover_migrations
 
 from tai42_skeleton.connectors.providers import registry
 from tai42_skeleton.connectors.providers.registry import (
@@ -14,9 +15,16 @@ from tai42_skeleton.connectors.providers.registry import (
     list_providers,
     register_connector,
 )
-from tai42_skeleton.sql.schema import load_ddl
+from tai42_skeleton.db import skeleton_migrations_dir
 
 from .conftest import make_oauth_descriptor
+
+
+def load_ddl() -> str:
+    """The skeleton baseline migration's SQL — the single home of the seeded
+    ``connector_category`` rows this test cross-checks against the register-time
+    allow-list."""
+    return discover_migrations(skeleton_migrations_dir())[0].sql
 
 
 @pytest.fixture(autouse=True)

@@ -64,10 +64,10 @@ where = ["src"]
 include = ["tai42_accounts_postgres*"]
 
 [tool.setuptools.package-data]
-# The packaged DDL (loaded by db.py at apply time), the built Studio bundle
-# (served by the host), and the plugin spec travel in the wheel alongside the
-# typing marker.
-tai42_accounts_postgres = ["py.typed", "tai-plugin.yml", "sql/*.sql", "studio/*"]
+# The packaged migration chain (discovered and applied by the shared runner), the
+# built Studio bundle (served by the host), and the plugin spec travel in the
+# wheel alongside the typing marker.
+tai42_accounts_postgres = ["py.typed", "tai-plugin.yml", "migrations/*.sql", "studio/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

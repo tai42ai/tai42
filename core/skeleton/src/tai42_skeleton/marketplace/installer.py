@@ -92,9 +92,11 @@ from tai42_contract.app import tai42_app
 from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpec
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import apply_migrations
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.config.service import ApplyResult, ConfigService
+from tai42_skeleton.db import plugin_migration_entry, schema_settings
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.compat import running_contract_version, update_targets
 from tai42_skeleton.marketplace.errors import (
@@ -340,6 +342,33 @@ class Installer:
                 return await self._pip_runner(install_args(package, version, source, verified, prefix=self._prefix))
         return await self._pip_runner(install_args(package, version, source, prefix=self._prefix))
 
+    async def _run_plugin_migrations(self, spec: PluginSpec) -> None:
+        """Apply the installed/upgraded plugin's schema migrations, when it declares
+        a chain.
+
+        A plugin with no ``migrations`` field owns no tables and is skipped — the
+        feature is opt-in. The chain runs under the DDL-privileged migrator identity
+        (the ``TAI_DB_*`` namespace ``tai db migrate`` uses), on a migration advisory
+        lock DISTINCT from the marketplace lock this operation already holds, so the
+        nested lock can never self-deadlock. Called AFTER the package lands and
+        BEFORE the manifest patch, so a failure aborts the operation with the
+        manifest untouched; applied files roll forward, so a re-run applies only the
+        remainder.
+
+        The wheel landed moments ago, so the import machinery is refreshed first —
+        both the distribution→import-package resolution and the packaged migrations
+        directory read must see the freshly installed files in this running process.
+        """
+        if spec.migrations is None:
+            return
+        importlib.invalidate_caches()
+        entry = plugin_migration_entry(spec, schema_settings())
+        if entry is None:
+            return
+        applied = await apply_migrations([entry])
+        for item in applied:
+            logger.info("marketplace: applied migration %s %04d_%s", item.component, item.version, item.name)
+
     async def _remove_package(self, package: str) -> bool:
         """Remove ``package``'s own distribution and report whether files were removed.
 
@@ -433,6 +462,16 @@ class Installer:
         pip_output = await self._pip_install(
             spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
         )
+
+        # Step 3.5 — run the plugin's schema migrations, when it declares a chain.
+        # The package has landed but the manifest is not yet patched, so the plugin
+        # is inert: a migration failure aborts the install with the manifest
+        # untouched (no half-active plugin), unwinding the just-installed package.
+        try:
+            await self._run_plugin_migrations(spec)
+        except Exception as migration_error:
+            await self._unwind_install(migration_error, package=spec.package, saved_manifest=None)
+            raise
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False
@@ -654,6 +693,22 @@ class Installer:
             pip_output = await self._pip_install(
                 new_spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
             )
+
+        # Run the new version's schema migrations before the manifest patch, the
+        # same ordering install uses: the new wheel has landed but is not yet
+        # active, so a migration failure unwinds to the OLD pin with the manifest
+        # untouched, never a half-migrated active plugin.
+        try:
+            await self._run_plugin_migrations(new_spec)
+        except Exception as migration_error:
+            await self._unwind_update(
+                migration_error,
+                old_package=old_spec.package,
+                new_package=new_spec.package,
+                row=row,
+                saved_manifest=None,
+            )
+            raise
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False

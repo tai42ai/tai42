@@ -142,7 +142,7 @@ where = ["src"]
 include = ["tai42_skeleton*"]
 
 [tool.setuptools.package-data]
-tai42_skeleton = ["py.typed", "data/*.yml", "sql/resources/*.sql"]
+tai42_skeleton = ["py.typed", "data/*.yml", "sql/migrations/*.sql"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

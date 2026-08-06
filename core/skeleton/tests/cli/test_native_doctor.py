@@ -11,14 +11,15 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 
+import psycopg
 import pytest
 from click.testing import CliRunner
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import doctor
-from tai42_skeleton.cli.native.db import SchemaAdminSettings
 from tai42_skeleton.cli.native.doctor import Check
+from tai42_skeleton.db import SchemaAdminSettings
 
 
 def test_redact_url_masks_password() -> None:
@@ -193,34 +194,76 @@ def test_probe_redis_clean_on_unconfigured(monkeypatch: pytest.MonkeyPatch) -> N
     assert "is not configured" in check.detail
 
 
-def test_probe_schema_all_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.cli.native import doctor as doctor_mod
+def _component_status(component: str, *, pending: int, mismatch: int):
+    from tai42_kit.db import ChecksumMismatch, ComponentStatus, MigrationScript
 
-    expected = doctor_mod.expected_tables()
-    rows = [(table,) for table in expected]
-    monkeypatch.setattr(doctor, "client_ctx", _yielding(_FakePool(_FakeConn(rows))))
+    scripts = tuple(
+        MigrationScript(version=100 + i, name="x", filename=f"{100 + i:04d}_x.sql", checksum="c", sql="")
+        for i in range(pending)
+    )
+    mismatches = tuple(ChecksumMismatch(component, 1, "baseline", "old", "new") for _ in range(mismatch))
+    return ComponentStatus(component=component, applied_versions=(1,), pending=scripts, mismatches=mismatches)
+
+
+def test_probe_schema_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _entries(settings: object) -> list:
+        return []
+
+    async def _status(entries: object) -> list:
+        return [_component_status("skeleton", pending=0, mismatch=0)]
+
+    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._OK
-    assert str(len(expected)) in check.detail
+    assert "up to date" in check.detail
 
 
-def test_probe_schema_reports_missing_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.cli.native import doctor as doctor_mod
+def test_probe_schema_out_of_date_names_migrate(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _entries(settings: object) -> list:
+        return []
 
-    expected = doctor_mod.expected_tables()
-    # Report every table but the first as present, so the first is flagged missing.
-    rows = [(table,) for table in expected[1:]]
-    monkeypatch.setattr(doctor, "client_ctx", _yielding(_FakePool(_FakeConn(rows))))
+    async def _status(entries: object) -> list:
+        return [_component_status("skeleton", pending=2, mismatch=0)]
+
+    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "migration_status", _status)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL
-    assert "missing tables" in check.detail
-    assert expected[0] in check.detail
+    assert "tai db migrate" in check.detail
+    assert "skeleton" in check.detail
 
 
 def test_probe_schema_connection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(doctor, "client_ctx", _refusing())
+    async def _entries(settings: object) -> list:
+        return []
+
+    async def _boom(entries: object) -> list:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "migration_status", _boom)
     check = asyncio.run(doctor._probe_schema(_TARGET))
     assert check.status == doctor._FAIL
+    assert "cannot inspect schema" in check.detail
+
+
+def test_probe_schema_bad_chain_is_fail_not_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed installed-plugin chain surfaces as a kit MigrationError from
+    # discovery; the probe must render a FAIL naming ``tai db migrate``, not crash.
+    from tai42_kit.db import MigrationDiscoveryError
+
+    async def _entries(settings: object) -> list:
+        raise MigrationDiscoveryError("migration file 'oops.sql' does not match the required form")
+
+    async def _status(entries: object) -> list:  # pragma: no cover - discovery fails first
+        raise AssertionError("status must not be reached when discovery fails")
+
+    monkeypatch.setattr(doctor, "all_migration_entries", _entries)
+    monkeypatch.setattr(doctor, "migration_status", _status)
+    check = asyncio.run(doctor._probe_schema(_TARGET))
+    assert check.status == doctor._FAIL
+    assert "tai db migrate" in check.detail
     assert "cannot inspect schema" in check.detail
 
 

@@ -368,6 +368,49 @@ def test_provides_rejects_duplicate_router_items():
         PluginSpec(**_spec_kwargs(provides=[router_item, dict(router_item)]))
 
 
+def test_migrations_is_optional_and_defaults_to_none():
+    from tai42_contract.plugins import PluginSpec
+
+    # A plugin that owns no tables never declares a chain: the field is absent
+    # (base kwargs omit it) and also accepts an explicit None.
+    assert PluginSpec(**_spec_kwargs()).migrations is None
+    assert PluginSpec(**_spec_kwargs(migrations=None)).migrations is None
+
+
+@pytest.mark.parametrize("value", ["migrations", "db/migrations", "sql/schema.d"])
+def test_migrations_accepts_package_relative_dir(value: str):
+    from tai42_contract.plugins import PluginSpec
+
+    assert PluginSpec(**_spec_kwargs(migrations=value)).migrations == value
+
+
+def test_migrations_rejects_non_relative_or_unsafe_paths():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    # Format-only shape guard: absolute, trailing-slash, backslash/drive, and
+    # empty values are rejected loudly (never silently normalized).
+    for bad in ("/abs/migrations", "migrations/", "db\\migrations", "c:/migrations", ""):
+        with pytest.raises(ValidationError, match="package-relative POSIX directory path"):
+            PluginSpec(**_spec_kwargs(migrations=bad))
+    for bad in ("../migrations", "db/../secret"):
+        with pytest.raises(ValidationError, match=r"'\.\.' segment"):
+            PluginSpec(**_spec_kwargs(migrations=bad))
+
+
+def test_migrations_validation_touches_no_filesystem():
+    from tai42_contract.plugins import PluginSpec
+
+    # The path need not exist: the contract validates shape only, so a
+    # well-formed but non-existent directory round-trips (existence is the
+    # runner's discovery-time concern). round-trip via model_validate mirrors
+    # the DB-row hydration path, which can touch no filesystem.
+    value = "this/dir/does/not/exist"
+    spec = PluginSpec.model_validate(_spec_kwargs(migrations=value))
+    assert spec.migrations == value
+
+
 def test_item_kind_must_be_known():
     from pydantic import ValidationError
 
@@ -480,6 +523,7 @@ _SPEC_TOKEN_FIELDS: list[tuple[str, str]] = [
     ("version", "0.1.0"),
     ("license", "Apache-2.0"),
     ("icon", "assets/toolbox.svg"),
+    ("migrations", "migrations"),
 ]
 
 

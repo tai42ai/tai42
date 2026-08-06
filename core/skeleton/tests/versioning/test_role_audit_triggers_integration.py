@@ -1,7 +1,7 @@
 """REAL-Postgres tests for the ``kind='role_audit'`` append-only triggers.
 
 The role-edit audit trail rides the generic versioned store under
-``kind='role_audit'``. The schema (``tai42_skeleton.init.sql``) installs three row
+``kind='role_audit'``. The skeleton baseline migration installs three row
 triggers that make those documents append-only IN THE DATABASE, so no code path or
 bug can rewrite the security record. These tests prove the triggers on real
 Postgres — there is no fake for DB-side triggers, so they need a live server.
@@ -34,15 +34,24 @@ import psycopg
 import pytest
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import discover_migrations
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.sql.schema import load_ddl
+from tai42_skeleton.db import skeleton_migrations_dir
 from tai42_skeleton.versioning.settings import versioning_store_settings
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 pytestmark = pytest.mark.integration
 
 _OPT_IN_ENV = "TAI42_SKELETON_REAL_PG"
+
+
+def load_ddl() -> str:
+    """The skeleton baseline migration's SQL — applied directly to the live server so
+    the test exercises the EXACT role_audit triggers that ship (never a hand-copied
+    duplicate that could drift)."""
+    return discover_migrations(skeleton_migrations_dir())[0].sql
+
 
 _AUDIT_KIND = "role_audit"
 

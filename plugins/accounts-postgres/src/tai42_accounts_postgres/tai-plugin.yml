@@ -24,6 +24,7 @@ permissions:
   network: true
   subprocess: false
   filesystem: false
+migrations: migrations
 provides:
   - kind: identity
     name: accounts-postgres

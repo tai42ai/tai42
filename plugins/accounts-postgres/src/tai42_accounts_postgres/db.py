@@ -1,81 +1,89 @@
-"""Packaged DDL loader and CLI to apply/inspect the plugin's schema.
+"""Schema identity and boot-time migration gate for the plugin's own chain.
 
-python -m tai42_accounts_postgres.db apply    # create the three tables (idempotent)
-python -m tai42_accounts_postgres.db tables    # list the tables the DDL declares
+The plugin owns a migration chain — ``migrations/0001_baseline.sql`` and any
+later files — applied by the shared runner (``tai db migrate``), recorded in the
+per-database ``tai_schema_history`` table under the component name
+``tai42-accounts-postgres`` (its distribution name, the same identity the
+marketplace installer and the ``tai db`` CLI stamp its rows with).
+
+At startup the provider asserts, once, that this chain is fully applied before
+serving — a pending migration or a checksum mismatch is a loud refusal naming
+``tai db migrate``, never a half-migrated serve. The gate reads the history table
+through the plugin's OWN store connection (the runner grants ``SELECT`` on it to
+``PUBLIC``) and fires ONLY when the store is configured: an unconfigured accounts
+store owns no live schema and must not demand a migrated one.
+
+The check is built on the shared kit primitive
+:func:`~tai42_kit.db.assert_chain_applied` rather than the skeleton's boot-gate
+module: this plugin is contract-facing and never imports ``tai42_skeleton``, and
+kit is on its allowed import path.
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
-import re
-from pathlib import Path
-from typing import LiteralString, cast
+import importlib.resources
+import logging
 
-from tai42_kit.clients import client_ctx
-from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import MigrationEntry, SchemaOutOfDateError, assert_chain_applied
 
-from tai42_accounts_postgres.settings import AccountsPgSettings
+from tai42_accounts_postgres.settings import AccountsPgSettings, accounts_settings
 
-_RESOURCES_DIR = Path(__file__).resolve().parent / "sql"
+logger = logging.getLogger(__name__)
 
-# Parsed from the DDL so the listing never drifts from what ``apply`` creates.
-_CREATE_TABLE_RE = re.compile(r"CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)", re.IGNORECASE)
+# The chain's identity in ``tai_schema_history`` — the plugin's distribution name
+# (``spec.package``), so the boot gate reads the exact rows the installer and CLI
+# write. Fixed once and forever; it never changes across releases.
+COMPONENT = "tai42-accounts-postgres"
 
+# The packaged directory holding the chain, resolved through the plugin's import
+# root — the same ``migrations`` directory declared in ``tai-plugin.yml``.
+_MIGRATIONS_SUBPATH = "migrations"
 
-def load_ddl() -> str:
-    """Return the plugin's full DDL (the ``accounts.init.sql`` resource)."""
-    return (_RESOURCES_DIR / "accounts.init.sql").read_text(encoding="utf-8")
+# The plugin's user-facing fix for a pending/diverged chain, appended verbatim by
+# kit's shared gate primitive. Kept byte-identical to the skeleton's wording.
+_REMEDIATION = "Run 'tai db migrate' to apply the pending migrations, then restart."
 
-
-def declared_tables() -> list[str]:
-    """The tables the packaged DDL creates, sorted."""
-    return sorted(set(_CREATE_TABLE_RE.findall(load_ddl())))
-
-
-def _target(settings: AccountsPgSettings) -> str:
-    """A credential-free description of the connection target for messages."""
-    return f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
-
-
-async def _apply_schema(settings: AccountsPgSettings) -> None:
-    ddl = load_ddl()
-    # Multi-statement script run in one transaction: all-or-nothing.
-    async with (
-        client_ctx(PostgresClient, settings, fresh=True) as pool,
-        pool.connection() as conn,
-        conn.transaction(),
-    ):
-        # Cast: the DDL is trusted packaged schema, not user input.
-        await conn.execute(cast("LiteralString", ddl))
+# Re-exported: ``SchemaOutOfDateError`` now lives in kit, but the plugin's provider
+# and tests import it from here as the accounts gate's error identity.
+__all__ = [
+    "COMPONENT",
+    "SchemaOutOfDateError",
+    "accounts_migration_entry",
+    "accounts_store_configured",
+    "assert_accounts_schema_applied",
+]
 
 
-def _apply_command() -> None:
+def accounts_store_configured() -> bool:
+    """Whether this deployment configures the accounts store's Postgres at all.
+
+    Resolved through the SAME pydantic-settings the store connects with (its own
+    ``TAI_ACCOUNTS_PG_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
+    fresh — not the cached singleton — so a config reload re-evaluates. The store
+    carries no baked-in credential, so a supplied password is the signal a real
+    store is wired up; a bare env-var read would miss the ``TAI_DEFAULT_*``
+    fallback.
+    """
     settings = AccountsPgSettings()
-    asyncio.run(_apply_schema(settings))
-    print(f"Applied accounts schema to {_target(settings)}.")
+    return bool(settings.pg_password and settings.pg_password.get_secret_value())
 
 
-def _tables_command() -> None:
-    for table in declared_tables():
-        print(table)
+def accounts_migration_entry() -> MigrationEntry:
+    """The plugin's chain as a runner entry against its own store connection."""
+    migrations_dir = importlib.resources.files("tai42_accounts_postgres").joinpath(_MIGRATIONS_SUBPATH)
+    return MigrationEntry(component=COMPONENT, migrations_dir=migrations_dir, settings=accounts_settings().pg)
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        prog="python -m tai42_accounts_postgres.db",
-        description="Apply and inspect the tai42-accounts-postgres schema.",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("apply", help="Apply the packaged DDL to Postgres (idempotent).")
-    sub.add_parser("tables", help="List the tables the DDL declares.")
-    args = parser.parse_args(argv)
+async def assert_accounts_schema_applied() -> None:
+    """Startup gate: assert the accounts chain is applied when the store is
+    configured.
 
-    if args.command == "apply":
-        _apply_command()
-    elif args.command == "tables":
-        _tables_command()
-
-
-if __name__ == "__main__":  # pragma: no cover - module CLI entry
-    main()
+    A deployment that does not configure the accounts store (no resolved password)
+    owns no accounts tables, so the gate is a no-op. Otherwise the chain is
+    verified on the exact database the store reads and writes; a pending migration
+    or a checksum mismatch refuses with the ``tai db migrate`` fix.
+    """
+    if not accounts_store_configured():
+        logger.info("schema gate: the accounts store is not configured — skipping the migration check")
+        return
+    await assert_chain_applied([accounts_migration_entry()], remediation=_REMEDIATION)

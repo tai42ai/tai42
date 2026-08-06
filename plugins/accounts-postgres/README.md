@@ -37,8 +37,8 @@ platform-level story:
 
 ## What it stores
 
-Three plugin-owned tables in the platform database (its own DDL, its own apply
-step):
+Three plugin-owned tables in the platform database, created by the plugin's own
+migration chain:
 
 - `accounts_users` — one row per human user: the opaque, stable `user_id`
   (`usr-…`), the normalized email, the argon2id password hash (NULL until an
@@ -122,19 +122,24 @@ while no owner exists.
 > `X-Forwarded-For` parsing. A deployment behind a shared proxy must throttle at
 > its ingress, or all callers collapse to one throttled IP.
 
-## Schema apply + startup guard
+## Schema migrations + startup guard
 
-The plugin cannot ride the skeleton's `tai db` CLI (it never imports the
-skeleton), so it applies its own DDL:
+The plugin ships an ordered SQL migration chain under `migrations/` and declares
+it in `tai-plugin.yml` (`migrations: migrations`). The shared migration runner
+applies it — run by the operator with `tai db migrate`, or automatically by the
+marketplace install/upgrade flow once the package lands. Applied migrations are
+recorded in the per-database `tai_schema_history` table under the component
+`tai42-accounts-postgres`, on the DDL-privileged migrator identity.
 
 ```bash
-python -m tai42_accounts_postgres.db apply     # create the three tables (idempotent)
-python -m tai42_accounts_postgres.db tables     # list the tables the DDL declares
+tai db migrate     # apply every pending migration across all discovered components
+tai db status      # per-component applied / pending / checksum verdicts
 ```
 
-`apply` connects through `TAI_ACCOUNTS_PG_*`. The provider's boot healthcheck
-verifies the schema exists and, if it is missing, fails startup loudly naming the
-apply command above — it NEVER auto-applies.
+The provider's boot healthcheck asserts the chain is fully applied — a pending
+migration or a checksum mismatch fails startup loudly naming `tai db migrate` —
+and fires only when the accounts store is configured (its `TAI_ACCOUNTS_PG_*` /
+`TAI_DEFAULT_PG_PASSWORD` password is resolved). It NEVER auto-applies.
 
 The accounts kind requires access control ENABLED. If the routes are mounted while
 `ACCESS_CONTROL_ENABLE=false` (so the provider is never instantiated and the admin
@@ -184,8 +189,8 @@ the only place the raw invite link or session token appears.
 
 Requires **Python 3.13+**, a Postgres reachable through `TAI_ACCOUNTS_PG_*`, and a
 Redis reachable through the injected access-control Redis. Apply the schema with
-`python -m tai42_accounts_postgres.db apply` before first serve; a missing schema is
-caught loudly at boot.
+`tai db migrate` before first serve; an out-of-date schema is caught loudly at
+boot.
 
 ## Install
 

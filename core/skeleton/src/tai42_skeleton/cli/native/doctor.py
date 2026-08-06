@@ -13,11 +13,12 @@ import typer
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import MigrationError, migration_status
 
 from tai42_skeleton.cli.commands._common import app_context
-from tai42_skeleton.cli.native.db import SchemaAdminSettings, expected_tables, schema_settings
 from tai42_skeleton.cli.render import print_json, render_table
 from tai42_skeleton.config.config_mode import config_mode
+from tai42_skeleton.db import SchemaAdminSettings, all_migration_entries, schema_settings
 
 _OK = "ok"
 _FAIL = "fail"
@@ -70,27 +71,30 @@ async def _probe_postgres(settings: SchemaAdminSettings) -> Check:
 
 
 async def _probe_schema(settings: SchemaAdminSettings) -> Check:
+    """Report per-component migration-chain status via the runner.
+
+    ``migration_status`` never raises on a mismatch — a pending migration or a
+    rewritten (checksum-diverged) chain comes back as data, rendered here as a FAIL
+    naming ``tai db migrate``. A connection failure or a malformed installed-plugin
+    chain (a kit :class:`~tai42_kit.db.MigrationError` from discovery/checksum) is
+    caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
+    error propagates so a broken probe is never mistaken for a clean schema."""
     import psycopg
 
-    expected = expected_tables()
     try:
-        async with (
-            client_ctx(PostgresClient, settings, fresh=True) as pool,
-            pool.connection() as conn,
-            conn.cursor() as cur,
-        ):
-            await cur.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name = ANY(%s)",
-                (expected,),
-            )
-            present = {row[0] for row in await cur.fetchall()}
+        entries = await all_migration_entries(settings)
+        statuses = await migration_status(entries)
     except psycopg.OperationalError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema at {_pg_target(settings)}: {exc}")
-    missing = [table for table in expected if table not in present]
-    if missing:
-        return Check("schema", _FAIL, f"missing tables (run 'tai db apply'): {', '.join(missing)}")
-    return Check("schema", _OK, f"all {len(expected)} framework tables present")
+    except MigrationError as exc:
+        return Check("schema", _FAIL, f"cannot inspect schema (run 'tai db migrate'): {exc}")
+    stale = [status for status in statuses if not status.is_up_to_date]
+    if stale:
+        detail = ", ".join(
+            f"{status.component} ({len(status.pending)} pending, {len(status.mismatches)} mismatch)" for status in stale
+        )
+        return Check("schema", _FAIL, f"out of date (run 'tai db migrate'): {detail}")
+    return Check("schema", _OK, f"all {len(statuses)} component(s) up to date")
 
 
 async def _probe_redis() -> Check:

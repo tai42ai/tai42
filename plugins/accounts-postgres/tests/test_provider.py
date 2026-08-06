@@ -14,14 +14,11 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_accounts_postgres import provider as provider_module
 from tai42_accounts_postgres import service
+from tai42_accounts_postgres.db import SchemaOutOfDateError
 from tai42_accounts_postgres.provider import PostgresAccountsProvider
 from tai42_accounts_postgres.settings import accounts_settings
 
-from .conftest import FakeProviderSettings, ScriptedPg, future, make_pg_ctx, past
-
-
-def _all_tables_present() -> ScriptedPg:
-    return ScriptedPg(fetches=[[("accounts_users",), ("accounts_sessions",), ("accounts_invites",)]])
+from .conftest import FakeProviderSettings, future, past
 
 
 def _provider(redis=None, admin=None) -> PostgresAccountsProvider:
@@ -195,15 +192,23 @@ def test_login_methods_omits_token_field_when_open(monkeypatch):
 # -- healthcheck ----------------------------------------------------------------
 
 
-async def test_healthcheck_missing_schema_raises_with_apply_command(monkeypatch):
-    # Only one of the three tables present -> schema guard fires.
-    monkeypatch.setattr(provider_module, "client_ctx", make_pg_ctx(ScriptedPg(fetches=[[("accounts_users",)]])))
-    with pytest.raises(RuntimeError, match="schema missing"):
+async def _gate_ok() -> None:
+    return None
+
+
+async def test_healthcheck_refuses_on_out_of_date_schema(monkeypatch):
+    # The boot gate's refusal (a pending migration or checksum mismatch) propagates
+    # out of the healthcheck naming the fix — boot never proceeds on a stale schema.
+    async def _refuse() -> None:
+        raise SchemaOutOfDateError("database schema is out of date — refusing to start. Run 'tai db migrate'")
+
+    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _refuse)
+    with pytest.raises(SchemaOutOfDateError, match="tai db migrate"):
         await _provider().healthcheck()
 
 
 async def test_healthcheck_gated_fixes_bootstrap_token(monkeypatch):
-    monkeypatch.setattr(provider_module, "client_ctx", make_pg_ctx(_all_tables_present()))
+    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
     called: list[Any] = []
 
     async def record(redis_settings):
@@ -218,7 +223,7 @@ async def test_healthcheck_gated_fixes_bootstrap_token(monkeypatch):
 async def test_healthcheck_open_window_warns(monkeypatch, users_store, caplog):
     monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
     accounts_settings.cache_clear()
-    monkeypatch.setattr(provider_module, "client_ctx", make_pg_ctx(_all_tables_present()))
+    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
     monkeypatch.setattr(service, "users_store", lambda: users_store)  # empty -> needs bootstrap
     with caplog.at_level("WARNING"):
         await _provider().healthcheck()

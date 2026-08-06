@@ -1,10 +1,12 @@
 -- ============================================================
--- Tai Platform — Connector framework PostgreSQL Schema
+-- skeleton component — baseline schema (migration 0001)
 -- ============================================================
--- Framework connector-engine tables only: the de-tenanted token
--- store, the no-auth market catalog, its categories, and the
--- allowed discovery sources. Product tables live in product repos.
--- Database: tai
+-- The full core-owned schema the skeleton features require: the connector
+-- token store + market catalog, the generic versioned-document store and its
+-- role_audit append-only triggers, the access-control policy/route tables, the
+-- marketplace install-attribution record, and the tool-metadata overlay. One
+-- transaction (the runner wraps each file); every object guards with
+-- IF NOT EXISTS / ON CONFLICT so a replay is inert.
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -322,14 +324,6 @@ CREATE TABLE IF NOT EXISTS marketplace_installs (
 );
 -- `ref` is the sole point-read path (`WHERE ref = %s`); the installed listing
 -- enumerates the table. Operator-sized (tens of rows), no further indexes.
-
--- The IF-NOT-EXISTS create above adds columns only when it first creates the
--- table; on a database where `marketplace_installs` already exists it is a no-op,
--- so columns introduced after that table's first deploy must be added explicitly.
--- `ADD COLUMN IF NOT EXISTS` keeps this one script idempotent — it backfills the
--- column where absent and skips it where present, no migration framework.
-ALTER TABLE marketplace_installs ADD COLUMN IF NOT EXISTS contract_version TEXT;
-ALTER TABLE marketplace_installs ADD COLUMN IF NOT EXISTS skeleton_version TEXT;
 
 -- ============================================================
 -- Tool metadata overlay — folders + per-tool organizational row

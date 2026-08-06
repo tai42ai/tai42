@@ -1,203 +1,195 @@
-"""``tai db apply`` / ``tai db check`` — schema apply and inspection.
+"""``tai db migrate`` / ``tai db status`` — apply and inspect migrations.
 
-No live Postgres: the DB seam is faked or the async workers are patched. The
-tests assert the DDL is idempotent by construction, that ``apply`` runs it inside
-one transaction and is loud (and credential-free) on a connection failure, and
-that ``check`` exits non-zero when a table is missing.
+No live Postgres: the kit runner (``apply_migrations`` / ``migration_status``) and
+the migrator settings are faked. The tests assert the command wiring — migrate
+applies and reports, ``--plan`` inspects without applying, status is a clean/CI
+gate — and the loud, credential-free failure surfaces (connection failure,
+unconfigured connection, a rewritten chain).
 """
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from typing import cast
 
 import psycopg
 import pytest
 from click.testing import CliRunner
+from tai42_kit.db import AppliedMigration, ChecksumMismatchError, ComponentStatus, MigrationScript
 
 from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import db
-from tai42_skeleton.sql.schema import load_ddl
+from tai42_skeleton.db import SchemaAdminSettings
 
-# --- DDL properties -------------------------------------------------------
-
-
-def test_expected_tables_match_the_ddl() -> None:
-    tables = db.expected_tables()
-    assert set(tables) == {
-        "connector_connections",
-        "connector_category",
-        "versioned_documents",
-        "versioned_document_versions",
-        "access_control_policies",
-        "access_control_routes",
-        "marketplace_installs",
-        "tool_folders",
-        "tool_meta",
-    }
+_TARGET = cast("SchemaAdminSettings", SimpleNamespace(pg_host="db", pg_port=5432, pg_db="tai"))
 
 
-def test_ddl_is_idempotent_by_construction() -> None:
-    ddl = load_ddl().upper()
-    # Every table/index creation guards with IF NOT EXISTS and every seed insert
-    # with ON CONFLICT, so a second apply is a no-op.
-    assert "CREATE TABLE " in ddl
-    assert ddl.count("CREATE TABLE ") == ddl.count("CREATE TABLE IF NOT EXISTS ")
-    assert ddl.count("CREATE INDEX ") + ddl.count("CREATE UNIQUE INDEX ") == (
-        ddl.count("CREATE INDEX IF NOT EXISTS ") + ddl.count("CREATE UNIQUE INDEX IF NOT EXISTS ")
-    )
-    assert ddl.count("INSERT INTO ") == ddl.count("ON CONFLICT ")
+def _script(version: int, name: str) -> MigrationScript:
+    return MigrationScript(version=version, name=name, filename=f"{version:04d}_{name}.sql", checksum="abc", sql="")
 
 
-# --- fake DB seam ---------------------------------------------------------
+def _status(component: str, *, applied: tuple[int, ...], pending: tuple[MigrationScript, ...] = ()) -> ComponentStatus:
+    return ComponentStatus(component=component, applied_versions=applied, pending=pending, mismatches=())
 
 
-class _FakeCursor:
-    def __init__(self, rows: list[tuple]) -> None:
-        self._rows = rows
-        self.executed: list[str] = []
-
-    async def execute(self, sql: str, params: object = None) -> None:
-        self.executed.append(sql)
-
-    async def fetchall(self) -> list[tuple]:
-        return self._rows
-
-    async def __aenter__(self) -> _FakeCursor:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
+@pytest.fixture(autouse=True)
+def _fake_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The migrator target is only read for messages; the fake makes real connection
+    # fields irrelevant and keeps the credential-redaction assertions deterministic.
+    monkeypatch.setattr(db, "schema_settings", lambda: _TARGET)
 
 
-class _FakeConn:
-    def __init__(self, rows: list[tuple]) -> None:
-        self.cursor_obj = _FakeCursor(rows)
-        self.executed: list[str] = []
-
-    async def execute(self, sql: str, params: object = None) -> None:
-        self.executed.append(sql)
-
-    def cursor(self) -> _FakeCursor:
-        return self.cursor_obj
-
-    @asynccontextmanager
-    async def transaction(self):
-        yield
+# --- migrate --------------------------------------------------------------
 
 
-class _FakePool:
-    def __init__(self, conn: _FakeConn) -> None:
-        self._conn = conn
+def test_migrate_applies_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _apply(entries: object) -> list[AppliedMigration]:
+        return [AppliedMigration("skeleton", 1, "baseline", "abc")]
 
-    @asynccontextmanager
-    async def connection(self):
-        yield self._conn
+    monkeypatch.setattr(db, "apply_migrations", _apply)
 
-
-def _fake_client_ctx(conn: _FakeConn):
-    @asynccontextmanager
-    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
-        yield _FakePool(conn)
-
-    return _ctx
-
-
-# --- apply ----------------------------------------------------------------
-
-
-def test_apply_runs_ddl_in_a_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn = _FakeConn(rows=[])
-    monkeypatch.setattr(db, "client_ctx", _fake_client_ctx(conn))
-
-    result = CliRunner().invoke(app_module.app, ["db", "apply"])
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 0, result.output
-    assert conn.executed  # the DDL text was executed
-    assert "CREATE TABLE" in conn.executed[0]
+    assert "Applied skeleton 0001_baseline" in result.output
+    assert "Applied 1 migration(s)." in result.output
 
 
-def test_apply_is_loud_and_credential_free_on_connection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TAI_DB_PG_PASSWORD", "s3cr3t-should-not-leak")
-    db.schema_settings.cache_clear()
+def test_migrate_json_reports_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
 
-    async def _boom(settings: object) -> None:
-        raise psycopg.OperationalError("password authentication failed for user 'postgres'")
+    async def _apply(entries: object) -> list[AppliedMigration]:
+        return [AppliedMigration("skeleton", 1, "baseline", "abc")]
 
-    monkeypatch.setattr(db, "_apply_schema", _boom)
-    try:
-        result = CliRunner().invoke(app_module.app, ["db", "apply"])
-    finally:
-        db.schema_settings.cache_clear()
+    monkeypatch.setattr(db, "apply_migrations", _apply)
+
+    result = CliRunner().invoke(app_module.app, ["--json", "db", "migrate"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data == [{"component": "skeleton", "version": 1, "name": "baseline"}]
+
+
+def test_migrate_plan_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status("skeleton", applied=(1,), pending=(_script(2, "add_thing"),))]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["--json", "db", "migrate", "--plan"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data[0]["pending"] == "1"
+
+
+def test_migrate_up_to_date_reports_nothing_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _apply(entries: object) -> list[AppliedMigration]:
+        return []
+
+    monkeypatch.setattr(db, "apply_migrations", _apply)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert "up to date" in result.output
+
+
+def test_migrate_plan_shows_pending_without_applying(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status("skeleton", applied=(1,), pending=(_script(2, "add_thing"),))]
+
+    async def _forbidden_apply(entries: object) -> list[AppliedMigration]:
+        raise AssertionError("--plan must not apply anything")
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+    monkeypatch.setattr(db, "apply_migrations", _forbidden_apply)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate", "--plan"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 pending migration(s)" in result.output
+    assert "nothing applied (--plan)" in result.output
+
+
+def test_migrate_loud_and_credential_free_on_connection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(entries: object) -> list[AppliedMigration]:
+        raise psycopg.OperationalError("password authentication failed for user 'postgres' (s3cr3t)")
+
+    monkeypatch.setattr(db, "apply_migrations", _boom)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 1
-    assert "could not connect to Postgres" in result.output
-    assert "s3cr3t-should-not-leak" not in result.output
+    assert "could not connect to Postgres at db:5432/tai" in result.output
 
 
-def test_apply_is_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The kit's named not-configured error (unset TAI_DB_PG_PASSWORD, no TAI_DEFAULT
-    # fallback) yields a clean, actionable message and exit 1 — never a raw traceback.
-    async def _boom(settings: object) -> None:
+def test_migrate_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(entries: object) -> list[AppliedMigration]:
         raise ValueError(
             "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
         )
 
-    monkeypatch.setattr(db, "_apply_schema", _boom)
+    monkeypatch.setattr(db, "apply_migrations", _boom)
 
-    result = CliRunner().invoke(app_module.app, ["db", "apply"])
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "is not configured: set TAI_DB_PG_PASSWORD" in result.output
 
 
-# --- check ----------------------------------------------------------------
+def test_migrate_loud_on_rewritten_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(entries: object) -> list[AppliedMigration]:
+        raise ChecksumMismatchError("component 'skeleton' version 1 ('baseline') was applied with a different checksum")
 
+    monkeypatch.setattr(db, "apply_migrations", _boom)
 
-def test_check_reports_missing_tables_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _missing(settings: object) -> list[str]:
-        return ["versioned_documents"]
-
-    monkeypatch.setattr(db, "_missing_tables", _missing)
-
-    result = CliRunner().invoke(app_module.app, ["db", "check"])
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 1
-    assert "versioned_documents" in result.output
-    assert "tai db apply" in result.output
+    assert "the chain has been rewritten" in result.output or "different checksum" in result.output
 
 
-def test_check_passes_when_all_tables_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn = _FakeConn(rows=[(table,) for table in db.expected_tables()])
-    monkeypatch.setattr(db, "client_ctx", _fake_client_ctx(conn))
+# --- status ---------------------------------------------------------------
 
-    result = CliRunner().invoke(app_module.app, ["db", "check"])
+
+def test_status_clean_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status("skeleton", applied=(1,))]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
 
     assert result.exit_code == 0, result.output
-    assert "is present" in result.output
+    assert "up-to-date" in result.output
 
 
-def test_check_is_loud_on_connection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _boom(settings: object) -> list[str]:
-        raise psycopg.OperationalError("connection refused")
+def test_status_out_of_date_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status("skeleton", applied=(1,), pending=(_script(2, "add_thing"),))]
 
-    monkeypatch.setattr(db, "_missing_tables", _boom)
+    monkeypatch.setattr(db, "migration_status", _status_fn)
 
-    result = CliRunner().invoke(app_module.app, ["db", "check"])
-
-    assert result.exit_code == 1
-    assert "could not connect to Postgres" in result.output
-
-
-def test_check_is_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _boom(settings: object) -> list[str]:
-        raise ValueError(
-            "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
-        )
-
-    monkeypatch.setattr(db, "_missing_tables", _boom)
-
-    result = CliRunner().invoke(app_module.app, ["db", "check"])
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
 
     assert result.exit_code == 1
-    assert "is not configured: set TAI_DB_PG_PASSWORD" in result.output
+    assert "OUT OF DATE" in result.output
+
+
+def test_status_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    async def _status_fn(entries: object) -> list[ComponentStatus]:
+        return [_status("skeleton", applied=(1,))]
+
+    monkeypatch.setattr(db, "migration_status", _status_fn)
+
+    result = CliRunner().invoke(app_module.app, ["--json", "db", "status"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data[0]["component"] == "skeleton"
