@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-connector-google"
-version = "0.2.2"
+version = "0.2.3"
 description = "Google (Gmail, Calendar, Drive) OAuth connector provider for the TAI ecosystem. Pure descriptor data; depends only on tai42-contract."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — this plugin's only dependency. It registers a
     # ProviderDescriptor through the tai42_app handle; it imports no engine code.
-    "tai42-contract>=0.4,<0.6",
+    "tai42-contract>=1.0,<2",
 ]
 
 [project.urls]
