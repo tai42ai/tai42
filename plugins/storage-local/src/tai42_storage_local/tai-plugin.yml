@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: storage-local
 package: tai42-storage-local
-version: 0.2.6
+version: 0.2.7
 description: >-
   Local-filesystem storage backend for the TAI ecosystem: a manifest-loaded
   Storage plugin serving text and binary content from a directory tree.
