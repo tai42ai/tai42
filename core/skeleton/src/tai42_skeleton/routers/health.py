@@ -23,19 +23,18 @@ from tai42_contract.app import tai42_app
 from tai42_kit.clients import ClientSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_configured, component_store_settings
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app import instance
-from tai42_skeleton.connectors.settings import connector_store_settings, connectors_store_configured
+from tai42_skeleton.connectors.settings import connector_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.interactions.settings import interactions_settings
-from tai42_skeleton.marketplace.settings import marketplace_store_configured, marketplace_store_settings
 from tai42_skeleton.plugins.quarantine import quarantine_count
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
 from tai42_skeleton.settings.rate_limit import rate_limit_settings
 from tai42_skeleton.sub_mcp.settings import sub_mcp_settings
-from tai42_skeleton.tool_meta.settings import tool_meta_store_configured, tool_meta_store_settings
-from tai42_skeleton.versioning.settings import versioning_store_settings
 
 logger = logging.getLogger(__name__)
 
@@ -101,30 +100,23 @@ def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
     if not sub_mcp.in_memory:
         conns.append(("sub_mcp", RedisClient, sub_mcp.redis))
 
-    # The durable connector token store: Postgres-backed whenever a password is
-    # configured (its own namespace or TAI_DEFAULT_PG_PASSWORD) — the same
-    # store-configured gate as marketplace/tool_meta. Its Redis cache is an
-    # additional ping, ridden only when a connector-store Redis URL resolves (its
-    # own namespace or TAI_DEFAULT_REDIS_URL), so a Postgres-only deploy readies on
+    # Every durable skeleton store lives in the skeleton component's bound
+    # database; the readiness probe pings that database once per feature label when
+    # it is configured. The connector Redis cache is an additional ping, ridden only
+    # when a connector-store Redis URL resolves, so a Postgres-only deploy readies on
     # the PG row alone rather than 503ing on a Redis it never wired.
-    if connectors_store_configured():
-        store = connector_store_settings()
-        conns.append(("connectors", PostgresClient, store.pg))
-        if store.redis.redis_url:
-            conns.append(("connectors", RedisClient, store.redis))
+    if component_store_configured(SKELETON_COMPONENT):
+        conns.append(("connectors", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
+        connector_redis = connector_store_settings().redis
+        if connector_redis.redis_url:
+            conns.append(("connectors", RedisClient, connector_redis))
 
     if instance.versioned_store_in_use():
-        conns.append(("versioning", PostgresClient, versioning_store_settings()))
+        conns.append(("versioning", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
 
-    # The durable install-attribution store: Postgres-backed whenever a password is
-    # configured (its own namespace or TAI_DEFAULT_PG_PASSWORD), omitted otherwise.
-    if marketplace_store_configured():
-        conns.append(("marketplace", PostgresClient, marketplace_store_settings()))
-
-    # The tool-metadata overlay store: same store-configured gate — a supplied
-    # password is the signal a real Postgres backs the overlay.
-    if tool_meta_store_configured():
-        conns.append(("tool_meta", PostgresClient, tool_meta_store_settings()))
+    if component_store_configured(SKELETON_COMPONENT):
+        conns.append(("marketplace", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
+        conns.append(("tool_meta", PostgresClient, component_store_settings(SKELETON_COMPONENT)))
 
     return conns
 

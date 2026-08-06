@@ -24,7 +24,6 @@ from tai42_e2e.manifests import (
     _base_env,
     _builtin_entries,
     _memory_agent_state_env,
-    _pg_env,
     _probe_tools_entry,
     _toolbox_tools_entry,
 )
@@ -68,7 +67,6 @@ def build_cli_stack(res: StackResources, variants: Variants) -> StackConfig:
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     # No agent runs here, but pin the checkpoint/store provider to the in-process
     # ``memory`` one so a settings reload never tries to build a RediSearch index on
     # the plain shared Redis.

@@ -54,6 +54,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
+from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
 from tai42_skeleton.operations import (
     BadRequestError,
     ForbiddenError,
@@ -321,6 +322,9 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
     store = ToolRunStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as r:
         refresher = asyncio.create_task(_refresh_liveness_loop(r, store, run_id, settings))
+        # Bind this run's id as the interaction origin for the tool body, so a
+        # question the tool raises through ``ask_user`` is attributed to the run.
+        origin_token = set_interaction_origin(run_id)
         try:
             try:
                 result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
@@ -366,6 +370,7 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
                     fields["status"],
                 )
         finally:
+            reset_interaction_origin(origin_token)
             refresher.cancel()
             with suppress(asyncio.CancelledError):
                 await refresher

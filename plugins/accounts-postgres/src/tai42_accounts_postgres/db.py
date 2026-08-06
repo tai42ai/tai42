@@ -9,9 +9,10 @@ marketplace installer and the ``tai db`` CLI stamp its rows with).
 At startup the provider asserts, once, that this chain is fully applied before
 serving — a pending migration or a checksum mismatch is a loud refusal naming
 ``tai db migrate``, never a half-migrated serve. The gate reads the history table
-through the plugin's OWN store connection (the runner grants ``SELECT`` on it to
-``PUBLIC``) and fires ONLY when the store is configured: an unconfigured accounts
-store owns no live schema and must not demand a migrated one.
+through the plugin's OWN store connection — resolved from the central database
+registry on the component's binding (the runner grants ``SELECT`` on it to
+``PUBLIC``) — and fires ONLY when that database is configured: an unconfigured
+accounts store owns no live schema and must not demand a migrated one.
 
 The check is built on the shared kit primitive
 :func:`~tai42_kit.db.assert_chain_applied` rather than the skeleton's boot-gate
@@ -24,9 +25,13 @@ from __future__ import annotations
 import importlib.resources
 import logging
 
-from tai42_kit.db import MigrationEntry, SchemaOutOfDateError, assert_chain_applied
-
-from tai42_accounts_postgres.settings import AccountsPgSettings, accounts_settings
+from tai42_kit.db import (
+    MigrationEntry,
+    SchemaOutOfDateError,
+    assert_chain_applied,
+    component_store_configured,
+    component_store_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,23 +60,21 @@ __all__ = [
 
 
 def accounts_store_configured() -> bool:
-    """Whether this deployment configures the accounts store's Postgres at all.
+    """Whether this deployment configures the accounts store's database at all.
 
-    Resolved through the SAME pydantic-settings the store connects with (its own
-    ``TAI_ACCOUNTS_PG_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
-    fresh — not the cached singleton — so a config reload re-evaluates. The store
-    carries no baked-in credential, so a supplied password is the signal a real
-    store is wired up; a bare env-var read would miss the ``TAI_DEFAULT_*``
-    fallback.
+    Resolved through the central registry on the component's binding, read fresh so
+    a config reload re-evaluates. The bound database is configured iff its password
+    resolves to a non-empty value.
     """
-    settings = AccountsPgSettings()
-    return bool(settings.pg_password and settings.pg_password.get_secret_value())
+    return component_store_configured(COMPONENT)
 
 
 def accounts_migration_entry() -> MigrationEntry:
     """The plugin's chain as a runner entry against its own store connection."""
     migrations_dir = importlib.resources.files("tai42_accounts_postgres").joinpath(_MIGRATIONS_SUBPATH)
-    return MigrationEntry(component=COMPONENT, migrations_dir=migrations_dir, settings=accounts_settings().pg)
+    return MigrationEntry(
+        component=COMPONENT, migrations_dir=migrations_dir, settings=component_store_settings(COMPONENT)
+    )
 
 
 async def assert_accounts_schema_applied() -> None:

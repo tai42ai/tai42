@@ -104,7 +104,7 @@ def build_backup_populated_stack(res: StackResources, variants: Variants) -> Sta
     never dialed. One worker, no backend runtime, no metrics sidecar keeps this opt-in
     stack's boot cost down; convergence is not asserted on it."""
     # Local import so the fleet helpers stay a thin re-shape layer over the shared builders.
-    from tai42_e2e.manifests import _llm_env, _memory_agent_state_env, _pg_env
+    from tai42_e2e.manifests import _llm_env, _memory_agent_state_env
 
     cfg = build_bare_stack(res, variants)
     manifest = copy.deepcopy(cfg.manifest)
@@ -122,7 +122,6 @@ def build_backup_populated_stack(res: StackResources, variants: Variants) -> Sta
     env = dict(cfg.env)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url
     env.update(_memory_agent_state_env())
     env.update(_llm_env(res))

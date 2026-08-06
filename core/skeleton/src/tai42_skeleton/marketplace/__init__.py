@@ -6,9 +6,9 @@ and keep a local record of what it installed.
 
 Its pieces:
 
-- :mod:`.settings` — the ``MARKETPLACE_*`` registry endpoint / advisory-poll
-  knobs and the ``MARKETPLACE_STORE_*`` Postgres connection for the attribution
-  table.
+- :mod:`.settings` — the ``MARKETPLACE_*`` registry endpoint and advisory-poll
+  knobs; the attribution table lives in the skeleton component's bound database,
+  resolved through the central registry.
 - :mod:`.errors` — the typed failure hierarchy raised inside the client and
   installer, translated to the operation-layer error vocabulary at the boundary.
 - :mod:`.client` — the thin async client over the registry's public read API.

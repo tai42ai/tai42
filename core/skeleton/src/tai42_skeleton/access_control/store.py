@@ -43,9 +43,10 @@ from typing import Any
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
-from tai42_skeleton.access_control.store_settings import access_control_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 # The policy body shape enforcement reads and the management surface writes.
 _POLICY_COLUMNS = "scopes, policy_data, condition, condition_id, condition_kwargs"
@@ -88,7 +89,7 @@ class PostgresAccessControlStore:
         names no scope, so a public route is excluded."""
         public = self._settings().public_resource_id
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -105,7 +106,7 @@ class PostgresAccessControlStore:
         The full faithful set a backup needs so an explicit public mapping
         round-trips instead of silently reverting to protected on restore."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -118,7 +119,7 @@ class PostgresAccessControlStore:
         registered for a url so the verifier matches request paths onto that url's
         scope. Empty when no url carries a dynamic pattern."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -132,7 +133,7 @@ class PostgresAccessControlStore:
         """The scope id a request ``path`` maps to (exact route), or ``None`` when
         the path has no mapping (a legitimately-unknown route → denied downstream)."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -145,7 +146,7 @@ class PostgresAccessControlStore:
         each regex and, on a full match, resolves the url template's route. Empty
         when no dynamic pattern is registered."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -165,7 +166,7 @@ class PostgresAccessControlStore:
         to the verifier's canonical form; the ``pattern`` regex is stored verbatim."""
         url = _normalize_url(url)
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -188,7 +189,7 @@ class PostgresAccessControlStore:
         url = _normalize_url(url)
         public = self._settings().public_resource_id
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
@@ -217,7 +218,7 @@ class PostgresAccessControlStore:
         public."""
         public = self._settings().public_resource_id
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -254,7 +255,7 @@ class PostgresAccessControlStore:
                 )
         public = settings.public_resource_id
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -278,7 +279,7 @@ class PostgresAccessControlStore:
         url = _normalize_url(url)
         public = self._settings().public_resource_id
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
@@ -304,7 +305,7 @@ class PostgresAccessControlStore:
         if scope_id == public:
             raise ValueError(f"{scope_id!r} is the public marker, not a removable scope")
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
@@ -340,7 +341,7 @@ class PostgresAccessControlStore:
         record the durable version history mirrors verbatim), or ``None`` when the
         user has no policy row."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -359,7 +360,7 @@ class PostgresAccessControlStore:
         truth ``ROLE_POINTER_KEY``) rather than hardcoded here, so the JSON key can never
         drift from the pointer the assignment writes."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -373,7 +374,7 @@ class PostgresAccessControlStore:
     async def policy_exists(self, user_id: str) -> bool:
         """Whether ``user_id`` has a policy row — the mint duplicate-user pre-check."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -404,7 +405,7 @@ class PostgresAccessControlStore:
             "condition_kwargs": condition_kwargs,
         }
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -437,7 +438,7 @@ class PostgresAccessControlStore:
         of a scope's last route serializes rather than committing against a dead
         scope. Raises ``ValueError`` if any supplied scope does not exist."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
@@ -496,7 +497,7 @@ class PostgresAccessControlStore:
             "condition_kwargs": body.get("condition_kwargs"),
         }
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
         ):
             async with conn.transaction(), conn.cursor() as cur:
@@ -519,7 +520,7 @@ class PostgresAccessControlStore:
         """Delete ``user_id``'s policy row (the store half of revoke). Returns
         whether a row existed. A real backend error propagates loudly."""
         async with (
-            client_ctx(PostgresClient, access_control_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):

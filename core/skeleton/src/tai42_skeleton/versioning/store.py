@@ -37,8 +37,9 @@ from tai42_contract.versioning.errors import (
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.db import component_store_settings
 
-from tai42_skeleton.versioning.settings import versioning_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 # Name of the partial-unique index enforcing one ACTIVE row per ``(kind, name)``
 # (see the skeleton init SQL). A create whose insert trips THIS index is a live
@@ -69,7 +70,7 @@ class PostgresVersionedStore(VersionedStore):
         audit append commit or roll back together — never a live change without its
         audit."""
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
         ):
@@ -86,7 +87,7 @@ class PostgresVersionedStore(VersionedStore):
                 yield cur
             return
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -104,7 +105,7 @@ class PostgresVersionedStore(VersionedStore):
                 yield cur
             return
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -190,7 +191,7 @@ class PostgresVersionedStore(VersionedStore):
 
     async def list(self, kind: str) -> list[DocumentRecord]:
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -219,7 +220,7 @@ class PostgresVersionedStore(VersionedStore):
         Concrete-only (not on the ``VersionedStore`` protocol): callers reach it
         through the concretely-typed ``_versioned_store`` accessor."""
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -234,7 +235,7 @@ class PostgresVersionedStore(VersionedStore):
 
     async def get(self, kind: str, name: str) -> DocumentRecord:
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -309,7 +310,7 @@ class PostgresVersionedStore(VersionedStore):
 
     async def list_versions(self, kind: str, name: str) -> list[DocumentVersion]:
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -370,7 +371,7 @@ class PostgresVersionedStore(VersionedStore):
         :class:`DocumentVersionNotFoundError` for an unknown document or version,
         mirroring :meth:`get_version`'s error style."""
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -420,7 +421,7 @@ class PostgresVersionedStore(VersionedStore):
 
     async def soft_delete(self, kind: str, name: str) -> None:
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -445,7 +446,7 @@ class PostgresVersionedStore(VersionedStore):
 
     async def rename(self, kind: str, name: str, new_name: str) -> DocumentRecord:
         async with (
-            client_ctx(PostgresClient, versioning_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):

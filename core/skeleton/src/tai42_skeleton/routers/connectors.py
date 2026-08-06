@@ -44,6 +44,7 @@ from tai42_contract.connectors.models import (
     StartConnectRequest,
     StartReconnectRequest,
 )
+from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
@@ -51,7 +52,7 @@ from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import state
 from tai42_skeleton.connectors.oauth.redirect import compute_deployment_origin, compute_redirect_uri
 from tai42_skeleton.connectors.service import connection_service
-from tai42_skeleton.connectors.settings import connectors_store_configured
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import validation_error_fields
 from tai42_skeleton.operations.connectors import disconnect as _disconnect_op
@@ -253,7 +254,7 @@ async def oauth_complete(request: Request) -> Response:
     # door carries a discriminated ``{"data": {"kind": ...}}`` body with a
     # load-bearing status, so the OFF state rides that native envelope — a 400 with
     # ``kind: "not_configured"`` — never the ``{"error": ...}`` shape and never a 501.
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         return JSONResponse({"data": {"kind": "not_configured"}}, status_code=400)
     try:
         body = await _json_body(request)

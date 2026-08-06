@@ -590,6 +590,36 @@ def test_interaction_audience_explicit_json_round_trips():
     assert restored.audience == "user-42"
 
 
+def test_interaction_recipient_defaults_none_and_json_round_trips():
+    # Omitting recipient yields None, surviving the store's model_dump_json round-trip.
+    assert _interaction().recipient is None
+    default = InteractionRequest.model_validate_json(_interaction().model_dump_json())
+    assert default.recipient is None
+
+
+def test_interaction_recipient_explicit_json_round_trips():
+    # An explicit delivery address serializes to JSON and reloads unchanged.
+    req = _interaction(recipient="+15551234567")
+    assert req.recipient == "+15551234567"
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.recipient == "+15551234567"
+
+
+def test_interaction_origin_defaults_none_and_json_round_trips():
+    # Omitting origin yields None, surviving the store's model_dump_json round-trip.
+    assert _interaction().origin is None
+    default = InteractionRequest.model_validate_json(_interaction().model_dump_json())
+    assert default.origin is None
+
+
+def test_interaction_origin_explicit_json_round_trips():
+    # An explicit run origin serializes to JSON and reloads unchanged.
+    req = _interaction(origin="run-abc123")
+    assert req.origin == "run-abc123"
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.origin == "run-abc123"
+
+
 # === interactions/models.py — MediaItem + InteractionRequest.media ==========
 
 

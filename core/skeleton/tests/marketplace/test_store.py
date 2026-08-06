@@ -144,6 +144,9 @@ def make_pg_ctx(pg: FakeMarketplacePg):
 
 @pytest.fixture
 def pg(monkeypatch: pytest.MonkeyPatch) -> FakeMarketplacePg:
+    # The store resolves its bound database through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     fake = FakeMarketplacePg()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(fake))
     return fake

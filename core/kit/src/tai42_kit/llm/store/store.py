@@ -18,11 +18,10 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
     """
     Creates a long-lived connection resource for the Store.
 
-    A ``None`` conn string falls back per provider to the shared connection
+    A ``None`` conn string falls back per provider to the base connection
     namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
-    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*`` /
-    ``TAI_DEFAULT_PG_*``). ``sqlite`` requires an explicit path; ``memory`` needs
-    none.
+    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*``).
+    ``sqlite`` requires an explicit path; ``memory`` needs none.
 
     ARCHITECTURAL NOTES:
         Resources are cached indefinitely (no LRU) as this is a single-deployment instance.

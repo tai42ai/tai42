@@ -114,21 +114,21 @@ def test_baseline_folds_schema_into_create_table_with_no_alter_backfill():
 
 
 def test_store_configured_true_when_password_resolves(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     assert accounts_store_configured() is True
 
 
 def test_store_configured_false_without_any_password(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("TAI_ACCOUNTS_PG_PASSWORD", raising=False)
-    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
     assert accounts_store_configured() is False
 
 
-def test_store_configured_true_via_tai_default_fallback(monkeypatch: pytest.MonkeyPatch):
-    # The predicate must honor the shared TAI_DEFAULT_PG_PASSWORD fallback, not a
-    # bare TAI_ACCOUNTS_PG_PASSWORD read.
-    monkeypatch.delenv("TAI_ACCOUNTS_PG_PASSWORD", raising=False)
-    monkeypatch.setenv("TAI_DEFAULT_PG_PASSWORD", "shared-secret")
+def test_store_configured_follows_component_binding(monkeypatch: pytest.MonkeyPatch):
+    # The predicate resolves the component's binding, not the "default" database
+    # directly: bound to a named database, it reads that database's password.
+    monkeypatch.setenv("TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES", "accounts")
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.setenv("TAI_DATABASE_ACCOUNTS_PG_PASSWORD", "secret")
     assert accounts_store_configured() is True
 
 
@@ -151,7 +151,7 @@ def _fake_status(result: list[ComponentStatus]):
 
 
 async def test_gate_clean_is_noop(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     # The gate is the shared kit primitive; fake kit's ``migration_status`` at its
     # source so the real ``assert_chain_applied`` renders the refusal end-to-end.
     monkeypatch.setattr("tai42_kit.db.migrations.migration_status", _fake_status([_status()]))
@@ -159,7 +159,7 @@ async def test_gate_clean_is_noop(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_gate_pending_refuses_naming_migrate(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setattr(
         "tai42_kit.db.migrations.migration_status", _fake_status([_status(pending=(_script(2, "add_thing"),))])
     )
@@ -172,7 +172,7 @@ async def test_gate_pending_refuses_naming_migrate(monkeypatch: pytest.MonkeyPat
 
 
 async def test_gate_checksum_mismatch_refuses(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     mismatch = ChecksumMismatch(COMPONENT, 1, "baseline", "old", "new")
     monkeypatch.setattr("tai42_kit.db.migrations.migration_status", _fake_status([_status(mismatches=(mismatch,))]))
     with pytest.raises(SchemaOutOfDateError) as excinfo:
@@ -182,8 +182,7 @@ async def test_gate_checksum_mismatch_refuses(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_gate_skipped_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("TAI_ACCOUNTS_PG_PASSWORD", raising=False)
-    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     async def _forbidden(entries: Sequence[MigrationEntry]) -> list[ComponentStatus]:
         raise AssertionError("an unconfigured accounts store must not query the database")

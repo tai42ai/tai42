@@ -84,12 +84,13 @@ dispatcher; this plugin contributes `revoke_session`.
 
 ## Configuration
 
-All from the plugin's own `TAI_ACCOUNTS_*` namespace (the plugin never reads
-skeleton config):
+Behavior config is the plugin's own `TAI_ACCOUNTS_*` namespace; the Postgres
+connection resolves through the central database registry on the component's
+binding (the plugin never reads skeleton config):
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `TAI_ACCOUNTS_PG_HOST` / `_PG_PORT` / `_PG_DB` / `_PG_USER` / `_PG_PASSWORD` | `localhost` / `5432` / `tai` / `postgres` / (empty) | Postgres connection for the plugin's tables. |
+| `TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES` | `default` | The named database in the central registry the plugin's tables live in. The bound database is declared under `TAI_DATABASE_<NAME>_PG_*`; the `default` binding is `TAI_DATABASE_DEFAULT_PG_*`. |
 | `TAI_ACCOUNTS_SESSION_IDLE_SECONDS` | `86400` | Sliding-idle session expiry. |
 | `TAI_ACCOUNTS_SESSION_ABSOLUTE_SECONDS` | `2592000` | Absolute session cap from mint. |
 | `TAI_ACCOUNTS_INVITE_TTL_SECONDS` | `259200` | Invite validity from mint. |
@@ -138,8 +139,9 @@ tai db status      # per-component applied / pending / checksum verdicts
 
 The provider's boot healthcheck asserts the chain is fully applied — a pending
 migration or a checksum mismatch fails startup loudly naming `tai db migrate` —
-and fires only when the accounts store is configured (its `TAI_ACCOUNTS_PG_*` /
-`TAI_DEFAULT_PG_PASSWORD` password is resolved). It NEVER auto-applies.
+and fires only when the accounts store is configured (the database bound by
+`TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES` resolves a non-empty password). It NEVER
+auto-applies.
 
 The accounts kind requires access control ENABLED. If the routes are mounted while
 `ACCESS_CONTROL_ENABLE=false` (so the provider is never instantiated and the admin
@@ -187,8 +189,9 @@ the only place the raw invite link or session token appears.
 
 ## Requirements
 
-Requires **Python 3.13+**, a Postgres reachable through `TAI_ACCOUNTS_PG_*`, and a
-Redis reachable through the injected access-control Redis. Apply the schema with
+Requires **Python 3.13+**, a Postgres reachable through the database bound by
+`TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES` (default `TAI_DATABASE_DEFAULT_PG_*`),
+and a Redis reachable through the injected access-control Redis. Apply the schema with
 `tai db migrate` before first serve; an out-of-date schema is caught loudly at
 boot.
 

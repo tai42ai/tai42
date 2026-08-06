@@ -95,6 +95,8 @@ def _seed_ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     pg.add_route("/api/manifest/replace", "admin")
     pg.add_policy("alice", scopes=["*"])
     pg.add_policy("bob", scopes=[])
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))

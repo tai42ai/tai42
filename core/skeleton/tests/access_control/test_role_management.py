@@ -36,7 +36,7 @@ def mem() -> _MemStore:
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch, mem: _MemStore) -> None:
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     # A fresh grant cache + route index per test so a prior test's cache never leaks.
     role_grants_module.reset_role_grants_cache()
     reset_route_index()

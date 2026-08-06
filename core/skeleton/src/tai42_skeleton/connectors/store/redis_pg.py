@@ -68,8 +68,10 @@ from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.connectors.settings import connector_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.utils.redis_typing import eval_script
 
 logger = logging.getLogger(__name__)
@@ -252,7 +254,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         # drops that filter so disconnect can still load and purge it.
         expiry_filter = "" if include_expired else "AND (session_expires_at IS NULL OR session_expires_at > now())"
         async with (
-            client_ctx(PostgresClient, self._settings.pg) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -303,7 +305,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
             raise ValueError("put: provider_id and alias are required for an insert (create-only or upsert)")
 
         async with (
-            client_ctx(PostgresClient, self._settings.pg) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -390,7 +392,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
     async def delete(self, connection_id: str) -> None:
         conn_uuid = self._as_uuid(connection_id)
         async with (
-            client_ctx(PostgresClient, self._settings.pg) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -445,7 +447,7 @@ class RedisPgConnectorTokenStore(ConnectorTokenStore):
         # list), and it sidesteps the cold-vs-empty ambiguity a Redis index set
         # would introduce.
         async with (
-            client_ctx(PostgresClient, self._settings.pg) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):

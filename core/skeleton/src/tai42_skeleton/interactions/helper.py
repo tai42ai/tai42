@@ -33,6 +33,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
 
 from tai42_skeleton.access_control.user import clamp_write_audience
+from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
 
@@ -353,7 +354,11 @@ async def ask_user(
         timeout_at=timeout_at,
         sensitive=sensitive,
         channel=channel,
+        recipient=recipient,
         audience=audience,
+        # Origin of the raising run (a background tool-run id), read from the
+        # contextvar the run binds; None outside a bound tool run.
+        origin=get_interaction_origin(),
         # dicts here are coerced to ``MediaItem`` by the model's own validation —
         # the single source of media validation, which raises before any persist.
         media=media,  # type: ignore[arg-type]

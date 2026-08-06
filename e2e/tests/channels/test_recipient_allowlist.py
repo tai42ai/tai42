@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
-from _support import ChannelCase, await_true, cancel_and_join, is_pending, post_inbound, tool_content_text
+from _support import ChannelCase, await_true, cancel_and_join, find_add, is_pending, post_inbound, tool_content_text
 
 pytestmark = pytest.mark.backendless
 
@@ -38,6 +38,11 @@ async def test_allowlisted_recipient_is_delivered_to(channel_case: ChannelCase, 
         )
         assert len(records) == 1
         assert case.outbound_recipient(records[0]) == case.allowlisted_recipient
+
+        # The in-app add frame carries the caller-supplied delivery recipient verbatim
+        # (a WHERE, echoed present-value onto the stream for display).
+        add = await find_add(stack, stack.port_a, question)
+        assert add["recipient"] == case.allowlisted_recipient
 
         # An allowlisted non-default recipient's reply routes home too.
         reply = case.build_reply(records[0], answer, recipient=case.allowlisted_recipient)

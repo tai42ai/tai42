@@ -70,8 +70,9 @@ def test_register_binds_runnable_tool_and_rejects_baked_key(pg: FakeVersioningPg
             # ...and a caller that passes the baked key is REJECTED, never overriding it.
             with pytest.raises(TypeError):
                 await app.tools.run_tool("paris", {"city": "paris", "units": "metric"})
-            # ``register`` binds the live tool only — it never writes the store.
-            assert pg.documents == []
+            # ``register`` binds the live tool only — it never writes a preset row
+            # (boot seeds the default role documents, a different kind).
+            assert [d for d in pg.documents if d["kind"] == "preset"] == []
 
     asyncio.run(run())
 
@@ -271,7 +272,8 @@ def test_name_conflict_raises_before_store_write(pg: FakeVersioningPg):
                     PresetSpec(name="weather", description="d", base_tool="echo", fixed_kwargs={}),
                     extensions=[],
                 )
-            assert pg.documents == []  # nothing persisted
+            # No preset row persisted (boot-seeded role documents are a different kind).
+            assert [d for d in pg.documents if d["kind"] == "preset"] == []
 
     asyncio.run(run())
 

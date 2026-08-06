@@ -1737,6 +1737,33 @@ async def test_add_data_channel_is_conditional(wired):
     assert "channel" not in router._add_data(without_channel)
 
 
+def test_add_data_attribution_is_conditional(wired):
+    # recipient/origin/audience each ride the add frame when set and are ABSENT
+    # (no key, not null) when None — the additive channel/media idiom.
+    base = _plain_request(wired.store, AnswerFormat.TEXT)
+    bare = router._add_data(base)
+    assert "recipient" not in bare
+    assert "origin" not in bare
+    assert "audience" not in bare
+
+    attributed = base.model_copy(update={"recipient": "+15550001111", "origin": "run-xyz", "audience": "alice"})
+    data = router._add_data(attributed)
+    # A delivery address rides as-is, unmasked, on this authed operator feed.
+    assert data["recipient"] == "+15550001111"
+    assert data["origin"] == "run-xyz"
+    assert data["audience"] == "alice"
+
+
+def test_add_data_attribution_leaves_verifier_strip_intact(wired):
+    # Attribution keys are additive: a verifier-bound external question still
+    # strips its verifier and flags server_verified alongside the audience key.
+    req = _external_request(wired.store, "iva", "gva", verifier=_BINDING).model_copy(update={"audience": "alice"})
+    data = router._add_data(req)
+    assert "verifier" not in (data["format_payload"] or {})
+    assert data["server_verified"] is True
+    assert data["audience"] == "alice"
+
+
 # -- the store-unconfigured OFF gate ------------------------------------
 # With no interactions Redis the surface is honestly OFF. The gate reads the presence
 # env fresh, so delenv-ing BOTH the feature var and the shared default (overriding the

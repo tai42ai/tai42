@@ -42,8 +42,9 @@ from tai42_contract.tool_meta import (
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_settings
 
-from tai42_skeleton.tool_meta.settings import tool_meta_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 
 def _folder_record(row: tuple[Any, ...]) -> FolderRecord:
@@ -69,7 +70,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def create_folder(self, name: str, parent_id: str | None = None) -> FolderRecord:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -87,7 +88,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def rename_folder(self, folder_id: str, name: str) -> FolderRecord:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -104,7 +105,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def move_folder(self, folder_id: str, parent_id: str | None) -> FolderRecord:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -129,7 +130,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def delete_folder(self, folder_id: str) -> None:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -145,7 +146,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def list_folders(self) -> list[FolderRecord]:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -164,7 +165,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         hidden: bool | None,
     ) -> ToolMetaRecord:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -193,7 +194,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         # then read and merge on top of its row) or blocks until we commit — and
         # ``SELECT ... FOR UPDATE`` then holds that row for the merge.
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -236,7 +237,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def get_meta(self, tool_name: str) -> ToolMetaRecord | None:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -249,7 +250,7 @@ class PostgresToolMetaStore(ToolMetaStore):
 
     async def list_meta(self) -> list[ToolMetaRecord]:
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -262,7 +263,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         # NO-OP when no row exists (most tools never own one, and this runs on every
         # preset delete) — a missing row is not an error here.
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,
@@ -275,7 +276,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         # the re-key can never hit a PK violation. When ``old_name`` owns no row the
         # re-key moves nothing, but the destination ghost is still cleared.
         async with (
-            client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.transaction(),
             conn.cursor() as cur,

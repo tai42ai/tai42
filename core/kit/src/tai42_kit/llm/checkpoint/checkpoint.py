@@ -21,11 +21,10 @@ async def create_checkpoint_resource(
     """
     Creates a long-lived connection resource for checkpoints.
 
-    A ``None`` conn string falls back per provider to the shared connection
+    A ``None`` conn string falls back per provider to the base connection
     namespace: ``redis`` to the base Redis URL (``REDIS_URL`` /
-    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*`` /
-    ``TAI_DEFAULT_PG_*``). ``sqlite`` requires an explicit path; ``memory`` needs
-    none.
+    ``TAI_DEFAULT_REDIS_URL``), ``postgres`` to the base Postgres DSN (``PG_*``).
+    ``sqlite`` requires an explicit path; ``memory`` needs none.
 
     ARCHITECTURAL NOTES:
         This resource is intended to be cached indefinitely in the registry.

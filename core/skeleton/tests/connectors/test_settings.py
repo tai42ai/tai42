@@ -199,7 +199,6 @@ def test_store_settings_defaults(monkeypatch):
     assert s.key_prefix == "connectors:"
     assert s.redis.decode_responses is False
     assert s.redis.redis_url is None
-    assert s.pg.pg_db == "tai"
 
 
 def test_connector_store_settings_is_cached():

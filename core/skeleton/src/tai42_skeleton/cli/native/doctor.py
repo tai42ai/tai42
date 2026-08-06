@@ -10,15 +10,21 @@ from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 
 import typer
-from tai42_kit.clients import client_ctx
+from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
-from tai42_kit.db import MigrationError, migration_status
+from tai42_kit.db import (
+    AdminIdentityIncompleteError,
+    DatabaseNotConfiguredError,
+    MigrationError,
+    component_migrator_settings,
+    migration_status,
+)
 
 from tai42_skeleton.cli.commands._common import app_context
 from tai42_skeleton.cli.render import print_json, render_table
 from tai42_skeleton.config.config_mode import config_mode
-from tai42_skeleton.db import SchemaAdminSettings, all_migration_entries, schema_settings
+from tai42_skeleton.db import SKELETON_COMPONENT, all_migration_entries
 
 _OK = "ok"
 _FAIL = "fail"
@@ -32,7 +38,7 @@ class Check:
     detail: str
 
 
-def _pg_target(settings: SchemaAdminSettings) -> str:
+def _pg_target(settings: PostgresConnectionSettings) -> str:
     """A credential-free description of the Postgres target."""
     return f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
@@ -52,7 +58,7 @@ def _redact_url(url: str | None) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-async def _probe_postgres(settings: SchemaAdminSettings) -> Check:
+async def _probe_postgres(settings: PostgresConnectionSettings) -> Check:
     import psycopg
 
     try:
@@ -64,30 +70,36 @@ async def _probe_postgres(settings: SchemaAdminSettings) -> Check:
     except psycopg.OperationalError as exc:
         return Check("postgres", _FAIL, f"cannot connect to {_pg_target(settings)}: {exc}")
     except ValueError as exc:
-        # The kit's named not-configured error (an unset TAI_DB_PG_HOST/PG_PASSWORD
-        # with no TAI_DEFAULT_* fallback) — a clean check line, never a traceback.
+        # The kit's named malformed-connection error — a clean check line, never a
+        # traceback.
         return Check("postgres", _FAIL, str(exc))
     return Check("postgres", _OK, f"connected to {_pg_target(settings)}")
 
 
-async def _probe_schema(settings: SchemaAdminSettings) -> Check:
+async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     """Report per-component migration-chain status via the runner.
 
     ``migration_status`` never raises on a mismatch — a pending migration or a
     rewritten (checksum-diverged) chain comes back as data, rendered here as a FAIL
-    naming ``tai db migrate``. A connection failure or a malformed installed-plugin
-    chain (a kit :class:`~tai42_kit.db.MigrationError` from discovery/checksum) is
-    caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
+    naming ``tai db migrate``. A connection failure, a malformed installed-plugin
+    chain (a kit :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a
+    component bound to an unconfigured named database (a kit
+    :class:`~tai42_kit.db.DatabaseNotConfiguredError`, which names the env var) or one
+    with a half-set admin identity (a kit
+    :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars)
+    is caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other
     error propagates so a broken probe is never mistaken for a clean schema."""
     import psycopg
 
     try:
-        entries = await all_migration_entries(settings)
+        entries = await all_migration_entries()
         statuses = await migration_status(entries)
     except psycopg.OperationalError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema at {_pg_target(settings)}: {exc}")
     except MigrationError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema (run 'tai db migrate'): {exc}")
+    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError) as exc:
+        return Check("schema", _FAIL, str(exc))
     stale = [status for status in statuses if not status.is_up_to_date]
     if stale:
         detail = ", ".join(
@@ -120,11 +132,19 @@ async def _probe_redis() -> Check:
 
 
 async def _run_checks() -> list[Check]:
-    settings = schema_settings()
     checks = [
         Check("python", _INFO, platform.python_version()),
         Check("config-mode", _INFO, config_mode()),
     ]
+    try:
+        settings = component_migrator_settings(SKELETON_COMPONENT)
+    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError) as exc:
+        # The skeleton database is unconfigured or its admin identity is half-set; the
+        # schema probe has nothing to inspect, so report the postgres check as a clean
+        # FAIL and skip it.
+        checks.append(Check("postgres", _FAIL, str(exc)))
+        checks.append(await _probe_redis())
+        return checks
     postgres = await _probe_postgres(settings)
     checks.append(postgres)
     # The schema probe needs a live connection; skip it (rather than double-report

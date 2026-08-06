@@ -6,7 +6,7 @@ exercise the wired ``@on_startup`` handler
 persisted versioned preset is re-registered as the app BOOTS, and a stale preset
 is QUARANTINED without aborting the boot (which runs under ``raise_on_error=True``).
 
-The store is configured by setting ``VERSIONING_STORE_PG_PASSWORD`` (the gate that
+The store is configured by setting ``TAI_DATABASE_DEFAULT_PG_PASSWORD`` (the gate that
 lets the handler open Postgres), and the ``pg`` fixture points that open at the
 in-memory fake — so the boot path runs the true store + engine offline.
 """
@@ -35,7 +35,7 @@ def _manifest() -> Manifest:
 @pytest.fixture
 def store_configured(monkeypatch) -> None:
     """Set the store's DSN env so the boot hook's gate opens Postgres."""
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
 
 
 async def _seed(name: str, base_tool: str) -> None:
@@ -88,11 +88,13 @@ def test_startup_hook_quarantines_missing_base_tool_without_bricking_boot(pg: Fa
     asyncio.run(run())
 
 
-def test_startup_hook_skipped_when_store_unconfigured(pg: FakeVersioningPg):
+def test_startup_hook_skipped_when_store_unconfigured(pg: FakeVersioningPg, monkeypatch):
     async def run():
-        # No VERSIONING_STORE_* env: the boot hook must not touch the store, even
-        # though a row exists — so the preset is NOT rehydrated (and no pg read).
+        # Skeleton database unconfigured: the boot hook must not touch the store, even
+        # though a row exists — so the preset is NOT rehydrated (and no pg read). The
+        # seed runs before the gate is closed so a row exists to prove the skip.
         await _seed("ver", "weather")
+        monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
         pg.executed.clear()
         async with app.app_context(_manifest()):
             assert not app.preset_manager.is_registered("ver")

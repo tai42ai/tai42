@@ -30,6 +30,14 @@ from redis.exceptions import WatchError
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 
 
+@pytest.fixture(autouse=True)
+def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The policy store resolves its Postgres through the registry; these offline
+    tests fake the transport, so they model a configured deployment with the default
+    database on. A test wanting it absent deletes the var itself."""
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+
+
 class FakeRedis:
     """Matches exactly the redis operations the access_control modules call."""
 

@@ -85,6 +85,8 @@ def policy_store(monkeypatch):
 
     pg = FakeAccessControlPg()
     renderer = _CountingRenderer()
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))

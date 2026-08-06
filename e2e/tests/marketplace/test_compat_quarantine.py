@@ -77,8 +77,8 @@ def _install_wheel_into_prefix(prefix: str, wheel: BuiltWheel) -> None:
 
 def _seed_install_row(resources: StackResources, wheel: BuiltWheel) -> None:
     """Insert the attribution row a real install of ``wheel`` had written, into
-    the stack's own marketplace store (the same per-stack PG clone the
-    ``MARKETPLACE_STORE_`` env group points at)."""
+    the stack's own marketplace store (the per-stack PG clone the marketplace store
+    binds to via the ``default`` database)."""
     spec = yaml.safe_load(wheel.plugin_yml)
     with (
         psycopg.connect(

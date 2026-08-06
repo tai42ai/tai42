@@ -6,17 +6,17 @@ from tai42_accounts_postgres import settings as settings_module
 from tai42_accounts_postgres.settings import AccountsSettings
 
 
-def test_redis_key_prefix_defaults_to_pg_db(monkeypatch):
-    """Unset, the Redis namespace derives from the plugin's pg_db (never a literal)."""
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_DB", "deployment_b")
+def test_redis_key_prefix_defaults_to_bound_database(monkeypatch):
+    """Unset, the Redis namespace derives from the bound database's name (never a
+    literal)."""
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_DB", "deployment_b")
     s = AccountsSettings()
-    assert s.pg.pg_db == "deployment_b"
-    assert s.redis_key_prefix == "deployment_b"
+    assert s.redis_key_prefix is None
     assert s.key_prefix == "deployment_b"
 
 
 def test_redis_key_prefix_explicit_is_respected(monkeypatch):
-    monkeypatch.setenv("TAI_ACCOUNTS_PG_DB", "shared")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_DB", "shared")
     monkeypatch.setenv("TAI_ACCOUNTS_REDIS_KEY_PREFIX", "tenant-1")
     s = AccountsSettings()
     assert s.key_prefix == "tenant-1"

@@ -74,6 +74,9 @@ class _MemStore(VersionedStore):
             if k == kind
         ]
 
+    async def list_active_bodies(self, kind) -> dict[str, dict[str, Any]]:
+        return {n: dict(d["versions"][d["active"]][0]) for (k, n), d in self.docs.items() if k == kind}
+
     async def get(self, kind, name) -> DocumentRecord:
         doc = self._require(kind, name)
         return DocumentRecord(kind=kind, name=name, active_version=doc["active"], is_active=True, created_at="t")

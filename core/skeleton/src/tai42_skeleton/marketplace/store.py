@@ -30,8 +30,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.db import component_store_settings
 
-from tai42_skeleton.marketplace.settings import marketplace_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 
 class InstallRecord(BaseModel):
@@ -89,7 +90,7 @@ class MarketplaceInstallStore:
         the write — diagnostics only.
         """
         async with (
-            client_ctx(PostgresClient, marketplace_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -121,7 +122,7 @@ class MarketplaceInstallStore:
     async def get(self, ref: str) -> InstallRecord | None:
         """The install record for ``ref``, or ``None`` when it is not installed."""
         async with (
-            client_ctx(PostgresClient, marketplace_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -139,7 +140,7 @@ class MarketplaceInstallStore:
     async def delete(self, ref: str) -> bool:
         """Drop the install row; ``True`` when a row existed, ``False`` otherwise."""
         async with (
-            client_ctx(PostgresClient, marketplace_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):
@@ -149,7 +150,7 @@ class MarketplaceInstallStore:
     async def list_installed(self) -> list[InstallRecord]:
         """Every install record, ordered by ``ref``."""
         async with (
-            client_ctx(PostgresClient, marketplace_store_settings()) as pool,
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
             conn.cursor() as cur,
         ):

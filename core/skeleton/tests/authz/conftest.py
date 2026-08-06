@@ -112,6 +112,9 @@ def ac_env(monkeypatch):
     """A fake access-control backend: an empty PG (routes + policies) and a shared
     Redis, wired over the store/verifier/policy client seams. Returns the PG so a
     test seeds routes/policies on it."""
+    # The policy store resolves its Postgres through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     pg = FakeAccessControlPg()
     redis = FakeRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))

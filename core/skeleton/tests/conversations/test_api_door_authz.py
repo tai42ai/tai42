@@ -108,6 +108,8 @@ def client(monkeypatch, bound_app) -> TestClient:
     monkeypatch.setattr(verifier_module, "client_ctx", ctx)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     role_grants_module.reset_role_grants_cache()
 

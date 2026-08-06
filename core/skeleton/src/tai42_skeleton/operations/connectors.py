@@ -46,16 +46,17 @@ from tai42_contract.connectors.service import (
     NoAuthConnectResult,
     StartConnectResult,
 )
+from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.providers.registry import get_provider, list_providers
 from tai42_skeleton.connectors.runtime.probe import probe
 from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
 from tai42_skeleton.connectors.service import connection_service
-from tai42_skeleton.connectors.settings import connectors_store_configured
 from tai42_skeleton.connectors.store import token_store
 from tai42_skeleton.connectors.store.catalog_store import fetch_categories
 from tai42_skeleton.connectors.store.persistence import load_record_or_none
+from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
 
 logger = logging.getLogger(__name__)
@@ -70,13 +71,11 @@ _MAX_LIST_LIMIT = 500
 # Sits above ``probe``'s own transport timeout so a live MCP round-trip completes.
 _SUB_SERVICE_PROBE_TIMEOUT_SECONDS = 8.0
 
-# The machine-readable code + message the connector START refusal carries when the
-# token store is unconfigured. The read/named-entity doors answer the door's own
-# 200-empty / 404 instead; only the mutation that opens a flow refuses named.
+# The machine-readable code the connector START refusal carries when the token
+# store is unconfigured; the message is rendered from the live binding at raise
+# time. The read/named-entity doors answer the door's own 200-empty / 404 instead;
+# only the mutation that opens a flow refuses named.
 _NOT_CONFIGURED_CODE = "connectors-not-configured"
-_NOT_CONFIGURED_MESSAGE = (
-    "the connector token store is not configured: set CONNECTOR_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
-)
 
 # The machine-readable code a flow refusal carries when an OAuth provider is enabled
 # but its operator-supplied client credentials env var is unset. Distinct from the
@@ -232,7 +231,7 @@ async def list_connector_providers() -> dict[str, Any]:
     that store is configured (otherwise an empty grouping list, mirroring the
     OFF-state connections read)."""
     providers = [_provider_view(p) for p in list_providers()]
-    if connectors_store_configured():
+    if component_store_configured(SKELETON_COMPONENT):
         categories = [
             ConnectorCategoryView(id=category.id, display_name=category.display_name, sort_order=category.sort_order)
             for category in await fetch_categories()
@@ -258,7 +257,7 @@ async def list_connections(health: str | None = None, limit: int | None = None) 
 
     # OFF gate: with no store configured there are no connections — the honest
     # empty collection (reaching for an absent store would otherwise 500).
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         return ConnectionsListResponse(items=[], total=0, unhealthy=0).model_dump(mode="json")
 
     ids = await token_store().list()
@@ -296,7 +295,7 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
     unknown id is a loud 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError("connection not found")
     record = await load_record_or_none(connection_id)
     if record is None:
@@ -327,8 +326,8 @@ async def start_connect(
     """Begin a Connect (OAuth authorize URL, or an immediate no-auth connection)."""
     # OFF gate: opening a flow needs the store to persist the connection — refuse
     # with a named, machine-readable reason rather than reaching for an absent store.
-    if not connectors_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message("connector token store"), extra={"code": _NOT_CONFIGURED_CODE})
     try:
         result = await connection_service.start_connect(
             provider_id=provider_id,
@@ -357,7 +356,7 @@ async def disconnect(connection_id: str) -> dict[str, Any]:
     """Disconnect (purge) a connection; a genuinely-absent connection is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below.
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError("connection not found")
     # Let the service load the record with include_expired so a lapsed connection is
     # still purgeable (a serving-filtered pre-check would 404 an expired connection and
@@ -393,7 +392,7 @@ async def reconnect(
     """Re-run the OAuth flow for an existing connection; an unknown id is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below.
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError("connection not found")
     if await load_record_or_none(connection_id) is None:
         raise NotFoundError("connection not found")
@@ -433,7 +432,7 @@ async def patch_sub_services(
     """Toggle a connection's enabled sub-services; an unknown id is a 404."""
     # OFF gate: with no store no connection can exist — a 404 byte-identical to the
     # genuine miss below.
-    if not connectors_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError("connection not found")
     if await load_record_or_none(connection_id) is None:
         raise NotFoundError("connection not found")

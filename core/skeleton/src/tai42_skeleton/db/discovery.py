@@ -7,6 +7,10 @@ pip distribution name. This module turns those declarations into
 :class:`~tai42_kit.db.MigrationEntry` values the runner consumes — resolving a
 plugin's packaged directory through ``importlib.resources`` and failing loudly when
 a declared directory is absent from the installed package.
+
+Each entry's connection is the migrator (DDL-privileged) identity of the database
+its component is bound to, resolved through the central registry
+(:func:`~tai42_kit.db.component_migrator_settings`).
 """
 
 from __future__ import annotations
@@ -17,8 +21,7 @@ import re
 from importlib.resources.abc import Traversable
 
 from tai42_contract.plugins import PluginSpec
-from tai42_kit.clients import PostgresConnectionSettings
-from tai42_kit.db import MigrationDiscoveryError, MigrationEntry
+from tai42_kit.db import MigrationDiscoveryError, MigrationEntry, component_migrator_settings
 
 # The skeleton's chain is component ``skeleton`` — the identity in the history
 # table, fixed once and forever.
@@ -35,9 +38,14 @@ def skeleton_migrations_dir() -> Traversable:
     return root.joinpath(*_SKELETON_MIGRATIONS_SUBPATH)
 
 
-def skeleton_entry(settings: PostgresConnectionSettings) -> MigrationEntry:
-    """The skeleton chain as a runner entry against ``settings``."""
-    return MigrationEntry(component=SKELETON_COMPONENT, migrations_dir=skeleton_migrations_dir(), settings=settings)
+def skeleton_entry() -> MigrationEntry:
+    """The skeleton chain as a runner entry against the skeleton component's bound
+    migrator identity."""
+    return MigrationEntry(
+        component=SKELETON_COMPONENT,
+        migrations_dir=skeleton_migrations_dir(),
+        settings=component_migrator_settings(SKELETON_COMPONENT),
+    )
 
 
 def _normalize_dist(name: str) -> str:
@@ -72,44 +80,50 @@ def _import_package_for_distribution(distribution: str) -> str:
     return packages[0]
 
 
-def plugin_migration_entry(spec: PluginSpec, settings: PostgresConnectionSettings) -> MigrationEntry | None:
+def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
     """A plugin's chain as a runner entry, or ``None`` when it declares none.
 
-    The component is the plugin's distribution name (``spec.package``). The
-    ``migrations`` path is resolved against the plugin's import root; the runner
-    then enforces that the directory actually exists and holds a well-formed chain.
+    The component is the plugin's distribution name (``spec.package``); its
+    connection is that component's bound migrator identity. The ``migrations`` path
+    is resolved against the plugin's import root; the runner then enforces that the
+    directory actually exists and holds a well-formed chain.
     """
     if spec.migrations is None:
         return None
     package = _import_package_for_distribution(spec.package)
     migrations_dir = importlib.resources.files(package).joinpath(*spec.migrations.split("/"))
-    return MigrationEntry(component=spec.package, migrations_dir=migrations_dir, settings=settings)
+    return MigrationEntry(
+        component=spec.package,
+        migrations_dir=migrations_dir,
+        settings=component_migrator_settings(spec.package),
+    )
 
 
-async def installed_plugin_entries(settings: PostgresConnectionSettings) -> list[MigrationEntry]:
+async def installed_plugin_entries() -> list[MigrationEntry]:
     """Runner entries for every marketplace-installed plugin that declares a chain.
 
     Reads the marketplace install-attribution store (the local record of every
-    installed plugin and the exact ``PluginSpec`` it shipped). Empty when no
-    marketplace store is configured — a deployment with no installed plugins has no
-    plugin chains to migrate. Every plugin chain runs under the same migrator
-    identity as the skeleton chain (``settings``).
+    installed plugin and the exact ``PluginSpec`` it shipped). Empty when the
+    skeleton database is not configured — a deployment with no store has no plugin
+    chains to migrate. Each plugin chain runs under its own component's bound
+    migrator identity.
     """
-    from tai42_skeleton.marketplace.settings import marketplace_store_configured
+    from tai42_kit.db import component_store_configured
+
     from tai42_skeleton.marketplace.store import MarketplaceInstallStore
 
-    if not marketplace_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         return []
     entries: list[MigrationEntry] = []
     for record in await MarketplaceInstallStore().list_installed():
         spec = PluginSpec.model_validate(record.spec)
-        entry = plugin_migration_entry(spec, settings)
+        entry = plugin_migration_entry(spec)
         if entry is not None:
             entries.append(entry)
     return entries
 
 
-async def all_migration_entries(settings: PostgresConnectionSettings) -> list[MigrationEntry]:
+async def all_migration_entries() -> list[MigrationEntry]:
     """Every chain this process is responsible for: the skeleton chain plus every
-    installed plugin chain, all under the migrator identity ``settings``."""
-    return [skeleton_entry(settings), *await installed_plugin_entries(settings)]
+    installed plugin chain, each under its component's bound migrator identity."""
+    return [skeleton_entry(), *await installed_plugin_entries()]

@@ -113,6 +113,8 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
         policy_data={OWNER_USER_ID_CLAIM: "owner", KEY_FINGERPRINT_CLAIM: "fp-k-owned"},
     )
     pg.add_policy("owner", scopes=[_PROBE_SCOPE, _KEPT_SCOPE])
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
@@ -578,7 +580,7 @@ def test_rolling_the_policy_back_denies_the_next_fire(monkeypatch: pytest.Monkey
     # enforced policy at an earlier version, and the fire reads it live.
     store = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: store)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
 
     async def run() -> None:
         async with app.app_context(_manifest()):
@@ -718,7 +720,7 @@ def test_dropping_the_governing_roles_grant_denies_the_next_fire(monkeypatch: py
     # grant to ``none`` denies the key's next fire with nothing written to the key's record.
     store = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: store)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
 
     async def run() -> None:
         async with app.app_context(_manifest()):

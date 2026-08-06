@@ -43,6 +43,9 @@ def wire_store_from_route_strings(monkeypatch, route_strings: Mapping[str, str])
     ``route_strings`` is a ``{url: scope_id}`` map; each key is the store row's
     ``url``. For boundary tests, call this so the route resolution hits the fake
     store, not a real Postgres."""
+    # The policy store resolves its Postgres through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     pg = FakeAccessControlPg()
     for key, scope_id in route_strings.items():
         pg.add_route(key, scope_id)
@@ -76,6 +79,9 @@ def boundary_client(
     async def version_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield _VersionRedis()
 
+    # The policy store resolves its Postgres through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(verifier_module, "client_ctx", version_ctx)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
 

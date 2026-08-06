@@ -63,14 +63,14 @@ def tool_content_text(result: CallToolResult) -> str:
     return json.dumps([block.model_dump(mode="json") for block in (result.content or [])])
 
 
-async def find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> str:
-    """Stream the interactions backlog on ``port`` until a pending interaction
-    whose payload carries ``question`` appears; return its id."""
+async def find_add(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
+    """Stream the interactions backlog on ``port`` until an add frame whose payload
+    carries ``question`` appears; return the frame's whole parsed ``data`` object."""
     import httpx
 
     url = f"http://{stack.host}:{port}/api/interactions/stream"
 
-    async def probe() -> str | None:
+    async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
             try:
                 async with client.stream("GET", url) as response:
@@ -81,17 +81,23 @@ async def find_pending(stack: TaiStack, port: int, question: str, *, deadline: f
                             frame, buffer = buffer.split("\n\n", 1)
                             for line in frame.splitlines():
                                 if line.startswith("data:") and question in line:
-                                    data = json.loads(line[len("data:") :].strip())
-                                    return data.get("interaction_id") or data.get("id")
+                                    return json.loads(line[len("data:") :].strip())
                             if "backlog_done" in frame:
                                 return None
             except httpx.HTTPError:
                 return None
         return None
 
-    found = await wait_for_async(
-        probe, deadline=deadline, message=f"pending interaction for {question!r} never appeared"
-    )
+    found = await wait_for_async(probe, deadline=deadline, message=f"add frame for {question!r} never appeared")
+    assert found is not None
+    return found
+
+
+async def find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> str:
+    """Stream the interactions backlog on ``port`` until a pending interaction
+    whose payload carries ``question`` appears; return its id."""
+    data = await find_add(stack, port, question, deadline=deadline)
+    found = data.get("interaction_id") or data.get("id")
     assert found is not None
     return found
 

@@ -172,10 +172,10 @@ async def test_ready_dedupes_shared_connection(monkeypatch) -> None:
 
 async def test_wired_connections_gates_out_pg_and_inmemory_hooks(monkeypatch) -> None:
     # connectors + versioning not wired, hooks in-memory: no Postgres check and no
-    # hooks check are produced. Hermetic against ambient PG passwords — the
-    # marketplace/tool_meta rows are password-gated, so an ambient
-    # MARKETPLACE_STORE_PG_PASSWORD / TOOL_META_STORE_PG_PASSWORD / TAI_DEFAULT_PG_PASSWORD
-    # would otherwise leak a PostgresClient row and flip the assertion below.
+    # hooks check are produced. Hermetic against an ambient PG password — the
+    # skeleton store rows are gated on the bound-database password, so an ambient
+    # TAI_DATABASE_DEFAULT_PG_PASSWORD would otherwise leak a PostgresClient row and
+    # flip the assertion below.
     _quiet_stores(monkeypatch)
     for key in list(os.environ):
         if key.startswith("HOOKS_"):
@@ -200,7 +200,7 @@ async def test_wired_connections_gates_in_stores_when_wired(monkeypatch) -> None
     monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: True)
     # A connector store password wires connectors in; a connector Redis URL rides the
     # additional Redis row on top of the Postgres row.
-    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
     monkeypatch.setenv("CONNECTOR_STORE_REDIS_URL", "redis://connectors")
     monkeypatch.setenv("HOOKS_REDIS_URL", "redis://hooks")
     reset_all_settings()
@@ -231,8 +231,8 @@ async def test_ready_connectors_pg_only_readies_without_connector_redis(monkeypa
     monkeypatch.setattr(health, "client_ctx", _make_client_ctx(calls))
     _quiet_stores(monkeypatch)
     # A password wires connectors on; a host lets the Postgres row compose its DSN.
-    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "pw")
-    monkeypatch.setenv("CONNECTOR_STORE_PG_HOST", "db")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_HOST", "db")
     reset_all_settings()
     try:
         wired = health._wired_connections()
@@ -277,27 +277,23 @@ async def test_wired_connections_gates_sub_mcp_on_redis_url(monkeypatch) -> None
 
 def _quiet_stores(monkeypatch) -> None:
     # Keep the readiness set to just the feature under test: no connectors/versioning,
-    # and none of the shared TAI_DEFAULT_* / feature stores leaking a row in. Connectors
-    # gates on its store password (own var or TAI_DEFAULT_PG_PASSWORD), so both are cleared.
+    # and no skeleton database leaking a store row in. Every DB-backed skeleton store
+    # gates on the one bound-database password, so clearing it turns them all off.
     monkeypatch.setattr(health.instance, "versioned_store_in_use", lambda: False)
     for var in (
         "TAI_DEFAULT_REDIS_URL",
-        "TAI_DEFAULT_PG_PASSWORD",
+        "TAI_DATABASE_DEFAULT_PG_PASSWORD",
         "TAI_TOOL_RUNS_REDIS_URL",
         "INTERACTIONS_REDIS_URL",
-        "MARKETPLACE_STORE_PG_PASSWORD",
-        "TOOL_META_STORE_PG_PASSWORD",
-        "CONNECTOR_STORE_PG_PASSWORD",
     ):
         monkeypatch.delenv(var, raising=False)
 
 
 async def test_wired_connections_gates_marketplace_and_tool_meta_on_pg_password(monkeypatch) -> None:
-    # the marketplace + tool-metadata Postgres stores join the readiness set
-    # exactly when their password is configured (own var or TAI_DEFAULT_PG_PASSWORD).
+    # the marketplace + tool-metadata Postgres stores join the readiness set exactly
+    # when the skeleton database is configured.
     _quiet_stores(monkeypatch)
-    monkeypatch.setenv("MARKETPLACE_STORE_PG_PASSWORD", "pw")
-    monkeypatch.setenv("TOOL_META_STORE_PG_PASSWORD", "pw")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "pw")
     reset_all_settings()
     try:
         wired = health._wired_connections()

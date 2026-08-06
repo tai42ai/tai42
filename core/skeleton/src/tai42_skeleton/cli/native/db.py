@@ -5,10 +5,10 @@ skeleton chain plus every installed plugin that declares one) through the kit
 migration runner; ``--plan`` prints what WOULD be applied without touching the
 database. ``status`` reports each component's applied / pending / checksum verdict.
 
-Both connect through the ``TAI_DB_*`` schema-admin identity — the DDL-privileged
-migrator namespace (falling back to ``TAI_DEFAULT_*``), distinct from the app's
-runtime store roles so the migrator can own the schema. A connection failure or an
-unconfigured connection is a clean, credential-free message and a non-zero exit,
+Each component connects through its bound database's migrator (DDL-privileged)
+identity, resolved through the central registry — distinct from the app's runtime
+store roles so the migrator can own the schema. A connection failure or an
+unconfigured database is a clean, credential-free message and a non-zero exit,
 never a raw traceback.
 """
 
@@ -18,16 +18,20 @@ import asyncio
 
 import typer
 from tai42_kit.db import (
+    AdminIdentityIncompleteError,
     AppliedMigration,
     ComponentStatus,
+    DatabaseNotConfiguredError,
     MigrationError,
     apply_migrations,
+    component_binding,
+    component_migrator_settings,
     migration_status,
 )
 
 from tai42_skeleton.cli.commands._common import app_context
 from tai42_skeleton.cli.render import print_json, render_table
-from tai42_skeleton.db import SchemaAdminSettings, all_migration_entries, schema_settings
+from tai42_skeleton.db import SKELETON_COMPONENT, all_migration_entries
 
 app = typer.Typer(
     name="db",
@@ -36,18 +40,21 @@ app = typer.Typer(
 )
 
 
-def _target(settings: SchemaAdminSettings) -> str:
-    """A credential-free description of the connection target for messages."""
-    return f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
+def _target() -> str:
+    """A credential-free description of the skeleton component's bound database for
+    messages: the registry name plus host/port/db."""
+    name = component_binding(SKELETON_COMPONENT)
+    settings = component_migrator_settings(SKELETON_COMPONENT)
+    return f"database {name!r} at {settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
 async def _apply() -> list[AppliedMigration]:
-    entries = await all_migration_entries(schema_settings())
+    entries = await all_migration_entries()
     return await apply_migrations(entries)
 
 
 async def _status() -> list[ComponentStatus]:
-    entries = await all_migration_entries(schema_settings())
+    entries = await all_migration_entries()
     return await migration_status(entries)
 
 
@@ -75,16 +82,17 @@ def _emit_status(statuses: list[ComponentStatus], *, json_output: bool) -> None:
 def _run(coro):  # type: ignore[no-untyped-def]
     """Run a migration coroutine, mapping the kit's connection and chain faults to
     clean CLI failures. A connection error names the credential-free target; the
-    kit's not-configured ``ValueError`` and the chain-integrity errors surface their
-    own actionable messages; all exit non-zero without a traceback."""
+    registry's not-configured and half-set-admin-identity errors and the
+    chain-integrity errors surface their own actionable messages; all exit non-zero
+    without a traceback."""
     import psycopg
 
     try:
         return asyncio.run(coro)
     except psycopg.OperationalError as exc:
-        typer.echo(f"Error: could not connect to Postgres at {_target(schema_settings())}: {exc}", err=True)
+        typer.echo(f"Error: could not connect to Postgres {_target()}: {exc}", err=True)
         raise typer.Exit(1) from exc
-    except (ValueError, MigrationError) as exc:
+    except (DatabaseNotConfiguredError, AdminIdentityIncompleteError, ValueError, MigrationError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 

@@ -20,9 +20,10 @@ from tai42_contract.accounts import (
 )
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_settings
 
 from tai42_accounts_postgres import service
-from tai42_accounts_postgres.db import assert_accounts_schema_applied
+from tai42_accounts_postgres.db import COMPONENT, assert_accounts_schema_applied
 from tai42_accounts_postgres.settings import accounts_settings
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ class PostgresAccountsProvider(AccountsProvider):
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
         # Both backing stores: the plugin's own Postgres and the injected Redis.
         return (
-            ReadinessTarget("accounts", PostgresClient, accounts_settings().pg),
+            ReadinessTarget("accounts", PostgresClient, component_store_settings(COMPONENT)),
             ReadinessTarget("accounts", RedisClient, self.settings.redis),
         )
 

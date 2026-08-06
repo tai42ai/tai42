@@ -149,9 +149,9 @@ def pg(monkeypatch) -> FakeVersioningPg:
 
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
     # Faking the store transport models a store-configured deployment, so it must
-    # also set the ``VERSIONING_STORE_*`` namespace the create/list/delete routes
-    # gate on (versioned_store_configured) — else a versioned author is refused.
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    # also configure the skeleton database the create/list/delete routes gate on —
+    # else a versioned author is refused.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
 
 

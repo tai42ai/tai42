@@ -20,7 +20,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 if TYPE_CHECKING:
-    from tai42_accounts_postgres.settings import AccountsPgSettings
+    from tai42_kit.clients import PostgresConnectionSettings
 
 # Bounded id-collision retry: a small cap that then RAISES, never an unbounded loop.
 _MAX_ID_ATTEMPTS = 3
@@ -49,7 +49,7 @@ def new_user_id() -> str:
 class UsersStore:
     """The ``accounts_users`` table."""
 
-    def __init__(self, settings: AccountsPgSettings) -> None:
+    def __init__(self, settings: PostgresConnectionSettings) -> None:
         self._settings = settings
 
     async def create(self, user_id: str, email: str, role: str, password_hash: str | None = None) -> str:
@@ -285,7 +285,7 @@ class _AdminGuard:
 class SessionsStore:
     """The ``accounts_sessions`` table."""
 
-    def __init__(self, settings: AccountsPgSettings) -> None:
+    def __init__(self, settings: PostgresConnectionSettings) -> None:
         self._settings = settings
 
     async def create(self, token_hash: str, user_id: str, absolute_expires_at: Any) -> None:
@@ -358,7 +358,7 @@ class SessionsStore:
 class InvitesStore:
     """The ``accounts_invites`` table."""
 
-    def __init__(self, settings: AccountsPgSettings) -> None:
+    def __init__(self, settings: PostgresConnectionSettings) -> None:
         self._settings = settings
 
     async def create(self, token_hash: str, user_id: str, expires_at: Any) -> None:

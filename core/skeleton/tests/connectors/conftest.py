@@ -57,6 +57,14 @@ def crypto_env(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_all_settings()
 
 
+@pytest.fixture(autouse=True)
+def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connector store resolves its durable Postgres through the registry; these
+    offline tests fake the transport, so they model a configured deployment with the
+    default database on. A test wanting it absent deletes the var itself."""
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
+
+
 # -- Descriptor / record builders -------------------------------------------
 
 

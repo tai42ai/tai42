@@ -229,9 +229,11 @@ async def list_role_versions(name: str) -> dict[str, Any]:
     Admin-only. A store-less deployment keeps no history, so the read is an empty pair."""
     caller = await resolve_caller()
     require_admin(caller)
-    from tai42_skeleton.versioning import versioned_store_configured
+    from tai42_kit.db import component_store_configured
 
-    if not versioned_store_configured():
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
         return {"versions": [], "audit": []}
     try:
         versions = await role_store().list_versions(name)

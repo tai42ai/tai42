@@ -41,14 +41,13 @@ def test_override_endpoints_reach_the_rendered_env(infra: Infra, tmp_path: Path)
         assert resources.probe_redis_url == infra.redis.url_for(0)
 
         # The override reaches the feature env every builder renders: the SUT's
-        # feature Redis URL and its PG coordinates — carried by the shared
-        # TAI_DEFAULT_* default namespace the core stack sets — point at the given
-        # endpoints.
+        # feature Redis URL and its PG coordinates — carried by the ``default`` named
+        # database the core stack declares — point at the given endpoints.
         env = build_core_stack(resources, infra.variants).env
         assert env["ACCESS_CONTROL_REDIS_URL"] == resources.redis_url
         assert env["TAI_TOOL_RUNS_REDIS_URL"] == resources.redis_url
-        assert env["TAI_DEFAULT_PG_HOST"] == "127.0.0.1"
-        assert env["TAI_DEFAULT_PG_PORT"] == "59998"
+        assert env["TAI_DATABASE_DEFAULT_PG_HOST"] == "127.0.0.1"
+        assert env["TAI_DATABASE_DEFAULT_PG_PORT"] == "59998"
     finally:
         # No TaiStack owns these, so reap the real resources the allocator made.
         if resources.broker_lease is not None:

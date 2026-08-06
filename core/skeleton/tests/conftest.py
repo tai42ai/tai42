@@ -37,8 +37,10 @@ from tai42_kit.settings import reset_all_settings
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
 import tai42_skeleton.tool_meta.store as tool_meta_store
+import tai42_skeleton.versioning.store as versioning_store
 from tests._fakes.interactions_redis import FakeRedis
 from tests.tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
+from tests.versioning.conftest import FakeVersioningPg
 
 
 @pytest.fixture
@@ -102,14 +104,32 @@ def _offline_connector_categories(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _offline_schema_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The boot-time migration gate (:func:`assert_skeleton_schema_applied`) reads the
-    ``tai_schema_history`` table through the kit runner whenever a schema-owning
-    skeleton feature is configured. An offline app-boot test that sets a store password
-    (to turn a feature ON) but fakes that store's Postgres would otherwise have the gate
-    reach for a real Postgres it never provided. Neutralize it by reporting no
-    schema-owning features — the same offline posture the store-seam fakes above take.
-    The gate's own suite (``tests/db/test_boot_gate.py``) re-patches this seam to drive
-    the configured / pending / refusal branches."""
-    monkeypatch.setattr(boot_gate, "_skeleton_schema_features", list)
+    ``tai_schema_history`` table through the kit runner whenever the skeleton database
+    is configured. An offline app-boot test that sets the database password (to turn a
+    feature ON) but fakes that store's Postgres would otherwise have the gate reach for
+    a real Postgres it never provided. Neutralize it by reporting the database as
+    unconfigured — the same offline posture the store-seam fakes above take. The gate's
+    own suite (``tests/db/test_boot_gate.py``) re-patches this seam to drive the
+    configured / pending / refusal branches."""
+    monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: False)
+
+
+@pytest.fixture(autouse=True)
+def _offline_versioned_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The versioned-document store's boot handlers (role seeding, preset
+    rehydration) open Postgres through the store's own pooled ``client_ctx`` whenever
+    the skeleton database is configured. An offline app-boot test that configures the
+    database (to turn another feature ON) would otherwise have those handlers reach a
+    real Postgres. Fake the store's seam with the stateful in-memory ``FakeVersioningPg``
+    so the boot handlers run against it and return instantly. The versioning/preset
+    suites re-patch this seam with their own fresh fake to assert store behavior."""
+    fake = FakeVersioningPg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield fake
+
+    monkeypatch.setattr(versioning_store, "client_ctx", fake_client_ctx)
 
 
 @pytest.fixture(autouse=True)

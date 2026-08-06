@@ -1,10 +1,11 @@
-"""Plugin configuration — the ``TAI_ACCOUNTS_*`` env namespace.
+"""Plugin behavior config — the ``TAI_ACCOUNTS_*`` env namespace.
 
-``AccountsPgSettings`` (``TAI_ACCOUNTS_PG_*``) is the Postgres connection for the
-user/session/invite store; ``AccountsSettings`` (``TAI_ACCOUNTS_*``) carries the
-session/invite lifetimes, login-throttle knobs, argon2 concurrency bound, and the
-bootstrap gate. Redis is not configured here — it comes through the injected
-``settings.redis``.
+``AccountsSettings`` (``TAI_ACCOUNTS_*``) carries the session/invite lifetimes,
+login-throttle knobs, argon2 concurrency bound, the bootstrap gate, and the Redis
+key namespace. The plugin's Postgres connection is not configured here — it
+resolves through the central database registry from the component's binding
+(``TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES``). Redis likewise comes through the
+injected ``settings.redis``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import os
 
 from pydantic import Field, SecretStr
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.clients import PostgresConnectionSettings
+from tai42_kit.db import component_store_settings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
@@ -34,18 +35,6 @@ def _default_hash_concurrency() -> int:
         _HASH_CONCURRENCY_CPU_MULTIPLE,
     )
     return _HASH_CONCURRENCY_CPU_MULTIPLE
-
-
-class AccountsPgSettings(PostgresConnectionSettings):
-    """``TAI_ACCOUNTS_PG_*`` Postgres connection for the plugin's own tables.
-
-    ``pg_db`` defaults to ``"tai"`` (the tables live in the platform database). No
-    baked-in credential — supply the password via ``TAI_ACCOUNTS_PG_PASSWORD``.
-    """
-
-    model_config = SettingsConfigDict(env_prefix="TAI_ACCOUNTS_")
-
-    pg_db: str = "tai"
 
 
 class AccountsSettings(TaiBaseSettings):
@@ -79,24 +68,20 @@ class AccountsSettings(TaiBaseSettings):
     bootstrap_open: bool = False
 
     # Per-deployment namespace prefixed onto every plugin Redis key so a shared Redis
-    # cannot cross-read. Defaults to ``pg_db`` (derived in model_post_init since a
-    # pydantic default cannot reference another field); never a hardcoded literal.
-    # Deployments sharing both one Redis and one ``pg_db`` must set distinct values.
+    # cannot cross-read. Unset, ``key_prefix`` derives it from the bound database's
+    # name; never a hardcoded literal. Deployments sharing both one Redis and one
+    # database must set distinct values.
     redis_key_prefix: str | None = None
-
-    pg: AccountsPgSettings = Field(default_factory=AccountsPgSettings)
-
-    def model_post_init(self, __context: object) -> None:
-        # Derive the Redis namespace from ``pg_db`` when left unset.
-        if self.redis_key_prefix is None:
-            self.redis_key_prefix = self.pg.pg_db
 
     @property
     def key_prefix(self) -> str:
-        """The resolved Redis namespace segment (never ``None`` post-init)."""
-        if self.redis_key_prefix is None:  # pragma: no cover - invariant guard
-            raise RuntimeError("redis_key_prefix was not derived in model_post_init")
-        return self.redis_key_prefix
+        """The resolved Redis namespace segment: the explicit override, else the
+        bound database's name (which requires the store be configured)."""
+        if self.redis_key_prefix is not None:
+            return self.redis_key_prefix
+        from tai42_accounts_postgres.db import COMPONENT
+
+        return component_store_settings(COMPONENT).pg_db
 
 
 @settings_cache

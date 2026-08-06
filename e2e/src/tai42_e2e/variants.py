@@ -303,7 +303,7 @@ class RedisIdentity(IdentityVariant):
 
 
 # The fixture identity provider's ``fixture_identity_keys`` table, in the stack's
-# ACCESS_CONTROL_STORE Postgres database. The seed writes the provider's wire
+# skeleton store database (its per-run PG clone). The seed writes the provider's wire
 # format directly (as the redis seed writes ``ac:key:*`` directly), so this DDL
 # and its columns mirror what ``tai42_e2e_fixtures.identity_provider`` reads.
 _FIXTURE_IDENTITY_CREATE_TABLE = (

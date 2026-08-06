@@ -1,10 +1,10 @@
 """The boot-time schema gate (A3): refuse to serve on an out-of-date database.
 
 The refusal itself is kit's shared ``assert_chain_applied`` primitive (covered in
-kit's own tests); these tests pin the skeleton's WIRING around it — its feature
-collection, the DSN de-duplication, the exact ``tai db migrate`` remediation it
-supplies, and that the gate is a no-op when no schema-owning feature is configured.
-One test drives the real kit primitive end-to-end (faking only kit's
+kit's own tests); these tests pin the skeleton's WIRING around it — that the gate
+verifies the skeleton chain on the runtime store connection, supplies the exact
+``tai db migrate`` remediation, and is a no-op when the skeleton database is not
+configured. One test drives the real kit primitive end-to-end (faking only kit's
 ``migration_status``) so the byte-exact refusal wording stays pinned here too.
 """
 
@@ -19,7 +19,7 @@ from tai42_kit.db import ComponentStatus, MigrationEntry, MigrationScript
 
 from tai42_skeleton.db import boot_gate
 from tai42_skeleton.db.boot_gate import SchemaOutOfDateError, assert_chain_applied, assert_skeleton_schema_applied
-from tai42_skeleton.db.boot_gate import _skeleton_schema_features as _real_skeleton_schema_features
+from tai42_skeleton.db.discovery import SKELETON_COMPONENT
 
 
 def _script(version: int, name: str) -> MigrationScript:
@@ -37,10 +37,8 @@ def test_gate_re_exports_the_kit_primitive() -> None:
     assert SchemaOutOfDateError is kit_migrations.SchemaOutOfDateError
 
 
-async def test_skeleton_gate_noop_when_no_feature_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        boot_gate, "_skeleton_schema_features", lambda: [(lambda: False, lambda: SimpleNamespace(pg_dsn="unused"))]
-    )
+async def test_skeleton_gate_noop_when_database_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: False)
 
     async def _forbidden(entries: Sequence[MigrationEntry], *, remediation: str) -> None:
         raise AssertionError("an all-off deployment must not run the schema gate")
@@ -49,14 +47,36 @@ async def test_skeleton_gate_noop_when_no_feature_configured(monkeypatch: pytest
     await assert_skeleton_schema_applied()  # no raise, no query
 
 
-async def test_skeleton_gate_checks_configured_feature_and_supplies_remediation(
+async def test_skeleton_gate_verifies_chain_on_the_runtime_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = SimpleNamespace(pg_dsn="runtime-dsn")
+    monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: True)
+    monkeypatch.setattr(boot_gate, "component_store_settings", lambda component: runtime)
+    captured: dict[str, object] = {}
+
+    async def _fn(entries: Sequence[MigrationEntry], *, remediation: str) -> None:
+        captured["entries"] = list(entries)
+        captured["remediation"] = remediation
+
+    monkeypatch.setattr(boot_gate, "assert_chain_applied", _fn)
+    await assert_skeleton_schema_applied()
+
+    entries = captured["entries"]
+    assert isinstance(entries, list)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.component == SKELETON_COMPONENT
+    assert entry.settings is runtime  # verified on the runtime store, not the migrator
+    # The skeleton supplies its own fix wording; kit hard-codes none.
+    assert captured["remediation"] == "Run 'tai db migrate' to apply the pending migrations, then restart."
+
+
+async def test_skeleton_gate_checks_configured_database_and_supplies_remediation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Drive the REAL kit primitive (only kit's ``migration_status`` is faked) so the
     # skeleton's remediation wording and the byte-exact refusal are pinned end-to-end.
-    monkeypatch.setattr(
-        boot_gate, "_skeleton_schema_features", lambda: [(lambda: True, lambda: SimpleNamespace(pg_dsn="dsn1"))]
-    )
+    monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: True)
+    monkeypatch.setattr(boot_gate, "component_store_settings", lambda component: SimpleNamespace(pg_dsn="dsn1"))
 
     async def _fn(entries: Sequence[MigrationEntry]) -> list[ComponentStatus]:
         assert len(entries) == 1
@@ -70,34 +90,3 @@ async def test_skeleton_gate_checks_configured_feature_and_supplies_remediation(
         "database schema is out of date — refusing to start: skeleton: 1 pending (0002_add_thing.sql). "
         "Run 'tai db migrate' to apply the pending migrations, then restart."
     )
-
-
-async def test_skeleton_gate_dedups_by_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
-    features = [
-        (lambda: True, lambda: SimpleNamespace(pg_dsn="same")),
-        (lambda: True, lambda: SimpleNamespace(pg_dsn="same")),
-        (lambda: True, lambda: SimpleNamespace(pg_dsn="other")),
-    ]
-    monkeypatch.setattr(boot_gate, "_skeleton_schema_features", lambda: features)
-    captured: dict[str, object] = {}
-
-    async def _fn(entries: Sequence[MigrationEntry], *, remediation: str) -> None:
-        captured["count"] = len(entries)
-        captured["remediation"] = remediation
-
-    monkeypatch.setattr(boot_gate, "assert_chain_applied", _fn)
-    await assert_skeleton_schema_applied()
-    assert captured["count"] == 2  # two distinct DSNs, the duplicate collapsed
-    # The skeleton supplies its own fix wording; kit hard-codes none.
-    assert captured["remediation"] == "Run 'tai db migrate' to apply the pending migrations, then restart."
-
-
-def test_real_skeleton_schema_features_registers_the_five_stores() -> None:
-    # The real registry (the autouse offline fixture patches the module attr, so the
-    # bound reference captured at import drives the real body). Every entry is a
-    # (predicate, settings-factory) pair the gate can call.
-    features = _real_skeleton_schema_features()
-    assert len(features) == 5
-    for predicate, settings_factory in features:
-        assert callable(predicate)
-        assert callable(settings_factory)

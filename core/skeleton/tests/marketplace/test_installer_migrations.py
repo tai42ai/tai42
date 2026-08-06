@@ -57,7 +57,7 @@ async def test_install_runs_migrations_before_manifest_patch(monkeypatch: pytest
         return [AppliedMigration("tai42-acct", 1, "baseline", "abc")]
 
     monkeypatch.setattr(installer_module, "apply_migrations", _fake_apply)
-    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s, settings: object())
+    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s: object())
 
     await h.installer().install("tai42/acct")
 
@@ -97,7 +97,7 @@ async def test_migration_failure_aborts_without_manifest_patch(monkeypatch: pyte
         raise RuntimeError("migration boom")
 
     monkeypatch.setattr(installer_module, "apply_migrations", _boom)
-    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s, settings: object())
+    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s: object())
 
     with pytest.raises(RuntimeError, match="migration boom"):
         await h.installer().install("tai42/acct")
@@ -124,7 +124,7 @@ async def test_update_runs_new_version_migrations_before_manifest_patch(monkeypa
         return []
 
     monkeypatch.setattr(installer_module, "apply_migrations", _fake_apply)
-    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s, settings: object())
+    monkeypatch.setattr(installer_module, "plugin_migration_entry", lambda s: object())
 
     await h.installer().update("tai42/acct")
 

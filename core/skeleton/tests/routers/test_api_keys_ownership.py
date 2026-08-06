@@ -57,6 +57,8 @@ class _SpyProvider(ApiKeyIdentityProvider):
 def wired(monkeypatch):
     pg = FakeAccessControlPg()
     redis = FakeRedis(strings={})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
@@ -299,7 +301,7 @@ async def test_list_roles_returns_seeded_roles(wired, monkeypatch):
     # A shared store so the seed survives the handler's own ``role_store()`` rebuild.
     mem = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     await seed_default_roles()
     resp = await _call(router.list_roles, "admin1", _req(method="GET"))
     assert resp.status_code == 200
@@ -314,19 +316,12 @@ async def test_list_roles_returns_seeded_roles(wired, monkeypatch):
     assert admin["grants"] == {}
 
 
-async def test_list_roles_empty_on_store_less_deployment(wired, monkeypatch):
-    # A store-less deployment (no versioned store) has no role templates — the route
-    # serves an empty list rather than attempting a Postgres read. The versioned store
-    # is patched to RAISE if invoked, so the guard is load-bearing: without it the
-    # handler would read the store and blow up rather than return an empty list.
+async def test_list_roles_empty_when_no_role_documents(wired, monkeypatch):
+    # With no role documents in the versioned store, the route serves an empty list.
     pg, _spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
-
-    def _boom():
-        raise AssertionError("versioned store must not be read when store-less")
-
-    monkeypatch.setattr(versioning_module, "versioned_store", _boom)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: False)
+    mem = _MemStore()
+    monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
     resp = await _call(router.list_roles, "admin1", _req(method="GET"))
     assert resp.status_code == 200
     assert _body(resp)["data"] == []
@@ -388,7 +383,7 @@ async def test_list_policy_versions_admin_succeeds(wired, monkeypatch):
     pg, _spy = wired
     mem = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     _seed_caller(pg, "admin1", scopes=["*"])
     await ops_api_keys.ac_policy_store().write("target", _policy_body(["a"]))
     resp = await _call(router.list_policy_versions, "admin1", _req(path_params={"user_id": "target"}, method="GET"))
@@ -400,7 +395,7 @@ async def test_rollback_policy_admin_succeeds(wired, monkeypatch):
     pg, _spy = wired
     mem = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     _seed_caller(pg, "admin1", scopes=["*"])
     # A live target policy plus two history versions; admin rolls back to version 1.
     pg.add_policy("target", scopes=["b"])
@@ -414,34 +409,26 @@ async def test_rollback_policy_admin_succeeds(wired, monkeypatch):
     assert _body(resp)["data"]["active_version"] == 1
 
 
-# -- policy-history routes degrade gracefully on a store-less deployment ------
+# -- policy-history routes 404 on a user with no policy history ---------------
 #
-# A store-less AC deployment (no versioned store configured) keeps no policy version
-# history, so both admin routes short-circuit (empty list / clean 404) rather than
-# raw-500 on an absent Postgres backend. The versioned store is patched to RAISE if
-# invoked, so the guard is load-bearing: without it the handler would read the store and
-# blow up rather than return the store-less answer.
+# A user with no policy document has no version history, so both admin routes answer
+# a clean 404 rather than raw-500 on a missing document.
 
 
-def _boom_store():
-    raise AssertionError("versioned store must not be read when store-less")
-
-
-async def test_list_policy_versions_admin_store_less_returns_empty(wired, monkeypatch):
+async def test_list_policy_versions_admin_404_when_no_history(wired, monkeypatch):
     pg, _spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
-    monkeypatch.setattr(versioning_module, "versioned_store", _boom_store)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: False)
+    mem = _MemStore()
+    monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
     resp = await _call(router.list_policy_versions, "admin1", _req(path_params={"user_id": "target"}, method="GET"))
-    assert resp.status_code == 200
-    assert _body(resp)["data"] == []
+    assert resp.status_code == 404
 
 
-async def test_rollback_policy_admin_store_less_returns_404(wired, monkeypatch):
+async def test_rollback_policy_admin_404_when_no_history(wired, monkeypatch):
     pg, _spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
-    monkeypatch.setattr(versioning_module, "versioned_store", _boom_store)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: False)
+    mem = _MemStore()
+    monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
     resp = await _call(
         router.rollback_policy, "admin1", _req({"version": 1}, path_params={"user_id": "target"}, method="POST")
     )

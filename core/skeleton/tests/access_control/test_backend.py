@@ -499,7 +499,7 @@ async def test_step5b_level_miss_and_hard_fence_deny_with_cause(monkeypatch, bou
 
     mem = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     role_grants_module.reset_role_grants_cache()
     reset_route_index()
     await seed_default_roles()

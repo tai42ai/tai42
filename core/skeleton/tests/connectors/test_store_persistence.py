@@ -31,7 +31,7 @@ from .conftest import CID, CID2, make_oauth_record
 def _connector_store_configured(monkeypatch):
     # the connector surface answers OFF with no store configured. These tests
     # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
-    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "x")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "x")
 
 
 class _FakeStore:

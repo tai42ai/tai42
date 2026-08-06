@@ -19,6 +19,7 @@ from tai42_contract.interactions import (
 
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
 from tests._helpers import await_add_event
 
 
@@ -152,6 +153,50 @@ async def test_ask_user_blocks_until_answer(monkeypatch, fake_redis, fake_client
     await answerer
 
     assert result == "hello human"
+
+
+async def _answer_and_report_origin(fake_redis, store) -> str | None:
+    # Play the answerer: wake the blocked caller and report the origin stamped on
+    # the persisted question record.
+    interaction_id, group_id = await await_add_event(fake_redis, store)
+    state = await store.get_state(fake_redis, interaction_id)
+    assert state is not None
+    await store.record_answer(
+        fake_redis,
+        InteractionResponse(
+            interaction_id=interaction_id,
+            answer="ok",
+            answered_by="tester",
+            answered_at=datetime.now(UTC),
+        ),
+        group_id,
+        reply_ttl=60,
+    )
+    return state.request.origin
+
+
+async def test_ask_user_stamps_origin_from_bound_context(monkeypatch, fake_redis, fake_client_ctx):
+    # A question raised inside a bound run carries that run's origin on its durable record.
+    monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
+    store = InteractionStore(helper_module.interactions_settings().key_prefix)
+
+    token = set_interaction_origin("run-42")
+    try:
+        answerer = asyncio.create_task(_answer_and_report_origin(fake_redis, store))
+        await ask_user("bound?", timeout=5)
+        assert await answerer == "run-42"
+    finally:
+        reset_interaction_origin(token)
+
+
+async def test_ask_user_origin_none_outside_bound_context(monkeypatch, fake_redis, fake_client_ctx):
+    # Outside any bound run the origin is None (an unattributed ask).
+    monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
+    store = InteractionStore(helper_module.interactions_settings().key_prefix)
+
+    answerer = asyncio.create_task(_answer_and_report_origin(fake_redis, store))
+    await ask_user("unbound?", timeout=5)
+    assert await answerer is None
 
 
 async def test_ask_user_times_out(monkeypatch, fake_client_ctx):

@@ -29,6 +29,9 @@ tai42_app.bind(instance.build_app())
 
 @pytest.fixture
 def pg(monkeypatch) -> FakeVersioningPg:
+    # The store resolves its bound database through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     fake = FakeVersioningPg()
 
     @asynccontextmanager

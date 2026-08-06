@@ -1,7 +1,10 @@
-"""C6 + C7 — a human-in-the-loop ``ask_user`` blocks a tool call on replica A;
-the pending interaction is observed and answered via replica B; the waiter wakes
-across workers (Redis blpop/rpush). The external-callback variant proves the
-single-use answer claim (WATCH/MULTI)."""
+"""C6 + C7 — a human-in-the-loop ``ask_user`` blocks its caller on replica A, the
+pending interaction is observed and answered via replica B, and the waiter wakes
+across workers (Redis blpop/rpush). The first flow raises the ask INSIDE a background
+tool run, so its add frame carries the submitting run id as ``origin`` (no
+recipient/audience passed, so both keys are absent), and the run reaches its terminal
+state on B once answered. The external-callback variant proves the single-use answer
+claim (WATCH/MULTI)."""
 
 from __future__ import annotations
 
@@ -16,12 +19,12 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 
-async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> str:
+async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
     """Stream the interactions SSE on ``port`` until a pending interaction whose
-    payload carries ``question`` appears; return its id."""
+    payload carries ``question`` appears; return its add-frame data."""
     url = f"http://{stack.host}:{port}/api/interactions/stream"
 
-    async def probe() -> str | None:
+    async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
             try:
                 async with client.stream("GET", url) as response:
@@ -30,9 +33,9 @@ async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: 
                         buffer += chunk
                         while "\n\n" in buffer:
                             frame, buffer = buffer.split("\n\n", 1)
-                            interaction_id = _match(frame, question)
-                            if interaction_id is not None:
-                                return interaction_id
+                            data = _match(frame, question)
+                            if data is not None:
+                                return data
                             if "backlog_done" in frame:
                                 return None
             except httpx.HTTPError:
@@ -46,7 +49,7 @@ async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: 
     return found
 
 
-def _match(frame: str, question: str) -> str | None:
+def _match(frame: str, question: str) -> dict | None:
     for line in frame.splitlines():
         if line.startswith("data:"):
             try:
@@ -54,30 +57,44 @@ def _match(frame: str, question: str) -> str | None:
             except json.JSONDecodeError:
                 return None
             if question in json.dumps(data):
-                return data.get("interaction_id") or data.get("id")
+                return data
     return None
 
 
 async def test_ask_user_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
 
-    async def ask() -> object:
-        async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
-            # A boot-time ask races the ~2s self-resync gate (a retriable ``reloading``);
-            # poll past it so the call parks on the real question, not the reload gate.
-            result = await mcp.call_tool("ask_user", {"question": question}, retry_on_reloading=True)
-        return result.data
+    # Raise the ask INSIDE a background tool run on A: the supervisor binds the run id
+    # as the interaction origin, so the question the run parks on carries it. The submit
+    # can race the ~2s boot-time self-resync gate, so poll past a retriable ``reloading``.
+    submitted = await api_a.post(
+        "/api/tool-runs",
+        json={"tool_name": "ask_user", "arguments": {"question": question}},
+        expect=202,
+        retry_on_reloading=True,
+    )
+    run_id = submitted["run_id"]
 
-    ask_task = asyncio.create_task(ask())
-    try:
-        interaction_id = await _find_pending(replicas_stack, replicas_stack.port_b, question)
-        api_b = replicas_stack.api(port=replicas_stack.port_b)
-        await api_b.post(f"/api/interactions/{interaction_id}/answer", json={"answer": "yes-from-b"})
-        answer = await asyncio.wait_for(ask_task, timeout=10.0)
-    finally:
-        if not ask_task.done():
-            ask_task.cancel()
-    assert "yes-from-b" in json.dumps(answer)
+    add = await _find_pending(replicas_stack, replicas_stack.port_b, question)
+    # Attribution rides the add frame: ``origin`` IS the submitting run; no recipient or
+    # audience was passed, so both keys are ABSENT (the additive-wire idiom).
+    assert add["origin"] == run_id
+    assert "recipient" not in add
+    assert "audience" not in add
+
+    await api_b.post(f"/api/interactions/{add['interaction_id']}/answer", json={"answer": "yes-from-b"})
+
+    # The parked run woke across workers: its terminal record — carrying the answer —
+    # is readable on B.
+    async def terminal_on_b() -> dict | None:
+        view = await api_b.get(f"/api/tool-runs/{run_id}")
+        return view if view["status"] == "succeeded" else None
+
+    view = await wait_for_async(terminal_on_b, deadline=10.0, message="the background ask never reached succeeded on B")
+    assert view is not None
+    assert "yes-from-b" in json.dumps(view["result"])
 
 
 async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
@@ -101,7 +118,8 @@ async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, 
 
     ask_task = asyncio.create_task(ask())
     try:
-        interaction_id = await _find_pending(replicas_stack, replicas_stack.port_b, question)
+        add = await _find_pending(replicas_stack, replicas_stack.port_b, question)
+        interaction_id = add["interaction_id"]
         api_b = replicas_stack.api(port=replicas_stack.port_b)
         # Resolve the ticket for this interaction, then answer via the public
         # callback door twice: first answers, second is an idempotent duplicate.

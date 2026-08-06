@@ -9,8 +9,9 @@ shares a class with plain feature config:
   * :class:`ConnectorEngineConfig` (``CONNECTORS_*``) — non-secret engine knobs:
     the session/token-cache TTL cap and the OAuth redirect-URI allow-list.
   * :class:`ConnectorStoreSettings` (``CONNECTOR_STORE_*``) — the token-store
-    backend, composing the kit Redis + Postgres connection settings so the store
-    reaches both through the pooled clients, plus the connector key prefix.
+    backend, composing the kit Redis connection settings plus the connector key
+    prefix. The durable Postgres connection is the skeleton component's bound
+    database, resolved through the central registry.
 
 Alongside the engine, :class:`ConnectorAdapterSettings` (``CONNECTORS_*``) carries
 the wire-format contract between the outbound MCP adapter and the connector-
@@ -27,7 +28,7 @@ from datetime import timedelta
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.clients import PostgresConnectionSettings, RedisConnectionSettings
+from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 _KEK_BYTE_LENGTH = 32
@@ -192,26 +193,16 @@ class ConnectorStoreRedisSettings(RedisConnectionSettings):
     socket_timeout: float | None = Field(default=5, gt=0)
 
 
-class ConnectorStorePgSettings(PostgresConnectionSettings):
-    """``CONNECTOR_STORE_*`` postgres connection for the ``connector_connections``
-    durable source of truth. No baked-in credential — supply the password via
-    ``CONNECTOR_STORE_PG_PASSWORD``."""
-
-    model_config = SettingsConfigDict(env_prefix="CONNECTOR_STORE_")
-
-    pg_db: str = "tai"
-
-
 class ConnectorStoreSettings(TaiBaseSettings):
-    """Token-store backend: the composed kit Redis + Postgres connection
-    settings plus the connector key prefix."""
+    """Token-store backend: the composed kit Redis connection settings plus the
+    connector key prefix. The durable Postgres connection is the skeleton
+    component's bound database, resolved through the central registry."""
 
     model_config = SettingsConfigDict(env_prefix="CONNECTOR_STORE_")
 
-    # Infra: the connections are composed from the kit (fields, not bases), so
-    # the store config declares no connection fields of its own.
+    # Infra: the redis cache/lock connection is composed from the kit (a field,
+    # not a base), so the store config declares no connection fields of its own.
     redis: ConnectorStoreRedisSettings = Field(default_factory=ConnectorStoreRedisSettings)
-    pg: ConnectorStorePgSettings = Field(default_factory=ConnectorStorePgSettings)
 
     # Namespace prefix for every connector key (record cache + lock).
     key_prefix: str = "connectors:"
@@ -220,20 +211,6 @@ class ConnectorStoreSettings(TaiBaseSettings):
 @settings_cache
 def connector_store_settings() -> ConnectorStoreSettings:
     return ConnectorStoreSettings()
-
-
-def connectors_store_configured() -> bool:
-    """Whether this deployment configures the connector token store's durable
-    Postgres source of truth at all.
-
-    Resolved through the SAME pydantic-settings the store connects with (its own
-    ``CONNECTOR_STORE_*`` env or the shared ``TAI_DEFAULT_PG_PASSWORD``), read
-    fresh — not the cached singleton — so a config reload re-evaluates. Postgres is
-    the durable authority for ``connector_connections``, so a supplied password is
-    the signal a real store is wired up; without one the connectors router surface
-    answers OFF rather than reaching for an absent Postgres."""
-    s = ConnectorStorePgSettings()
-    return bool(s.pg_password and s.pg_password.get_secret_value())
 
 
 # -- Adapter wire-format contract --------------------------------------------

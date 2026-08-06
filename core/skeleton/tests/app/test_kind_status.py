@@ -114,12 +114,8 @@ def test_gated_features_off_when_unconfigured(bound_app, monkeypatch: pytest.Mon
         "TAI_TOOL_RUNS_REDIS_URL",
         "INTERACTIONS_REDIS_URL",
         "TAI_RATE_LIMIT_REDIS_URL",
-        "MARKETPLACE_STORE_PG_PASSWORD",
-        "TOOL_META_STORE_PG_PASSWORD",
-        "CONNECTOR_STORE_PG_PASSWORD",
-        "VERSIONING_STORE_PG_PASSWORD",
+        "TAI_DATABASE_DEFAULT_PG_PASSWORD",
         "TAI_DEFAULT_REDIS_URL",
-        "TAI_DEFAULT_PG_PASSWORD",
     ):
         monkeypatch.delenv(var, raising=False)
     for kind in (
@@ -152,11 +148,11 @@ def test_registry_covers_every_gated_kind() -> None:
 
 def test_every_gated_feature_has_offline_readable_metadata() -> None:
     # Each descriptor carries a non-empty human label, enabling var, and one-line
-    # off-behavior contract — the static fields the offline doc generator renders,
-    # readable without booting any store.
+    # off-behavior contract — the offline-readable fields the doc generator renders;
+    # enabling_var reads env only, so it resolves without booting any store.
     for feature in ks._GATED_FEATURES:
         assert feature.label.strip(), f"{feature.kind}: empty label"
-        assert feature.enabling_var.strip(), f"{feature.kind}: empty enabling_var"
+        assert feature.enabling_var().strip(), f"{feature.kind}: empty enabling_var"
         assert feature.off_behavior.strip(), f"{feature.kind}: empty off_behavior"
 
 

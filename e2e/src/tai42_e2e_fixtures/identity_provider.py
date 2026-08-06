@@ -11,8 +11,9 @@ revocation propagates) hold exactly as the redis provider's do.
 A manifest activates it by naming this module in ``lifecycle_modules`` and setting
 ``ACCESS_CONTROL_AUTH_PROVIDERS=["fixture"]``; the module-level
 :func:`register_identity_provider` call fires at import (no ``tai42_app`` handle
-involved, mirroring the redis provider). It reuses the ``ACCESS_CONTROL_STORE_*``
-Postgres connection — the same database the policy store lives in — and owns its
+involved, mirroring the redis provider). It reuses the skeleton component's store
+database — the same database the access-control policy store lives in — resolved
+through the central registry (``component_store_settings(SKELETON_COMPONENT)``), and owns its
 own table there. ``readiness_targets`` declares that Postgres store so core's
 ``/ready`` health-checks the identity provider generically.
 """
@@ -23,7 +24,6 @@ import logging
 import secrets
 
 import psycopg
-from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import (
     ApiKeyIdentityProvider,
@@ -34,31 +34,25 @@ from tai42_contract.access_control.identity import (
 from tai42_contract.access_control.registry import register_identity_provider
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_settings
 from tai42_kit.settings import settings_cache
 from tai42_kit.utils.data.string_util import hash_api_key
+from tai42_skeleton.db.discovery import SKELETON_COMPONENT
 
 logger = logging.getLogger(__name__)
 
-# The provider's OWN table in the ACCESS_CONTROL_STORE Postgres database, created by the
-# harness before boot: the key hash (primary key), the user it identifies, and its
-# description. The ``UNIQUE (user_id)`` constraint is the atomic guard ``provision`` relies
-# on so two concurrent provisions of one user cannot both write.
+# The provider's OWN table in the skeleton store database, created by the harness before
+# boot: the key hash (primary key), the user it identifies, and its description. The
+# ``UNIQUE (user_id)`` constraint is the atomic guard ``provision`` relies on so two
+# concurrent provisions of one user cannot both write.
 _TABLE = "fixture_identity_keys"
 
 
-class FixtureIdentityPgSettings(PostgresConnectionSettings):
-    """The Postgres connection for the fixture identity store, read from the
-    ``ACCESS_CONTROL_STORE_*`` env — the same database the policy store uses, so a
-    stack that wires the policy store already points this provider at its PG."""
-
-    model_config = SettingsConfigDict(env_prefix="ACCESS_CONTROL_STORE_")
-
-    pg_db: str = "tai"
-
-
 @settings_cache
-def fixture_identity_pg_settings() -> FixtureIdentityPgSettings:
-    return FixtureIdentityPgSettings()
+def fixture_identity_pg_settings() -> PostgresConnectionSettings:
+    # The same database the access-control policy store lives in: the skeleton
+    # component's bound database, resolved through the central registry.
+    return component_store_settings(SKELETON_COMPONENT)
 
 
 class DuplicateIdentityError(ValueError):
@@ -76,11 +70,11 @@ class FixturePgApiKeyProvider(ApiKeyIdentityProvider):
 
     def __init__(self, settings: IdentityProviderSettings) -> None:
         # The registry hands every provider the access-control settings shape, but this
-        # Postgres-backed provider reads its own PG connection from the ACCESS_CONTROL_STORE
-        # env instead, so that shape carries nothing it needs.
+        # Postgres-backed provider resolves its own PG connection through the skeleton
+        # store binding instead, so that shape carries nothing it needs.
         del settings
 
-    def _pg(self) -> FixtureIdentityPgSettings:
+    def _pg(self) -> PostgresConnectionSettings:
         return fixture_identity_pg_settings()
 
     async def validate_token(self, token: str) -> AuthIdentity | None:

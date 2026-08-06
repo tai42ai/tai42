@@ -134,11 +134,10 @@ async def test_configured_accounts_provider_passes(monkeypatch: pytest.MonkeyPat
 # -- role seeding gate -------------------------------------------------------
 
 
-async def test_seed_roles_seeds_when_versioned_store_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Access control is enabled and a versioned store is wired, so the boot seeds the
-    # default role templates into it.
+async def test_seed_roles_seeds_when_skeleton_database_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Access control is enabled and the skeleton database is configured, so the boot
+    # seeds the default role templates into the versioned store.
     import tai42_skeleton.access_control.roles as roles
-    import tai42_skeleton.versioning as versioning
 
     seeded = False
 
@@ -146,22 +145,21 @@ async def test_seed_roles_seeds_when_versioned_store_configured(monkeypatch: pyt
         nonlocal seeded
         seeded = True
 
-    monkeypatch.setattr(versioning, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setattr(roles, "seed_default_roles", _seed)
     await seed_roles()
     assert seeded is True
 
 
 async def test_seed_roles_skips_when_no_versioned_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Roles live in the versioned document store, so a deployment without one seeds
-    # nothing and never opens a Postgres connection at boot.
+    # Roles live in the versioned document store, so a deployment with the skeleton
+    # database unconfigured seeds nothing and never opens a Postgres connection at boot.
     import tai42_skeleton.access_control.roles as roles
-    import tai42_skeleton.versioning as versioning
 
     async def _seed() -> None:
         raise AssertionError("seed_default_roles must not run without a versioned store")
 
-    monkeypatch.setattr(versioning, "versioned_store_configured", lambda: False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
     monkeypatch.setattr(roles, "seed_default_roles", _seed)
     await seed_roles()  # no raise, no seed
 

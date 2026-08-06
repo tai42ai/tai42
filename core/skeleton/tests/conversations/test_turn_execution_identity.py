@@ -147,6 +147,8 @@ def ac(monkeypatch) -> FakeAccessControlPg:
     # A non-admin key holding the run door's scope but NOT the probe scope: runs the agent
     # but is denied the grantable read op for want of scope.
     pg.add_policy("k-runonly", scopes=[_RUN_SCOPE, _KEPT_SCOPE], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-runonly"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(verifier_module, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))

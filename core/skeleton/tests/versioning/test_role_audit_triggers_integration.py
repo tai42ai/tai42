@@ -18,8 +18,8 @@ Proven here:
 * a NON-role_audit kind is entirely unaffected — normal edit / rename / soft-delete
   / hard-delete still work.
 
-OPT-IN: set ``TAI42_SKELETON_REAL_PG=1`` and point ``VERSIONING_STORE_*`` at a live
-Postgres. Without the opt-in the tests SKIP VISIBLY with a clear reason (never a
+OPT-IN: set ``TAI42_SKELETON_REAL_PG=1`` and point ``TAI_DATABASE_DEFAULT_PG_*`` at a
+live Postgres. Without the opt-in the tests SKIP VISIBLY with a clear reason (never a
 silent skip).
 """
 
@@ -34,11 +34,10 @@ import psycopg
 import pytest
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import discover_migrations
+from tai42_kit.db import component_store_settings, discover_migrations
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.db import skeleton_migrations_dir
-from tai42_skeleton.versioning.settings import versioning_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_migrations_dir
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 pytestmark = pytest.mark.integration
@@ -62,7 +61,7 @@ async def _exec(sql: LiteralString, params: tuple | None = None) -> None:
     # empty-tuple call would misread as an incomplete placeholder (this mirrors the
     # production apply path in ``cli/native/db.py``, which passes no params).
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
     ):
         await conn.execute(sql, params)
@@ -70,7 +69,7 @@ async def _exec(sql: LiteralString, params: tuple | None = None) -> None:
 
 async def _fetchval(sql: LiteralString, params: tuple | None = None) -> object:
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -86,7 +85,7 @@ async def _cleanup(tag: str) -> None:
     the owner-level admin escape the WORM boundary deliberately leaves open."""
     like = f"%{tag}%"
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
     ):
         await conn.execute("ALTER TABLE versioned_document_versions DISABLE TRIGGER USER")
@@ -101,9 +100,9 @@ async def real_store() -> AsyncIterator[tuple[PostgresVersionedStore, str]]:
     if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
         pytest.skip(
             f"real-Postgres role_audit trigger test is opt-in: set {_OPT_IN_ENV}=1 and point the "
-            "VERSIONING_STORE_* env at a live Postgres to run it (DB-side triggers have no fake)"
+            "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (DB-side triggers have no fake)"
         )
-    # Rebuild cached settings so ``VERSIONING_STORE_*`` from the environment is read.
+    # Rebuild cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read.
     reset_all_settings()
     # Apply the FULL shipped DDL (idempotent) so the test exercises the EXACT triggers
     # that ship — never a hand-copied duplicate that could drift.

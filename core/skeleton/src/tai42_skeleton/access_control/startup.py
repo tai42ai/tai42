@@ -52,9 +52,11 @@ async def seed_roles() -> None:
     rehydration handler applies, so an access-control deployment without a versioned
     store never opens a Postgres connection at boot.
     """
-    from tai42_skeleton.versioning import versioned_store_configured
+    from tai42_kit.db import component_store_configured
 
-    if not versioned_store_configured():
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
         return
     from tai42_skeleton.access_control.roles import seed_default_roles
 

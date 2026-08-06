@@ -273,4 +273,4 @@ async def test_boot_log_names_the_off_state(off_stack: TaiStack) -> None:
 
     # The skip INFO lines name what is off and are present at boot.
     assert "skipping versioned-preset rehydration" in log
-    assert "advisory poll skipped — no install store configured" in log
+    assert "advisory poll skipped — the skeleton database is not configured" in log

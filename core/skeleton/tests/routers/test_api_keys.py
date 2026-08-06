@@ -597,7 +597,7 @@ def pg_store(monkeypatch: pytest.MonkeyPatch) -> _MemStore:
     rather than the store-less short-circuit."""
     mem = _MemStore()
     monkeypatch.setattr(operations_api_keys, "ac_policy_store", lambda: AcPolicyStore(mem))
-    monkeypatch.setattr("tai42_skeleton.versioning.versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return mem
 
 

@@ -99,6 +99,26 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
     assert record["status"] == "succeeded"
 
 
+async def test_run_binds_its_run_id_as_interaction_origin(wired):
+    # The supervisor binds the run's id as the interaction origin for the tool body,
+    # so a question the tool raises through ask_user is attributed to the run. The
+    # binding lives on the run's own context and is released with the run.
+    from tai42_skeleton.interactions.origin import get_interaction_origin
+
+    tools = wired.install()
+    seen: dict[str, str | None] = {}
+
+    async def _run_tool(key, arguments, *, offload_sync=False):
+        seen["origin"] = get_interaction_origin()
+        return {"ok": 1}
+
+    tools.run_tool = _run_tool
+    out = await ops.submit_run("alpha", {})
+    await _drain()
+    assert seen["origin"] == out["run_id"]
+    assert get_interaction_origin() is None
+
+
 async def test_submit_authorizes_the_submitted_tool_before_recording(wired):
     # The submitted tool is authorized against the live caller — with its exact arguments —
     # before a slot is reserved or a record is written.

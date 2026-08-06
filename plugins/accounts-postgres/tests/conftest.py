@@ -521,6 +521,15 @@ def _reset_plugin_state():
     service.reset_provider_settings()
 
 
+@pytest.fixture(autouse=True)
+def _configure_default_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite runs as a deployed plugin: the default database — the component's
+    binding target — is configured. Tests asserting the unconfigured path delete
+    the password themselves."""
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test-secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_DB", "tai_test")
+
+
 @pytest.fixture
 def users_store() -> FakeUsersStore:
     return FakeUsersStore()

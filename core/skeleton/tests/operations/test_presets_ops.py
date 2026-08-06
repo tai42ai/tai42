@@ -66,7 +66,7 @@ def pg(monkeypatch) -> FakeVersioningPg:
         yield fake
 
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
 
 
@@ -608,7 +608,7 @@ def test_validate_version_authoring_error(pg) -> None:
 
 
 def test_referees_store_less_404(monkeypatch) -> None:
-    monkeypatch.delenv("VERSIONING_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -631,11 +631,13 @@ def test_set_version_tags_non_int_version_400(pg) -> None:
 
 
 def test_set_version_tags_store_less_501(monkeypatch) -> None:
-    monkeypatch.delenv("VERSIONING_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
-            with pytest.raises(preset_ops.NotSupportedError, match="configured versioned-document store") as exc_info:
+            with pytest.raises(
+                preset_ops.NotSupportedError, match="versioned-document store is not configured"
+            ) as exc_info:
                 await preset_ops.set_preset_version_tags(name="x", version="1", tags=[])
             assert exc_info.value.extra["code"] == "versioning-not-configured"
 

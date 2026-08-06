@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import logging_settings, setup_logging
 
 from tai42_skeleton.access_control.adapter import AuthAdapter
@@ -17,10 +18,8 @@ from tai42_skeleton.access_control.startup import (
 from tai42_skeleton.access_control.verifier import reset_registered_reserved_paths
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
-from tai42_skeleton.connectors.settings import connectors_store_configured
-from tai42_skeleton.db import assert_skeleton_schema_applied
+from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
 from tai42_skeleton.plugins.registry import rebuild_studio_plugin_registry
-from tai42_skeleton.versioning import versioned_store_configured
 
 logger = logging.getLogger(__name__)
 
@@ -30,21 +29,20 @@ _app: TaiMCP | None = None
 def connectors_in_use() -> bool:
     """Whether this deployment uses connectors at all.
 
-    Thin alias for :func:`tai42_skeleton.connectors.settings.connectors_store_configured`
-    (the single source of truth): connectors are ON exactly when the connector token
-    store is configured, mirroring the versioned-store gate.
+    Connectors are ON exactly when the skeleton database is configured — every
+    skeleton store shares one binding, so the connector token store is live iff that
+    database is.
     """
-    return connectors_store_configured()
+    return component_store_configured(SKELETON_COMPONENT)
 
 
 def versioned_store_in_use() -> bool:
     """Whether this deployment uses the versioned-document store at all.
 
-    Thin alias for :func:`tai42_skeleton.versioning.versioned_store_configured` (the
-    single source of truth) so the boot/reload hook skips the Postgres open when no
-    ``VERSIONING_STORE_*`` env is set, mirroring the connector-catalog gate.
+    ON exactly when the skeleton database is configured, so the boot/reload hook
+    skips the Postgres open on an all-off deployment.
     """
-    return versioned_store_configured()
+    return component_store_configured(SKELETON_COMPONENT)
 
 
 async def rehydrate_versioned_presets_if_store_in_use() -> None:
@@ -64,7 +62,10 @@ async def rehydrate_versioned_presets_if_store_in_use() -> None:
     boot.
     """
     if not versioned_store_in_use():
-        logger.info("presets: skipping versioned-preset rehydration — no VERSIONING_STORE_* env configuration")
+        logger.info(
+            "presets: skipping versioned-preset rehydration — the skeleton database is not configured (%s)",
+            database_password_env(component_binding(SKELETON_COMPONENT)),
+        )
         return
     await build_app().preset_manager.rehydrate()
 

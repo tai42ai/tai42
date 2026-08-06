@@ -87,6 +87,9 @@ def _wire_router(monkeypatch) -> None:
     """Point the router's collaborators at in-memory stand-ins: the hooks manager, the
     payload parser, and the trigger resolver (``api-key-token`` is the link minted
     ``require_api_key``, every other token is a plain one)."""
+    # The auth stack resolves policies/roles through the registry-bound database; the
+    # fake transports model a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     manager = _Manager()
     monkeypatch.setattr(router, "get_hooks_manager", lambda: manager)
 
@@ -141,6 +144,8 @@ def boundary_client(monkeypatch):
     async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
         yield ac_fake
 
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
     wire_store_from_route_strings(monkeypatch, ac_fake._strings)
 

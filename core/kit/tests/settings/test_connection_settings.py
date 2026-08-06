@@ -74,7 +74,7 @@ def _pg(**overrides) -> PostgresConnectionSettings:
 class TestPostgresConnectionSettings:
     def test_identity_defaults_to_none(self):
         # No hidden localhost/passwordless default: host and password are unset
-        # until env supplies them (their own namespace or TAI_DEFAULT_*).
+        # until env supplies them under the database's prefix.
         settings = PostgresConnectionSettings()
         assert settings.pg_host is None
         assert settings.pg_password is None
@@ -84,17 +84,15 @@ class TestPostgresConnectionSettings:
         assert settings.pg_db == "postgres"
 
     def test_pg_dsn_raises_named_error_without_host(self):
-        # A None host at DSN construction names the env var that sets it and its
-        # shared-namespace alternative, rather than a bare TypeError.
-        with pytest.raises(
-            ValueError, match=r"Postgres connection is not configured: set PG_HOST \(or TAI_DEFAULT_PG_HOST\)\."
-        ):
+        # A None host at DSN construction names the env var that sets it, rather
+        # than a bare TypeError.
+        with pytest.raises(ValueError, match=r"Postgres connection is not configured: set PG_HOST\."):
             _ = PostgresConnectionSettings(pg_password=SecretStr("")).pg_dsn
 
     def test_pg_dsn_raises_named_error_without_password(self):
-        # A None password names PG_PASSWORD (and its TAI_DEFAULT_* form) rather
-        # than an AttributeError on None.get_secret_value().
-        with pytest.raises(ValueError, match=r"set PG_PASSWORD \(or TAI_DEFAULT_PG_PASSWORD\)\."):
+        # A None password names PG_PASSWORD rather than an AttributeError on
+        # None.get_secret_value().
+        with pytest.raises(ValueError, match=r"set PG_PASSWORD\."):
             _ = PostgresConnectionSettings(pg_host="db").pg_dsn
 
     def test_client_kwargs_raises_named_error_on_none_identity(self):
@@ -107,7 +105,7 @@ class TestPostgresConnectionSettings:
         class StorePgSettings(PostgresConnectionSettings):
             model_config = SettingsConfigDict(env_prefix="PGSTORE_")
 
-        with pytest.raises(ValueError, match=r"set PGSTORE_PG_HOST \(or TAI_DEFAULT_PG_HOST\)\."):
+        with pytest.raises(ValueError, match=r"set PGSTORE_PG_HOST\."):
             _ = StorePgSettings().pg_dsn
 
     def test_dsn_is_built_from_fields(self):

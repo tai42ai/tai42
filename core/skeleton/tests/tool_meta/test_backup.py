@@ -143,6 +143,9 @@ class FakeBackupPg:
 
 @pytest.fixture
 def pg(monkeypatch: pytest.MonkeyPatch) -> FakeBackupPg:
+    # The store resolves its bound database through the registry; a fake transport
+    # models a configured deployment, so the default database must be on.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     fake = FakeBackupPg()
 
     @asynccontextmanager

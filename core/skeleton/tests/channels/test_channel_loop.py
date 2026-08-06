@@ -250,6 +250,24 @@ async def test_recipient_forwarded_in_delivery(wired, fake_channel):
     assert await task == "pong"
 
 
+async def test_recipient_persisted_on_record(wired, fake_channel):
+    # The caller-requested address is also recorded on the durable question (feed
+    # attribution), not only forwarded to the channel delivery.
+    task = asyncio.create_task(ask_user("Ping?", channel="fake", recipient="123456", timeout=5))
+    iid, _gid = await await_add_event(wired.fake, wired.store)
+    delivery = await _await_delivery(fake_channel)
+
+    state = await wired.store.get_state(wired.fake, iid)
+    assert state is not None
+    assert state.request.recipient == "123456"
+
+    resp = await router.callback(
+        _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "pong"}')
+    )
+    assert resp.status_code == 200
+    assert await task == "pong"
+
+
 async def test_channel_delivery_omits_media_inbox_keeps_it(wired, fake_channel):
     # Display-only media is NOT forwarded to a channel: the ChannelDelivery handed
     # to the plugin carries no media, while the persisted question keeps it and the

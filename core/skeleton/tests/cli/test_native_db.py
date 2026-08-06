@@ -15,13 +15,19 @@ from typing import cast
 import psycopg
 import pytest
 from click.testing import CliRunner
-from tai42_kit.db import AppliedMigration, ChecksumMismatchError, ComponentStatus, MigrationScript
+from tai42_kit.clients import PostgresConnectionSettings
+from tai42_kit.db import (
+    AppliedMigration,
+    ChecksumMismatchError,
+    ComponentStatus,
+    DatabaseNotConfiguredError,
+    MigrationScript,
+)
 
 from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import db
-from tai42_skeleton.db import SchemaAdminSettings
 
-_TARGET = cast("SchemaAdminSettings", SimpleNamespace(pg_host="db", pg_port=5432, pg_db="tai"))
+_TARGET = cast("PostgresConnectionSettings", SimpleNamespace(pg_host="db", pg_port=5432, pg_db="tai"))
 
 
 def _script(version: int, name: str) -> MigrationScript:
@@ -34,9 +40,17 @@ def _status(component: str, *, applied: tuple[int, ...], pending: tuple[Migratio
 
 @pytest.fixture(autouse=True)
 def _fake_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The migrator target is only read for messages; the fake makes real connection
-    # fields irrelevant and keeps the credential-redaction assertions deterministic.
-    monkeypatch.setattr(db, "schema_settings", lambda: _TARGET)
+    # The migrator target is only read for messages; the fakes make real connection
+    # fields irrelevant and keep the credential-redaction assertions deterministic.
+    # Chain discovery is stubbed so the command wiring is exercised without resolving
+    # a real database or reading the marketplace store.
+    monkeypatch.setattr(db, "component_migrator_settings", lambda component: _TARGET)
+    monkeypatch.setattr(db, "component_binding", lambda component: "default")
+
+    async def _entries() -> list:
+        return []
+
+    monkeypatch.setattr(db, "all_migration_entries", _entries)
 
 
 # --- migrate --------------------------------------------------------------
@@ -123,14 +137,12 @@ def test_migrate_loud_and_credential_free_on_connection_failure(monkeypatch: pyt
     result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 1
-    assert "could not connect to Postgres at db:5432/tai" in result.output
+    assert "could not connect to Postgres database 'default' at db:5432/tai" in result.output
 
 
 def test_migrate_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _boom(entries: object) -> list[AppliedMigration]:
-        raise ValueError(
-            "the Postgres connection is not configured: set TAI_DB_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)."
-        )
+        raise DatabaseNotConfiguredError("database 'default' is not configured: set TAI_DATABASE_DEFAULT_PG_PASSWORD.")
 
     monkeypatch.setattr(db, "apply_migrations", _boom)
 
@@ -138,7 +150,44 @@ def test_migrate_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatc
 
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert "is not configured: set TAI_DB_PG_PASSWORD" in result.output
+    assert "is not configured: set TAI_DATABASE_DEFAULT_PG_PASSWORD" in result.output
+
+
+def _use_real_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Undo the autouse chain-discovery stub so the real registry runs: a half-set
+    # admin identity is raised EAGERLY from ``all_migration_entries`` (through the
+    # skeleton entry's migrator-settings resolve), before any status/apply fake.
+    from tai42_skeleton.db import all_migration_entries
+
+    monkeypatch.setattr(db, "all_migration_entries", all_migration_entries)
+    monkeypatch.delenv("TAI_DB_BINDING_SKELETON", raising=False)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_USER", "migrator")
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD", raising=False)
+
+
+def test_migrate_clean_on_half_set_admin_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Admin user set, admin password unset: the kit's half-set-admin error escapes
+    # discovery and must render as a clean, credential-free failure — never a traceback.
+    _use_real_discovery(monkeypatch)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "half-set admin identity" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_status_clean_on_half_set_admin_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_real_discovery(monkeypatch)
+
+    result = CliRunner().invoke(app_module.app, ["db", "status"])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "half-set admin identity" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_migrate_loud_on_rewritten_chain(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -29,20 +29,18 @@ from pydantic import BaseModel
 from tai42_contract.access_control.registry import get_identity_provider_factory
 from tai42_contract.accounts.registry import iter_accounts_provider_factories
 from tai42_contract.app import tai42_app
+from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.connectors.providers.registry import list_providers
-from tai42_skeleton.connectors.settings import connectors_store_configured
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.interactions.settings import interactions_store_configured
-from tai42_skeleton.marketplace.settings import marketplace_store_configured
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
-from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
-from tai42_skeleton.versioning import versioned_store_configured
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -215,16 +213,17 @@ class GatedFeature:
     ``kind`` is the pluggable-kind name the row reports; ``label`` is the human name
     the docs table shows; ``configured`` is the predicate reading the same fresh
     pydantic-settings the feature gates on, so the row tracks the live config after a
-    reload; ``enabling_var`` is the env var that turns the feature on; ``off_behavior``
-    is the one-line uniform-OFF contract the feature honors when its store is absent.
-    The static fields (``kind``, ``label``, ``enabling_var``, ``off_behavior``) are
-    offline-readable, so a doc generator imports this registry without booting a store.
+    reload; ``enabling_var`` is the env var that turns the feature on, live-derived
+    from the component's binding so it tracks a rebind; ``off_behavior`` is the
+    one-line uniform-OFF contract the feature honors when its store is absent.
+    ``enabling_var`` reads env only, not a store, so a doc generator calls it under a
+    clean env to print the default name without booting a store.
     """
 
     kind: str
     label: str
     configured: Callable[[], bool]
-    enabling_var: str
+    enabling_var: Callable[[], str]
     off_behavior: str
 
 
@@ -236,7 +235,7 @@ _GATED_FEATURES: list[GatedFeature] = [
         kind="tool_runs",
         label="Background tool runs",
         configured=tool_runs_store_configured,
-        enabling_var="TAI_TOOL_RUNS_REDIS_URL",
+        enabling_var=lambda: "TAI_TOOL_RUNS_REDIS_URL",
         off_behavior=(
             "Run reads answer 200 empty (a single run reads 404); submit refuses 501 tool-runs-not-configured."
         ),
@@ -245,7 +244,7 @@ _GATED_FEATURES: list[GatedFeature] = [
         kind="interactions",
         label="Interactions + notifications",
         configured=interactions_store_configured,
-        enabling_var="INTERACTIONS_REDIS_URL",
+        enabling_var=lambda: "INTERACTIONS_REDIS_URL",
         off_behavior=(
             "The notification feed and stream refuse 501 interactions-not-configured "
             "(ask_user refuses as a tool error); feed reads answer 200 empty."
@@ -255,14 +254,14 @@ _GATED_FEATURES: list[GatedFeature] = [
         kind="rate_limit",
         label="Rate limiting",
         configured=lambda: bool(RateLimitSettings().redis.redis_url),
-        enabling_var="TAI_RATE_LIMIT_REDIS_URL",
+        enabling_var=lambda: "TAI_RATE_LIMIT_REDIS_URL",
         off_behavior="Pass-through — the three public-door families are unthrottled; one boot WARNING.",
     ),
     GatedFeature(
         kind="marketplace_store",
         label="Marketplace store",
-        configured=marketplace_store_configured,
-        enabling_var="MARKETPLACE_STORE_PG_PASSWORD",
+        configured=lambda: component_store_configured(SKELETON_COMPONENT),
+        enabling_var=lambda: database_password_env(component_binding(SKELETON_COMPONENT)),
         off_behavior=(
             "Installed and advisory reads answer 200 empty; the registry-proxy catalog is "
             "store-independent (502 against an unreachable registry); install and attribution "
@@ -272,22 +271,22 @@ _GATED_FEATURES: list[GatedFeature] = [
     GatedFeature(
         kind="tool_meta",
         label="Tool-metadata overlay",
-        configured=tool_meta_store_configured,
-        enabling_var="TOOL_META_STORE_PG_PASSWORD",
+        configured=lambda: component_store_configured(SKELETON_COMPONENT),
+        enabling_var=lambda: database_password_env(component_binding(SKELETON_COMPONENT)),
         off_behavior="Folder and tag reads answer 200 empty; writes refuse 501 tool-meta-not-configured.",
     ),
     GatedFeature(
         kind="connectors",
         label="Connectors store",
-        configured=connectors_store_configured,
-        enabling_var="CONNECTOR_STORE_PG_PASSWORD",
+        configured=lambda: component_store_configured(SKELETON_COMPONENT),
+        enabling_var=lambda: database_password_env(component_binding(SKELETON_COMPONENT)),
         off_behavior="Connector endpoints answer OFF; writes refuse 501 connectors-not-configured.",
     ),
     GatedFeature(
         kind="versioning",
         label="Versioning",
-        configured=versioned_store_configured,
-        enabling_var="VERSIONING_STORE_PG_PASSWORD",
+        configured=lambda: component_store_configured(SKELETON_COMPONENT),
+        enabling_var=lambda: database_password_env(component_binding(SKELETON_COMPONENT)),
         off_behavior="Preset and version reads answer 200 empty or 404; writes refuse 501 versioning-not-configured.",
     ),
 ]
@@ -297,9 +296,10 @@ def _gated_feature_row(feature: GatedFeature) -> KindStatus:
     """One DB-backed feature's live status: ``active`` when its store is configured,
     ``off`` (a legal, reported state — never an error) when it is not, naming the env
     var that turns it on."""
+    var = feature.enabling_var()
     if feature.configured():
-        return KindStatus(kind=feature.kind, state="active", plugin=None, detail=f"{feature.enabling_var} configured")
-    return KindStatus(kind=feature.kind, state="off", plugin=None, detail=f"{feature.enabling_var} not configured")
+        return KindStatus(kind=feature.kind, state="active", plugin=None, detail=f"{var} configured")
+    return KindStatus(kind=feature.kind, state="off", plugin=None, detail=f"{var} not configured")
 
 
 def _connectors_row(feature: GatedFeature) -> KindStatus:

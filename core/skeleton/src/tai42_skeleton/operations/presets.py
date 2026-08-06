@@ -33,6 +33,7 @@ from tai42_contract.presets.errors import (
     PresetVersionNotFoundError,
 )
 from tai42_contract.versioning.errors import DocumentVersionNotFoundError
+from tai42_kit.db import component_store_configured
 from tai42_kit.utils.data.json_schema_util import (
     InvalidJsonSchemaError,
     check_json_schema,
@@ -40,6 +41,7 @@ from tai42_kit.utils.data.json_schema_util import (
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
+from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_name
 from tai42_skeleton.operations import (
@@ -51,16 +53,15 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations._broadcast import log_non_convergence
 from tai42_skeleton.presets.manager import is_valid_preset_name
-from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
-from tai42_skeleton.versioning import versioned_store_configured
 
 logger = logging.getLogger(__name__)
 
-# The machine-readable code + message every preset OFF refusal carries when the
-# versioned-document store is unconfigured. A 501 (a capability the deployment
-# lacks), never a transient 503 — the store is absent, not momentarily down.
+# The machine-readable code every preset OFF refusal carries when the
+# versioned-document store is unconfigured; the message is rendered from the live
+# binding at raise time. A 501 (a capability the deployment lacks), never a
+# transient 503 — the store is absent, not momentarily down.
 _NOT_CONFIGURED_CODE = "versioning-not-configured"
-_NOT_CONFIGURED_MESSAGE = "presets require a configured versioned-document store"
+_NOT_CONFIGURED_NOUN = "versioned-document store"
 
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
@@ -532,7 +533,7 @@ async def list_presets() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     # A store-less deploy (no versioned store configured) has no presets — skip the
     # Postgres read and serve an empty list.
-    if versioned_store_configured():
+    if component_store_configured(SKELETON_COMPONENT):
         records = await instance.app.presets.store.list_presets()
         # One batched active-body read instead of a per-record round-trip (N+1).
         bodies = await instance.app.presets.list_active_bodies()
@@ -623,12 +624,12 @@ async def create_preset(
     if bind_error is not None:
         raise BadRequestError(bind_error)
 
-    # A preset needs the durable store; on a store-less deploy (no
-    # VERSIONING_STORE_* credential) refuse cleanly here — the same predicate the
+    # A preset needs the durable store; on a store-less deploy (the skeleton
+    # database unconfigured) refuse cleanly here — the same predicate the
     # list / delete / reconcile paths gate on — rather than let create open Postgres
     # and fail with an opaque 500.
-    if not versioned_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
     # Clean slate: a dangling overlay row for this name (left by a DIFFERENT tool that
     # once held it, kept across a plugin uninstall) must never be inherited by the
@@ -636,7 +637,7 @@ async def create_preset(
     # create below rolls back, the deleted ghost belonged to a vanished tool and needs
     # no restoring. Guarded on the overlay store: with tool_meta OFF the cascade is a
     # no-op rather than a 500 opening an absent Postgres.
-    if tool_meta_store_configured():
+    if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.delete_meta(name)
 
     # The pre-checks already ran, so the store write is safe. Persist THEN register;
@@ -934,7 +935,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
 
     # A store-less deploy holds no preset, so an unquarantined name is a genuine 404
     # without a Postgres open (delete's reasoning).
-    if not versioned_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"preset {name!r} not found")
 
     store = instance.app.presets.store
@@ -1009,7 +1010,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # one (clean slate); a failure here raises loudly, leaving only a dangling old-name
     # row that the next claim reclaims. Guarded on the overlay store: with tool_meta
     # OFF the re-key is a no-op rather than a 500 opening an absent Postgres.
-    if tool_meta_store_configured():
+    if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.rename_tool(name, new_name)
 
     # A rename changes the tool listing by definition (old gone, new present), so the
@@ -1057,7 +1058,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
         # Cascade the overlay row (R5): the tool is gone, so its organizational
         # metadata goes with it. A no-op when the preset never got a row, and skipped
         # entirely when the overlay store is OFF (no absent-Postgres open).
-        if tool_meta_store_configured():
+        if component_store_configured(SKELETON_COMPONENT):
             await instance.app.tool_meta.store.delete_meta(name)
         mgr.drop_quarantine(name)
         await _fanout_remove(name)
@@ -1065,7 +1066,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
 
     # A store-less deploy (no versioned store configured) can hold no preset, so a
     # name that is not quarantined is a genuine 404 without a Postgres read.
-    if not versioned_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"preset {name!r} not found")
     try:
         await instance.app.presets.store.soft_delete(name)
@@ -1076,7 +1077,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
     # Keyed by tool name, so the soft-delete ghost in ``versioned_documents`` is
     # irrelevant; a no-op when the preset never got a row, and skipped entirely when
     # the overlay store is OFF (no absent-Postgres open).
-    if tool_meta_store_configured():
+    if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.delete_meta(name)
     await instance.app.emit_list_changed("tool")
     await _fanout_remove(name)
@@ -1094,7 +1095,7 @@ async def preset_referees(name: str) -> dict[str, Any]:
     first."""
     # A store-less deploy holds no preset, so an unknown name is a genuine 404
     # without a Postgres open (the rename/delete doors' reasoning).
-    if not versioned_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"preset {name!r} not found")
     try:
         await instance.app.presets.store.get_preset(name)
@@ -1209,8 +1210,8 @@ async def validate_preset(
     Both verdicts return 200; only a malformed body is a 400."""
     # Mode resolution needs the store; refuse cleanly on a store-less deploy exactly
     # as the create route does before anything else.
-    if not versioned_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
     store = instance.app.presets.store
     try:
@@ -1294,8 +1295,8 @@ async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> d
     except ValueError as exc:
         raise BadRequestError("version must be an integer") from exc
 
-    if not versioned_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
     try:
         await instance.app.presets.set_version_tags(name, version_num, tags)

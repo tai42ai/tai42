@@ -42,7 +42,7 @@ from tests.connectors.conftest import (
 def _connector_store_configured(monkeypatch):
     # the connector surface answers OFF with no store configured. These tests
     # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
-    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "x")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "x")
 
 
 def _missing_loader():
@@ -140,8 +140,7 @@ async def test_patch_sub_services_returns_result_view(monkeypatch: pytest.Monkey
 def _off(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force the OFF gate: drop the feature's own password AND the shared default so
     # the fresh-read presence probe answers unconfigured (overrides the autouse ON).
-    monkeypatch.delenv("CONNECTOR_STORE_PG_PASSWORD", raising=False)
-    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
 
 async def test_list_connections_off_answers_empty(monkeypatch: pytest.MonkeyPatch) -> None:

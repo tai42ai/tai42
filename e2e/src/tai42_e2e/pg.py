@@ -9,9 +9,9 @@ applies, and the per-stack clones inherit it (the fresh-install leg verifies a
 replay against this template by ``public`` table-NAME set, not a byte-for-byte
 schema diff). The harness is synchronous
 psycopg while the runner is async, so ``ensure_template`` drives it through
-``asyncio.run``; the chains are discovered exactly as production discovers them
-(``skeleton_entry`` / ``plugin_migration_entry``), differing only in the explicit
-connection-settings pointing at the template DB rather than an env-prefix
+``asyncio.run``; the chains carry the same component names and packaged SQL
+directories production discovers, differing only in the explicit connection
+settings pointing at the target DB rather than the registry's env-prefix
 resolution."""
 
 from __future__ import annotations
@@ -25,40 +25,47 @@ from pydantic import SecretStr
 from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import MigrationEntry, apply_migrations
 from tai42_kit.plugins import parse_plugin_spec
-from tai42_skeleton.db.discovery import plugin_migration_entry, skeleton_entry
+from tai42_skeleton.db.discovery import SKELETON_COMPONENT, skeleton_migrations_dir
 
 from tai42_e2e.settings import HarnessSettings
 
 _TEMPLATE_DB = "tai42_e2e_template"
 
-# The accounts plugin's distribution name, used only to load its packaged
-# ``tai-plugin.yml`` so the runner discovers its chain the way production does.
+# The accounts plugin's import package, holding its packaged ``tai-plugin.yml`` and
+# its ``migrations`` chain directory.
 _ACCOUNTS_IMPORT_PACKAGE = "tai42_accounts_postgres"
 
 
 def _accounts_plugin_entry(settings: PostgresConnectionSettings) -> MigrationEntry:
-    """The accounts-postgres plugin chain as a runner entry, resolved from its
-    packaged ``tai-plugin.yml`` exactly as production discovery does. The plugin
-    declares a ``migrations`` chain, so the entry is never ``None``; a missing
-    declaration is a loud error rather than a silently skipped schema."""
-    spec_path = importlib.resources.files(_ACCOUNTS_IMPORT_PACKAGE).joinpath("tai-plugin.yml")
+    """The accounts-postgres plugin chain as a runner entry, its SQL directory
+    resolved from its packaged ``tai-plugin.yml`` the way production discovery does,
+    but pointed at ``settings`` (the explicit target database) rather than the
+    registry's env-resolved migrator identity. The plugin declares a ``migrations``
+    chain; a missing declaration is a loud error rather than a silently skipped
+    schema."""
+    package = importlib.resources.files(_ACCOUNTS_IMPORT_PACKAGE)
+    spec_path = package.joinpath("tai-plugin.yml")
     spec = parse_plugin_spec(spec_path.read_bytes(), source=str(spec_path))
-    entry = plugin_migration_entry(spec, settings)
-    if entry is None:
+    if spec.migrations is None:
         raise RuntimeError(
             "tai42-accounts-postgres declares no 'migrations' chain in its tai-plugin.yml; "
             "the e2e template cannot be built from the product chains"
         )
-    return entry
+    migrations_dir = package.joinpath(*spec.migrations.split("/"))
+    return MigrationEntry(component=spec.package, migrations_dir=migrations_dir, settings=settings)
 
 
 def product_migration_entries(settings: PostgresConnectionSettings) -> list[MigrationEntry]:
     """The migration chains the product applies to a platform database: the
-    skeleton chain plus the accounts-postgres plugin chain, both under
-    ``settings``. Building the template DB and the fresh-install replay leg run
-    this exact set, so the harness template matches a from-scratch ``tai db
-    migrate``."""
-    return [skeleton_entry(settings), _accounts_plugin_entry(settings)]
+    skeleton chain plus the accounts-postgres plugin chain, both pointed at
+    ``settings``. Building the template DB and the fresh-install replay leg run this
+    exact set, so the harness template matches a from-scratch ``tai db migrate``."""
+    skeleton = MigrationEntry(
+        component=SKELETON_COMPONENT,
+        migrations_dir=skeleton_migrations_dir(),
+        settings=settings,
+    )
+    return [skeleton, _accounts_plugin_entry(settings)]
 
 
 class PostgresAdmin:

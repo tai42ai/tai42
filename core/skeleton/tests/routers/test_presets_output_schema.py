@@ -91,7 +91,7 @@ def pg(monkeypatch) -> FakeVersioningPg:
         yield fake
 
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
 
 

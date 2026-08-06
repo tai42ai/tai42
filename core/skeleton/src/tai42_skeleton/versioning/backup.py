@@ -22,8 +22,9 @@ from typing import Any, Literal
 
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
+from tai42_kit.db import component_store_settings
 
-from tai42_skeleton.versioning.settings import versioning_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 # The report shape every importer returns, matching the backup section contract.
 _SectionReport = dict[str, Any]
@@ -38,7 +39,7 @@ async def export_versioned_documents() -> dict[str, Any]:
     synthetic ``id`` (so the version-to-document link survives) and ``created_at``
     is serialized. The ``body`` JSONB is carried as-is."""
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -91,7 +92,7 @@ async def import_versioned_documents(
     versions = payload.get("versions") or []
 
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):

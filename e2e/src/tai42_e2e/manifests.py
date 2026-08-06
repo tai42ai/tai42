@@ -264,7 +264,9 @@ def _redis_agent_state_env(res: StackResources) -> dict[str, str]:
 
 
 def _pg_env(prefix: str, res: StackResources) -> dict[str, str]:
-    """The five ``<prefix>PG_*`` keys a PostgresConnectionSettings subclass reads."""
+    """The five ``<prefix>PG_*`` connection keys — the ``TAI_DATABASE_DEFAULT_`` named
+    database the platform binds every store to, or the external postgres-mcp's bare
+    ``PG_`` env."""
     return {
         f"{prefix}PG_HOST": res.pg_host,
         f"{prefix}PG_PORT": str(res.pg_port),
@@ -286,11 +288,11 @@ def _base_env(res: StackResources, variants: Variants) -> dict[str, str]:
     # Harness targets all bind 127.0.0.1, which the SSRF/URL guard refuses by default.
     # Opt the loopback ranges in, keeping the guard ON for everything else.
     env["TAI_URL_GUARD_ALLOW_CIDRS"] = json.dumps(["127.0.0.0/8", "::1/128"])
-    # The versioning store (presets + policy history) and the tool_meta overlay
-    # (folders + per-tool rows) both live on this stack's isolated PG clone. Set only
-    # the shared default namespace, so each resolves its connection through the
-    # TAI_DEFAULT_* fallback instead of a store-specific prefix.
-    env.update(_pg_env("TAI_DEFAULT_", res))
+    # Every skeleton store (versioning, tool_meta, connectors, marketplace, access
+    # control) binds to the ``default`` named database, which points at this stack's
+    # isolated PG clone. Declaring the default database configures them all — a store
+    # is live iff its bound database is configured.
+    env.update(_pg_env("TAI_DATABASE_DEFAULT_", res))
     # Off by default here; the auth/accounts profiles turn it back on after calling this.
     env["ACCESS_CONTROL_ENABLE"] = "false"
     return env
@@ -801,7 +803,6 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     env["CONVERSATIONS_REDIS_URL"] = res.redis_url
     env.update(_memory_agent_state_env())
     env.update(_llm_env(res))
@@ -917,7 +918,6 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     # Stripe tool config. MOCK: the api base points at the in-process FakeStripe stub and
     # the test-mode key agrees with the stub's livemode. REAL: drop the api base (plugin
     # default = real api.stripe.com) and read the operator's ``sk_test_`` key.
@@ -1030,7 +1030,6 @@ def build_auth_stack(res: StackResources, variants: Variants) -> StackConfig:
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     # Pin BOTH rate-limit windows: exercise the 10-second burst window (L=10),
     # keep the per-minute window high enough that it can never trip first.
     env["TAI_RATE_LIMIT_WEBHOOK_BURST"] = "10"
@@ -1110,10 +1109,10 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     # Ordered resolution: the accounts provider claims its own session tokens, the
     # redis provider claims sk- keys; a non-matching provider is a MISS, not an error.
     env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", "redis"])
-    # The access-control policy store and the accounts plugin's Postgres — whose
-    # accounts_* tables share this stack's database, the template carrying both
-    # schemas — resolve through the TAI_DEFAULT_* namespace already set in
-    # _base_env; no store-specific PG env here.
+    # The access-control policy store binds to the ``default`` database (skeleton
+    # component); the accounts plugin binds to the SAME clone (its component's binding
+    # also defaults to ``default``), the template carrying both schemas — both resolve
+    # through the default database _base_env already declares; no per-store PG env here.
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # The plugin's rate-limit counters + bootstrap token ride the same ACCESS_CONTROL_REDIS_URL
     # the identity-provider factory receives; sessions live in Postgres, so no plugin Redis
@@ -1377,8 +1376,8 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     env["ACCESS_CONTROL_AUTH_PROVIDERS"] = json.dumps(["accounts-postgres", variants.identity.name])
     # The access-control policy store and the accounts plugin's Postgres — whose
     # accounts_* tables share this stack's database, the template carrying both
-    # schemas — resolve through the TAI_DEFAULT_* namespace already set in
-    # _base_env; no store-specific PG env here.
+    # schemas — bind to the ``default`` database _base_env already declares; no
+    # per-store PG env here.
     # First-owner bootstrap gate, pinned to a known value (see ``_ACCOUNTS_BOOTSTRAP_TOKEN``).
     env["TAI_ACCOUNTS_BOOTSTRAP_TOKEN"] = _ACCOUNTS_BOOTSTRAP_TOKEN
     # Tier one of the route mapping: request-path regex -> route template. Tier two
@@ -1397,12 +1396,11 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         env["LLM_BASE_URL"] = res.llm_base_url
         env["LLM_API_KEY"] = "e2e-test"
         env["LLM_MODEL"] = "e2e-scripted"
-    # The connectors surface: the connector-store PG password is what flips connectors
-    # on (store-configured), so point the store's Postgres half at this stack's isolated
-    # resources; its Redis cache rides the shared ``_redis_feature_env``. Wire the fixture
-    # provider's crypto keys + stub-IdP endpoints when the runner supplied them —
-    # mirroring build_connectors_stack.
-    env.update(_pg_env("CONNECTOR_STORE_", res))
+    # The connectors surface: the connector store binds to the ``default`` database
+    # (skeleton component) _base_env already declares, so it is live (store-configured);
+    # its Redis cache rides the shared ``_redis_feature_env``. Wire the fixture provider's
+    # crypto keys + stub-IdP endpoints when the runner supplied them — mirroring
+    # build_connectors_stack.
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek
     if res.connectors_state_hmac_key is not None:
@@ -1419,7 +1417,8 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         env["MARKETPLACE_URL"] = res.marketplace_url
         env["MARKETPLACE_ADVISORIES_POLL"] = "true"
         env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
-        env.update(_pg_env("MARKETPLACE_STORE_", res))  # attribution store on the stack's own PG clone
+        # The attribution store binds to the ``default`` database (skeleton component)
+        # _base_env already declares — the stack's own PG clone.
         if res.package_index_url is not None:
             env["PIP_INDEX_URL"] = f"{res.package_index_url}/simple/"  # pip's PEP 503 root on the fixture server
     return StackConfig(
@@ -1456,10 +1455,9 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
         "user_tools": ["ask_user", "reload_config"],
     }
     env = _base_env(res, variants)
-    # The connector-store PG password is what flips connectors on (store-configured), so
-    # point the store's Postgres half at this stack's isolated resources; its Redis cache
-    # rides the shared ``_redis_feature_env``.
-    env.update(_pg_env("CONNECTOR_STORE_", res))
+    # The connector store binds to the ``default`` database (skeleton component) _base_env
+    # already declares, so it is live (store-configured); its Redis cache rides the shared
+    # ``_redis_feature_env``.
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek
     if res.connectors_state_hmac_key is not None:
@@ -1517,8 +1515,8 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
     """MULTIWORKER(1), no backend/metrics, auth off — the SHIPPED google + atlassian
     connector descriptors loaded and their launch (authorize) URLs asserted.
 
-    Mounts the connectors router over a real connector store (the CONNECTOR_STORE PG
-    password is what flips connectors on) with random per-stack crypto keys, and points
+    Mounts the connectors router over a live connector store (bound to the ``default``
+    database, so it is store-configured) with random per-stack crypto keys, and points
     ``CONNECTORS_<VENDOR>_CLIENT_ID/SECRET`` at fixed fixture values. The connect flow
     builds the authorize URL PURELY LOCALLY from the descriptor's hardcoded authorize
     endpoint + the client_id + this stack's own redirect origin (no network to the
@@ -1539,9 +1537,9 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
         "user_tools": ["ask_user", "reload_config"],
     }
     env = _base_env(res, variants)
-    # The connector-store PG password flips connectors on (store-configured); its Redis
-    # cache rides the shared ``_redis_feature_env``.
-    env.update(_pg_env("CONNECTOR_STORE_", res))
+    # The connector store binds to the ``default`` database (skeleton component) _base_env
+    # already declares, so it is live (store-configured); its Redis cache rides the shared
+    # ``_redis_feature_env``.
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek
     if res.connectors_state_hmac_key is not None:
@@ -1754,9 +1752,8 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
     env["MARKETPLACE_URL"] = res.marketplace_url
     env["MARKETPLACE_ADVISORIES_POLL"] = "true"
     env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
-    # The attribution store is its own PG group; without this it defaults to db "tai",
-    # which the harness never creates. Point it at the stack's own per-run clone.
-    env.update(_pg_env("MARKETPLACE_STORE_", res))
+    # The attribution store binds to the ``default`` database (skeleton component)
+    # _base_env already declares — the stack's own per-run clone.
     # The installer shells ``sys.executable -m pip install`` inheriting the worker env,
     # so this pip knob reaches it; the PEP 503 root is /simple/. REAL marketplace-pypi
     # drops the fixture index so pip resolves the tai42 packages from real pypi.org (the
@@ -1950,7 +1947,6 @@ def build_projection_authz_stack(res: StackResources, variants: Variants) -> Sta
     env = _base_env(res, variants)
     env["ACCESS_CONTROL_ENABLE"] = "true"
     env.update(variants.identity.auth_provider_env())
-    env.update(_pg_env("ACCESS_CONTROL_STORE_", res))
     return StackConfig(
         name="projection-authz",
         topology=Topology.MULTIWORKER,
@@ -1987,7 +1983,7 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
     Serves the WHOLE default router surface (``default_routers="all"``) so every
     gated feature's door is mounted, then subtracts the two config anchors that
     would resolve a store: the per-feature Redis URLs (``_redis_feature_env``) and
-    the shared ``TAI_DEFAULT_*`` PG block (``_pg_env("TAI_DEFAULT_", res)``). With
+    the ``default`` database block (``_pg_env("TAI_DATABASE_DEFAULT_", res)``). With
     neither present, no DB-backed feature is configured, so each answers OFF: reads
     200-empty, writes 501 + ``<feature>-not-configured``, named reads 404
     byte-identical to a genuine miss, public doors uniform-404, the SSE stream 501
@@ -2008,7 +2004,7 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
     # DB-backed feature genuinely unconfigured — the OFF state under test.
     for key in _redis_feature_env(res):
         env.pop(key, None)
-    for key in _pg_env("TAI_DEFAULT_", res):
+    for key in _pg_env("TAI_DATABASE_DEFAULT_", res):
         env.pop(key, None)
     # The marketplace registry proxies are the registry CLIENT, not the install
     # store, so they are outside the OFF gate. Point them at a closed loopback port

@@ -111,7 +111,7 @@ async def test_rollback_policy_restore_value_error_maps_to_bad_request(monkeypat
     from types import SimpleNamespace
 
     monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
-    monkeypatch.setattr("tai42_skeleton.versioning.versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
 
     class _Store:
         async def get_version(self, _user_id, _version):

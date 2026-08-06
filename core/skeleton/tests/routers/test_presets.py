@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -96,8 +95,8 @@ def pg(monkeypatch) -> FakeVersioningPg:
 
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
     # Signal a store-configured deployment (the gate list/delete/reconcile consult):
-    # faking the store transport must also set its ``VERSIONING_STORE_*`` namespace.
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    # faking the store transport must also configure the skeleton database.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
 
 
@@ -1280,12 +1279,10 @@ def test_delete_neither_stored_nor_registered_404(pg, emit):
 
 @pytest.fixture
 def store_less(monkeypatch):
-    """A store-less deployment: no ``VERSIONING_STORE_*`` env, and any versioned-store
-    open is a hard error — the preset routes must never touch Postgres (a store-less
-    deploy can hold no preset)."""
-    for key in list(os.environ):
-        if key.startswith("VERSIONING_STORE_"):
-            monkeypatch.delenv(key, raising=False)
+    """A store-less deployment: the skeleton database is unconfigured, and any
+    versioned-store open is a hard error — the preset routes must never touch Postgres
+    (a store-less deploy can hold no preset)."""
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     @asynccontextmanager
     async def forbid_client_ctx(client_cls, settings=None, **kwargs):
@@ -1307,9 +1304,9 @@ def test_list_store_less_empty_without_opening_store(store_less, emit):
 
 def test_create_store_less_refuses_with_501_without_opening_store(store_less, emit):
     """A create on a store-less deploy is refused with 501 + the
-    ``versioning-not-configured`` code (the same versioned_store_configured predicate
-    the list/delete/reconcile paths gate on) BEFORE any Postgres open — a capability
-    the deployment lacks, never a transient 503 nor a 500 from a failed connection."""
+    ``versioning-not-configured`` code (the same store-configured gate the
+    list/delete/reconcile paths use) BEFORE any Postgres open — a capability the
+    deployment lacks, never a transient 503 nor a 500 from a failed connection."""
 
     async def run():
         async with instance.app.app_context(_manifest()):
@@ -2170,7 +2167,7 @@ def test_validate_version_quarantined_is_invalid(pg, emit):
 def test_validate_store_less_501(monkeypatch, emit):
     # No VERSIONING_STORE_* env: mode resolution needs the store, so refuse cleanly
     # with 501 + the versioning-not-configured code (a capability the deployment lacks).
-    monkeypatch.delenv("VERSIONING_STORE_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     async def run():
         async with instance.app.app_context(_manifest()):

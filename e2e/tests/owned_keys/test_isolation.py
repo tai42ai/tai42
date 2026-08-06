@@ -319,6 +319,9 @@ async def test_key_own_not_owner_interactions_two_siblings_under_one_owner(
     try:
         add = await _find_add(auth_stack, port, owned_1_raw, question)
         interaction_id = add["interaction_id"]
+        # The add frame carries the addressed audience — sibling-1's OWN id, the value
+        # the ask clamped to — verbatim, so the attribution rides the stream present-value.
+        assert add["audience"] == owned_1_id
 
         # The SIBLING under the SAME owner never sees sibling-1's addressed question in
         # its backlog — isolation follows the own id, so a shared owner does NOT share a

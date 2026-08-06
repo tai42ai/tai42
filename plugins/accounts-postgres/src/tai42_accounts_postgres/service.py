@@ -18,8 +18,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from tai42_kit.clients import RedisConnectionSettings, client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
+from tai42_accounts_postgres.db import COMPONENT
 from tai42_accounts_postgres.settings import accounts_settings
 from tai42_accounts_postgres.stores import InvitesStore, SessionsStore, UsersStore, new_user_id
 
@@ -81,15 +83,15 @@ def reset_provider_settings() -> None:
 
 
 def users_store() -> UsersStore:
-    return UsersStore(accounts_settings().pg)
+    return UsersStore(component_store_settings(COMPONENT))
 
 
 def sessions_store() -> SessionsStore:
-    return SessionsStore(accounts_settings().pg)
+    return SessionsStore(component_store_settings(COMPONENT))
 
 
 def invites_store() -> InvitesStore:
-    return InvitesStore(accounts_settings().pg)
+    return InvitesStore(component_store_settings(COMPONENT))
 
 
 # -- minting / normalization ----------------------------------------------------

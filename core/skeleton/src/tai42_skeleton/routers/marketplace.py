@@ -48,9 +48,10 @@ from typing import Any
 
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.marketplace import advisories
-from tai42_skeleton.marketplace.settings import marketplace_store_configured
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.marketplace import marketplace_advisories as _marketplace_advisories_op
 from tai42_skeleton.operations.marketplace import marketplace_categories as _marketplace_categories_op
@@ -184,10 +185,11 @@ def _start_advisories_poll() -> None:
     otherwise fail every interval reaching for an absent Postgres inventory, so a
     store-less deployment logs one INFO line and starts nothing (matching
     ``start_poll``'s own documented-silence contract)."""
-    if not marketplace_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         logger.info(
-            "marketplace: advisory poll skipped — no install store configured "
-            "(MARKETPLACE_STORE_PG_PASSWORD or TAI_DEFAULT_PG_PASSWORD); no installed inventory to poll"
+            "marketplace: advisory poll skipped — the skeleton database is not configured (%s); "
+            "no installed inventory to poll",
+            database_password_env(component_binding(SKELETON_COMPONENT)),
         )
         return
     advisories.start_poll()

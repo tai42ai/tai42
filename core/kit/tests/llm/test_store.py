@@ -100,9 +100,9 @@ async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
 
 async def test_postgres_none_conn_string_resolves_from_base_pg_settings(monkeypatch):
     # None + postgres resolves to the base Postgres DSN, so the pool is opened
-    # against the identity from the shared namespace.
-    monkeypatch.setenv("TAI_DEFAULT_PG_HOST", "shared-db")
-    monkeypatch.setenv("TAI_DEFAULT_PG_PASSWORD", "shared-secret")
+    # against the identity from the base ``PG_*`` namespace.
+    monkeypatch.setenv("PG_HOST", "shared-db")
+    monkeypatch.setenv("PG_PASSWORD", "shared-secret")
     captured: dict[str, Any] = {}
 
     class _FakeConnCtx:

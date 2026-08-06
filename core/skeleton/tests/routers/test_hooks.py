@@ -879,6 +879,8 @@ class _BindingManager:
 def _wire_access_control(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg) -> None:
     """Access control ON for the link-level bind over ``pg``, overriding this module's
     autouse off-switch for the binder alone."""
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))

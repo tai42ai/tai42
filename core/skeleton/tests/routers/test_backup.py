@@ -331,6 +331,8 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     # The POLICY store is Postgres; the identity record + live context are Redis.
     source_pg = FakeAccessControlPg()
     source_redis = FakeRedis()
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(source_pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(source_redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source_redis))
@@ -346,6 +348,8 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     # Restore into a fresh (wiped) store + Redis.
     target_pg = FakeAccessControlPg()
     target_redis = FakeRedis()
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(target_pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(target_redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(target_redis))
@@ -442,6 +446,8 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
     # The key's condition lives in the template store, exactly as a ``condition_id``
     # policy does on a real host.
     pg.add_policy("svc", ["a"], condition_id="policies/svc.j2", policy_data={KEY_FINGERPRINT_CLAIM: "fp-svc"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=True))
@@ -548,6 +554,8 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     from tai42_skeleton.access_control import store as store_module
     from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     source = FakeRedis()
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(source))
@@ -563,6 +571,8 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
 
     # Restore into a fresh (wiped) store — the dynamic pattern comes back so a
     # pattern-scoped route re-authorizes exactly as before the backup.
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
@@ -580,6 +590,8 @@ async def test_access_control_public_route_round_trips(monkeypatch):
     from tai42_skeleton.access_control import store as store_module
     from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     source = FakeRedis()
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(source))
@@ -599,6 +611,8 @@ async def test_access_control_public_route_round_trips(monkeypatch):
 
     # Restore into a fresh (wiped) store — the public route comes back public,
     # never silently reverting to protected.
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
@@ -617,6 +631,8 @@ async def test_access_control_import_marker_mapping_lands_via_pin_route_public(m
     from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
     pg = FakeAccessControlPg()
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
     marker = access_control_settings().public_resource_id
@@ -1089,6 +1105,8 @@ async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch
     from tai42_skeleton.access_control import store as store_module
     from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
@@ -1125,6 +1143,8 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
 
     pg = FakeAccessControlPg()
     pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
     _install(monkeypatch)
@@ -1161,6 +1181,8 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
 
     pg = FakeAccessControlPg()
     pg.add_policy("u1", [], policy_data={KEY_FINGERPRINT_CLAIM: "fp-live"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
     _install(monkeypatch)
@@ -1194,6 +1216,10 @@ async def test_versioned_documents_section_round_trips_through_router(monkeypatc
     from tai42_kit.clients.impl.postgres import PostgresClient
 
     import tai42_skeleton.versioning.backup as versioning_backup
+
+    # The versioned-store backup resolves its Postgres through the registry; the fake
+    # transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     from tests.versioning.test_backup import _FakeVersioningBackupPg, _seed
 
     def _ctx_for(fake):

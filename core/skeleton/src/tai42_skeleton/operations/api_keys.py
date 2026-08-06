@@ -631,9 +631,11 @@ async def list_roles() -> list[dict[str, Any]]:
         return []
     caller = await resolve_caller()
     require_admin(caller)
-    from tai42_skeleton.versioning import versioned_store_configured
+    from tai42_kit.db import component_store_configured
 
-    if not versioned_store_configured():
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
         return []
     return await role_store().list_roles()
 
@@ -763,9 +765,11 @@ async def list_policy_versions(user_id: str) -> list[dict[str, Any]]:
     # A store-less deployment (no versioned store configured) keeps no policy version
     # history, so short-circuit an empty list rather than let the store read raw-500 on
     # an absent Postgres backend.
-    from tai42_skeleton.versioning import versioned_store_configured
+    from tai42_kit.db import component_store_configured
 
-    if not versioned_store_configured():
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
         return []
     try:
         versions = await ac_policy_store().list_versions(user_id)
@@ -799,9 +803,11 @@ async def rollback_policy(user_id: str, version: int) -> dict[str, Any]:
     # history, so no version can exist to roll back to — return the same clean 404 an
     # absent version yields rather than let the store read raw-500 on an absent Postgres
     # backend.
-    from tai42_skeleton.versioning import versioned_store_configured
+    from tai42_kit.db import component_store_configured
 
-    if not versioned_store_configured():
+    from tai42_skeleton.db import SKELETON_COMPONENT
+
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"user {user_id!r} has no policy version {version}")
 
     store = ac_policy_store()

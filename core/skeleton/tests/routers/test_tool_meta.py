@@ -34,7 +34,7 @@ tai42_app.bind(instance.build_app())
 def _tool_meta_store_configured(monkeypatch):
     # the tool-meta surface answers OFF with no store configured. These tests
     # exercise the ON feature (a fake DB stands in), so satisfy the presence gate.
-    monkeypatch.setenv("TOOL_META_STORE_PG_PASSWORD", "x")
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "x")
 
 
 # -- request / response helpers ----------------------------------------------
@@ -346,8 +346,7 @@ def test_folder_create_unknown_parent_is_400(pg: FakeToolMetaPg) -> None:
 def _off(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force the OFF gate: drop the feature's own password AND the shared default so
     # the fresh-read presence probe answers unconfigured (overrides the autouse ON).
-    monkeypatch.delenv("TOOL_META_STORE_PG_PASSWORD", raising=False)
-    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
 
 def test_list_off_answers_empty_overlay(monkeypatch: pytest.MonkeyPatch) -> None:

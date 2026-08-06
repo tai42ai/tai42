@@ -41,8 +41,10 @@ from tai42_contract.tool_meta import (
     FolderNotEmptyError,
     FolderNotFoundError,
 )
+from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import (
     BadRequestError,
     ConflictError,
@@ -50,14 +52,12 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
-from tai42_skeleton.tool_meta.settings import tool_meta_store_configured
 
-# The machine-readable code + message the tool-meta write OFF refusals carry when
-# the overlay store is unconfigured. Hoisted so upsert / folder-create read one way.
+# The machine-readable code the tool-meta write OFF refusals carry when the overlay
+# store is unconfigured; the message is rendered from the live binding at raise time.
+# Hoisted so upsert / folder-create read one way.
 _NOT_CONFIGURED_CODE = "tool-meta-not-configured"
-_NOT_CONFIGURED_MESSAGE = (
-    "the tool-metadata store is not configured: set TOOL_META_STORE_PG_PASSWORD (or TAI_DEFAULT_PG_PASSWORD)"
-)
+_NOT_CONFIGURED_NOUN = "tool-metadata store"
 
 # -- request models (the emitted spec's requestBody schemas) -----------------
 
@@ -117,7 +117,7 @@ async def list_tool_meta() -> dict[str, Any]:
     list client-side."""
     # OFF gate: with no overlay store the honest answer is the empty overlay — the
     # UI degrades perfectly on empty (D7). No store touched.
-    if not tool_meta_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         return {"folders": [], "meta": []}
     store = instance.app.tool_meta.store
     folders = await store.list_folders()
@@ -143,8 +143,8 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
     replaces the set. An unknown ``folder_id`` is a loud 400."""
     # OFF gate: a write needs the store — refuse with a named, machine-readable
     # reason rather than reaching for an absent Postgres.
-    if not tool_meta_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     store = instance.app.tool_meta.store
     # Build a SPARSE patch of only the fields the caller sent (present keys), each
     # already normalized here at the door — a blank ``display_name`` is refused
@@ -175,7 +175,7 @@ async def delete_tool_meta(tool_name: str) -> dict[str, Any]:
     row is a no-op, not an error (most tools never own one)."""
     # OFF gate: with no store there is no row to drop — the same idempotent success
     # the documented no-op contract already answers, no store touched.
-    if not tool_meta_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         return {"tool_name": tool_name, "deleted": True}
     await instance.app.tool_meta.store.delete_meta(tool_name)
     return {"tool_name": tool_name, "deleted": True}
@@ -197,8 +197,8 @@ async def create_folder(name: str, parent_id: str | None = None) -> dict[str, An
     a 409."""
     # OFF gate: a write needs the store — refuse with a named, machine-readable
     # reason rather than reaching for an absent Postgres.
-    if not tool_meta_store_configured():
-        raise NotSupportedError(_NOT_CONFIGURED_MESSAGE, extra={"code": _NOT_CONFIGURED_CODE})
+    if not component_store_configured(SKELETON_COMPONENT):
+        raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     clean = _clean_label(name, "name")
     try:
         folder = await instance.app.tool_meta.store.create_folder(clean, parent_id)
@@ -221,7 +221,7 @@ async def rename_folder(folder_id: str, name: str) -> dict[str, Any]:
     a sibling collision a 409."""
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
-    if not tool_meta_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"folder {folder_id!r} not found")
     clean = _clean_label(name, "name")
     try:
@@ -247,7 +247,7 @@ async def move_folder(folder_id: str, parent_id: str | None = None) -> dict[str,
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine folder-miss below (``FolderNotFoundError(folder_id)`` renders the same
     # text), so the door is no oracle.
-    if not tool_meta_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"folder {folder_id!r} not found")
     try:
         folder = await instance.app.tool_meta.store.move_folder(folder_id, parent_id)
@@ -270,7 +270,7 @@ async def delete_folder(folder_id: str) -> dict[str, Any]:
     subfolders or overlay rows is a 409 (empty it first)."""
     # OFF gate: with no store no folder can exist — a 404 byte-identical to the
     # genuine miss below, so the door is no oracle for the store's absence.
-    if not tool_meta_store_configured():
+    if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"folder {folder_id!r} not found")
     try:
         await instance.app.tool_meta.store.delete_folder(folder_id)

@@ -57,50 +57,32 @@ def test_fenced_route_audit_wired_as_startup_and_reload_when_enabled():
 # --- connectors gate --------------------------------------------------------
 
 
-def _clear_connector_env(monkeypatch) -> None:
+def _clear_database_env(monkeypatch) -> None:
+    # Every skeleton store gates on the one bound-database password; clearing it (and
+    # any connector redis env) leaves the DB-backed features cleanly OFF.
     import os
 
     for key in list(os.environ):
         if key.startswith(("CONNECTORS_", "CONNECTOR_STORE_")):
             monkeypatch.delenv(key, raising=False)
-    # The store also resolves through the shared TAI_DEFAULT_PG_PASSWORD fallback, so
-    # an ambient one would leave connectors ON — clear it too for a true OFF state.
-    monkeypatch.delenv("TAI_DEFAULT_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
 
 def test_connectors_gate_off_when_store_unconfigured(monkeypatch):
-    # The connectors gate is the store-configured gate alone: with no store password
-    # (and no shared default) connectors read OFF.
-    _clear_connector_env(monkeypatch)
+    # The connectors gate is the store-configured gate alone: with the skeleton
+    # database unconfigured, connectors read OFF.
+    _clear_database_env(monkeypatch)
     assert instance.connectors_in_use() is False
 
 
 def test_connectors_gate_on_when_store_configured(monkeypatch):
-    # A supplied store password is the single signal that flips connectors ON.
-    _clear_connector_env(monkeypatch)
-    monkeypatch.setenv("CONNECTOR_STORE_PG_PASSWORD", "secret")
-    assert instance.connectors_in_use() is True
-
-
-def test_default_namespace_env_does_flip_connectors_gate(monkeypatch):
-    # The connectors gate is the store-configured gate, which resolves through the
-    # shared TAI_DEFAULT_PG_PASSWORD fallback — so setting it flips connectors ON,
-    # exactly like the versioning/marketplace/tool_meta store gates.
-    _clear_connector_env(monkeypatch)
-    monkeypatch.setenv("TAI_DEFAULT_PG_PASSWORD", "shared-secret")
-
+    # The bound-database password is the single signal that flips connectors ON.
+    _clear_database_env(monkeypatch)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     assert instance.connectors_in_use() is True
 
 
 # --- versioned-preset rehydration gate --------------------------------------
-
-
-def _clear_versioning_env(monkeypatch) -> None:
-    import os
-
-    for key in list(os.environ):
-        if key.startswith("VERSIONING_STORE_"):
-            monkeypatch.delenv(key, raising=False)
 
 
 def _record_rehydrate(monkeypatch) -> list[bool]:
@@ -114,8 +96,8 @@ def _record_rehydrate(monkeypatch) -> list[bool]:
 
 
 async def test_rehydrate_skipped_when_versioning_store_unused(monkeypatch):
-    # No VERSIONING_STORE_* env: the handler skips the load (no Postgres at boot).
-    _clear_versioning_env(monkeypatch)
+    # Skeleton database unconfigured: the handler skips the load (no Postgres at boot).
+    _clear_database_env(monkeypatch)
     calls = _record_rehydrate(monkeypatch)
 
     await instance.rehydrate_versioned_presets_if_store_in_use()
@@ -124,8 +106,8 @@ async def test_rehydrate_skipped_when_versioning_store_unused(monkeypatch):
 
 
 async def test_rehydrate_runs_when_versioning_store_env_present(monkeypatch):
-    _clear_versioning_env(monkeypatch)
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    _clear_database_env(monkeypatch)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     calls = _record_rehydrate(monkeypatch)
 
     await instance.rehydrate_versioned_presets_if_store_in_use()

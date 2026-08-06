@@ -90,34 +90,23 @@ class RedisConnectionSettings(ClientSettings):
 
 
 class PostgresConnectionSettings(ClientSettings):
-    # Base with unprefixed field names — a product subclasses it with its own
-    # ``env_prefix``; excluded here so the unprefixed base is not a bogus group.
+    # Base with unprefixed field names — the registry loads it under a database's
+    # ``TAI_DATABASE_<NAME>_`` prefix; excluded here so the unprefixed base is not
+    # a bogus group.
     registry_exclude: ClassVar[bool] = True
 
-    # Connection-identity fields fall back to the shared ``TAI_DEFAULT_*``
-    # namespace when this store's own namespace leaves them unset. Only identity
-    # is mapped — behavior knobs (connect/statement timeouts, pool bounds) stay
-    # per-store.
-    tai_default_fields: ClassVar[Mapping[str, str]] = {
-        "pg_host": "pg_host",
-        "pg_port": "pg_port",
-        "pg_db": "pg_db",
-        "pg_user": "pg_user",
-        "pg_password": "pg_password",
-    }
-
-    # No hidden localhost default: an unset host means the feature is OFF, not a
-    # silent connection to localhost. Resolved from this store's own namespace or
-    # TAI_DEFAULT_PG_HOST; None reaching DSN construction raises a named error.
+    # No hidden localhost default: an unset host means the database is OFF, not a
+    # silent connection to localhost. None reaching DSN construction raises a named
+    # error.
     pg_host: str | None = None
     pg_port: int = 5432
     pg_db: str = "postgres"
     pg_user: str = "postgres"
-    # No baked-in credential — supply via env (PG_PASSWORD) or TAI_DEFAULT_PG_PASSWORD.
-    # None by default so a missing password raises a named error at DSN construction
-    # rather than shipping a real secret or silently connecting passwordless.
-    # SecretStr keeps it out of repr/logs/tracebacks; the plaintext is read only
-    # when composing the DSN handed to the driver.
+    # No baked-in credential — supply via env (PG_PASSWORD under the database
+    # prefix). None by default so a missing password raises a named error at DSN
+    # construction rather than shipping a real secret or silently connecting
+    # passwordless. SecretStr keeps it out of repr/logs/tracebacks; the plaintext
+    # is read only when composing the DSN handed to the driver.
     pg_password: SecretStr | None = None
     pg_min_connections: int = 2
     pg_max_connections: int = 10
@@ -135,10 +124,8 @@ class PostgresConnectionSettings(ClientSettings):
         # rather than an AttributeError on None.get_secret_value() or a bare
         # TypeError at the ``":" in host`` check.
         prefix = self.model_config.get("env_prefix") or ""
-        pg_host = require(self.pg_host, "the Postgres connection", f"{prefix}PG_HOST", "TAI_DEFAULT_PG_HOST")
-        pg_password = require(
-            self.pg_password, "the Postgres connection", f"{prefix}PG_PASSWORD", "TAI_DEFAULT_PG_PASSWORD"
-        )
+        pg_host = require(self.pg_host, "the Postgres connection", f"{prefix}PG_HOST")
+        pg_password = require(self.pg_password, "the Postgres connection", f"{prefix}PG_PASSWORD")
         # Percent-encode every user-controlled component so reserved characters
         # can't break the URL or reroute the host:
         #  - credentials (@ / : # ?) in a generated password/user,

@@ -150,6 +150,16 @@ class InteractionRequest(BaseModel):
     # side when the question is raised with a channel, so consumers can
     # attribute the medium the answer arrived through.
     channel: str | None = None
+    # The channel delivery address the asking side passed for this question (a
+    # chat id, phone number, ...) — display/binding attribution on the operator
+    # feed, a WHERE, never an authorization axis. None when no address was
+    # passed; a set value is a non-blank string (the helper rejects blanks).
+    recipient: str | None = None
+    # The run/thread that raised this question — the background tool-run id
+    # stamped when the question is asked inside a tool run, None outside one. It
+    # attributes a pending question and lets programmatic answering bind it to
+    # the originating run. A set value is a non-blank string.
+    origin: str | None = None
     # Identity (a user_id) the interaction is scoped to: a restricted caller sees
     # and answers only questions addressed to its own identity. This is the
     # isolation axis, distinct from ``channel``/``reply_to`` delivery addressing

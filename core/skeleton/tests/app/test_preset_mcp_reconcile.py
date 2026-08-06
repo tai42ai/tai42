@@ -19,7 +19,6 @@ so no network or live database is touched.
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock
@@ -69,8 +68,8 @@ def pg(monkeypatch) -> FakeVersioningPg:
     monkeypatch.setattr(store_module, "client_ctx", fake_client_ctx)
     # Signal a store-configured deployment (the gate reconcile + rehydrate consult):
     # a versioned preset can only exist when the store is wired up, so faking the
-    # store transport must also set its ``VERSIONING_STORE_*`` namespace.
-    monkeypatch.setenv("VERSIONING_STORE_PG_PASSWORD", "secret")
+    # store transport must also configure the skeleton database.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     return fake
 
 
@@ -154,11 +153,10 @@ def test_deregister_mcp_quarantines_dependent_presets(pg, monkeypatch):
 
 
 def test_deregister_store_less_reconcile_opens_no_store(monkeypatch):
-    # A store-less deployment (no VERSIONING_STORE_* env): reconcile rebinds/quarantines
-    # from the in-memory spec map alone and NEVER opens the versioned Postgres store.
-    for key in list(os.environ):
-        if key.startswith("VERSIONING_STORE_"):
-            monkeypatch.delenv(key, raising=False)
+    # A store-less deployment (the skeleton database unconfigured): reconcile
+    # rebinds/quarantines from the in-memory spec map alone and NEVER opens the
+    # versioned Postgres store.
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
 
     @asynccontextmanager
     async def forbid_client_ctx(client_cls, settings=None, **kwargs):

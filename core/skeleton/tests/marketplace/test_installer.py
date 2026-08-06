@@ -1182,7 +1182,7 @@ def _patch_fleet_client(monkeypatch: pytest.MonkeyPatch, log: list[str], closed:
         def client_kwargs(self):
             return {}
 
-    monkeypatch.setattr(installer_module, "marketplace_store_settings", lambda: _Settings())
+    monkeypatch.setattr(installer_module, "component_store_settings", lambda component: _Settings())
 
 
 async def test_fleet_lock_autocommit_before_trylock_and_unlock_in_finally(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1248,7 +1248,7 @@ async def test_fleet_lock_refuses_when_lock_held_elsewhere(monkeypatch: pytest.M
         def client_kwargs(self):
             return {}
 
-    monkeypatch.setattr(installer_module, "marketplace_store_settings", lambda: _Settings())
+    monkeypatch.setattr(installer_module, "component_store_settings", lambda component: _Settings())
 
     with pytest.raises(OperationInProgressError):
         async with installer_module._fleet_lock():

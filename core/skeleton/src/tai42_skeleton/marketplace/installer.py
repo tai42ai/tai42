@@ -92,11 +92,11 @@ from tai42_contract.app import tai42_app
 from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpec
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import apply_migrations
+from tai42_kit.db import apply_migrations, component_store_settings
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.config.service import ApplyResult, ConfigService
-from tai42_skeleton.db import plugin_migration_entry, schema_settings
+from tai42_skeleton.db import SKELETON_COMPONENT, plugin_migration_entry
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.compat import running_contract_version, update_targets
 from tai42_skeleton.marketplace.errors import (
@@ -129,7 +129,6 @@ from tai42_skeleton.marketplace.prefix import (
     prefix_has_distribution,
     uninstall_from_prefix,
 )
-from tai42_skeleton.marketplace.settings import marketplace_store_settings
 from tai42_skeleton.marketplace.store import InstallRecord, MarketplaceInstallStore
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, fleet_fanout
 
@@ -196,7 +195,7 @@ async def _fleet_lock() -> AsyncIterator[None]:
     inside the body stays on this client and cannot evict the SHARED pool through
     the kit's disconnection rewrap.
     """
-    kwargs = marketplace_store_settings().client_kwargs()
+    kwargs = component_store_settings(SKELETON_COMPONENT).client_kwargs()
     kwargs["min_size"] = 1
     kwargs["max_size"] = 1
     async with (
@@ -362,7 +361,7 @@ class Installer:
         if spec.migrations is None:
             return
         importlib.invalidate_caches()
-        entry = plugin_migration_entry(spec, schema_settings())
+        entry = plugin_migration_entry(spec)
         if entry is None:
             return
         applied = await apply_migrations([entry])

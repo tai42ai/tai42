@@ -34,8 +34,9 @@ async def test_kind_status_authed_and_reflects_providers(accounts_stack: TaiStac
 
 async def test_connectors_live_via_store_resolution(accounts_stack: TaiStack) -> None:
     # Connectors gates on its store config like every other DB feature. This stack sets
-    # no explicit CONNECTOR_STORE_* env, yet the shared TAI_DEFAULT_PG_PASSWORD resolves
-    # the store — so connectors is live purely by store resolution, no intent marker.
+    # no connectors-specific binding, yet the ``default`` database's configured password
+    # resolves the store (skeleton binding -> default database) — so connectors is live
+    # purely by store resolution, no intent marker.
     # Pair the two windows on that fact: kinds reports the connectors row active and
     # /ready pings the connector store clean.
     stack = accounts_stack

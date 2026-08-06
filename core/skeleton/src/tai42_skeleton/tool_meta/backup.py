@@ -18,8 +18,9 @@ from typing import Any, Literal
 
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_settings
 
-from tai42_skeleton.tool_meta.settings import tool_meta_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 # The report shape every importer returns, matching the backup section contract.
 _SectionReport = dict[str, Any]
@@ -66,7 +67,7 @@ async def export_tool_meta() -> dict[str, Any]:
     intact.
     """
     async with (
-        client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -115,7 +116,7 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
     rows = payload.get("rows") or []
 
     async with (
-        client_ctx(PostgresClient, tool_meta_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.transaction(),
         conn.cursor() as cur,

@@ -220,6 +220,18 @@ def _add_data(request: InteractionRequest) -> dict:
         data["server_verified"] = True
     if request.channel is not None:
         data["channel"] = request.channel
+    # Attribution, additive and absent-when-None (the channel/media idiom). The
+    # feed is the channel operator's own authed surface already scoped by the
+    # audience read-gate, so ``recipient`` (a delivery address) rides as-is,
+    # unmasked. ``recipient``/``origin`` are display/binding-only; ``audience`` IS
+    # the isolation axis, emitted here purely for display — the feed is already
+    # audience-gated at the read query, so echoing it grants no extra reach.
+    if request.recipient is not None:
+        data["recipient"] = request.recipient
+    if request.origin is not None:
+        data["origin"] = request.origin
+    if request.audience is not None:
+        data["audience"] = request.audience
     # Display-only media rides the add frame as plain JSON dicts when present
     # (absent — no key — when the question has none); ``exclude_none`` keeps a
     # caption-less item lean, and the client treats a missing caption as absent.

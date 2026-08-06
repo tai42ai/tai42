@@ -24,9 +24,11 @@ from psycopg.errors import UniqueViolation
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.db import component_store_settings
 
 from tai42_skeleton.connectors.settings import connector_store_settings
 from tai42_skeleton.connectors.store.redis_pg import _ALIAS_UNIQUE_CONSTRAINT, RedisPgConnectorTokenStore
+from tai42_skeleton.db import SKELETON_COMPONENT
 
 # The backup section report shape, built here rather than imported across the seam.
 _SectionReport = dict[str, Any]
@@ -43,7 +45,7 @@ async def export_connector_categories() -> dict[str, Any]:
     """Export the ``connector_category`` grouping rows as a faithful row copy;
     ``created_at`` is carried so the original creation time survives a round-trip."""
     async with (
-        client_ctx(PostgresClient, connector_store_settings().pg) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -75,7 +77,7 @@ async def import_connector_categories(
     categories = payload.get("categories") or []
 
     async with (
-        client_ctx(PostgresClient, connector_store_settings().pg) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -113,7 +115,7 @@ async def export_connector_connections() -> list[dict[str, Any]]:
     store-regenerated on restore and omitted.
     """
     async with (
-        client_ctx(PostgresClient, connector_store_settings().pg) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):
@@ -148,7 +150,7 @@ async def import_connector_connections(
     report = _empty_report()
     restored_ids: list[str] = []
     async with (
-        client_ctx(PostgresClient, connector_store_settings().pg) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
         conn.cursor() as cur,
     ):

@@ -8,9 +8,9 @@ without a live database. Real SQL correctness is proven by the e2e leg.
 from __future__ import annotations
 
 import pytest
+from tai42_kit.clients import PostgresConnectionSettings
 
 from tai42_accounts_postgres import stores
-from tai42_accounts_postgres.settings import AccountsPgSettings
 from tai42_accounts_postgres.stores import (
     EmailTakenError,
     InvitesStore,
@@ -26,8 +26,10 @@ def _pg(monkeypatch, pg: ScriptedPg) -> None:
     monkeypatch.setattr(stores, "client_ctx", make_pg_ctx(pg))
 
 
-def _settings() -> AccountsPgSettings:
-    return AccountsPgSettings()
+def _settings() -> PostgresConnectionSettings:
+    # The scripted ``client_ctx`` fake never opens a connection, so a bare settings
+    # object is enough for the stores' control-flow tests.
+    return PostgresConnectionSettings()
 
 
 def test_new_user_id_is_prefixed():

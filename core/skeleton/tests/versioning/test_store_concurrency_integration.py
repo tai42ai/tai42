@@ -8,8 +8,8 @@ version join under its ORIGINAL snapshot, where the just-committed version row i
 invisible, and finds 0 rows for a document that plainly exists.
 
 This needs real Postgres MVCC — there is no fake here. It is OPT-IN: set
-``TAI42_SKELETON_REAL_PG=1`` and point ``VERSIONING_STORE_*`` at a live Postgres. Without
-the opt-in the test SKIPS VISIBLY with a clear reason (never a silent skip).
+``TAI42_SKELETON_REAL_PG=1`` and point ``TAI_DATABASE_DEFAULT_PG_*`` at a live Postgres.
+Without the opt-in the test SKIPS VISIBLY with a clear reason (never a silent skip).
 """
 
 from __future__ import annotations
@@ -23,9 +23,10 @@ from typing import LiteralString
 import pytest
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
+from tai42_kit.db import component_store_settings
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.versioning.settings import versioning_store_settings
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 pytestmark = pytest.mark.integration
@@ -52,7 +53,7 @@ _SCHEMA_SQL: tuple[LiteralString, ...] = (
 
 async def _exec(sql: LiteralString, params: tuple = ()) -> None:
     async with (
-        client_ctx(PostgresClient, versioning_store_settings()) as pool,
+        client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
         pool.connection() as conn,
     ):
         await conn.execute(sql, params)
@@ -63,9 +64,9 @@ async def real_store() -> AsyncIterator[tuple[PostgresVersionedStore, str]]:
     if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
         pytest.skip(
             f"real-Postgres concurrency test is opt-in: set {_OPT_IN_ENV}=1 and point the "
-            "VERSIONING_STORE_* env at a live Postgres to run it (needs real MVCC — no fake)"
+            "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (needs real MVCC — no fake)"
         )
-    # Rebuild the cached settings so ``VERSIONING_STORE_*`` from the environment is read
+    # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read
     # (a stale cached settings object would target the wrong database).
     reset_all_settings()
     for statement in _SCHEMA_SQL:

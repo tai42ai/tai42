@@ -183,6 +183,8 @@ async def test_a_fire_whose_key_no_longer_exists_is_refused_and_isolated(
     app = make_app()
     pg = FakeAccessControlPg()
     pg.add_policy("k-live", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-live"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(verifier_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
@@ -221,6 +223,8 @@ async def test_a_revoke_remint_of_the_execution_key_is_denied_not_run_as_admin(
     app = make_app()
     pg = FakeAccessControlPg()
     pg.add_policy("svc", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "F1"})
+    # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))
     monkeypatch.setattr(verifier_module, "client_ctx", make_ac_client_ctx(AcFakeRedis()))

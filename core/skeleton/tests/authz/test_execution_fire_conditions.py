@@ -264,4 +264,4 @@ def _wire_edit_door(monkeypatch: pytest.MonkeyPatch, ac_env) -> None:
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis(strings={})))
     store = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: store)
-    monkeypatch.setattr(versioning_module, "versioned_store_configured", lambda: True)
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
