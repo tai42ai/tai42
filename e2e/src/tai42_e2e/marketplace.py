@@ -5,9 +5,9 @@ does — REAL OS processes spawned from the shared venv via
 :class:`~tai42_e2e.procs.ProcessHandle`, from the out-of-band pinned install, with
 log files and a leak-checked teardown — not a net-fixture thread. A
 :class:`MarketplaceService` owns an isolated Postgres database (created empty and
-schema-bootstrapped through the production ``tai42-marketplace db init`` path,
-which runs ``CREATE EXTENSION pg_trgm``), spawns the API server, and waits for
-``GET /healthz`` == 200.
+schema-bootstrapped through the production ``tai42-marketplace db migrate`` path,
+which replays the migration chain — its baseline runs ``CREATE EXTENSION
+pg_trgm``), spawns the API server, and waits for ``GET /healthz`` == 200.
 
 :func:`seed_fixture_catalog` is the shared seeding helper (both the pytest
 fixtures and the studio runner call it): it stages the forged fixture wheels on
@@ -51,7 +51,14 @@ if TYPE_CHECKING:
 # opt-in marketplace suite installs it out-of-band at boot from this pinned ref
 # (the git insteadOf token config rewrites the URL — no token handling here).
 _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
-_MARKETPLACE_PIN = "6fb0a97cea603a73091a366291db018c84e2cae1"
+# Re-pin to the tai-marketplace commit SHA that moves the registry off its
+# standalone ``db init`` onto the framework migration runner (``db migrate``) at
+# the user-gated release. That commit is the ONLY ref whose CLI carries the
+# ``db migrate`` path :meth:`MarketplaceService._apply_ddl` now drives; it does
+# not exist until that release is cut, so this placeholder is deliberately not a
+# resolvable ref — the marketplace suite fails loudly on out-of-band install
+# until it is filled, never silently resolving an older ``db init``-only pin.
+_MARKETPLACE_PIN = "b2a5b188ea904551cf026add33c1ad7f7a5a2010"
 
 
 def _registry_venv_dir() -> Path:
@@ -435,24 +442,25 @@ class MarketplaceService:
         self._wait_ready()
 
     def _apply_ddl(self) -> None:
-        """Run ``tai42-marketplace db init`` to completion against the empty DB.
+        """Run ``tai42-marketplace db migrate`` to completion against the empty DB.
 
-        The production bootstrap path; it runs ``CREATE EXTENSION pg_trgm``, so
-        the DB must be owned (created by ``create_empty_db``, not a template
-        clone). A non-zero exit raises loudly with the captured output."""
+        The production bootstrap path: it replays the registry's migration chain,
+        whose baseline runs ``CREATE EXTENSION pg_trgm``, so the DB must be owned
+        (created by ``create_empty_db``, not a template clone). A non-zero exit
+        raises loudly with the captured output."""
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
-            [self._bin(), "db", "init"],
+            [self._bin(), "db", "migrate"],
             cwd=str(self.root),
             env=self._service_env(),
             capture_output=True,
             text=True,
             check=False,
         )
-        (self._logs_dir / "mp-db-init.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        (self._logs_dir / "mp-db-migrate.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
         if proc.returncode != 0:
             raise RuntimeError(
-                f"tai42-marketplace db init failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+                f"tai42-marketplace db migrate failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
             )
 
     def _spawn_all(self) -> None:
