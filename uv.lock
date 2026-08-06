@@ -4878,7 +4878,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "0.5.0"
+version = "1.0.0"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -5460,7 +5460,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "0.7.0"
+version = "1.0.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
