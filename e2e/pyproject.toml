@@ -41,7 +41,7 @@ dependencies = [
     # Postgres-backed accounts provider (password login, sessions, invites), the
     # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
     # provider (issuer-minted machine JWTs).
-    "tai42-accounts-postgres>=0.5,<0.6",
+    "tai42-accounts-postgres>=0.4,<0.5",
     "tai42-accounts-oidc>=0.2,<0.3",
     "tai42-identity-oidc>=0.2,<0.3",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
