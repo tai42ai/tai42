@@ -25,12 +25,12 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the identity
     # ABCs and the module-level identity-provider registry.
-    "tai42-contract>=0.4,<0.6",
+    "tai42-contract>=1.0,<2",
     # The Redis client, its hash typing seams (hgetall/hset_mapping/scan_iter),
     # and the api-key hash. The `redis` extra is REQUIRED, not optional: the
     # provider's storage IS Redis, so tai42_kit.clients.impl.redis (which imports the
     # redis driver at module top) must resolve for the plugin to import.
-    "tai42-kit[redis]>=0.5,<0.7",
+    "tai42-kit[redis]>=1.0,<2",
 ]
 
 [project.urls]
