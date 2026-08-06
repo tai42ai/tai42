@@ -7,13 +7,17 @@ minimal-but-valid instances so a test states only the fields it cares about.
 
 from __future__ import annotations
 
+import importlib.metadata
 from typing import Any
 
+from packaging.version import Version
 from tai42_contract.plugins import PluginSpec
 
-# The tai42-contract version installed in this environment satisfies this range, so
+# The default models a COMPATIBLE plugin: its range is derived from the installed
+# tai42-contract's major so it always admits that version, whatever the release, and
 # a resolve built with it passes the installer's contract check by default.
-DEFAULT_CONTRACT_RANGE = ">=0.1,<1.0"
+_CONTRACT_MAJOR = Version(importlib.metadata.version("tai42-contract")).major
+DEFAULT_CONTRACT_RANGE = f">={_CONTRACT_MAJOR}.0,<{_CONTRACT_MAJOR + 1}"
 
 
 def tool_item(module: str = "tai42_toolbox.tools.gen_uuid", name: str = "gen-uuid") -> dict[str, Any]:
