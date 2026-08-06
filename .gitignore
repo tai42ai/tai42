@@ -11,9 +11,9 @@ dist/
 
 # JS toolchain
 node_modules/
-ui/test-results/
-ui/playwright-report/
-ui/.cache/
+**/ui/test-results/
+**/ui/playwright-report/
+**/ui/.cache/
 
 # e2e workspace artifacts
 junit.xml
