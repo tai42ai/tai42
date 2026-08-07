@@ -799,3 +799,50 @@ async def test_empty_targets_list_reaches_nobody(wire_bus_client: None) -> None:
         assert b_seen == []
     finally:
         await _stop(task_a, task_b)
+
+
+# -- the subscription connection is epoch-immune (fresh) ----------------------
+
+
+async def test_subscription_uses_a_fresh_epoch_immune_connection(
+    monkeypatch: pytest.MonkeyPatch, server: fakeredis.FakeServer
+) -> None:
+    """The process-lifetime subscription must acquire its connection with ``fresh=True``
+    so it lives OUTSIDE the epoch client pool. A pooled (epoch-scoped) lease is
+    force-closed by a reload's ``drain_epoch`` of the retired epoch → the subscription
+    reconnects → its ``on_ready`` fires a self-resync ``reload_config`` → which retires and
+    force-closes the NEXT lease → an unbounded reload cascade (the config-k8s e2e
+    regression: a single env change wedged the worker in a perpetual ~10s-period reload
+    loop). The bus URL is Tier-1 refused (invariant across epochs), so the connection has
+    no reason to be epoch-scoped. Guards the exact ``fresh=`` argument at the call site."""
+    fresh_flags: list[bool] = []
+
+    @asynccontextmanager
+    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[aioredis.FakeRedis]:
+        fresh_flags.append(fresh)
+        client = aioredis.FakeRedis(server=server, decode_responses=True)
+        try:
+            yield client
+        finally:
+            await client.aclose()
+
+    monkeypatch.setattr(bus_module, "client_ctx", spy)
+
+    bus = make_bus()
+    ready = asyncio.Event()
+
+    async def on_ready() -> None:
+        ready.set()
+
+    async def apply(_op: dict) -> object:
+        return None
+
+    task = asyncio.create_task(bus.subscribe(bus.origin, apply, on_ready))
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        # The subscription (and its shared-connection heartbeat) is the only connection a
+        # bare subscribe opens, and it must be fresh — never a pooled epoch-scoped lease.
+        assert fresh_flags == [True], f"the subscription connection was not fresh=True: {fresh_flags}"
+    finally:
+        await _stop(task)

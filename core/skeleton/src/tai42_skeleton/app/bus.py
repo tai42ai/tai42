@@ -603,7 +603,17 @@ class WorkerBus:
         on_established: Callable[[], None],
     ) -> None:
         presence_key = self._settings.presence_key(origin.origin)
-        async with client_ctx(RedisClient, self._settings.redis) as conn:
+        # ``fresh=True``: a DEDICATED, non-pooled connection for the process-lifetime
+        # subscription, so an epoch retire's ``drain_epoch`` can never force-close it.
+        # A pooled lease is stamped with the epoch current at acquire time; the
+        # subscription holds it for the whole epoch, so every reload's retire would
+        # force-close it (blocking the full drain budget first) → the subscription
+        # reconnects → its ``on_ready`` fires a resync reload_config → which retires and
+        # force-closes the NEXT lease → an unbounded reload cascade. The bus URL is
+        # Tier-1 refused (never changes across a profile apply), so this connection is
+        # invariant across epochs and has no reason to be epoch-scoped. A REAL bus outage
+        # still raises a transport error here and drives the reconnect+resync self-heal.
+        async with client_ctx(RedisClient, self._settings.redis, fresh=True) as conn:
             r: Any = conn
             pubsub = r.pubsub()
             await pubsub.subscribe(self._settings.channel)
