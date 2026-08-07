@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import McpError
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE, build_replicas_stack
@@ -72,6 +73,14 @@ def _tool_text(result: Any) -> str:
 
 def _reloading(exc: ToolError) -> bool:
     return "reloading" in str(exc)
+
+
+def _session_terminated(exc: McpError) -> bool:
+    """True for the D13a session-swap rejection — a worker that swaps its serving epoch
+    under a fan-out reload retires the MCP session a poll opened against the old epoch, so
+    the SDK raises ``McpError`` "Session terminated". A polled predicate treats it as
+    "not yet" and re-polls on a fresh session. Any other MCP error propagates."""
+    return "Session terminated" in str(exc)
 
 
 async def _call_preset(stack: TaiStack, port: int, name: str) -> str:
@@ -138,6 +147,10 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
             if _reloading(exc):
                 return False
             raise
+        except McpError as exc:
+            if _session_terminated(exc):
+                return False
+            raise
 
     await wait_for_async(b_serves_baked, deadline=5.0, message="B never rebound the preset after its reload")
 
@@ -149,6 +162,10 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
             return await _backend_call(stack, name) == new_payload
         except ToolError as exc:
             if _reloading(exc):
+                return False
+            raise
+        except McpError as exc:
+            if _session_terminated(exc):
                 return False
             raise
 

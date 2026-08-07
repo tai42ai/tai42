@@ -43,7 +43,7 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
+from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, _probe_tolerating_reloading
 from tai42_e2e.variants import BusOrigin
 
 if TYPE_CHECKING:
@@ -160,14 +160,29 @@ async def _stable_serve_digests(stack: TaiStack, n: int) -> dict[int, str]:
 async def _backend_dispatch(stack: TaiStack, tool: str, arguments: dict) -> CallToolResult:
     """Run ``tool`` INSIDE the backend worker via the ``run_tool_sync_task`` door (the
     task-execution readback) and return the raw MCP result — ``is_error`` when the
-    backend can no longer dispatch the name."""
-    async with stack.mcp() as mcp:
-        return await mcp.call_tool(
-            "run_tool_sync_task",
-            {"tool_name": tool, "arguments": arguments},
-            raise_on_error=False,
-            retry_on_reloading=True,
-        )
+    backend can no longer dispatch the name.
+
+    A whole-fleet reload (``_normalize``) or a targeted op settling on the serve worker
+    this dispatch enters can swap that worker's serving epoch and retire the freshly-opened
+    MCP session (D13a — the new epoch serves a fresh session-id space -> "Session
+    terminated"). Re-open on a fresh session until the dispatch lands, exactly as a real
+    client re-initialises; a genuine ``is_error`` dispatch result (the backend lost the
+    tool) is a delivered result and passes straight through."""
+
+    async def _thunk() -> CallToolResult:
+        async with stack.mcp() as mcp:
+            return await mcp.call_tool(
+                "run_tool_sync_task",
+                {"tool_name": tool, "arguments": arguments},
+                raise_on_error=False,
+                retry_on_reloading=True,
+            )
+
+    return await wait_for_async(
+        lambda: _probe_tolerating_reloading(_thunk),
+        deadline=15.0,
+        message=f"the backend dispatch of {tool!r} never left the reload/session-swap window",
+    )
 
 
 async def _normalize(stack: TaiStack) -> None:

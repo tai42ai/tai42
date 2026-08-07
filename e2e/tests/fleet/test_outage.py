@@ -47,7 +47,7 @@ from _fleet import (
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import build_bare_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology
+from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology, _probe_tolerating_reloading
 from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 from tai42_e2e.variants import bus_census
 
@@ -314,11 +314,24 @@ async def _probe(stack: TaiStack, port: int) -> tuple[int, str]:
     """The ``(pid, state_digest)`` a specific replica reports — REPLICAS gives each
     replica its own port, so the probe addresses one worker deterministically (unlike
     the load-balanced MULTIWORKER port the ``_fleet`` helpers sample)."""
-    async with stack.mcp(port=port) as mcp:
-        result = await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
-    data = result.data if result.data is not None else result.structured_content
-    if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
-        raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
+
+    async def _thunk() -> dict:
+        async with stack.mcp(port=port) as mcp:
+            result = await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
+        data = result.data if result.data is not None else result.structured_content
+        if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
+            raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
+        return data
+
+    # A fleet reload settling on this replica swaps its serving epoch and retires the
+    # freshly-opened MCP session mid-probe (D13a — the new epoch serves a fresh session-id
+    # space -> "Session terminated"). Re-open on a fresh session until the probe lands,
+    # exactly as a real client re-initialises.
+    data = await wait_for_async(
+        lambda: _probe_tolerating_reloading(_thunk),
+        deadline=10.0,
+        message=f"the worker_info probe on port {port} never left the reload/session-swap window",
+    )
     return int(data["pid"]), str(data["state_digest"])
 
 

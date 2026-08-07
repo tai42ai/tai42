@@ -62,6 +62,12 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     # handshake — sits inside the corpse's short presence-TTL window: the census must
     # still list the dead worker when the confirmed broadcast reads it.
     async with stack.mcp(port=stack.port_a) as mcp:
+        # Prime the SDK's per-session tool-output-schema cache BEFORE the reload retires
+        # this session (D13a — the swapped-in epoch serves a new session-id space). The
+        # dead-worker report is a DELIVERED non-error FleetResult (it names the corpse), so
+        # the SDK's post-call output validation would issue a follow-up tools/list on the
+        # orphaned session -> "Session terminated"; a primed cache skips that follow-up.
+        await mcp.list_tools()
         stack.kill("backend")
         result = await mcp.call_tool("reload_config", {}, raise_on_error=False)
     data = result.data if isinstance(result.data, dict) else result.structured_content
@@ -78,6 +84,9 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
 
     await wait_for_async(census_dropped_backend, deadline=8.0, message="dead worker never left the census")
     async with stack.mcp(port=stack.port_a) as mcp:
+        # Prime the schema cache so this successful reload's post-call output validation
+        # issues no follow-up tools/list on the session the reload retires (D13a).
+        await mcp.list_tools()
         ok = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
     ok_data = ok.data if isinstance(ok.data, dict) else ok.structured_content
     assert isinstance(ok_data, dict), f"reload_config returned no result map: {ok!r}"

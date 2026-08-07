@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE
-from tai42_e2e.stack import TaiStack
+from tai42_e2e.stack import TaiStack, _probe_tolerating_reloading
 
 # The tool-call counter the ``prometheus_metrics`` extension increments, and the
 # label set the embed app's own worker stamps (``runtime="main"``).
@@ -94,15 +94,26 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     # (b) The fleet ``reload_config`` tool returns a FleetResult (no ``workers`` key)
     # whose per-origin outcomes cover the census — the embedded worker joined the bus
     # exactly like a CLI worker, and the backend sibling applied the reload.
-    async with embed_stack.mcp() as mcp:
-        # Prime the SDK's per-session tool-output-schema cache (ClientSession
-        # ._tool_output_schemas) so the post-call result validation
-        # (_validate_tool_result) does not issue a follow-up tools/list: reload_config
-        # retires this session (D13a — the swapped-in epoch serves a new session-id
-        # space), so that follow-up would hit the orphaned session and raise
-        # "Session terminated" even though the tool result was already delivered.
-        await mcp.list_tools()
-        result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+    async def _reload_over_mcp():
+        async with embed_stack.mcp() as mcp:
+            # Prime the SDK's per-session tool-output-schema cache (ClientSession
+            # ._tool_output_schemas) so the post-call result validation
+            # (_validate_tool_result) does not issue a follow-up tools/list: reload_config
+            # retires this session (D13a — the swapped-in epoch serves a new session-id
+            # space), so that follow-up would hit the orphaned session and raise
+            # "Session terminated" even though the tool result was already delivered.
+            await mcp.list_tools()
+            return await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+
+    # The prior env-reload (POST /api/config/env above) already swapped the embed worker's
+    # epoch on a deferred session-manager close; a session opened here can be retired
+    # before the call even lands (D13a). Re-open on a fresh session until it lands cleanly,
+    # exactly as a real client re-initialises.
+    result = await wait_for_async(
+        lambda: _probe_tolerating_reloading(_reload_over_mcp),
+        deadline=10.0,
+        message="the embed reload_config tool never left the reload/session-swap window",
+    )
     result_data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(result_data, dict), f"reload_config returned no result map: {result!r}"
     assert result_data["reachable"] is True, f"the bus was unreachable: {result_data}"
