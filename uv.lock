@@ -5532,7 +5532,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-postgres", specifier = ">=3,<4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3,<4" },
     { name = "prometheus-client", specifier = ">=0.24" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-settings", specifier = ">=2.13" },
     { name = "pytest", specifier = ">=8" },
