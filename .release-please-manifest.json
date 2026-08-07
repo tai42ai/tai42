@@ -1,6 +1,6 @@
 {
   "core/contract": "1.0.0",
-  "core/kit": "1.0.0",
+  "core/kit": "1.1.0",
   "core/skeleton": "1.0.0",
   "plugins/accounts-oidc": "0.3.1",
   "plugins/accounts-postgres": "1.0.1",
