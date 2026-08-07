@@ -29,6 +29,7 @@ test('the reference plugin contributes a Settings tab (after core tabs) and a na
   expect(await tablist.getByRole('tab').allInnerTexts()).toEqual([
     'Settings',
     'Environment',
+    'Profiles',
     'API keys',
     'Backup',
     'Roles',
