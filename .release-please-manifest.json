@@ -25,5 +25,5 @@
   "plugins/tools-stripe": "0.3.8",
   "plugins/webhook-verifier-github": "0.2.3",
   "plugins/webhook-verifier-stripe": "0.2.3",
-  "e2e": "1.0.1"
+  "e2e": "1.0.2"
 }
