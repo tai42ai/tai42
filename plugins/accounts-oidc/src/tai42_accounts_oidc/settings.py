@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import KeyMaterial, TaiBaseSettings, settings_cache
 
 # The presets a provider row may name. ``github`` selects the plain-OAuth2 path;
 # the rest are OIDC discovery issuers.
@@ -111,8 +111,9 @@ class OidcAccountsSettings(TaiBaseSettings):
     providers: list[OidcProviderConfig] = Field(default_factory=list)
 
     # HMAC key for the tamper-evident ``state`` parameter; REQUIRED (None sentinel →
-    # precise ValueError at provider construction).
-    state_key: SecretStr | None = None
+    # precise ValueError at provider construction). Key material, so a settings
+    # profile can never carry it.
+    state_key: KeyMaterial | None = None
 
     # The public origin both the OAuth redirect_uri and the /login?sso= hand-back
     # derive from — never the inbound Host/origin. REQUIRED (None sentinel).

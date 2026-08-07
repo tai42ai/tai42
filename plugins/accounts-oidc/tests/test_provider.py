@@ -24,7 +24,7 @@ _GOOGLE = {"name": "google", "preset": "google", "client_id": "cid", "client_sec
 
 
 def test_provider_settings_raises_before_population() -> None:
-    with pytest.raises(RuntimeError, match="unpopulated"):
+    with pytest.raises(RuntimeError, match="no active provider"):
         provider_mod.provider_settings()
 
 

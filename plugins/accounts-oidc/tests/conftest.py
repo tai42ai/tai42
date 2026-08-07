@@ -44,10 +44,23 @@ class _FakeLifecycle:
         return func
 
 
+class _FakeAccounts:
+    """The ``tai42_app.accounts`` facet: resolves the current epoch's recorded provider
+    instance by name (``make_provider`` records ``accounts-oidc`` here), so the routes'
+    ``active_provider`` resolution finds the provider under test."""
+
+    def __init__(self) -> None:
+        self.providers: dict[str, Any] = {}
+
+    def active_provider(self, name: str) -> Any:
+        return self.providers.get(name)
+
+
 class _FakeApp:
     def __init__(self) -> None:
         self.http = _FakeHttp()
         self.lifecycle = _FakeLifecycle()
+        self.accounts = _FakeAccounts()
 
 
 _fake_app = _FakeApp()
@@ -300,6 +313,9 @@ def make_provider(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(provider_mod, "client_ctx", make_client_ctx(fake))
         settings_obj: Any = SimpleNamespace(redis=SimpleNamespace(), admin=None)
         instance = provider_mod.OidcAccountsProvider(settings_obj)
+        # Record the instance as the active provider so the routes' module helpers
+        # (``provider_settings`` / ``get_runtime``) resolve it through the accounts facet.
+        _fake_app.accounts.providers["accounts-oidc"] = instance
         return instance, fake
 
     return _make
@@ -328,15 +344,13 @@ def _isolate_registries() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_plugin_state() -> Iterator[None]:
-    """Reset the settings cache, the settings holder, and the runtime registry so
-    an env-dependent test starts clean and never leaks into the next."""
-    from tai42_accounts_oidc import provider
+    """Reset the settings cache and the recorded active provider so an env-dependent
+    test starts clean and never leaks into the next (provider state lives on the
+    per-epoch instance now, recorded via the fake accounts facet — no module holder)."""
     from tai42_accounts_oidc.settings import accounts_oidc_settings
 
     accounts_oidc_settings.cache_clear()
-    provider.reset_provider_settings()
-    provider.reset_runtimes()
+    _fake_app.accounts.providers.clear()
     yield
     accounts_oidc_settings.cache_clear()
-    provider.reset_provider_settings()
-    provider.reset_runtimes()
+    _fake_app.accounts.providers.clear()

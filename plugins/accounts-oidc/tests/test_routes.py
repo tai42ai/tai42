@@ -508,7 +508,8 @@ async def test_github_userinfo_non_200(make_provider: Any, oidc_server: Any, mon
 
 
 def test_boot_guard_raises_when_holder_unset() -> None:
-    provider_mod.reset_provider_settings()
+    # No provider recorded this epoch (the autouse reset clears the active provider),
+    # so the boot guard fails loudly.
     with pytest.raises(RuntimeError, match="never instantiated"):
         routes._assert_accounts_provider_instantiated()
 

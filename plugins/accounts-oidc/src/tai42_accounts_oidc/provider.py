@@ -4,9 +4,11 @@ Accounts live at the external issuer; this plugin holds no relational data —
 sessions, the OAuth ``state`` record, and the one-time SSO code are all TTL'd
 key-value records in the injected Redis. Registered at import.
 
-The module-level settings holder is populated at provider ``__init__`` and read
-back by the routes and the session mint through :func:`provider_settings`; the
-accessor RAISES when unpopulated, never returns ``None``.
+Provider state (the injected settings, the resolved per-provider runtimes) lives on
+the per-epoch provider INSTANCE, not a module holder: the routes and the record
+helpers resolve the CURRENT epoch's instance through the app's accounts facet
+(:func:`provider_settings` / :func:`get_runtime`), so a failed epoch build's provider
+is discarded with its core and never leaks into the live epoch.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from tai42_contract.accounts import (
     LoginMethod,
     register_accounts_provider,
 )
+from tai42_contract.app import tai42_app
 from tai42_kit.clients import RedisConnectionSettings, client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.net.jwt import JwksCache, JwtVerifyError, OidcDiscovery, fetch_discovery
@@ -57,39 +60,34 @@ SSO_TTL_SECONDS = 30
 _HEALTHCHECK_PROBE_KID = "__accounts_oidc_healthcheck_probe__"
 
 
-# -- settings holder (populated at provider __init__) ---------------------------
+# -- live provider resolution (per epoch, no module holder) ---------------------
+# The provider state (injected settings, resolved runtimes) lives on the epoch's
+# provider INSTANCE. Route handlers and the module-level record helpers resolve the
+# CURRENT epoch's instance through the app's accounts facet — so a failed epoch build's
+# provider is GC'd with the discarded core and never leaks into the live epoch.
 
-_provider_settings: AccountsProviderSettings | None = None
 
-
-def set_provider_settings(settings: AccountsProviderSettings) -> None:
-    """Store the injected settings so route handlers can reach ``.redis`` (called
-    from the provider's ``__init__`` — the only writer)."""
-    global _provider_settings
-    _provider_settings = settings
+def _active_provider() -> OidcAccountsProvider | None:
+    """The current epoch's ``OidcAccountsProvider`` instance, or ``None`` when no OIDC
+    provider is active (access control disabled / not configured / build mid-flight)."""
+    return cast("OidcAccountsProvider | None", tai42_app.accounts.active_provider("accounts-oidc"))
 
 
 def provider_settings() -> AccountsProviderSettings:
-    """Return the injected settings; RAISE if the holder was never populated (the
-    provider was never instantiated — access control is disabled)."""
-    if _provider_settings is None:
+    """The injected settings of the CURRENT epoch's provider instance; RAISE when no
+    provider is active (the accounts kind is disabled)."""
+    provider = _active_provider()
+    if provider is None:
         raise RuntimeError(
-            "tai42-accounts-oidc settings holder is unpopulated: the provider was never "
-            "instantiated. The accounts kind requires ACCESS_CONTROL_ENABLE=true and "
-            "'accounts-oidc' present in ACCESS_CONTROL_AUTH_PROVIDERS."
+            "tai42-accounts-oidc has no active provider: access control is disabled or "
+            "'accounts-oidc' is absent from ACCESS_CONTROL_AUTH_PROVIDERS."
         )
-    return _provider_settings
+    return provider.settings
 
 
 def provider_settings_populated() -> bool:
-    """Whether the holder has been populated — the boot guard's input."""
-    return _provider_settings is not None
-
-
-def reset_provider_settings() -> None:
-    """Clear the holder (test isolation)."""
-    global _provider_settings
-    _provider_settings = None
+    """Whether an OIDC provider is active this epoch — the boot guard's input."""
+    return _active_provider() is not None
 
 
 def _redis_conn() -> RedisConnectionSettings:
@@ -130,21 +128,17 @@ class ProviderRuntime:
         return self._jwks
 
 
-_runtimes: dict[str, ProviderRuntime] = {}
-
-
 def _build_runtimes() -> dict[str, ProviderRuntime]:
     return {config.name: ProviderRuntime(resolve_provider(config)) for config in accounts_oidc_settings().providers}
 
 
 def get_runtime(name: str) -> ProviderRuntime | None:
-    """Return the runtime for a configured provider name, or ``None`` if unknown."""
-    return _runtimes.get(name)
-
-
-def reset_runtimes() -> None:
-    """Clear the runtime registry (test isolation)."""
-    _runtimes.clear()
+    """The runtime for a configured provider name on the CURRENT epoch's provider
+    instance, or ``None`` if no provider is active or the name is unknown."""
+    provider = _active_provider()
+    if provider is None:
+        return None
+    return provider._runtimes.get(name)
 
 
 # -- Redis records: state, SSO code, session ------------------------------------
@@ -213,11 +207,10 @@ class OidcAccountsProvider(AccountsProvider):
             raise ValueError("TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL is required (the public origin login flows return to)")
 
         self.settings = settings
-        # Populate the module holder so route handlers can reach ``settings.redis``.
-        set_provider_settings(settings)
-        # Rebuild the per-provider runtimes from this process's env config.
-        global _runtimes
-        _runtimes = _build_runtimes()
+        # Per-provider runtimes resolved from this epoch's env config, on the INSTANCE:
+        # a failed build's provider (and its runtimes) is discarded with the epoch core,
+        # never left in a module holder the live epoch would read.
+        self._runtimes = _build_runtimes()
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
         # Fast-reject non-session tokens without a Redis hit so resolution moves on.
@@ -256,7 +249,7 @@ class OidcAccountsProvider(AccountsProvider):
                 icon=runtime.config.icon,
                 href=f"/api/login/oidc/{runtime.config.name}/authorize",
             )
-            for runtime in _runtimes.values()
+            for runtime in self._runtimes.values()
         ]
 
     async def needs_bootstrap(self) -> bool:
@@ -274,7 +267,7 @@ class OidcAccountsProvider(AccountsProvider):
     async def healthcheck(self) -> None:
         # Runs once at boot: fetch each provider's discovery + JWKS (GitHub: HEAD the
         # authorize endpoint); any failure raises so a broken issuer fails the boot.
-        for runtime in _runtimes.values():
+        for runtime in self._runtimes.values():
             if runtime.config.kind == "github":
                 await self._probe_github()
                 continue
