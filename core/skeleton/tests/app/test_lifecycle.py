@@ -29,6 +29,7 @@ from tai42_skeleton.app import lifecycle as lifecycle_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
+from tai42_skeleton.app.server import ServingCore
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import compat as mkt_compat
@@ -36,6 +37,7 @@ from tai42_skeleton.marketplace.compat import CompatVerdict, CorePluginBootError
 from tai42_skeleton.monitoring.registry import reset_monitoring
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.template import ResourceManager
+from tests.app._fixtures.reload import reload_with
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -73,10 +75,17 @@ class _Mixin(TaiMCPLifecycleMixin):
     """A concrete-enough mixin: ``_mcp_tools`` records bound tool names without a
     real server."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self):
+        super().__init__()
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
         self.preset_manager = cast("Any", _StubPresetManager())
+        # A minimal serving core so the per-epoch forwarding reads (``_fast_mcp`` &c)
+        # resolve without a full ``TaiMCP``; the network-free tests only touch its
+        # FastMCP surface.
+        self._building = ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})
+
+    def _build_serving_core(self) -> ServingCore:
+        return ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})
 
     def _mcp_tools(self, config, tools):
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
@@ -292,120 +301,6 @@ def test_deregister_reconcile_marshals_onto_the_serving_loop():
     assert recorded == [serving_loop]
 
 
-def test_reload_closes_llm_registries_on_the_serving_loop():
-    """A settings reset refuses to drop a checkpoint/store registry that still holds
-    live resources on a running loop (it would leak the pools). An agent run leaves
-    such resources on the serving loop, so the reload path closes them there first —
-    marshalled onto the serving loop from the reload worker thread — so a reload
-    after an agent run does not crash. Without this close, ``reset`` raises."""
-    from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-
-    m = _Mixin()
-
-    serving_loop = asyncio.new_event_loop()
-    ready = threading.Event()
-
-    def _run_serving_loop() -> None:
-        asyncio.set_event_loop(serving_loop)
-        serving_loop.call_soon(ready.set)
-        serving_loop.run_forever()
-
-    thread = threading.Thread(target=_run_serving_loop, daemon=True)
-    thread.start()
-    ready.wait()
-    m._serving_loop = serving_loop
-
-    async def _open() -> bool:
-        await checkpoint_registry().get_checkpointer("memory", "e2e")
-        return checkpoint_registry().has_live_resources
-
-    async def _has_live() -> bool:
-        return checkpoint_registry().has_live_resources
-
-    def _on_serving_loop(coro) -> bool:
-        return asyncio.run_coroutine_threadsafe(coro, serving_loop).result()
-
-    try:
-        # A memory checkpoint saver opened on the serving loop is a live, loop-bound
-        # resource — exactly what an agent run leaves behind.
-        assert _on_serving_loop(_open()) is True
-
-        # Called from a thread that is NOT the serving loop, as reload_gate.run's
-        # worker thread would call it: it closes the pools on the serving loop.
-        m._close_llm_registries_on_serving_loop()
-
-        # The loop-bound registry no longer holds live resources, so the settings
-        # reset that follows in ``_reload_config`` can drop it cleanly.
-        assert _on_serving_loop(_has_live()) is False
-    finally:
-        serving_loop.call_soon_threadsafe(serving_loop.stop)
-        thread.join()
-        serving_loop.close()
-
-
-def test_reload_config_closes_live_registries_before_resetting_settings(monkeypatch):
-    """``_reload_config`` must close the loop-bound checkpoint/store pools on the
-    serving loop BEFORE it calls ``reset_all_settings``. The real reset refuses to
-    drop a registry that still holds live resources on a running loop (dropping it
-    would leak the open pools), so with a live agent-run resource open on the
-    serving loop the reset raises unless the close ran first and in that order.
-
-    This guards the call site itself (not just the helper): the real
-    ``reset_all_settings`` runs underneath, so removing the close call — or moving
-    it after the reset — makes this reload raise the "still hold live resources"
-    error and fail the test."""
-    from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-
-    class _StubConfig:
-        """Minimal config source so ``_reload_config`` refreshes an empty env and
-        re-inits from an empty manifest — the reset/close ordering is what's under
-        test, not the config read."""
-
-        def read_env(self) -> dict[str, str]:
-            return {}
-
-        def read_manifest(self) -> dict:
-            return {}
-
-    m = _Mixin()
-    m._config_manager = cast("Any", _StubConfig())
-    # Isolate the reset-vs-close ordering: the soft re-init (``_update``) is covered
-    # by the reload_config reinitialize tests, so stub it to a no-op here.
-    monkeypatch.setattr(m, "_update", lambda manifest: None)
-
-    serving_loop = asyncio.new_event_loop()
-    ready = threading.Event()
-
-    def _run_serving_loop() -> None:
-        asyncio.set_event_loop(serving_loop)
-        serving_loop.call_soon(ready.set)
-        serving_loop.run_forever()
-
-    thread = threading.Thread(target=_run_serving_loop, daemon=True)
-    thread.start()
-    ready.wait()
-    m._serving_loop = serving_loop
-
-    async def _open() -> bool:
-        await checkpoint_registry().get_checkpointer("memory", "e2e")
-        return checkpoint_registry().has_live_resources
-
-    try:
-        # A memory checkpoint saver opened on the serving loop is a live, loop-bound
-        # resource — exactly what an agent run leaves behind before a reload.
-        assert asyncio.run_coroutine_threadsafe(_open(), serving_loop).result() is True
-
-        # Called from a worker thread that is NOT the serving loop, as reload_gate.run
-        # would call it. The real ``reset_all_settings`` runs inside ``_reload_config``
-        # and raises unless the live pools were closed on the serving loop first.
-        out = m._reload_config()
-        assert out == {"status": "ok", "env_keys": 0}
-    finally:
-        serving_loop.call_soon_threadsafe(serving_loop.stop)
-        thread.join()
-        serving_loop.close()
-
-
 def test_deregister_reconcile_falls_back_to_worker_loop_without_serving_loop():
     """With no serving loop bound (a pure-sync boot) nothing contends, so the
     deregister reconcile runs on the ``_run_blocking`` worker loop and still
@@ -502,7 +397,8 @@ def test_registry_names_sync_raises_when_list_tools_fails():
     # A failing list_tools() must propagate through the off-loop runner — never
     # leave the caller blocked.
     m = _Mixin()
-    m._fast_mcp = cast(
+    assert m._building is not None
+    m._building._fast_mcp = cast(
         "FastMCP",
         MagicMock(
             list_tools=AsyncMock(side_effect=RuntimeError("list_tools boom")),
@@ -634,7 +530,7 @@ def test_module_handlers_and_middleware_idempotent_across_update():
         async with app.app_context(manifest):
             assert _counts() == (1, 1, 1)
             for _ in range(3):
-                app._update(manifest)
+                await reload_with(app, manifest)
                 assert _counts() == (1, 1, 1)
 
     asyncio.run(run())
@@ -655,7 +551,7 @@ def test_update_drops_old_tools_and_reruns_reload_handlers():
                 reloaded.append(True)
 
             assert "greet" in await app.tools.get_tools()
-            app._update(empty)
+            await reload_with(app, empty)
             # The greet tool is gone after re-init to an empty manifest.
             assert "greet" not in await app.tools.get_tools()
             # The reload handler ran during update().
@@ -678,7 +574,7 @@ def test_failed_update_leaves_previous_tool_set_live():
         async with app.app_context(base):
             assert "greet" in await app.tools.get_tools()
             with pytest.raises(CorePluginBootError, match="totally_bogus_pkg_xyz"):
-                app._update(broken)
+                await reload_with(app, broken)
             # The previous tool surface is restored after the failed reload.
             assert "greet" in await app.tools.get_tools()
 
@@ -695,7 +591,7 @@ def test_webhook_verifier_modules_import_registers_verifier():
     async def run():
         async with app.app_context(manifest):
             assert app.webhook_verifiers.get("fixture_verifier") is not None
-            app._update(manifest)
+            await reload_with(app, manifest)
             assert app.webhook_verifiers.get("fixture_verifier") is not None
 
     asyncio.run(run())
@@ -724,7 +620,7 @@ def test_channel_modules_import_registers_channel():
     async def run():
         async with app.app_context(manifest):
             assert app.channels.get("fixture_channel") is not None
-            app._update(manifest)
+            await reload_with(app, manifest)
             assert app.channels.get("fixture_channel") is not None
 
     asyncio.run(run())
@@ -754,7 +650,7 @@ def test_reload_dropping_channel_module_unregisters_channel():
     async def run():
         async with app.app_context(with_channel):
             assert app.channels.get("fixture_channel") is not None
-            app._update(empty)
+            await reload_with(app, empty)
             with pytest.raises(KeyError, match="unknown channel"):
                 app.channels.get("fixture_channel")
 
@@ -771,7 +667,7 @@ def test_reload_dropping_prompt_module_removes_its_prompts():
         async with app.app_context(with_prompt):
             names = {p.name for p in await app._fast_mcp.list_prompts()}
             assert "fixture_prompt" in names
-            app._update(empty)
+            await reload_with(app, empty)
             names = {p.name for p in await app._fast_mcp.list_prompts()}
             assert "fixture_prompt" not in names
 
@@ -815,7 +711,7 @@ def test_reload_with_connector_plugin_is_reload_safe():
             assert conn_registry.get_provider(provider_id).id == provider_id
             # Reload re-imports the plugin; the registry reset makes the repeated
             # register_connector(...) safe instead of a duplicate-id crash.
-            app._update(manifest)
+            await reload_with(app, manifest)
             assert conn_registry.get_provider(provider_id).id == provider_id
 
     try:
@@ -828,34 +724,27 @@ def test_reload_with_connector_plugin_is_reload_safe():
 def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
     import os
 
+    from tai42_kit.clients.base import current_client_epoch
+
+    from tai42_skeleton.app.reload_gate import reload_gate
+
     captured_env = {"NEW_KEY": "v1", "OTHER": "v2"}
-    reinit_manifests: list[Manifest] = []
 
     async def run():
         async with app.app_context(Manifest.model_validate({})):
             monkeypatch.setattr(app.config.config_manager, "read_env", lambda: captured_env)
             monkeypatch.setattr(app.config.config_manager, "read_manifest", dict)
 
-            # Spy the reinitialize seam so the "and_reinitializes" half is asserted,
-            # not just the env refresh: reload_config MUST drive _update (the soft
-            # re-init) with a manifest freshly built from read_manifest, while the
-            # real re-init still runs underneath.
-            real_update = app._update
-
-            def spy_update(manifest):
-                reinit_manifests.append(manifest)
-                return real_update(manifest)
-
-            monkeypatch.setattr(app, "_update", spy_update)
-
-            out = app.admin.reload_config()
+            before = current_client_epoch()
+            # Driven off the serving loop, as production does (the reload-gate worker
+            # thread): a fresh epoch is built under the refreshed env and swapped in.
+            out = await reload_gate.run(app.admin.reload_config)
             assert out == {"status": "ok", "env_keys": 2}
             # Env refreshed into the process environment.
             assert os.environ["NEW_KEY"] == "v1"
             assert os.environ["OTHER"] == "v2"
-            # Reinitialized: _update ran exactly once with a freshly-built Manifest.
-            assert len(reinit_manifests) == 1
-            assert isinstance(reinit_manifests[0], Manifest)
+            # Reinitialized: the client epoch advanced (a fresh serving epoch swapped in).
+            assert current_client_epoch() == before + 1
 
     try:
         asyncio.run(run())
@@ -867,19 +756,21 @@ def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
 def test_reload_config_drops_env_keys_removed_from_source(monkeypatch):
     import os
 
+    from tai42_skeleton.app.reload_gate import reload_gate
+
     async def run():
         async with app.app_context(Manifest.model_validate({})):
             monkeypatch.setattr(app.config.config_manager, "read_manifest", dict)
 
             monkeypatch.setattr(app.config.config_manager, "read_env", lambda: {"K1_RC": "a", "K2_RC": "b"})
-            app.admin.reload_config()
+            await reload_gate.run(app.admin.reload_config)
             assert os.environ["K1_RC"] == "a"
             assert os.environ["K2_RC"] == "b"
 
             # K2 removed from the source env: the next reload must drop it, not
             # leave it lingering as stale config.
             monkeypatch.setattr(app.config.config_manager, "read_env", lambda: {"K1_RC": "a"})
-            app.admin.reload_config()
+            await reload_gate.run(app.admin.reload_config)
             assert os.environ["K1_RC"] == "a"
             assert "K2_RC" not in os.environ
 
@@ -959,7 +850,7 @@ def test_start_quarantines_broken_additive_module_and_boots():
     async def run():
         async with app.app_context(broken):
             assert "failed to import" in quarantined_plugins()["totally_bogus_pkg_xyz"]
-            app._update(clean)
+            await reload_with(app, clean)
             assert quarantined_plugins() == {}
 
     asyncio.run(run())
@@ -1055,7 +946,6 @@ def test_quarantined_identity_provider_aborts_boot_naming_it():
     # A configured identity provider whose lifecycle module quarantined must ABORT
     # boot (not quarantine-and-continue): the typed error names the module, the
     # versioned quarantine reason, and the provider that failed to register.
-    from types import SimpleNamespace
 
     from tai42_skeleton.access_control import settings as ac_settings
 
@@ -1071,7 +961,7 @@ def test_quarantined_identity_provider_aborts_boot_naming_it():
         mp.setattr(
             ac_settings,
             "access_control_settings",
-            lambda: SimpleNamespace(enable=True, auth_providers=["quarantined-idp"]),
+            lambda: ac_settings.AccessControlSettings(enable=True, auth_providers=["quarantined-idp"]),
         )
         with pytest.raises(
             CorePluginBootError,
@@ -1084,7 +974,6 @@ def test_quarantined_accounts_provider_aborts_boot_naming_it():
     # An accounts provider registers into the identity registry too, so a configured
     # accounts provider whose lifecycle module quarantined is caught the same way —
     # the boot aborts rather than serving password/bootstrap login dead.
-    from types import SimpleNamespace
 
     from tai42_skeleton.access_control import settings as ac_settings
 
@@ -1100,7 +989,7 @@ def test_quarantined_accounts_provider_aborts_boot_naming_it():
         mp.setattr(
             ac_settings,
             "access_control_settings",
-            lambda: SimpleNamespace(enable=True, auth_providers=["accounts-postgres"]),
+            lambda: ac_settings.AccessControlSettings(enable=True, auth_providers=["accounts-postgres"]),
         )
         with pytest.raises(
             CorePluginBootError,
@@ -1115,7 +1004,6 @@ def test_unresolved_provider_and_unrelated_quarantine_reports_both_without_blame
     # The abort must state the two facts as SEPARATE enumerations — the unresolved
     # provider name AND the quarantined module + reason — and must NOT assert the
     # innocent module is the missing provider's cause.
-    from types import SimpleNamespace
 
     from tai42_skeleton.access_control import settings as ac_settings
 
@@ -1133,7 +1021,7 @@ def test_unresolved_provider_and_unrelated_quarantine_reports_both_without_blame
         mp.setattr(
             ac_settings,
             "access_control_settings",
-            lambda: SimpleNamespace(enable=True, auth_providers=["redis_api_key_provdr"]),
+            lambda: ac_settings.AccessControlSettings(enable=True, auth_providers=["redis_api_key_provdr"]),
         )
         with pytest.raises(CorePluginBootError) as excinfo:
             asyncio.run(run())

@@ -335,7 +335,7 @@ async def test_drain_supervisors_records_failed_shutdown_and_drains(wired):
 
     record = await wired.store.get_run(wired.fake, run_id)
     assert record["status"] == "failed"
-    assert record["error"] == "server shutdown before the tool-run completed"
+    assert record["error"] == "the server is shutting down before the tool-run completed"
     assert record["finished_at"]
     assert set() == ops._SUPERVISORS
 

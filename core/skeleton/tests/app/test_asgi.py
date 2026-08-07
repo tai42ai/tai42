@@ -96,7 +96,15 @@ class _FakeApp:
         self.manifest_env_at_context.append(os.environ.get("TAI_MANIFEST_PATH"))
         if self.raise_in_context:
             raise RuntimeError("boot boom")
-        yield
+        # Mirror the real app_context: install boot epoch 0's core so the worker
+        # lifespan can read the epoch and attach the serving app, and drop it on exit.
+        from tai42_skeleton.app import epoch
+
+        epoch.install_boot_core(SimpleNamespace())  # type: ignore[arg-type]
+        try:
+            yield
+        finally:
+            await epoch.clear_epoch()
 
     def http_app(self, stateless_http: bool | None = None) -> _FakeInnerApp:
         self.http_called = True

@@ -62,7 +62,11 @@ TIER2_K8S_REFUSED_KEYS: frozenset[str] = frozenset(
         "TAI_DATABASE_DEFAULT_PG_PASSWORD",
         # subMcpEnv (serve only) — shared sub-MCP routing store.
         "SUB_MCP_REDIS_URL",
-        # backendEnv (both deployments) — the task backend's connection env.
+        # backendEnv (both deployments) — the task backend's connection env. arq and
+        # celery are the chart-supervisable backend types, so only their broker keys
+        # are pod-pinned here; rq's RQ_REDIS_URL is intentionally absent (rq is not
+        # baked into any shipped image). A custom rq deployment pins its own broker
+        # key in its pod spec and owns that key's refusal.
         "CELERY_BROKER_URL",
         "CELERY_RESULT_BACKEND",
         "CELERY_REDBEAT_REDIS_URL",

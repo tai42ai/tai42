@@ -26,19 +26,19 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel
-from tai42_contract.access_control.registry import get_identity_provider_factory
-from tai42_contract.accounts.registry import iter_accounts_provider_factories
+from tai42_contract.access_control.registry import get_identity_provider_factory_staged
+from tai42_contract.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_contract.app import tai42_app
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.config.config_mode import config_mode
-from tai42_skeleton.connectors.providers.registry import list_providers
+from tai42_skeleton.connectors.providers.registry import list_providers_staged
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
-from tai42_skeleton.monitoring.registry import get_monitoring
-from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
+from tai42_skeleton.monitoring.registry import get_monitoring_staged
+from tai42_skeleton.plugins.registry import StudioPluginError, current_registry_staged
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
 
@@ -77,7 +77,7 @@ def _identity_provider_registered(name: str) -> bool:
     """Whether an identity provider is registered under ``name`` — the registry's
     ``KeyError``-on-miss lookup reported as a boolean."""
     try:
-        get_identity_provider_factory(name)
+        get_identity_provider_factory_staged(name)
         return True
     except KeyError:
         return False
@@ -98,7 +98,7 @@ def _identity_row() -> KindStatus:
 
 
 def _accounts_row() -> KindStatus:
-    names = [name for name, _factory in iter_accounts_provider_factories()]
+    names = [name for name, _factory in iter_accounts_provider_factories_staged()]
     if not names:
         return KindStatus(kind="accounts", state="off", plugin=None, detail="no accounts provider registered")
     return KindStatus(
@@ -110,7 +110,10 @@ def _accounts_row() -> KindStatus:
 
 
 def _monitoring_row() -> KindStatus:
-    backend = get_monitoring()
+    # Staged read so the build-time summary + noop warning reflect the generation
+    # being built (a build that adds a recorder is not reported OFF); serve-time reads
+    # fall through to the committed backend.
+    backend = get_monitoring_staged()
     if isinstance(backend, NoOpMonitoring):
         return KindStatus(
             kind="monitoring",
@@ -186,7 +189,9 @@ def _config_row() -> KindStatus:
 
 def _studio_plugins_row() -> KindStatus:
     try:
-        registry = current_registry()
+        # Staged read so the build-time summary reflects the generation being built;
+        # serve-time reads fall through to the committed registry.
+        registry = current_registry_staged()
     except StudioPluginError:
         return KindStatus(
             kind="studio_plugins",
@@ -307,7 +312,7 @@ def _connectors_row(feature: GatedFeature) -> KindStatus:
     registered providers appended so the table shows how many providers are wired even
     when the store — and thus the connectors surface — is off."""
     row = _gated_feature_row(feature)
-    return row.model_copy(update={"detail": f"{row.detail}, {len(list_providers())} provider(s)"})
+    return row.model_copy(update={"detail": f"{row.detail}, {len(list_providers_staged())} provider(s)"})
 
 
 def collect_kind_status() -> list[KindStatus]:

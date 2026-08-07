@@ -60,6 +60,8 @@ def _bind_providers(monkeypatch: pytest.MonkeyPatch, providers: dict[str, _SpyPr
 
 
 async def test_provider_probe_awaits_every_configured_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.app.instance import app
+
     first = _SpyProvider(None)
     second = _SpyProvider(None)
     _bind_providers(monkeypatch, {"spy1": first, "spy2": second}, ["spy1", "spy2"])
@@ -69,6 +71,10 @@ async def test_provider_probe_awaits_every_configured_provider(monkeypatch: pyte
         reset_all_settings()
     assert first.ran is True
     assert second.ran is True
+    # The instantiate-RECORD half: the probe records the very instance it healthchecked
+    # in the epoch core, so a later request resolves it without re-instantiating.
+    assert app._serving_core.active_auth_providers["spy1"] is first
+    assert app._serving_core.active_auth_providers["spy2"] is second
 
 
 async def test_provider_probe_first_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,9 +7,12 @@ the op loudly rather than leaving the worker silently behind.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+from tai42_skeleton.app.server import ServingCore
 from tai42_skeleton.manifest import Manifest
 
 
@@ -21,6 +24,7 @@ class _Mixin(TaiMCPLifecycleMixin):
     def __init__(self):
         super().__init__()
         self.started_with = None
+        self._building = ServingCore(cast("object", self), args=(), auth=None, kwargs={"name": "reload-under-test"})  # type: ignore[arg-type]
 
     def _mcp_tools(self, config, tools):  # abstract in the mixin
         pass
@@ -29,7 +33,7 @@ class _Mixin(TaiMCPLifecycleMixin):
         self.started_with = manifest
 
 
-def test_update_reruns_reload_handlers() -> None:
+def test_reload_registries_reruns_handlers() -> None:
     mixin = _Mixin()
     ran = []
 
@@ -38,15 +42,16 @@ def test_update_reruns_reload_handlers() -> None:
         ran.append("reload")
 
     manifest = Manifest()
-    mixin._update(manifest)
+    mixin._reload_registries(manifest)
 
     assert mixin.started_with is manifest
     assert ran == ["reload"]
 
 
-def test_update_raises_when_reload_handler_fails() -> None:
-    # raise_on_error on the update path: a failed reload handler must fail the op
-    # loudly, never leave the worker silently behind.
+def test_reload_registries_raises_when_handler_fails() -> None:
+    # raise_on_error on the per-epoch rebuild: a failed reload handler must fail the
+    # build loudly (so the primitive discards the half-built epoch), never leave the
+    # worker silently behind.
     mixin = _Mixin()
 
     @mixin._on_reload
@@ -54,4 +59,4 @@ def test_update_raises_when_reload_handler_fails() -> None:
         raise RuntimeError("reload blew up")
 
     with pytest.raises(RuntimeError, match="lifecycle handlers failed"):
-        mixin._update(Manifest())
+        mixin._reload_registries(Manifest())

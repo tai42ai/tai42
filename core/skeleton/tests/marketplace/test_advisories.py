@@ -2,16 +2,14 @@
 
 The store and the registry client are faked at the module seams; the module-level
 cache and poll-task globals are reset around each test. The poll's loop-ownership
-contract (start on the serving loop, restart marshalled from a foreign thread) is
-driven against a real background-thread loop.
+contract — the post-swap establisher (re)starts it on the serving loop, cancelling any
+previous task — is driven directly against the test's running loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -61,11 +59,9 @@ class _FakeRegistry:
 def _reset_module():
     advisories._state = None
     advisories._poll_task = None
-    advisories._serving_loop = None
     yield
     advisories._state = None
     advisories._poll_task = None
-    advisories._serving_loop = None
 
 
 def _wire(monkeypatch, store: _FakeStore, registry: _FakeRegistry | None = None) -> None:
@@ -210,7 +206,7 @@ async def test_start_poll_disabled_starts_nothing_and_logs_nothing(
         marketplace_settings.cache_clear()
 
 
-async def test_start_poll_enabled_logs_url_and_interval_and_remembers_loop(
+async def test_start_poll_enabled_logs_url_and_interval_and_spawns_on_running_loop(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
@@ -220,8 +216,10 @@ async def test_start_poll_enabled_logs_url_and_interval_and_remembers_loop(
     try:
         with caplog.at_level(logging.INFO, logger="tai42_skeleton.marketplace.advisories"):
             advisories.start_poll()
-        assert advisories._serving_loop is asyncio.get_running_loop()
         assert advisories._poll_task is not None
+        # The task attaches to the loop start_poll ran on (the real serving loop in
+        # production, where the post-swap establisher drives it).
+        assert advisories._poll_task.get_loop() is asyncio.get_running_loop()
         line = " ".join(r.getMessage() for r in caplog.records)
         assert "https://reg.example" in line
         assert "1800" in line
@@ -230,61 +228,31 @@ async def test_start_poll_enabled_logs_url_and_interval_and_remembers_loop(
         marketplace_settings.cache_clear()
 
 
-# -- restart_poll_from_reload ------------------------------------------------
+# -- restart semantics (post-swap re-establishment) --------------------------
 
 
-def test_restart_from_reload_is_noop_when_never_served() -> None:
-    # No serving loop was ever remembered: there is no poll to re-pace, so the
-    # reload hook is a quiet no-op (never a hang, never a raise that would fail an
-    # unrelated app's reload — the hook is registered process-wide).
-    advisories._serving_loop = None
-    advisories.restart_poll_from_reload()
-    assert advisories._poll_task is None
-
-
-def test_restart_from_reload_is_noop_when_serving_loop_not_running() -> None:
-    # A serving loop remembered from a prior (now torn-down) context is not
-    # running; marshalling onto it would block forever, so the restart is skipped.
-    stale = asyncio.new_event_loop()
-    try:
-        advisories._serving_loop = stale
-        advisories.restart_poll_from_reload()  # must return promptly, not hang
-        assert advisories._poll_task is None
-    finally:
-        stale.close()
-
-
-def test_restart_from_foreign_thread_marshals_onto_serving_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_poll_cancels_the_previous_task_and_spawns_a_fresh_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A second start_poll (a later epoch's post-swap establisher) cancels the previous
+    # task and spawns a fresh one on the same running loop — never leaves two polls.
     monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")
     marketplace_settings.cache_clear()
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=loop.run_forever, daemon=True)
-    thread.start()
-
-    async def _start() -> None:
-        advisories.start_poll()
-
     try:
-        asyncio.run_coroutine_threadsafe(_start(), loop).result(timeout=2)
-        old_task = advisories._poll_task
-        assert old_task is not None
+        advisories.start_poll()
+        first = advisories._poll_task
+        assert first is not None
 
-        # Called from THIS (foreign) thread — it marshals the restart onto the
-        # serving loop (fire-and-forget), so wait for the replacement to land.
-        advisories.restart_poll_from_reload()
-        deadline = time.monotonic() + 2
-        while advisories._poll_task is old_task and time.monotonic() < deadline:
-            time.sleep(0.01)
-        new_task = advisories._poll_task
-        assert new_task is not None
-        assert new_task is not old_task
-        assert new_task.get_loop() is loop  # owned by the serving loop
-        assert old_task.cancelled() or old_task.done()
+        advisories.start_poll()
+        second = advisories._poll_task
+        assert second is not None
+        assert second is not first
+        assert second.get_loop() is asyncio.get_running_loop()
+        # Let the cancellation of the superseded task settle.
+        await asyncio.sleep(0)
+        assert first.cancelled() or first.done()
     finally:
-        asyncio.run_coroutine_threadsafe(advisories.stop_poll(), loop).result(timeout=2)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=2)
-        loop.close()
+        await advisories.stop_poll()
         marketplace_settings.cache_clear()
 
 

@@ -26,10 +26,10 @@ from __future__ import annotations
 import base64
 from datetime import timedelta
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import KeyMaterial, TaiBaseSettings, settings_cache
 
 _KEK_BYTE_LENGTH = 32
 _STATE_HMAC_MIN_BYTE_LENGTH = 32
@@ -79,13 +79,15 @@ class ConnectorCryptoSecrets(TaiBaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="CONNECTORS_")
 
-    # Base64 32-byte key for AES-GCM token-blob encryption. SecretStr keeps it
-    # out of repr/logs/tracebacks; the require_* accessors validate + reveal it
-    # only when the engine actually encrypts/signs.
-    kek: SecretStr | None = None
+    # Base64 32-byte key for AES-GCM token-blob encryption. KeyMaterial keeps it
+    # out of repr/logs/tracebacks and excludes it from every settings profile — a
+    # profile carrying it is refused, naming the rotation path. The require_*
+    # accessors validate + reveal it only when the engine actually encrypts/signs.
+    kek: KeyMaterial | None = None
 
-    # Base64 key (>=32 bytes) signing the OAuth ``state`` param.
-    state_hmac_key: SecretStr | None = None
+    # Base64 key (>=32 bytes) signing the OAuth ``state`` param. Key material,
+    # excluded from profiles (see ``kek``).
+    state_hmac_key: KeyMaterial | None = None
 
     # NB: base64/length validation is deferred to require_*_bytes (below), NOT a
     # pydantic field/model validator. A validator failure captures the raw key as

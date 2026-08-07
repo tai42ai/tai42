@@ -29,10 +29,11 @@ import logging
 import sys
 import sysconfig
 from pathlib import Path
+from typing import ClassVar
 
 from packaging.utils import canonicalize_name
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 from tai42_skeleton.marketplace.errors import PluginPrefixError
 
@@ -47,6 +48,10 @@ class PluginPrefixSettings(TaiBaseSettings):
     """
 
     model_config = SettingsConfigDict(env_prefix="TAI_PLUGINS_")
+
+    # The install prefix is put on ``sys.path`` at boot; a change takes effect only
+    # on a fresh interpreter, so the group is excluded from the reload boundary.
+    reload_class: ClassVar[ReloadClass] = "excluded"
 
     # Absolute path to the persistent plugin-install prefix. Unset (None) keeps
     # today's behavior: installs land in the running environment. Set opts into

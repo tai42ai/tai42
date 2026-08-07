@@ -44,6 +44,10 @@ class AuthzMiddleware(Middleware):
         arguments = dict(context.message.arguments or {})
 
         try:
+            # ``_tool_registry`` / ``preset_manager`` forward to the epoch's serving
+            # core; at request dispatch an epoch is always installed, so both resolve.
+            # The ``None`` defaults cover only a pre-serving-core app (a bare test
+            # double) — never a missing epoch, which the properties raise on.
             resolved = resolve_dispatch(
                 name,
                 arguments,

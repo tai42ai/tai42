@@ -9,13 +9,13 @@ import asyncio
 import pytest
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import load_api_routes
 from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.cli.openapi import build_openapi_spec
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
+from tests.app._fixtures.reload import reload_with
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +76,7 @@ def test_projection_and_authz_survive_reload():
 
             # A reload re-runs start() (projection + the resets); run it on a worker
             # thread through the gate exactly as production does.
-            await reload_gate.run(lambda: app._update(_manifest()))
+            await reload_with(app, _manifest())
 
             tools = await app.tools.get_tools()
             assert "sample_greet" in tools
@@ -166,7 +166,7 @@ def test_skeleton_projection_survives_reload():
 
             # A reload re-runs start() (clear + repopulate + projection) on a worker
             # thread through the gate exactly as production does.
-            await reload_gate.run(lambda: app._update(_skeleton_manifest()))
+            await reload_with(app, _skeleton_manifest())
 
             tools = await app.tools.get_tools()
             assert "list_system_kinds" in tools

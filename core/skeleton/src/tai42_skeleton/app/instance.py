@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import logging_settings, setup_logging
 
-from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.startup import (
     check_accounts_providers_configured,
@@ -182,8 +181,10 @@ def build_app() -> TaiMCP:
     if _app is None:
         install_meta_log_redactor()
         settings = access_control_settings()
-        auth_adapter = AuthAdapter(settings) if settings.enable else None
-        app = TaiMCP(name="Tai", auth=auth_adapter, lifespan=lifespan)
+        # No ``auth=`` here: each epoch's ``ServingCore`` reads the access-control
+        # adapter FRESH from settings, so a profile that flips ACCESS_CONTROL_*
+        # rebuilds the adapter + verifier chain rather than pinning the boot one.
+        app = TaiMCP(name="Tai", lifespan=lifespan)
         # The schema gate runs FIRST, before any handler that touches a store: a
         # database with pending migrations refuses to boot with the ``tai db
         # migrate`` fix named, rather than failing deeper on a missing table. It

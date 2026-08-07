@@ -13,9 +13,7 @@ import asyncio
 
 import pytest
 
-from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.sessions import SessionRegistry, SessionTrackingMiddleware
-from tai42_skeleton.manifest import Manifest
 
 
 class _FakeSession:
@@ -94,32 +92,6 @@ def test_dead_session_is_pruned_and_broadcast_continues():
     assert reg.active_count() == 1
 
 
-def test_schedule_list_changed_reaches_every_session():
-    """The sync entry point (used by the reload path) schedules the send onto
-    each session's own loop; driven here on a running loop so the scheduled
-    coroutines get a chance to complete."""
-    reg = SessionRegistry()
-    a, b = _FakeSession(), _FakeSession()
-
-    async def go() -> None:
-        reg.track(a)
-        reg.track(b)
-        reg.schedule_list_changed("tool")
-        # Yield so the run_coroutine_threadsafe-scheduled sends run on this loop.
-        for _ in range(5):
-            await asyncio.sleep(0)
-
-    asyncio.run(go())
-    assert a.calls == ["tool"]
-    assert b.calls == ["tool"]
-
-
-def test_schedule_unknown_kind_raises_synchronously():
-    reg = SessionRegistry()
-    with pytest.raises(ValueError, match="Unknown list_changed kind"):
-        reg.schedule_list_changed("nope")
-
-
 def test_concurrent_track_during_broadcast_does_not_raise():
     """A ``track()`` racing an ``emit_list_changed`` iteration must not raise
     ``dictionary changed size during iteration`` — the lock snapshots the session
@@ -143,31 +115,6 @@ def test_concurrent_track_during_broadcast_does_not_raise():
         await asyncio.gather(broadcaster(), tracker())
 
     asyncio.run(go())  # no RuntimeError
-
-
-def test_schedule_prunes_a_session_on_a_closed_loop():
-    """``schedule_list_changed`` must prune a session whose loop is closed with a
-    warning instead of raising and aborting the broadcast for the rest."""
-    reg = SessionRegistry()
-
-    dead_loop = asyncio.new_event_loop()
-    dead_loop.close()
-    dead_session = _FakeSession()
-    # Track the dead session directly against the closed loop.
-    reg._sessions[dead_session] = dead_loop
-
-    live = _FakeSession()
-
-    async def go() -> None:
-        reg.track(live)  # tracked on the running loop
-        reg.schedule_list_changed("tool")
-        for _ in range(5):
-            await asyncio.sleep(0)
-
-    asyncio.run(go())
-    # The dead-loop session was pruned; the live one still received the send.
-    assert dead_session not in reg._sessions
-    assert live.calls == ["tool"]
 
 
 def test_tracking_middleware_registers_the_session():
@@ -202,37 +149,9 @@ def test_tracking_middleware_registers_the_session():
 # -- reload diff-guard through a started app ----------------------------------
 
 
-def test_reload_emits_only_for_changed_registries(monkeypatch):
-    """A reload that adds a tool broadcasts exactly one ``tool`` list_changed and
-    nothing for the unchanged prompt/resource registries; a no-op reload
-    broadcasts nothing."""
-    emitted: list[str] = []
-    monkeypatch.setattr(
-        app._session_registry,
-        "schedule_list_changed",
-        lambda kind: emitted.append(kind),
-    )
-
-    empty = Manifest.model_validate({})
-    with_tool = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_b", "include": ["shout"]}]}
-    )
-
-    async def run() -> None:
-        async with app.app_context(empty):
-            emitted.clear()
-            # Reload that adds the ``shout`` tool -> exactly one tool broadcast.
-            app._update(with_tool)
-            assert emitted == ["tool"]
-
-            emitted.clear()
-            # No-op reload (same manifest) -> nothing changed, nothing emitted.
-            app._update(with_tool)
-            assert emitted == []
-
-            emitted.clear()
-            # Reload that removes the tool -> one tool broadcast again.
-            app._update(empty)
-            assert emitted == ["tool"]
-
-    asyncio.run(run())
+# A per-reload list_changed broadcast is deliberately absent in the epoch model: a
+# reload swaps in a fresh epoch whose FastMCP lifespan is entered anew and retires the
+# previous one, terminating every live MCP transport. Clients re-initialise
+# against the new session-id space and re-list from scratch, so there is no persistent
+# session across the swap to notify — the session termination supersedes the old
+# in-place reload's diff-guarded list_changed.

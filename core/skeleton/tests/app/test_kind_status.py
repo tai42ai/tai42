@@ -190,7 +190,7 @@ def test_identity_off_when_access_control_disabled(bound_app, monkeypatch: pytes
 
 
 def test_accounts_off_when_registry_empty(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "iter_accounts_provider_factories", list)
+    monkeypatch.setattr(ks, "iter_accounts_provider_factories_staged", list)
     row = _row("accounts")
     assert row.state == "off"
     assert row.plugin is None
@@ -198,7 +198,7 @@ def test_accounts_off_when_registry_empty(bound_app, monkeypatch: pytest.MonkeyP
 
 
 def test_accounts_active_when_registered(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "iter_accounts_provider_factories", lambda: [("email", object), ("phone", object)])
+    monkeypatch.setattr(ks, "iter_accounts_provider_factories_staged", lambda: [("email", object), ("phone", object)])
     row = _row("accounts")
     assert row.state == "active"
     assert row.plugin == "email, phone"
@@ -318,21 +318,21 @@ def test_studio_plugins_off_when_registry_not_built(bound_app, monkeypatch: pyte
     def _raise() -> None:
         raise StudioPluginError("not built")
 
-    monkeypatch.setattr(ks, "current_registry", _raise)
+    monkeypatch.setattr(ks, "current_registry_staged", _raise)
     row = _row("studio_plugins")
     assert row.state == "off"
     assert row.detail == "studio plugin registry not built"
 
 
 def test_studio_plugins_off_when_built_but_empty(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "current_registry", lambda: SimpleNamespace(plugins={}))
+    monkeypatch.setattr(ks, "current_registry_staged", lambda: SimpleNamespace(plugins={}))
     row = _row("studio_plugins")
     assert row.state == "off"
     assert row.detail == "0 plugins"
 
 
 def test_studio_plugins_active_lists_sorted_names(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "current_registry", lambda: SimpleNamespace(plugins={"zeta": 1, "alpha": 2}))
+    monkeypatch.setattr(ks, "current_registry_staged", lambda: SimpleNamespace(plugins={"zeta": 1, "alpha": 2}))
     row = _row("studio_plugins")
     assert row.state == "active"
     assert row.detail == "2 plugin(s): alpha, zeta"

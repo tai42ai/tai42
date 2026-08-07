@@ -23,10 +23,12 @@ MUST diverge by namespace or they cross-deliver each other's fleet ops.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 
 class BusRedisSettings(RedisConnectionSettings):
@@ -38,9 +40,17 @@ class BusRedisSettings(RedisConnectionSettings):
 
     model_config = SettingsConfigDict(env_prefix="TAI_BUS_")
 
+    # Bus/broker URL reaches its pooled connection through the bus, torn down and
+    # rebuilt on a process recycle — never live-swappable in-process.
+    reload_class: ClassVar[ReloadClass] = "recycle"
+
 
 class BusSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="TAI_BUS_", frozen=True)
+
+    # Bus infrastructure converges only through a process recycle (boot resync
+    # applies the env before bus init on respawn), never an in-process flip.
+    reload_class: ClassVar[ReloadClass] = "recycle"
 
     # Infra: the redis connection is composed from the kit (a field, not a base),
     # so the group declares no connection fields of its own.

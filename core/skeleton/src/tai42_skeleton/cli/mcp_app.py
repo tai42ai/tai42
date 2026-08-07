@@ -69,6 +69,20 @@ def create_app():
     return asgi.create_app(transport=cast("asgi.Transport", transport), stateless_http=stateless_http)
 
 
+def _refuse_stdio_profile_apply() -> None:
+    """Reload handler wired only by the stdio launcher: the stdio transport serves
+    through ``app.run_async`` (no swappable ASGI slot) and joins no fleet, so a fresh
+    epoch could never take over serving. A profile apply / config reload here would
+    otherwise rebuild registries the live stdio session never serves — a silent
+    partial apply — so refuse loudly instead (the epoch rebuild runs reload handlers,
+    so the build is discarded and this server keeps serving)."""
+    raise RuntimeError(
+        "profile apply / config reload is not supported on the 'stdio' transport: it serves "
+        "through a single in-process session with no swappable serving surface and no fleet, so "
+        "a rebuilt epoch could never take over. Run an 'http'/'sse' transport to apply profiles."
+    )
+
+
 async def run_stdio():
     # The stdio server writes tool counters in this process, so the multiproc mmap
     # backend must have frozen (``run_mcp_app`` set the env before calling this).
@@ -79,6 +93,9 @@ async def run_stdio():
     app = instance.build_app()
     # This CLI-configured process keeps its root logger in sync across config reloads.
     instance.register_cli_logging_reload()
+    # stdio has no swappable serving surface and no fleet, so a profile apply / reload
+    # is refused loudly rather than silently applied to a surface it cannot swap.
+    app.lifecycle.on_reload(_refuse_stdio_profile_apply)
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
     install_meta_log_redactor(scope="process")
@@ -88,29 +105,16 @@ async def run_stdio():
     return 0
 
 
-async def run_debug(transport: str, config_kwargs: dict[str, Any], stateless_http: bool = False):
-    # The debug server writes tool counters in this process, so the multiproc mmap
-    # backend must have frozen (``run_mcp_app`` set the env before calling this).
-    from tai42_skeleton.routers.prometheus import assert_multiproc_value_class
-
-    assert_multiproc_value_class()
-
-    app = instance.build_app()
-    # This CLI-configured process keeps its root logger in sync across config reloads.
-    instance.register_cli_logging_reload()
-    # This CLI-owned process owns its whole logging surface, so the connector-secret
-    # redactor covers every record in the process, not just the tai logger family.
-    install_meta_log_redactor(scope="process")
-    manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
-
-    async with app.app_context(manifest):
-        if transport == "sse":
-            config_kwargs["app"] = app.sse_app()
-        elif stateless_http:
-            config_kwargs["app"] = app.http_app(stateless_http=True)
-        else:
-            config_kwargs["app"] = app.http_app()
-        await uvicorn.Server(uvicorn.Config(**config_kwargs)).serve()
+async def run_debug(config_kwargs: dict[str, Any]) -> int:
+    """Serve a single in-process worker through the SAME factory + epoch machinery as
+    the multi-worker path: :func:`create_app` builds the shim app (boot-epoch install
+    + swap slot), so a debug run gets the fresh-FastMCP-per-epoch serving surface and
+    a profile apply swaps a fresh epoch in place exactly as a served worker does. Only
+    the process shape differs — one uvicorn ``Server`` here versus ``uvicorn.run``'s
+    worker pool. The transport / stateless-http selection travels to ``create_app``
+    through the env ``run_mcp_app`` stamped before dispatching here."""
+    config_kwargs["app"] = create_app()
+    await uvicorn.Server(uvicorn.Config(**config_kwargs)).serve()
     return 0
 
 
@@ -293,7 +297,7 @@ def run_mcp_app(
             )
         else:
             logger.info("TAI_RUN_MODE=debug: running a single in-process server; --workers is ignored.")
-        return asyncio.run(run_debug(transport, config_kwargs, stateless_http))
+        return asyncio.run(run_debug(config_kwargs))
 
     # An unrecognized run mode fails loudly rather than silently falling through to
     # the normal path — a bad value never silently selects a mode.

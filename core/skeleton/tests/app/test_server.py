@@ -86,7 +86,11 @@ def test_basic_properties():
     assert a.fastmcp.name == "srv-under-test"
     assert a.fastmcp.version == "9.9"
     assert a.fastmcp.instructions is None
-    assert a.fastmcp.auth is None
+    # Auth is read FRESH from access-control settings per epoch: an app carries an
+    # adapter exactly when access control is enabled, not a passed-in default.
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    assert (a.fastmcp.auth is not None) == access_control_settings().enable
     assert a.config.config_manager is a._config_manager
     assert a.sub_app.mcp_sub_app_router is a._mcp_sub_app_router
     assert a.backends.backend is None
@@ -137,17 +141,17 @@ def test_get_agent_missing_raises():
 
 def test_run_and_run_async_and_custom_route_forward():
     a = _fresh()
-    a._fast_mcp = MagicMock()
-    a._fast_mcp.run_async = AsyncMock()
+    mcp = a._serving_core._fast_mcp = MagicMock()
+    mcp.run_async = AsyncMock()
 
     a.run("stdio", show_banner=False, x=1)
-    a._fast_mcp.run.assert_called_once_with("stdio", False, x=1)
+    mcp.run.assert_called_once_with("stdio", False, x=1)
 
     asyncio.run(a.run_async("http", show_banner=True, y=2))
-    a._fast_mcp.run_async.assert_awaited_once_with("http", True, y=2)
+    mcp.run_async.assert_awaited_once_with("http", True, y=2)
 
     a.http.custom_route("/p", ["GET"], name="n", include_in_schema=False, summary="P", tags=["t"], response_model=None)
-    a._fast_mcp.custom_route.assert_called_once_with("/p", ["GET"], "n", False)
+    mcp.custom_route.assert_called_once_with("/p", ["GET"], "n", False)
 
 
 def test_run_backend_requires_configured_backend():
@@ -221,13 +225,13 @@ def test_sse_app_builds_and_finalizes():
 def test_http_app_builds_and_finalizes():
     a = _fresh()
     sentinel = MagicMock()
-    a._fast_mcp = MagicMock()
-    a._fast_mcp.http_app.return_value = sentinel
+    mcp = a._serving_core._fast_mcp = MagicMock()
+    mcp.http_app.return_value = sentinel
     result = a.http_app(path="/mcp", transport="http")
-    a._fast_mcp.http_app.assert_called_once()
+    mcp.http_app.assert_called_once()
     # The audit trail and the body-size cap are injected into the base app's own
     # middleware list (inside ServerErrorMiddleware), audit outermost.
-    assert [m.cls for m in a._fast_mcp.http_app.call_args.kwargs["middleware"]] == [
+    assert [m.cls for m in mcp.http_app.call_args.kwargs["middleware"]] == [
         AuditLogMiddleware,
         BodyLimitMiddleware,
     ]
@@ -252,8 +256,8 @@ def test_http_app_registers_internal_error_handler():
     # S1: the same handler is installed on the http serving path's base app.
     a = _fresh()
     sentinel = MagicMock()
-    a._fast_mcp = MagicMock()
-    a._fast_mcp.http_app.return_value = sentinel
+    mcp = a._serving_core._fast_mcp = MagicMock()
+    mcp.http_app.return_value = sentinel
     a.http_app(path="/mcp", transport="http")
     sentinel.add_exception_handler.assert_called_once_with(Exception, server_module._internal_error_handler)
 
@@ -302,9 +306,9 @@ def test_internal_error_handler_survives_unstampable_exception():
 
 def test_remove_tool_forwards():
     a = _fresh()
-    a._fast_mcp = MagicMock()
+    mcp = a._serving_core._fast_mcp = MagicMock()
     a.tools.remove_tool("t")
-    a._fast_mcp.local_provider.remove_tool.assert_called_once_with("t")
+    mcp.local_provider.remove_tool.assert_called_once_with("t")
 
 
 # -- registration decorators (no manifest needed) -----------------------------
@@ -511,8 +515,8 @@ def test_unknown_tool_error_is_a_plain_exception_outside_the_operation_family():
 
 def test_get_tool_missing_raises():
     a = _fresh()
-    a._fast_mcp = MagicMock()
-    a._fast_mcp.get_tool = AsyncMock(return_value=None)
+    mcp = a._serving_core._fast_mcp = MagicMock()
+    mcp.get_tool = AsyncMock(return_value=None)
     with pytest.raises(UnknownToolError, match="No such tool"):
         asyncio.run(a.tools.get_tool("ghost"))
 

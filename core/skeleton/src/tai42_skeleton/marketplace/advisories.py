@@ -19,18 +19,17 @@ turns it off. Under ``uvicorn --workers N`` each worker process runs its own pol
 task and its own cache — N duplicate polls per interval — acceptable for this
 cadence and stated deliberately.
 
-Loop ownership matters. The startup hook runs on the serving loop, so it may
-spawn the poll task and remembers that loop. Reload hooks do NOT run there — the
-dispatch runs them via ``asyncio.run`` on a throwaway worker-thread loop — so
-:func:`restart_poll_from_reload` marshals the restart back onto the remembered
-serving loop (fire-and-forget), never spawning a task onto a loop that is torn
-down the instant the handler returns.
+Loop ownership matters. The poll task must live on the REAL serving loop and retire
+with the generation that started it, so :func:`start_poll` is driven by the post-swap
+establisher — run at boot and after every epoch swap, both ON the serving loop — and
+NOT by the per-epoch handler list, which runs on a throwaway build-thread loop a
+spawned task would not survive. Each (re)start registers the task with the epoch under
+construction, so a retire cancels exactly that generation's own task.
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextlib
 import logging
 from datetime import UTC, datetime
@@ -57,12 +56,11 @@ class AdvisoryState(BaseModel):
     fetched_at: datetime
 
 
-# The most recent snapshot (``None`` until the first refresh), the running poll
-# task, and the serving loop remembered by the startup hook so a reload-thread
-# restart can marshal back onto it.
+# The most recent snapshot (``None`` until the first refresh) and the running poll
+# task. The task always lives on the real serving loop (the post-swap establisher runs
+# there), so no remembered-loop handle is needed.
 _state: AdvisoryState | None = None
 _poll_task: asyncio.Task[None] | None = None
-_serving_loop: asyncio.AbstractEventLoop | None = None
 
 
 async def refresh() -> AdvisoryState:
@@ -132,59 +130,18 @@ async def current(max_age_s: int) -> AdvisoryState:
 
 
 def start_poll() -> None:
-    """Start (or restart) the background poll — the startup-hook body.
+    """(Re)start the background poll — the post-swap establisher body.
 
-    Called ON the serving loop (the startup hook runs inside the lifespan), so it
-    remembers that loop for later reload-thread restarts, cancels any previous
-    task, and — only when ``MARKETPLACE_ADVISORIES_POLL`` is true — logs the loud
-    enabled line and spawns the task. When the poll is disabled it logs nothing
-    and starts nothing (documented silence).
+    Called ON the serving loop (the post-swap hook runs there at boot and after every
+    epoch swap), so it cancels any previous task and — only when
+    ``MARKETPLACE_ADVISORIES_POLL`` is true — logs the loud enabled line and spawns the
+    task onto that loop, re-reading ``MARKETPLACE_*`` under the fresh settings caches.
+    When the poll is disabled it logs nothing and starts nothing (documented silence).
     """
-    global _serving_loop
-    _serving_loop = asyncio.get_running_loop()
     task = _poll_task
     if task is not None and not task.done():
         task.cancel()
     _spawn_poll_if_enabled()
-
-
-def restart_poll_from_reload() -> None:
-    """Re-pace the poll after a reload — the reload-hook body, safe from a FOREIGN
-    thread.
-
-    Reload handlers run under ``asyncio.run`` on a throwaway worker-thread loop, so
-    the poll task (which lives on the serving loop) is cancelled and re-spawned by
-    marshalling :func:`_restart` onto the remembered serving loop. The marshal is
-    fire-and-forget with an error-logging callback: a background advisory-poll
-    re-pace is non-critical and must never block or fail the ``reload_config``
-    reload. That reload runs its handlers off the serving loop (the reload gate
-    offloads the heavy body to a worker thread), so the serving loop stays free to
-    run the marshalled :func:`_restart` and blocking on the result would not
-    deadlock — but it would tie the reload's completion to a non-critical re-pace
-    and surface its failure as a reload failure. Scheduling and returning avoids both.
-
-    The poll can only live on a running serving loop. When none is running — the
-    app is not currently serving (the reload hook is registered process-wide, so it
-    also fires for reloads of apps that never started this poll) — there is nothing
-    to re-pace: the startup hook (re)establishes it when serving begins, so this is
-    a no-op.
-    """
-    loop = _serving_loop
-    if loop is None or not loop.is_running():
-        logger.debug("marketplace advisories poll restart skipped: no running serving loop to re-pace on")
-        return
-    future = asyncio.run_coroutine_threadsafe(_restart(), loop)
-    future.add_done_callback(_on_restart_done)
-
-
-def _on_restart_done(future: concurrent.futures.Future[None]) -> None:
-    """Surface a failed poll re-pace at ERROR without failing the reload that
-    triggered it (a cancellation from teardown is the normal stop, stays silent)."""
-    if future.cancelled():
-        return
-    exc = future.exception()
-    if exc is not None:
-        logger.error("marketplace advisories poll restart failed", exc_info=exc)
 
 
 async def stop_poll() -> None:
@@ -194,14 +151,6 @@ async def stop_poll() -> None:
     await is loop-safe by construction. Only ``CancelledError`` is suppressed.
     """
     await _cancel_and_await_poll_task()
-
-
-async def _restart() -> None:
-    """Cancel the old task and re-spawn per the current settings — runs ON the
-    serving loop (a reload has reset the settings caches, so this re-reads
-    ``MARKETPLACE_*``)."""
-    await _cancel_and_await_poll_task()
-    _spawn_poll_if_enabled()
 
 
 def _spawn_poll_if_enabled() -> None:
@@ -223,6 +172,30 @@ def _spawn_poll_if_enabled() -> None:
     task = asyncio.create_task(_poll_loop(), name="tai-marketplace-advisories")
     task.add_done_callback(_on_poll_done)
     _poll_task = task
+    _register_task_with_epoch(task)
+
+
+def _register_task_with_epoch(task: asyncio.Task[None]) -> None:
+    """Register this poll task's cancel with the epoch under construction, so the epoch
+    retire cancels exactly the generation's own task and no timer outlives its epoch. A
+    no-op when no epoch is installed (a bare unit context). The cancel awaits the task
+    only when it lives on the loop the retire runs on, so a task left on a torn-down
+    build loop is cancelled without a cross-loop await."""
+    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+
+    epoch = epoch_under_construction_or_none()
+    if epoch is None:
+        return
+
+    async def _cancel() -> None:
+        if task.done():
+            return
+        task.cancel()
+        if task.get_loop() is asyncio.get_running_loop():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    epoch.register_periodic_loop(_cancel)
 
 
 async def _cancel_and_await_poll_task() -> None:

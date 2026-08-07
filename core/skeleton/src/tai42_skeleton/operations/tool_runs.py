@@ -75,8 +75,16 @@ _NOT_CONFIGURED_MESSAGE = "the tool-run store is not configured: set TAI_TOOL_RU
 
 # The spawned supervisor tasks are held here so the event loop keeps a strong
 # reference (``asyncio`` only holds a weak one) — a dropped task would be
-# garbage-collected mid-run. Each task removes itself on completion.
+# garbage-collected mid-run. Each task removes itself on completion. Every task is
+# tagged with the serving epoch that ADMITTED its run, so an epoch retire drains only
+# that generation's in-flight runs and never a run admitted on the fresh epoch.
 _SUPERVISORS: set[asyncio.Task[None]] = set()
+_SUPERVISOR_EPOCH: dict[asyncio.Task[None], int] = {}
+
+# The default cancellation reason recorded on a run cancelled by a drain — overridden
+# per drain caller (epoch retire vs process shutdown) so the run's ``error`` names the
+# real cause rather than always claiming a shutdown.
+_DEFAULT_CANCEL_REASON = "the tool-run was cancelled before it completed"
 
 # Per-worker count of in-flight background runs, enforced against
 # ``max_concurrent_runs``. The submit door increments it synchronously before
@@ -270,8 +278,15 @@ def _spawn_supervisor(run_id: str, tool_name: str, arguments: dict[str, Any]) ->
     The task must be spawned HERE so it copies the submitting context: that carries a
     bound execution identity into the run, which is what authorizes the dispatch
     :func:`_supervise` makes long after the submitting fire released its binding."""
+    from tai42_skeleton.app.epoch import current_epoch_or_none
+
     task = asyncio.create_task(_supervise(run_id, tool_name, arguments))
     _SUPERVISORS.add(task)
+    # Tag the run with the epoch that admitted it, so an epoch retire drains exactly
+    # this generation's runs. ``None`` epoch (a loop-less unit context) tags nothing.
+    epoch = current_epoch_or_none()
+    if epoch is not None:
+        _SUPERVISOR_EPOCH[task] = epoch.number
     task.add_done_callback(lambda t: _on_supervisor_done(t, run_id, tool_name))
 
 
@@ -287,6 +302,7 @@ def _on_supervisor_done(task: asyncio.Task[None], run_id: str, tool_name: str) -
     cancellation (test teardown / shutdown) is the normal stop and stays silent."""
     global _ACTIVE_RUNS
     _SUPERVISORS.discard(task)
+    _SUPERVISOR_EPOCH.pop(task, None)
     # Release the concurrency slot the submit door reserved for this run. Every
     # spawned supervisor reaches this callback exactly once, so the count returns
     # to the submit door's increment.
@@ -331,16 +347,19 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
                 # ``run_tool`` already json-normalizes the body; a residual dumps
                 # failure surfaces as a ``failed`` record rather than a lost run.
                 result_json = json.dumps(result)
-            except asyncio.CancelledError:
-                # Server shutdown cancelled this run mid-flight. Record it as
-                # ``failed`` through the same one-way CAS the normal path uses (so a
-                # record already reconciled to ``lost`` is never overwritten), then
-                # re-raise so the cancellation propagates to the drain handler. Safe
-                # to await here: the drain cancels each task exactly once, then waits.
+            except asyncio.CancelledError as cancel:
+                # A drain (process shutdown OR an epoch retire) cancelled this run
+                # mid-flight. Record it as ``failed`` through the same one-way CAS the
+                # normal path uses (so a record already reconciled to ``lost`` is never
+                # overwritten), naming the ACTUAL cause the drain passed as the cancel
+                # message, then re-raise so the cancellation propagates to the drain
+                # handler. Safe to await here: the drain cancels each task exactly once,
+                # then waits.
+                reason = cancel.args[0] if cancel.args else _DEFAULT_CANCEL_REASON
                 fields = {
                     "status": _FAILED,
                     "finished_at": _now().isoformat(),
-                    "error": "server shutdown before the tool-run completed",
+                    "error": reason,
                 }
                 persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)
                 if not persisted:
@@ -376,28 +395,49 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
                 await refresher
 
 
-@tai42_app.lifecycle.on_shutdown
-async def _drain_supervisors() -> None:
-    """Cancel every in-flight supervisor at shutdown and wait, bounded, for each to
-    write its terminal ``failed``/shutdown record.
+async def drain_supervisors(
+    deadline: float | None = None,
+    *,
+    epoch: int | None = None,
+    reason: str = _DEFAULT_CANCEL_REASON,
+) -> None:
+    """Cancel in-flight supervisors and wait, bounded, for each to write its terminal
+    ``failed`` record naming ``reason``.
 
-    Shutdown handlers run BEFORE ``_teardown_resources`` closes the pooled clients,
-    so a cancelled supervisor still has a live Redis to write through. The wait is
-    bounded by ``shutdown_drain_seconds`` so teardown always proceeds; a supervisor
-    that misses the window is logged loudly and its run reconciles to ``lost`` later
-    — an explicit, logged recovery, never a silent one."""
-    tasks = [t for t in _SUPERVISORS if not t.done()]
+    Reused by two retire paths: process shutdown (:func:`_drain_supervisors`, all runs)
+    and an epoch retire (a settings-profile apply swaps in a fresh serving surface and
+    retires the old one). With ``epoch`` given, cancels ONLY the runs that generation
+    admitted — a run admitted on the fresh epoch during the retire is left running;
+    with ``epoch`` ``None`` it drains every run. Both cancel bounded by a budget so the
+    retire always proceeds; a supervisor that misses the window is logged loudly and its
+    run reconciles to ``lost`` later — an explicit, logged recovery, never a silent one.
+    ``reason`` is passed as the cancel message so each cancelled run records the actual
+    cause. ``deadline`` is a drain budget in SECONDS — a relative duration, not an
+    absolute time (mirrors the kit's ``drain_epoch`` vocabulary); defaults to
+    ``shutdown_drain_seconds``."""
+    tasks = [t for t in _SUPERVISORS if not t.done() and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)]
     if not tasks:
         return
+    budget = deadline if deadline is not None else tool_runs_settings().shutdown_drain_seconds
     for t in tasks:
-        t.cancel()
-    _done, pending = await asyncio.wait(tasks, timeout=tool_runs_settings().shutdown_drain_seconds)
+        t.cancel(reason)
+    _done, pending = await asyncio.wait(tasks, timeout=budget)
     if pending:
         logger.error(
-            "tool-runs shutdown: %d supervisor(s) did not finish their terminal write within "
-            "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS; those runs will reconcile to lost",
+            "tool-runs retire: %d supervisor(s) did not finish their terminal write within "
+            "the drain budget; those runs will reconcile to lost",
             len(pending),
         )
+
+
+@tai42_app.lifecycle.on_shutdown
+async def _drain_supervisors() -> None:
+    """Cancel every in-flight supervisor at shutdown and drain them bounded by
+    ``shutdown_drain_seconds``.
+
+    Shutdown handlers run BEFORE ``_teardown_resources`` closes the pooled clients,
+    so a cancelled supervisor still has a live Redis to write through."""
+    await drain_supervisors(reason="the server is shutting down before the tool-run completed")
 
 
 async def _reconcile_lost_with_liveness(

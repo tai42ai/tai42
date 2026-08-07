@@ -27,19 +27,19 @@ from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
 
 from tai42_skeleton.app import sub_mcp_app as sub_mcp_app_module
-from tai42_skeleton.app.sub_mcp_app import ROOT_PREFIX, SubMcpAppRouter, _SubAppLifespan
+from tai42_skeleton.app.sub_mcp_app import ROOT_PREFIX, SubAppLifespan, SubMcpAppRouter
 
 
-class _FakeLifespan(_SubAppLifespan):
-    """A ``_SubAppLifespan`` stand-in for the teardown tests.
+class _FakeLifespan(SubAppLifespan):
+    """A ``SubAppLifespan`` stand-in for the teardown tests.
 
-    The router stores a real ``_SubAppLifespan`` per built slug and, on
+    The router stores a real ``SubAppLifespan`` per built slug and, on
     unregister/reset/shutdown, invokes only its ``aclose()``. This fake skips the
     real sub-app + dedicated-task machinery and drives just that one method: its
     ``aclose()`` runs an optional async callback (to record that — and on which
     loop — teardown ran) and then optionally re-raises, so a failing teardown can
-    be exercised. It is genuinely a ``_SubAppLifespan`` (subclass), so it satisfies
-    the ``dict[str, _SubAppLifespan]`` registry contract without weakening it.
+    be exercised. It is genuinely a ``SubAppLifespan`` (subclass), so it satisfies
+    the ``dict[str, SubAppLifespan]`` registry contract without weakening it.
     """
 
     def __init__(
@@ -194,6 +194,7 @@ async def test_start_resets_stale_sub_app_routes():
     # generation stops serving after a re-init.
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.manifest import Manifest
+    from tests.app._fixtures.reload import reload_with
 
     manifest = Manifest.model_validate({})
 
@@ -202,7 +203,7 @@ async def test_start_resets_stale_sub_app_routes():
             router = cast(SubMcpAppRouter, app.sub_app.mcp_sub_app_router)
             await router.register_sub_mcp_app("svc", [], transport="stdio")
             assert "svc" in router.routes
-            app._update(manifest)
+            await reload_with(app, manifest)
             assert "svc" not in router.routes
 
     await run()

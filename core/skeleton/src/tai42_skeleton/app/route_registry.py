@@ -344,6 +344,9 @@ class _SpecLifecycle:
     def on_reload(self, func: Callable[..., object]) -> Callable[..., object]:
         return func
 
+    def on_post_swap(self, func: Callable[..., object]) -> Callable[..., object]:
+        return func
+
 
 class _SpecApp:
     """Minimal ``tai42_app`` impl exposing only the ``http`` and ``lifecycle`` seams

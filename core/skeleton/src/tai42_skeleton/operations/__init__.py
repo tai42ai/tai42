@@ -99,7 +99,12 @@ def reregister_operations() -> list[str]:
     reloaded: list[str] = []
     for module in operation_leaf_modules():
         reloaded.extend(import_or_reload_package(module))
-    _leaf_snapshot = operation_registry.all()
+    # Snapshot the write-target generation the re-imports just populated: this
+    # first-and-only import pass runs at boot, before any staged build opens a
+    # pending generation, so the write-target is the committed map here — but reading
+    # it through the staged accessor keeps the snapshot the very records just
+    # registered rather than a prior committed generation.
+    _leaf_snapshot = operation_registry.all_staged()
     return reloaded
 
 

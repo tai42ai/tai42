@@ -1,19 +1,26 @@
 import os
 import tempfile
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 
 class MetricsSettings(TaiBaseSettings):
-    backend_metrics_host: str = "127.0.0.1"
-    backend_metrics_port: int = 8012
+    # The exporter bind is deployment-spec identity and the metrics process has no
+    # bus subscription, so a recycle op can never reach it — each field is excluded
+    # from the reload boundary.
+    backend_metrics_host: str = Field(default="127.0.0.1", json_schema_extra={"reload": "excluded"})
+    backend_metrics_port: int = Field(default=8012, json_schema_extra={"reload": "excluded"})
     # A fixed, CWD-independent absolute path so every process in the run family
     # (mcp_app + backend worker + metrics server) resolves the SAME multiproc dir
     # regardless of the directory each was launched from. Honors ``TMPDIR`` (host
     # env, not per-process CWD). Overridable via ``PROMETHEUS_MULTIPROC_DIR``; an
-    # override MUST be absolute (validated below).
-    prometheus_multiproc_dir: str = os.path.join(tempfile.gettempdir(), "tai42_prometheus")
+    # override MUST be absolute (validated below). Frozen at first
+    # ``prometheus_client`` import, so it is excluded from the reload boundary.
+    prometheus_multiproc_dir: str = Field(
+        default=os.path.join(tempfile.gettempdir(), "tai42_prometheus"),
+        json_schema_extra={"reload": "excluded"},
+    )
 
     @field_validator("prometheus_multiproc_dir")
     @classmethod

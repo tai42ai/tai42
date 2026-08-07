@@ -75,17 +75,28 @@ def _form_method(mid: str) -> LoginMethod:
 
 @pytest.fixture(autouse=True)
 def _clean_accounts_registry():
-    saved = dict(accounts_registry._REGISTRY)
+    # login_methods/logout fan out over the CURRENT epoch's recorded providers, so a
+    # test records into (and is isolated on) the serving core's active_auth_providers.
+    from tai42_skeleton.app.instance import app
+
+    core = app._serving_core
+    saved_registry = dict(accounts_registry._REGISTRY)
+    saved_active = dict(core.active_auth_providers)
     accounts_registry._REGISTRY.clear()
+    core.active_auth_providers.clear()
     try:
         yield
     finally:
         accounts_registry._REGISTRY.clear()
-        accounts_registry._REGISTRY.update(saved)
+        accounts_registry._REGISTRY.update(saved_registry)
+        core.active_auth_providers.clear()
+        core.active_auth_providers.update(saved_active)
 
 
 def _register(name: str, provider) -> None:
-    accounts_registry._REGISTRY[name] = lambda _settings: provider
+    from tai42_skeleton.app.instance import app
+
+    app._serving_core.active_auth_providers[name] = provider
 
 
 # -- methods aggregator ------------------------------------------------------

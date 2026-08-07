@@ -10,7 +10,8 @@ through ``app.fastmcp`` in a manifest module) re-fires on every reload; the rese
 makes that re-fire's ``add_*`` idempotent under the server-wide
 ``on_duplicate="error"`` rather than a duplicate crash.
 
-The reload path (``_update``) relies on this: it does not clear the surface in
+The reload path (``_reload_registries`` -> ``start()``, the rebuild step
+``build_and_swap_epoch`` runs) relies on this: it does not clear the surface in
 the caller. A reload whose caller-side removal did not fully clear the surface
 would otherwise re-fire the decorator against a still-present component and raise
 ``Component already exists``.

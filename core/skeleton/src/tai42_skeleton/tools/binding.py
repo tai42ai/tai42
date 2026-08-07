@@ -195,11 +195,26 @@ def _baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
 # yields the SAME callable and fastmcp's identity-keyed ``without_injected_parameters`` LRU
 # still hits. Keyed on ``id`` (a fastmcp ``Tool`` is unhashable): safe only because the cached
 # partial strongly references its source tool, pinning that id for the entry's life.
+#
+# EPOCH-SCOPED: the strong reference would otherwise pin a retired epoch's tools (and their
+# id slots, an id-reuse hazard) for the process lifetime. The cache is dropped the moment the
+# serving generation advances, so it only ever holds the LIVE epoch's tools.
 _BAKED_PARTIAL_CACHE_MAX = 2048
 _baked_partial_cache: "OrderedDict[int, Callable[..., Any]]" = OrderedDict()
+_baked_partial_cache_epoch: int | None = None
 
 
 def _cached_baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
+    from tai42_skeleton.app.epoch import current_epoch_or_none
+
+    global _baked_partial_cache_epoch
+    epoch = current_epoch_or_none()
+    number = epoch.number if epoch is not None else None
+    if number != _baked_partial_cache_epoch:
+        # A new serving generation: drop the retired epoch's pinned partials.
+        _baked_partial_cache.clear()
+        _baked_partial_cache_epoch = number
+
     key = id(tool_obj)
     cached = _baked_partial_cache.get(key)
     if cached is not None:

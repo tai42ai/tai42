@@ -560,10 +560,12 @@ class WorkerBus:
         joins the census only once its resync has finished, so a reader that sees it
         counted finds it already converged and past its reload gate — never mid-resync.
         The channel is subscribed before the resync, so an op broadcast during it is
-        buffered and applied by the message loop; on a reconnect within the heartbeat
-        TTL the prior presence key is still live, so the worker is never dropped from the
-        census mid-resync — only a first boot, which has no prior key, appears once, after
-        its resync completes. Each reconnect attempt is ERROR-logged."""
+        buffered and applied by the message loop. ``_teardown`` deletes the presence key
+        on EVERY subscription exit (transport error, cancellation, clean stop), so a
+        subscription drop leaves the census; presence is (re-)advertised only AFTER the
+        next resync completes. A worker mid-resync is therefore absent from the census
+        whether this is a first boot or a reconnect. Each reconnect attempt is
+        ERROR-logged."""
         if self._local:
             await asyncio.Event().wait()
             return

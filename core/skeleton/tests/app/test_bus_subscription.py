@@ -130,10 +130,15 @@ async def test_self_resync_routes_reload_config_through_the_apply_path(monkeypat
     fired: list[str] = []
     m._on_fleet_op_applied(lambda name: fired.append(name))
 
+    # Boot (first connect): the live config was JUST built by start(), so the resync
+    # latches ready WITHOUT a redundant reload_config swap.
     await m._resync_on_ready()
+    assert dispatched == []
+    assert m._boot_ready.is_set()
 
-    # The reconnect self-resync is a ``reload_config`` routed through the SAME apply
-    # path as a delivered op, so the hook fires for it too.
+    # Reconnect: re-read persisted config through the SAME apply path as a delivered
+    # op (a broadcast may have been missed while away), so the hook fires for it too.
+    await m._resync_on_ready()
     assert dispatched == ["reload_config"]
     assert fired == ["reload_config"]
 
@@ -142,6 +147,8 @@ async def test_self_resync_swallows_a_failing_apply_and_stays_live(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     m = _Mixin()
+    # A reconnect (boot-ready already latched), so the resync actually reloads.
+    m._boot_ready.set()
     dispatched: list[str] = []
 
     async def flaky_dispatch(op: dict[str, Any]) -> Any:
@@ -169,6 +176,8 @@ async def test_self_resync_swallows_a_failing_apply_and_stays_live(
 
 async def test_self_resync_propagates_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     m = _Mixin()
+    # A reconnect (boot-ready latched), so the resync actually reloads and can cancel.
+    m._boot_ready.set()
 
     async def cancel_dispatch(_op: dict[str, Any]) -> Any:
         raise asyncio.CancelledError
@@ -201,31 +210,28 @@ async def test_a_successful_self_resync_latches_boot_ready(monkeypatch: pytest.M
     await asyncio.wait_for(m._wait_until_ready(), timeout=1.0)
 
 
-async def test_a_failing_self_resync_does_not_latch_boot_ready(
+async def test_a_failing_reconnect_resync_keeps_boot_ready_latched(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     m = _Mixin()
-    calls = 0
 
-    async def flaky_dispatch(_op: dict[str, Any]) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("resync reload blew up")
+    # Boot (first connect) skips the reload and latches ready — the registry was
+    # already built by start().
+    async def ok_dispatch(_op: dict[str, Any]) -> Any:
         return {"status": "ok"}
 
-    monkeypatch.setattr(m, "_dispatch_bus_op", flaky_dispatch)
+    monkeypatch.setattr(m, "_dispatch_bus_op", ok_dispatch)
+    await m._resync_on_ready()
+    assert m._boot_ready.is_set()
 
-    # A failed resync leaves the registry possibly half-built — it must NOT latch
-    # ready, so the consumer keeps waiting (and fails loudly on its own timeout)
-    # rather than forking work against it.
+    # A subsequent reconnect resync whose reload FAILS is swallowed (the subscription
+    # stays live) and never un-latches the one-way boot-ready signal.
+    async def boom(_op: dict[str, Any]) -> Any:
+        raise RuntimeError("reconnect reload blew up")
+
+    monkeypatch.setattr(m, "_dispatch_bus_op", boom)
     with caplog.at_level(logging.ERROR):
         await m._resync_on_ready()
-    assert not m._boot_ready.is_set()
-
-    # The next resync succeeds and latches ready — the one-way latch is set once and
-    # stays set from here.
-    await m._resync_on_ready()
     assert m._boot_ready.is_set()
 
 

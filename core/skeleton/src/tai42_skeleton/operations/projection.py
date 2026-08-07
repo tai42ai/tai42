@@ -126,7 +126,7 @@ def _selected_operations(
     manifest that curates a nonexistent op fails boot rather than silently doing
     nothing.
     """
-    known = registry.names()
+    known = registry.names_staged()
     unknown_includes = sorted(set(config.include) - known)
     if unknown_includes:
         raise ValueError(
@@ -139,7 +139,7 @@ def _selected_operations(
     selected: list[OperationMetadata] = []
     tier1_skipped: list[str] = []
 
-    for op in registry.all():
+    for op in registry.all_staged():
         reason = _tier1_reason(op)
         if reason is not None:
             # Never projectable — not even when named in include.
@@ -188,8 +188,9 @@ def project_operations(app: Any, config: ApiToolsConfig, *, registry: OperationR
 
     # The hardcoded tier-1 block is always enforced and always logged — even when
     # projection is disabled — so the invariant "run_tool is never a tool" is
-    # visible in every boot log.
-    for op in reg.all():
+    # visible in every boot log. Reads the STAGED generation so a build projects the
+    # operations it is assembling, not the live epoch's.
+    for op in reg.all_staged():
         reason = _tier1_reason(op)
         if reason is not None:
             logger.info(

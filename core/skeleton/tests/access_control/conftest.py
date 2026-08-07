@@ -411,11 +411,32 @@ class _FakeStorage:
         self.resource_manager = _FakeResourceManager()
 
 
+class _FakeAccounts:
+    """The ``tai42_app.accounts`` facet: resolves the active provider for a name.
+
+    The real epoch build eagerly instantiates each configured provider and records it;
+    here — with no real epoch — the fake resolves it from the identity registry the test
+    populated, mirroring what ``probe_identity_provider`` records so the verifier's
+    ``active_provider`` lookup finds it."""
+
+    def active_provider(self, name: str):
+        from tai42_contract.access_control.registry import get_identity_provider_factory
+
+        from tai42_skeleton.access_control.settings import access_control_settings
+
+        try:
+            factory = get_identity_provider_factory(name)
+        except KeyError:
+            return None
+        return factory(access_control_settings())
+
+
 class _FakeApp:
     """Minimal ``tai42_app`` impl exposing the members the auth backend reaches."""
 
     def __init__(self) -> None:
         self.storage = _FakeStorage()
+        self.accounts = _FakeAccounts()
 
     def effective_router_modules(self) -> None:
         # Not a started router deployment: the shared route importer reads this to

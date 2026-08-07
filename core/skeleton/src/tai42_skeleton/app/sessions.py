@@ -13,11 +13,9 @@ raises. Membership is thus self-healing and never depends on a disconnect
 callback that does not exist.
 """
 
-import asyncio
 import logging
 import threading
 import weakref
-from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.exceptions import ToolError
@@ -47,27 +45,22 @@ class SessionRegistry:
     broadcast helper FastMCP does not provide."""
 
     def __init__(self) -> None:
-        # session -> the event loop it was tracked on. Weak keys: a collected
-        # session falls out with no disconnect hook. The loop is retained because
-        # a session's write stream is bound to the loop it was created on, so a
-        # cross-loop/sync caller (the reload path) must schedule the send back
-        # onto that loop rather than await it inline.
-        self._sessions: weakref.WeakKeyDictionary[Any, asyncio.AbstractEventLoop] = weakref.WeakKeyDictionary()
-        # ``WeakKeyDictionary`` is not thread-safe, yet ``track`` runs on the serving
-        # loop while ``schedule_list_changed`` runs off-loop (a reload on a worker
-        # thread). A NON-REENTRANT lock guards every ``_sessions`` read/write. It is
-        # held ONLY for quick synchronous dict work (snapshot the list; pop a
-        # session), NEVER across an ``await`` / ``run_coroutine_threadsafe`` —
-        # wrapping the awaited per-session sends would deadlock and hold a lock
-        # across an await. Mirrors the discipline in ``SubMcpAppRouter``.
+        # The active sessions, weakly held so a collected session falls out with no
+        # disconnect hook. Broadcasts run on the sessions' own serving loop, so only
+        # the session identity is tracked.
+        self._sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+        # ``WeakSet`` is not thread-safe, so a NON-REENTRANT lock guards every
+        # ``_sessions`` read/write. It is held ONLY for quick synchronous work
+        # (snapshot the list; discard a session), NEVER across an ``await`` —
+        # wrapping the awaited per-session sends would hold a lock across an await.
+        # Mirrors the discipline in ``SubMcpAppRouter``.
         self._lock = threading.Lock()
 
     def track(self, session: Any) -> None:
-        """Record ``session`` as active on the current running loop. Idempotent —
-        re-tracking a known session is a cheap dict write."""
-        loop = asyncio.get_running_loop()
+        """Record ``session`` as active. Idempotent — re-tracking a known session
+        is a cheap set add."""
         with self._lock:
-            self._sessions[session] = loop
+            self._sessions.add(session)
 
     def active_count(self) -> int:
         with self._lock:
@@ -91,8 +84,7 @@ class SessionRegistry:
         pruned (logged, a visible recovery, never a silent swallow) and the
         broadcast reaches the remaining sessions; one dead session never aborts
         the whole broadcast. Call this from a coroutine running on the sessions'
-        own loop (the in-process registration-mutation path); a sync/cross-loop
-        caller uses :meth:`schedule_list_changed`."""
+        own loop (the in-process registration-mutation path)."""
         method = self._send_method(kind)
         # Snapshot under the lock (quick dict work), then await each send OFF the
         # lock so a slow/awaiting send never holds it.
@@ -110,47 +102,7 @@ class SessionRegistry:
                 exc_info=True,
             )
             with self._lock:
-                self._sessions.pop(session, None)
-
-    def schedule_list_changed(self, kind: str) -> None:
-        """Sync entry point for a caller NOT on the sessions' loop.
-
-        A manifest reload runs on a worker thread — the reload gate awaits it via
-        ``asyncio.to_thread`` so the serving loop keeps running — off every
-        session's loop; it therefore cannot ``await`` the broadcast, so this
-        schedules each per-session send cross-thread onto that session's own loop
-        (delivered once the loop next runs). A send that raises prunes that
-        session, same as :meth:`emit_list_changed`. The bad ``kind`` guard runs
-        synchronously so a programming error raises into the caller; per-session
-        delivery failures are logged, never raised into the reload."""
-        method = self._send_method(kind)  # validate synchronously — a bad kind raises here
-        with self._lock:
-            items = list(self._sessions.items())
-        for session, loop in items:
-            coro = self._send_one(session, method)
-            try:
-                fut = asyncio.run_coroutine_threadsafe(coro, loop)
-            except RuntimeError:
-                # The session's loop is closed — it can never receive another
-                # broadcast, so prune it (a visible recovery, logged) instead of
-                # letting the raise abort the broadcast for the remaining sessions
-                # and propagate into the reload that scheduled it. The coroutine was
-                # never scheduled, so close it to avoid a never-awaited warning.
-                coro.close()
-                logger.warning(
-                    "list_changed broadcast: pruning session whose loop is closed",
-                    exc_info=True,
-                )
-                with self._lock:
-                    self._sessions.pop(session, None)
-                continue
-            fut.add_done_callback(self._log_schedule_result)
-
-    @staticmethod
-    def _log_schedule_result(fut: "Future[None]") -> None:
-        exc = fut.exception()
-        if exc is not None:
-            logger.warning("list_changed broadcast task failed", exc_info=exc)
+                self._sessions.discard(session)
 
 
 class SessionTrackingMiddleware(Middleware):

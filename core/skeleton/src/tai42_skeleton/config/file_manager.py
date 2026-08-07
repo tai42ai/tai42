@@ -80,6 +80,9 @@ class FileConfigManager(ConfigManager):
     """
 
     def __init__(self, config_dir_path: str | None = None) -> None:
+        # ``TAI_CONFIG_DIR_PATH`` is a bootstrap path read here directly; it is
+        # classified excluded on ``ConfigModeSettings.config_dir_path`` so the
+        # reload boundary refuses any profile that tries to carry it.
         self._config_dir_path = config_dir_path or os.environ.get("TAI_CONFIG_DIR_PATH", "").strip() or "/app"
 
     @property

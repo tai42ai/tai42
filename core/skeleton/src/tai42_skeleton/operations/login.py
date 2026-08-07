@@ -10,10 +10,11 @@
   carried — the public QR-onboarding exchange leg, ``authority_changing`` so it never
   projects as an MCP tool.
 
-Provider factories are instantiated per call and NOT cached: the login fetch is
-low-frequency, and ``needs_bootstrap`` must be FRESH so the create-owner screen
-disappears the moment the owner exists. Provider errors propagate (loud, never a
-silently empty methods list or a silent logout no-op).
+Both operations fan out over the CURRENT epoch's live accounts-provider instances —
+the ones the epoch build eagerly instantiated and recorded — rather than
+re-instantiating a provider per call. ``needs_bootstrap`` still reads live so the
+create-owner screen disappears the moment the owner exists. Provider errors propagate
+(loud, never a silently empty methods list or a silent logout no-op).
 """
 
 from __future__ import annotations
@@ -22,14 +23,24 @@ import logging
 
 from pydantic import BaseModel, Field
 from tai42_contract.access_control import get_current_user_id
-from tai42_contract.accounts import iter_accounts_provider_factories
+from tai42_contract.accounts import AccountsProvider
 
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import exchange_claim_token as _exchange_claim_token
-from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.operations import NotFoundError, operation
 
 logger = logging.getLogger(__name__)
+
+
+def _active_accounts_providers() -> list[AccountsProvider]:
+    """The CURRENT epoch's live accounts-provider instances, name-sorted for a
+    deterministic aggregate. Filters the epoch's recorded identity providers to the
+    accounts ones (an accounts provider IS an identity provider); reads through the
+    serving core so a build in flight resolves the epoch being built, else the live one."""
+    from tai42_skeleton.app.instance import app
+
+    recorded = app._serving_core.active_auth_providers
+    return [p for _name, p in sorted(recorded.items()) if isinstance(p, AccountsProvider)]
 
 
 class ClaimExchange(BaseModel):
@@ -46,13 +57,11 @@ async def login_methods() -> dict:
     always-public ``/api/login`` prefix. Each method is serialized with
     ``model_dump(exclude_none=True)`` so a ``None``-valued optional (icon/autocomplete)
     is OMITTED, never ``null`` (the Studio's zod schemas accept absent but reject
-    ``null``). An empty registry yields ``{"methods": [], "bootstrap": false}``.
+    ``null``). No active provider yields ``{"methods": [], "bootstrap": false}``.
     Provider errors propagate (loud, never a silently empty methods list)."""
-    settings = access_control_settings()
     methods: list[dict] = []
     bootstrap = False
-    for _name, factory in iter_accounts_provider_factories():
-        provider = factory(settings)
+    for provider in _active_accounts_providers():
         for method in provider.login_methods():
             methods.append(method.model_dump(exclude_none=True))
         if await provider.needs_bootstrap():
@@ -105,8 +114,7 @@ async def logout(candidates: list[str]) -> dict:
     ``sk-`` API key cannot "log out" — loud, not a silent no-op), with a server-side
     log naming the caller so probing/replay stays visible. Provider errors propagate
     (fail closed)."""
-    settings = access_control_settings()
-    providers = [factory(settings) for _name, factory in iter_accounts_provider_factories()]
+    providers = _active_accounts_providers()
 
     # Tokens outer, providers inner (registry order): the first provider to own any
     # presented candidate revokes it and wins.

@@ -35,6 +35,21 @@ class _Mixin(TaiMCPLifecycleMixin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # The forwarding properties resolve through ``_building`` when set — install a
+        # stub core so the failed-MCP maps are read/written here without a real epoch.
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        self._building = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
+            _manifest=None,
+            _tool_registry=MagicMock(),
+            _extension_registry=MagicMock(),
+            _failed_mcps={},
+            _mcp_bound_tools={},
+            _mcp_preset_conflicts={},
+            _resource_manager_cache=None,
+            _fast_mcp=SimpleNamespace(local_provider=SimpleNamespace(remove_tool=lambda name: None)),
+        )
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
 
     def _mcp_tools(self, config, tools):  # abstract in the mixin

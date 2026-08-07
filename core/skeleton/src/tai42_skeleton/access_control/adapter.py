@@ -9,7 +9,7 @@ from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from tai42_contract.access_control.context import get_current_user_id
 from tai42_contract.access_control.identity import IdentityProvider
-from tai42_contract.access_control.registry import get_identity_provider_factory
+from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.backend import (
     AccessControlAuthBackend,
@@ -96,20 +96,19 @@ class AuthAdapter(TokenVerifier):
         self._middleware_stack = self._get_access_control_middleware()
 
     def _get_identity_providers(self) -> list[IdentityProvider]:
-        # Resolve EVERY configured provider through the module-level identity-provider
-        # registry, which the manifest's identity plugins populate at import, preserving
-        # the configured order (the verifier tries them in turn). A missing name — the
-        # registry cleared mid-reload, or a genuine misconfiguration — raises the precise
+        # Resolve EVERY configured provider from the CURRENT epoch's eagerly-instantiated
+        # providers (recorded by ``probe_identity_provider`` at build time), preserving
+        # the configured order (the verifier tries them in turn) — no per-request
+        # re-instantiation on the serving path. A missing name — an epoch whose providers
+        # are mid-build, or a genuine misconfiguration — raises the precise
         # ``IdentityProviderUnavailableError`` so the backend answers the retriable
-        # ``reloading`` envelope while a reload is in flight and fails closed otherwise.
-        # Only the registry lookup is wrapped, never a provider's own construction.
+        # ``reloading`` envelope while a build is in flight and fails closed otherwise.
         providers: list[IdentityProvider] = []
         for name in self.settings.auth_providers:
-            try:
-                factory = get_identity_provider_factory(name)
-            except KeyError as e:
-                raise IdentityProviderUnavailableError(f"identity provider {name!r} is not registered") from e
-            providers.append(factory(self.settings))
+            provider = tai42_app.accounts.active_provider(name)
+            if provider is None:
+                raise IdentityProviderUnavailableError(f"identity provider {name!r} is not registered")
+            providers.append(provider)
         return providers
 
     def _get_access_control_middleware(self) -> list[Middleware]:

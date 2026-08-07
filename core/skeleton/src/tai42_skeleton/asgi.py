@@ -43,7 +43,9 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import epoch, instance
+from tai42_skeleton.app.epoch import EpochAdmissionApp
+from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.manifest import Manifest
 
@@ -156,26 +158,32 @@ def create_app(
                     logger.info("Initializing Streamable HTTP App")
                     inner_app = app.http_app()
 
-                app_state["app"] = inner_app
-
-                # FastMCP requires its own lifespan to run to initialize
-                # TaskGroups. The mounted dispatch below swallows the lifespan
-                # scope, so we enter it by hand. ``finalize`` records the
-                # lifespan-bearing FastMCP app as ``mcp_lifespan_app`` so the
-                # lifespan is entered even when middleware wraps ``inner_app``
-                # (a middleware wrapper exposes no router/lifespan of its own).
+                # Enter the boot epoch's FastMCP lifespan through a dedicated-task
+                # supervisor (not a hand-entered ``async with`` here): the FastMCP
+                # lifespan initialises the streamable-http session-manager task group,
+                # the mounted dispatch below swallows the lifespan scope, and a profile
+                # apply must be able to close THIS lifespan from the swap task — which
+                # only the supervisor's one-task/one-context pattern allows.
+                # ``finalize`` records the lifespan-bearing FastMCP app as
+                # ``mcp_lifespan_app`` so the lifespan is entered even when middleware
+                # wraps ``inner_app``.
+                boot_epoch = epoch.current_epoch()
                 lifespan_app = getattr(inner_app, "mcp_lifespan_app", inner_app)
-                lifespan = getattr(lifespan_app, "lifespan", None)
-                if lifespan is not None:
-                    async with lifespan(lifespan_app):
-                        yield
-                else:
-                    yield
+                if getattr(lifespan_app, "lifespan", None) is not None:
+                    supervisor = SubAppLifespan(lifespan_app)
+                    await supervisor.start()
+                    boot_epoch.supervisor = supervisor
+                # Point the dispatch slot at the boot serving app, wrapped in this
+                # generation's admission counter so a later retire drains its work.
+                epoch.attach_boot_serving_app(EpochAdmissionApp(inner_app, boot_epoch), app_state)
+                yield
 
         except Exception:
             logger.exception("Worker application lifespan failed")
             raise
         finally:
+            # The serving generation (and its FastMCP lifespan) is dropped by
+            # ``app_context`` on its own exit, above.
             # Release the token and restore the manifest env under the same lock
             # so a failed boot never wedges the process and a later no-param app
             # resolves the config-dir default rather than this app's path.

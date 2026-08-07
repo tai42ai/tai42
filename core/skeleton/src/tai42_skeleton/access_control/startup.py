@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import logging
 
-from tai42_contract.access_control.registry import get_identity_provider_factory
-from tai42_contract.accounts import iter_accounts_provider_factories
+from tai42_contract.access_control.registry import get_identity_provider_factory_staged
+from tai42_contract.accounts import iter_accounts_provider_factories_staged
 
 from tai42_skeleton.access_control.settings import access_control_settings
 
@@ -22,19 +22,28 @@ logger = logging.getLogger(__name__)
 
 
 async def probe_identity_provider() -> None:
-    """Probe EVERY configured identity provider's OWN storage at startup.
+    """Instantiate EVERY configured identity provider ONCE, record it on the epoch, and
+    probe its own storage — the per-epoch eager-instantiation the live verifier and the
+    provider's login routes both resolve against.
 
-    Resolves each name in ``auth_providers`` through the module-level registry (the
-    same deferred path the runtime auth adapter uses — the plugins register on import
-    during ``start()``, before this startup handler runs) and awaits its
-    ``healthcheck()``. A provider whose storage needs no boot probe inherits the
+    Resolves each name in ``auth_providers`` through the STAGED identity registry (the
+    generation THIS build assembled), instantiates the provider once against the
+    access-control settings (whose ``admin`` services the freshly-built AuthAdapter has
+    already installed), records it in the epoch core's ``active_auth_providers`` so a
+    later request never re-instantiates it nor reads a plugin module holder, then awaits
+    its ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY
     provider's failure propagates, so a deployment against a backend a provider cannot
-    use fails LOUDLY at boot rather than on the first authenticated request.
+    use fails LOUDLY at build time rather than on the first authenticated request. The
+    build populates the epoch under construction; a failed build discards it whole.
     """
+    from tai42_skeleton.app.instance import app
+
     settings = access_control_settings()
+    core = app._serving_core
     for name in settings.auth_providers:
-        provider = get_identity_provider_factory(name)(settings)
+        provider = get_identity_provider_factory_staged(name)(settings)
+        core.active_auth_providers[name] = provider
         await provider.healthcheck()
 
 
@@ -297,7 +306,9 @@ async def check_accounts_providers_configured() -> None:
     """
     settings = access_control_settings()
     configured = set(settings.auth_providers)
-    missing = [name for name, _factory in iter_accounts_provider_factories() if name not in configured]
+    # Read the STAGED generation: this boot check keys on the providers THIS build
+    # registered, so a reload validates the generation it is assembling.
+    missing = [name for name, _factory in iter_accounts_provider_factories_staged() if name not in configured]
     if missing:
         raise RuntimeError(
             "access_control: registered accounts provider(s) are missing from the resolution chain: "

@@ -208,18 +208,32 @@ async def send_conversation_message(request: Request) -> Response:
 
 @tai42_app.lifecycle.on_startup
 async def _redrive_pending_conversations() -> None:
-    """Resume every unfinished conversation record on boot and start the periodic
-    stalled-delivery sweep, so nothing is stranded across a restart.
+    """Resume every unfinished conversation record on boot, so nothing is stranded
+    across a restart.
 
     Intake re-drive must run FIRST: it gives every stranded ``accepted`` record a terminal
-    outcome, which is work the delivery re-drive then picks up. The sweep is what recovers
-    a record whose worker died holding a still-live lease. No-op with no backend."""
+    outcome, which is work the delivery re-drive then picks up. No-op with no backend. The
+    periodic sweep is established separately (post-swap), so it survives a reload rather
+    than being spawned on the throwaway build-thread loop this handler runs on at reload."""
     if ConversationsSettings().in_memory:
         return
-    from tai42_skeleton.conversations import redrive_accepted, redrive_pending, start_delivery_sweep
+    from tai42_skeleton.conversations import redrive_accepted, redrive_pending
 
     await redrive_accepted()
     await redrive_pending()
+
+
+@tai42_app.lifecycle.on_post_swap
+def _start_conversations_delivery_sweep() -> None:
+    """(Re)establish the periodic stalled-delivery sweep on the serving loop — run at
+    boot and after every epoch swap, both ON the serving loop, so the sweep task
+    attaches to the loop its deliveries run on and retires with its generation. The sweep
+    is what recovers a record whose worker died holding a still-live lease. No-op with no
+    backend."""
+    if ConversationsSettings().in_memory:
+        return
+    from tai42_skeleton.conversations import start_delivery_sweep
+
     start_delivery_sweep()
 
 

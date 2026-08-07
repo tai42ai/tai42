@@ -50,7 +50,7 @@ def validate_registration(slug: str, transport: str) -> None:
         raise ValueError(f"transport {transport!r} must be one of {_VALID_TRANSPORTS}")
 
 
-class _SubAppLifespan:
+class SubAppLifespan:
     """Runs a sub-app's fastmcp lifespan (enter AND exit) inside ONE dedicated task.
 
     fastmcp's server sets a ``_current_server`` ContextVar with a token when its
@@ -157,7 +157,7 @@ class SubMcpAppRouter:
         # stdio sub-apps have no ASGI surface, so a slug can cache as None and the
         # caller serves a 404 for it.
         self._server_cache: dict[str, ASGIApp | None] = {}
-        self._app_exit_stacks: dict[str, _SubAppLifespan] = {}
+        self._app_exit_stacks: dict[str, SubAppLifespan] = {}
         # A globally-monotonic build generation and the per-slug token stamped from
         # it on every register/replace. The token is captured with the config at the
         # start of a build and re-checked at the end: if it changed, a concurrent
@@ -226,7 +226,7 @@ class SubMcpAppRouter:
         if stale is not None:
             await self._aclose_slug_stack(slug, stale)
 
-    def _pop_slug_locked(self, slug: str) -> _SubAppLifespan | None:
+    def _pop_slug_locked(self, slug: str) -> SubAppLifespan | None:
         """Remove a slug's route + cached app + generation token and return its
         lifespan runner (or None) for the caller to close off-lock. Caller holds
         ``_state_lock``.
@@ -240,7 +240,7 @@ class SubMcpAppRouter:
         self._route_generations.pop(slug, None)
         return self._app_exit_stacks.pop(slug, None)
 
-    async def _aclose_slug_stack(self, slug: str, stack: _SubAppLifespan) -> None:
+    async def _aclose_slug_stack(self, slug: str, stack: SubAppLifespan) -> None:
         try:
             await self._aclose_on_owner(slug, stack)
         except Exception as e:
@@ -251,7 +251,7 @@ class SubMcpAppRouter:
             logger.error(f"Error shutting down MCP app {slug}: {e}")
             raise
 
-    async def _aclose_on_owner(self, slug: str, stack: _SubAppLifespan) -> None:
+    async def _aclose_on_owner(self, slug: str, stack: SubAppLifespan) -> None:
         """Close a per-slug lifespan stack on the loop that entered it.
 
         The stack's lifespan (and its task group) was entered on the owner loop, so
@@ -351,7 +351,7 @@ class SubMcpAppRouter:
         if exc is not None:
             logger.error("Error tearing down sub-MCP app %s: %s", slug, exc)
 
-    async def _build_sub_app(self, slug: str, config: RouteConfig) -> tuple[ASGIApp | None, _SubAppLifespan | None]:
+    async def _build_sub_app(self, slug: str, config: RouteConfig) -> tuple[ASGIApp | None, SubAppLifespan | None]:
         """Build the ASGI sub-app for ``slug`` from the CAPTURED ``config`` and enter
         its lifespan, returning ``(sub_app, lifespan)``.
 
@@ -359,7 +359,7 @@ class SubMcpAppRouter:
         the generation token and decides, after the build, whether to record or
         discard it). ``stdio`` has no ASGI surface, so it returns ``(None, None)``;
         the caller caches that ``None`` for the slug. The lifespan is entered inside a
-        dedicated task (see :class:`_SubAppLifespan`) so its fastmcp ``_current_server``
+        dedicated task (see :class:`SubAppLifespan`) so its fastmcp ``_current_server``
         ContextVar token is reset in the SAME context at teardown; on a lifespan-enter
         failure that task has already unwound it and ``start()`` re-raises.
         """
@@ -412,7 +412,7 @@ class SubMcpAppRouter:
             # 404ing against the sub-app.
             sub_app = mcp.http_app(path="/", middleware=sub_middleware)
 
-        app_lifespan = _SubAppLifespan(sub_app)
+        app_lifespan = SubAppLifespan(sub_app)
         # start() enters the lifespan in its dedicated task and blocks until it is
         # live, re-raising (with the lifespan already unwound) on an enter failure, so
         # a raised build leaves nothing half-open for the caller to clean up.

@@ -31,6 +31,10 @@ async def authorize_submitted_tool(tool_name: str, arguments: dict[str, Any]) ->
     Raises ``PermissionDenied`` (403) on a deny and the retriable
     ``OperationSurfaceUnsettledError`` (503) mid-rebuild — the MCP edge's own refusals.
     """
+    # ``_tool_registry`` / ``preset_manager`` forward to the epoch's serving core; at
+    # request dispatch an epoch is always installed, so both resolve. The ``None``
+    # defaults cover only a pre-serving-core app (a bare test double) — never a missing
+    # epoch, which the properties raise on.
     resolved = resolve_dispatch(
         tool_name,
         arguments,

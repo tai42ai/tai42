@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.http import StarletteWithLifespan, create_sse_app
 from fastmcp.server.server import Transport
 from starlette.middleware import Middleware
@@ -19,6 +20,7 @@ from tai42_skeleton.app.channels_facet import ChannelsFacet
 from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.app.facets import (
+    AccountsFacet,
     AdminFacet,
     AgentsFacet,
     BackendsFacet,
@@ -46,6 +48,7 @@ from tai42_skeleton.backend.registry import BackendHolder
 from tai42_skeleton.backup import BackupRegistry, register_core_sections
 from tai42_skeleton.channels.registry import ChannelRegistry
 from tai42_skeleton.config import ConfigManagerFactory
+from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
@@ -53,16 +56,19 @@ from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.tools import ToolRegistry
 from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
+    from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.app import TaiApp
     from tai42_contract.conversations import DeliveryReceipt
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
 
+    from tai42_skeleton.manifest import Manifest
     from tai42_skeleton.versioning.store import PostgresVersionedStore
 
 logger = logging.getLogger(__name__)
@@ -96,6 +102,103 @@ async def _internal_error_handler(request: Request, exc: Exception) -> Response:
     return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
 
 
+class ServingCore:
+    """The per-epoch serving surface: a FRESH FastMCP server plus the feature
+    collaborators registered onto it.
+
+    A settings-profile apply builds a NEW ``ServingCore`` off to the side under the
+    proposed env and — only on a successful build — makes it the live epoch's core;
+    the failed build is discarded untouched. A fresh FastMCP per epoch is
+    MANDATORY: its ``_lifespan_manager`` is ref-counted and its route table snapshots
+    once, so a reload-added router only serves when the epoch's fresh FastMCP builds a
+    fresh ``http_app`` off the new route table.
+
+    The collaborators are constructed with the persistent ``TaiMCP`` (not this core):
+    each reads the live serving generation back through the app's per-epoch forwarding
+    properties, so a build-in-progress registers into THIS core and the swapped-in
+    epoch is what every later read resolves to.
+    """
+
+    def __init__(
+        self,
+        app: "TaiMCP",
+        *,
+        args: tuple[Any, ...],
+        auth: TokenVerifier | None,
+        kwargs: dict[str, Any],
+    ) -> None:
+        # ``on_duplicate="error"`` (server-wide) makes a duplicate registration raise
+        # instead of warn-then-replace: every legitimate rebind removes the name
+        # first, so an in-boot duplicate is always a genuine collision. Auth is read
+        # FRESH per epoch, so a profile that flips ACCESS_CONTROL_* rebuilds the
+        # adapter and its verifier chain.
+        self._fast_mcp: FastMCP = FastMCP(*args, on_duplicate="error", auth=auth, **kwargs)
+
+        # Active-MCP-session registry + the middleware that captures live sessions on
+        # every incoming message, so the list_changed broadcast primitive sees every
+        # connected client. Protocol-level infra, registered on the raw server.
+        self._session_registry = SessionRegistry()
+        self._fast_mcp.add_middleware(SessionTrackingMiddleware(self._session_registry))
+        # A session ``tools/call`` is a run surface too: reject it with the same
+        # retriable "reloading" error while the reload gate is held.
+        self._fast_mcp.add_middleware(ReloadRejectionMiddleware(reload_gate))
+        # Tool-edge authorization for projected operations, on the main server AND (in
+        # ``_build_sub_app``) every sub-MCP mount. Imported locally to avoid an import
+        # cycle (authz -> operations -> app -> server).
+        from tai42_skeleton.authz.middleware import AuthzMiddleware
+
+        self._fast_mcp.add_middleware(AuthzMiddleware(app))
+
+        # Per-feature impl collaborators — the bodies behind the facets.
+        self._tool_binding = ToolBinding(app)
+        self._agent_binding = AgentBinding(app)
+        self._backend_holder = BackendHolder()
+        self._http_surface = HttpSurface(app)
+        # The public webhook doors' flood limiter, registered here so it is always on
+        # (tunable/disable via TAI_RATE_LIMIT_*), never left to a manifest opt-in.
+        self._http_surface.middleware(RateLimitMiddleware)
+
+        # Webhook-verifier + channel registries, reset each start() so a reload
+        # re-imports the manifest's modules and re-registers cleanly.
+        self._webhook_verifier_registry = WebhookVerifierRegistry()
+        self._channel_registry = ChannelRegistry()
+
+        # The backup registry is the host's first consumer of its own AppBackup facet:
+        # the core host sections are registered here (never on reload, which keeps this
+        # object), so the duplicate-name guard is never tripped.
+        self._backup_registry = BackupRegistry()
+        register_core_sections(self._backup_registry)
+
+        # The preset register/reload engine, rehydrated per epoch from the store by the
+        # startup/reload handler.
+        self._preset_manager = PresetManager(app)
+
+        # Per-epoch generation state, reached through the app's forwarding properties so
+        # a build populates THIS core and a failed build is discarded with it untouched.
+        # ``None`` manifest is the pre-boot no-op contract the registration
+        # decorators truthiness-check; the registries/maps are empty-but-valid until
+        # ``start()`` rebuilds them from the manifest.
+        self._manifest: Manifest | None = None
+        self._tool_registry: ToolRegistry = ToolRegistry(set[str](), {})
+        self._extension_registry: ExtensionRegistry = ExtensionRegistry(frozenset[str]())
+        # Manifest MCP servers that failed their viability check (title -> "unavailable"),
+        # the tools each live MCP bound (per title, so a targeted reload replaces cleanly),
+        # and the per-title names a scoped MCP (re)bind refused because a preset owns them.
+        self._failed_mcps: dict[str, str] = {}
+        self._mcp_bound_tools: dict[str, set[str]] = {}
+        self._mcp_preset_conflicts: dict[str, set[str]] = {}
+        # Cached resource manager: dropped each start() so a reload rebuilds it against
+        # the freshly-imported storage provider rather than pinning the previous pool.
+        self._resource_manager_cache: ResourceManager | None = None
+
+        # The identity/accounts providers this epoch instantiated ONCE at build time
+        # (``probe_identity_provider``), keyed by configured name. The live verifier and
+        # the accounts-provider routes resolve THIS epoch's instances here rather than
+        # re-instantiating per request or reading a plugin module holder — so a failed
+        # build's providers are GC'd with the discarded core and never leak.
+        self.active_auth_providers: dict[str, IdentityProvider] = {}
+
+
 class TaiMCP(TaiMCPLifecycleMixin):
     """The concrete ``tai42_contract.app.TaiApp`` impl — owns the FastMCP server and
     exposes the 18 contract facet namespaces as its SOLE feature/contract surface;
@@ -111,61 +214,24 @@ class TaiMCP(TaiMCPLifecycleMixin):
     handle, never a flat member."""
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__()
+        # FastMCP construction params captured for the per-epoch ``ServingCore``
+        # build. ``auth`` is pulled aside: production reads it FRESH per epoch from
+        # access-control settings, while a test-supplied ``auth`` overrides that
+        # so a fixed verifier can be pinned across a throwaway app's epochs.
+        self._server_args: tuple[Any, ...] = args
+        self._auth_override: TokenVerifier | None = kwargs.pop("auth", None)
+        self._server_kwargs: dict[str, Any] = kwargs
+
+        # The half-built core during a build, and otherwise ``None`` so reads resolve
+        # to the live epoch's core. Set to the eager boot-scaffold core at the end of
+        # construction so a freshly-built (un-booted) app still has a serving surface.
+        self._building: ServingCore | None = None
+
         self._storage_registry: StorageRegistry = StorageRegistry()
-        self._resource_manager_cache: ResourceManager | None = None
         self._config_manager = ConfigManagerFactory.create()
         self._mcp_sub_app_router: SubMcpAppRouter = SubMcpAppRouter(app=self)
         self._clients: ClientsFacet = ClientsFacet()
-
-        # Active-MCP-session registry + the middleware that captures live
-        # sessions on every incoming message. Built once (the FastMCP server
-        # outlives every reload) so the list_changed broadcast primitive sees
-        # every connected client. Registered on the raw server here rather than
-        # through a facet — it is protocol-level infra, not a feature.
-        self._session_registry = SessionRegistry()
-        self._fast_mcp.add_middleware(SessionTrackingMiddleware(self._session_registry))
-        # A session ``tools/call`` is a run surface too: reject it with the same
-        # retriable "reloading" error while the reload gate is held, so the MCP
-        # half of the run surface is protected alongside ``POST /api/run-tool``.
-        self._fast_mcp.add_middleware(ReloadRejectionMiddleware(reload_gate))
-        # Tool-edge authorization for projected operations. Installed on the main
-        # server AND (in ``_build_sub_app``) on every sub-MCP mount, so no
-        # projected op is dispatchable externally without the same permission
-        # decision the HTTP edge makes. Imported locally to avoid an import cycle
-        # (authz -> operations -> app -> server).
-        from tai42_skeleton.authz.middleware import AuthzMiddleware
-
-        self._fast_mcp.add_middleware(AuthzMiddleware(self))
-
-        # Per-feature impl collaborators — the bodies behind the facets.
-        self._tool_binding = ToolBinding(self)
-        self._agent_binding = AgentBinding(self)
-        self._backend_holder = BackendHolder()
-        self._http_surface = HttpSurface(self)
-        # The public webhook doors (universal_webhook, the interactions callback, and
-        # the /trigger/{token} resolver) are
-        # exposed by design; their flood limiter is registered here at construction
-        # so it is always on (tunable/disable via TAI_RATE_LIMIT_*), never left to a
-        # manifest opt-in an operator could forget. It no-ops for every other path.
-        self._http_surface.middleware(RateLimitMiddleware)
-
-        # Webhook-verifier registry: reset each start() so a reload re-imports the
-        # manifest's verifier modules and re-registers cleanly (mirrors the agent
-        # binding reset).
-        self._webhook_verifier_registry = WebhookVerifierRegistry()
-
-        # Channel registry: reset each start() so a reload re-imports the
-        # manifest's channel modules and re-registers cleanly (mirrors the
-        # webhook-verifier registry above).
-        self._channel_registry = ChannelRegistry()
-
-        # The backup registry is the host's first consumer of its own AppBackup
-        # facet: build it once per app object and register the core host sections
-        # here (never on reload, which re-imports modules but keeps this object),
-        # so the duplicate-name guard is never tripped.
-        self._backup_registry = BackupRegistry()
-        register_core_sections(self._backup_registry)
 
         # The 18 contract facet namespaces, partitioning the feature surface.
         self._tools_facet = ToolsFacet(self)
@@ -173,6 +239,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._backends_facet = BackendsFacet(self)
         self._storage_facet = StorageFacet(self)
         self._connectors_facet = ConnectorsFacet(self)
+        self._accounts_facet = AccountsFacet(self)
         self._webhook_verifiers_facet = WebhookVerifiersFacet(self)
         self._channels_facet = ChannelsFacet(self)
         self._conversations_facet = ConversationsFacet(self)
@@ -188,12 +255,28 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._presets_facet = PresetsFacet(self)
         self._tool_meta_facet = ToolMetaFacet(self)
 
-        # The preset register/reload engine — a process-lifetime singleton (like
-        # the tool binding) owning the authoritative spec map + quarantine set, so
-        # its state survives a ``reload_config`` that swaps the manifest registries
-        # beneath it. Reached by the preset routes and the startup/reload
-        # rehydration hook via this concrete instance.
-        self._preset_manager = PresetManager(self)
+        # The eager boot-scaffold core: an un-booted app (bare construction, an
+        # embedded read, the boot-time ``http_app`` build) needs a live serving
+        # surface before an epoch is installed. ``app_context`` promotes it to
+        # epoch 0; a reload replaces it with a freshly-built one.
+        self._building = self._build_serving_core()
+
+    # -- Per-epoch serving core (fresh FastMCP + collaborators) ----------------
+
+    def _build_serving_core(self) -> ServingCore:
+        """Build a fresh ``ServingCore`` under the CURRENT env — a fresh FastMCP and
+        the feature collaborators registered onto it, with the access-control adapter
+        read fresh unless a construction-time ``auth`` pins it. Imported locally to
+        avoid an import cycle (access_control -> ... -> app.server)."""
+        from tai42_skeleton.access_control.adapter import AuthAdapter
+        from tai42_skeleton.access_control.settings import access_control_settings
+
+        if self._auth_override is not None:
+            auth: TokenVerifier | None = self._auth_override
+        else:
+            settings = access_control_settings()
+            auth = AuthAdapter(settings) if settings.enable else None
+        return ServingCore(self, args=self._server_args, auth=auth, kwargs=self._server_kwargs)
 
     # -- Facet namespaces (tai42_contract.app.TaiApp) --------------------------
 
@@ -216,6 +299,10 @@ class TaiMCP(TaiMCPLifecycleMixin):
     @property
     def connectors(self) -> ConnectorsFacet:
         return self._connectors_facet
+
+    @property
+    def accounts(self) -> AccountsFacet:
+        return self._accounts_facet
 
     @property
     def webhook_verifiers(self) -> WebhookVerifiersFacet:

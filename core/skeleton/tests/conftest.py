@@ -174,7 +174,10 @@ def _ensure_redis_identity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     import tai42_skeleton.app.lifecycle as lifecycle
 
     def _ensure() -> None:
-        if "redis" not in registry._REGISTRY:
+        # Guard/register against the WRITE TARGET (the staged generation during an epoch
+        # build, else the committed map), so a reload's staged registry gets the default
+        # even though the committed one already holds it.
+        if "redis" not in registry._write_target():
             registry.register_identity_provider("redis", RedisApiKeyProvider)
 
     real_reset = lifecycle.reset_identity_registry

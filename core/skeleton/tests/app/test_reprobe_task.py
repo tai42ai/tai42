@@ -57,11 +57,32 @@ class _NoManifestConfig:
         raise FileNotFoundError("no external manifest")
 
 
+def _stub_core() -> Any:
+    """A minimal serving-core stand-in: the per-epoch generation state the mixin's
+    forwarding properties read/write, without a real ``ServingCore``/FastMCP."""
+    from unittest.mock import MagicMock
+
+    return SimpleNamespace(
+        _manifest=None,
+        _tool_registry=MagicMock(),
+        _extension_registry=MagicMock(),
+        _failed_mcps={},
+        _mcp_bound_tools={},
+        _mcp_preset_conflicts={},
+        _resource_manager_cache=None,
+        _fast_mcp=SimpleNamespace(local_provider=SimpleNamespace(remove_tool=lambda name: None)),
+    )
+
+
 class _Mixin(TaiMCPLifecycleMixin):
     """Concrete-enough mixin: ``_mcp_tools`` records bound tool names, no server."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # The forwarding properties resolve through ``_building`` when set — install a
+        # stub core so ``_manifest``/``_failed_mcps``/``_mcp_bound_tools`` are read/written
+        # here without a real epoch.
+        self._building = _stub_core()
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
         # No presets are bound in these network-free tests, so the post-reload
         # reconciliation is a no-op stub (a bare mixin has no preset manager).

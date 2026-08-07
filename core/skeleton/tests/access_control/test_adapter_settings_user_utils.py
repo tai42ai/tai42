@@ -19,7 +19,6 @@ from tai42_contract.access_control.context import (
 )
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.access_control.models import AccessPolicy
-from tai42_contract.access_control.registry import register_identity_provider
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 from tai42_kit.utils.data.string_util import hash_api_key
 
@@ -55,6 +54,30 @@ class _StubProvider(IdentityProvider):
         return AuthIdentity(user_id="stub-user", claims={"src": "stub"})
 
 
+@pytest.fixture(autouse=True)
+def _clear_active_providers():
+    """The adapter resolves the CURRENT epoch's recorded providers, so each test
+    records into (and is isolated on) the serving core's ``active_auth_providers``."""
+    from tai42_skeleton.app.instance import app
+
+    core = app._serving_core
+    saved = dict(core.active_auth_providers)
+    core.active_auth_providers.clear()
+    try:
+        yield
+    finally:
+        core.active_auth_providers.clear()
+        core.active_auth_providers.update(saved)
+
+
+def _record_active_provider(name: str, provider: IdentityProvider) -> None:
+    """Record a provider on the serving core as the epoch build's ``probe`` would, so
+    the adapter's ``active_provider`` resolution finds it."""
+    from tai42_skeleton.app.instance import app
+
+    app._serving_core.active_auth_providers[name] = provider
+
+
 def test_adapter_builds_middleware_stack_without_resolving_provider():
     # Deferred resolution: constructing the adapter must NOT bind concrete providers
     # (build_app runs before start() populates the registry). The provider list is
@@ -66,11 +89,12 @@ def test_adapter_builds_middleware_stack_without_resolving_provider():
     assert all(isinstance(m, Middleware) for m in stack)
 
 
-def test_adapter_get_identity_providers_resolves_redis_from_registry():
-    # The tai42-identity-redis plugin registers "redis" in the module-level registry at
-    # import (ensured by the suite's default-provider fixture), so the adapter's
-    # registry lookup builds the plugin's RedisApiKeyProvider on demand.
-    adapter = AuthAdapter(AccessControlSettings())
+def test_adapter_get_identity_providers_resolves_redis_from_active_providers():
+    # The adapter resolves the epoch's recorded provider instance (the epoch build's
+    # ``probe`` instantiates and records it), not a per-request registry rebuild.
+    settings = AccessControlSettings()
+    _record_active_provider("redis", RedisApiKeyProvider(settings))
+    adapter = AuthAdapter(settings)
     providers = adapter._get_identity_providers()
     assert len(providers) == 1
     assert isinstance(providers[0], RedisApiKeyProvider)
@@ -78,9 +102,10 @@ def test_adapter_get_identity_providers_resolves_redis_from_registry():
 
 def test_adapter_resolves_every_configured_provider_in_order():
     # A two-provider chain resolves both names in configured order.
-    register_identity_provider("first-stub", _StubProvider)
-    register_identity_provider("second-stub", _StubProvider)
-    adapter = AuthAdapter(AccessControlSettings(auth_providers=["first-stub", "second-stub"]))
+    settings = AccessControlSettings(auth_providers=["first-stub", "second-stub"])
+    _record_active_provider("first-stub", _StubProvider(settings))
+    _record_active_provider("second-stub", _StubProvider(settings))
+    adapter = AuthAdapter(settings)
     providers = adapter._get_identity_providers()
     assert len(providers) == 2
     assert all(isinstance(p, _StubProvider) for p in providers)
@@ -100,11 +125,12 @@ def test_adapter_construction_does_not_crash_for_unregistered_provider():
 
 
 async def test_adapter_resolves_provider_lazily_after_registration():
-    # THE TIMING TRAP, closed: build the adapter BEFORE the provider is registered
-    # (no crash), then register it (as start()'s plugin import would), then the
-    # first verify_token resolves through the lazily-selected provider.
-    adapter = AuthAdapter(AccessControlSettings(auth_providers=["lazy-stub"]))
-    register_identity_provider("lazy-stub", _StubProvider)
+    # THE TIMING TRAP, closed: build the adapter BEFORE the epoch records the provider
+    # (no crash), then record it (as the epoch build's ``probe`` would), then the first
+    # verify_token resolves through the lazily-selected recorded provider.
+    settings = AccessControlSettings(auth_providers=["lazy-stub"])
+    adapter = AuthAdapter(settings)
+    _record_active_provider("lazy-stub", _StubProvider(settings))
     token = await adapter.verify_token("raw")
     assert token is not None
     assert token.client_id == "stub-user"
@@ -139,19 +165,18 @@ async def test_unknown_provider_denies_via_backend_fail_closed():
 
 
 async def test_provider_resolved_once_and_memoized():
-    # Resolution runs the factory exactly once; every later verify_token reuses the
-    # memoized provider rather than rebuilding it.
-    calls = {"n": 0}
-
-    def factory(settings: AccessControlSettings) -> IdentityProvider:
-        calls["n"] += 1
-        return _StubProvider(settings)
-
-    register_identity_provider("memo-stub", factory)
-    adapter = AuthAdapter(AccessControlSettings(auth_providers=["memo-stub"]))
+    # The verifier binds the provider list on the FIRST verify_token and memoizes it,
+    # so every later verify_token reuses the SAME recorded instance rather than
+    # re-resolving it from the epoch.
+    settings = AccessControlSettings(auth_providers=["memo-stub"])
+    recorded = _StubProvider(settings)
+    _record_active_provider("memo-stub", recorded)
+    adapter = AuthAdapter(settings)
     await adapter.verify_token("a")
     await adapter.verify_token("b")
-    assert calls["n"] == 1
+    bound = adapter._internal_verifier._providers
+    assert bound is not None
+    assert bound[0] is recorded
 
 
 async def test_adapter_verify_token_delegates_to_internal_verifier(monkeypatch):

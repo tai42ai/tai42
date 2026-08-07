@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import click
 import pytest
 from click.testing import CliRunner
+from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 
@@ -142,7 +143,15 @@ class _FakeApp:
 
     @asynccontextmanager
     async def app_context(self, manifest):
-        yield
+        # Mirror the real app_context: install boot epoch 0's core so the worker
+        # lifespan reads the epoch and attaches the serving app, and drop it on exit.
+        from tai42_skeleton.app import epoch
+
+        epoch.install_boot_core(SimpleNamespace())  # type: ignore[arg-type]
+        try:
+            yield
+        finally:
+            await epoch.clear_epoch()
 
     def http_app(self, stateless_http: bool | None = None) -> _FakeInnerApp:
         self.http_called = True
@@ -361,6 +370,21 @@ async def test_run_stdio_enters_context_and_runs(patch_app_seam) -> None:
     assert app.run_async_transport == "stdio"
 
 
+async def test_run_stdio_refuses_profile_apply_loudly(patch_app_seam) -> None:
+    """stdio has no swappable serving surface and no fleet, so a profile apply /
+    config reload is refused loudly. run_stdio wires the refusal as a reload handler;
+    the epoch rebuild runs reload handlers, so the raise discards the build and leaves
+    the running server serving."""
+    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
+
+    await mcp_app.run_stdio()
+
+    key = f"{mcp_app._refuse_stdio_profile_apply.__module__}.{mcp_app._refuse_stdio_profile_apply.__qualname__}"
+    assert key in app.lifecycle.reload_handlers
+    with pytest.raises(RuntimeError, match="stdio"):
+        app.lifecycle.reload_handlers[key]()
+
+
 class _FakeUvicorn:
     def __init__(self) -> None:
         self.config_kwargs: dict | None = None
@@ -380,30 +404,43 @@ class _FakeUvicorn:
         return _Server()
 
 
-async def test_run_debug_http_builds_http_app(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
-    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
+async def test_run_debug_routes_through_create_app(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The debug run serves the SAME factory app as the multi-worker path — the shim
+    Starlette (a single ``Mount("/")`` dispatch) built by ``create_app``, NOT a
+    hand-built ``http_app`` that bypasses the epoch machinery. So a debug run gets the
+    boot-epoch install + swap slot at lifespan time."""
+    monkeypatch.setenv("TAI_TRANSPORT", "http")
+    monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
     fake_uvicorn = _FakeUvicorn()
     monkeypatch.setattr(mcp_app, "uvicorn", fake_uvicorn)
 
     config_kwargs: dict = {"host": "127.0.0.1", "port": 8000}
-    rc = await mcp_app.run_debug("http", config_kwargs)
+    rc = await mcp_app.run_debug(config_kwargs)
 
     assert rc == 0
-    assert app.http_called is True
-    assert config_kwargs["app"] is app.inner
+    served_app = config_kwargs["app"]
+    assert isinstance(served_app, Starlette)
+    assert isinstance(served_app.routes[0], Mount)  # the shim's single dispatch mount
     assert fake_uvicorn.served is True
 
 
-async def test_run_debug_sse_builds_sse_app(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
-    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
+async def test_run_debug_serves_create_app_result(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_debug serves exactly what ``create_app`` returns — the delegation seam."""
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
     fake_uvicorn = _FakeUvicorn()
     monkeypatch.setattr(mcp_app, "uvicorn", fake_uvicorn)
+    sentinel = object()
+    calls: list = []
+    monkeypatch.setattr(mcp_app, "create_app", lambda: calls.append(True) or sentinel)
 
     config_kwargs: dict = {"host": "127.0.0.1", "port": 8000}
-    await mcp_app.run_debug("sse", config_kwargs)
+    rc = await mcp_app.run_debug(config_kwargs)
 
-    assert app.sse_called is True
-    assert config_kwargs["app"] is app.inner
+    assert rc == 0
+    assert calls == [True]
+    assert config_kwargs["app"] is sentinel
+    assert fake_uvicorn.served is True
 
 
 # --- CLI-seam logging-reload registration ---------------------------------
@@ -433,7 +470,7 @@ async def test_run_debug_registers_cli_logging_reload(patch_app_seam, monkeypatc
     app = patch_app_seam(_FakeApp(_FakeInnerApp()))
     monkeypatch.setattr(mcp_app, "uvicorn", _FakeUvicorn())
 
-    await mcp_app.run_debug("http", {"host": "127.0.0.1", "port": 8000})
+    await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
 
     assert _LOGGING_RELOAD_KEY in app.lifecycle.reload_handlers
 
@@ -469,7 +506,7 @@ async def test_run_debug_installs_process_scope_redactor(patch_app_seam, monkeyp
     scopes: list[object] = []
     monkeypatch.setattr(mcp_app, "install_meta_log_redactor", lambda **kwargs: scopes.append(kwargs.get("scope")))
 
-    await mcp_app.run_debug("http", {"host": "127.0.0.1", "port": 8000})
+    await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
 
     assert scopes == ["process"]
 
@@ -883,7 +920,7 @@ def test_run_mcp_app_sets_graceful_shutdown_default(monkeypatch: pytest.MonkeyPa
 def test_run_mcp_app_debug_path_carries_graceful_shutdown(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
     # The debug path builds a uvicorn.Config from the same config_kwargs, so the
     # setting reaches it too.
-    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
     monkeypatch.setattr(mcp_app.sys, "platform", "linux")
     monkeypatch.setenv("TAI_RUN_MODE", "debug")
     fake_uvicorn = _FakeUvicorn()
@@ -893,8 +930,9 @@ def test_run_mcp_app_debug_path_carries_graceful_shutdown(patch_app_seam, monkey
     rc = mcp_app.run_mcp_app("manifest.yaml", "http", host, port, workers=1)
 
     assert rc == 0
-    assert app.http_called is True
-    assert fake_uvicorn.config_kwargs is not None
+    # The debug path serves the shim factory app, carrying the setting into its Config.
+    assert isinstance(fake_uvicorn.config_kwargs, dict)
+    assert isinstance(fake_uvicorn.config_kwargs["app"], Starlette)
     assert (
         fake_uvicorn.config_kwargs["timeout_graceful_shutdown"] == mcp_app.app_args_settings().timeout_graceful_shutdown
     )

@@ -374,22 +374,68 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
 
 
 # -- Process-global current registry, swapped atomically by the build pass -----
+# ``_current`` is the COMMITTED registry the Studio routes serve. During an epoch
+# build the rebuild handler stages its fresh registry in ``_pending`` without swapping
+# the live one; ``commit_staging`` promotes it atomically on success, ``abort_staging``
+# drops it on failure — so a failed build never swaps in a half-built Studio
+# registry.
 
 _current: StudioPluginRegistry | None = None
+_pending: StudioPluginRegistry | None = None
+_staging: bool = False
 
 
 def set_current_registry(registry: StudioPluginRegistry) -> None:
-    global _current
+    """Install the freshly-built registry: STAGED during an epoch build (promoted at
+    commit), else swapped in immediately (boot)."""
+    global _current, _pending
+    if _staging:
+        _pending = registry
+        return
     _current = registry
 
 
 def current_registry() -> StudioPluginRegistry:
-    """The registry built by the last startup/reload pass. Raises if the pass has
-    not run (the app is not started) — never returns a silent empty registry that
+    """The COMMITTED registry built by the last startup/reload pass. Raises if the pass
+    has not run (the app is not started) — never returns a silent empty registry that
     would hide a boot-order bug."""
     if _current is None:
         raise StudioPluginError("studio plugin registry has not been built — is the app started?")
     return _current
+
+
+def current_registry_staged() -> StudioPluginRegistry:
+    """The STAGED registry if a build has rebuilt one, else the committed registry — the
+    build's own view (kind status). Serve-time reads use :func:`current_registry`
+    (committed only). Raises the same not-built error when neither exists."""
+    if _pending is not None:
+        return _pending
+    return current_registry()
+
+
+def begin_staging() -> None:
+    """Open Studio-registry staging: a rebuild during the build stages rather than
+    swaps the live registry."""
+    global _staging, _pending
+    _staging = True
+    _pending = None
+
+
+def commit_staging() -> None:
+    """Promote the staged registry to committed if the build rebuilt one, else leave
+    the live registry in place. Idempotent when no build staged."""
+    global _current, _pending, _staging
+    if _staging and _pending is not None:
+        _current = _pending
+    _pending = None
+    _staging = False
+
+
+def abort_staging() -> None:
+    """Drop the staged registry on a failed build — the live registry is untouched."""
+    global _pending, _staging
+    _pending = None
+    _staging = False
 
 
 async def rebuild_studio_plugin_registry() -> None:

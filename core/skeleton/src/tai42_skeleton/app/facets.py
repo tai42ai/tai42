@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from starlette.requests import Request
     from starlette.responses import Response
+    from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.agent import Agent
     from tai42_contract.backend import Backend
     from tai42_contract.config import ConfigManager
@@ -243,6 +244,18 @@ class ConnectorsFacet(_Facet):
         return self._app._token_store
 
 
+class AccountsFacet(_Facet):
+    """``app.accounts`` — read access to the current epoch's live provider instances
+    (``AppAccounts``)."""
+
+    def active_provider(self, name: str) -> IdentityProvider | None:
+        # Resolve the CURRENT (live) epoch's provider, never the generation under
+        # construction — a failed build's provider instances must never bind into a
+        # surviving epoch's memoized verifier (the D4 zero-mutation invariant). See
+        # ``TaiMCP._live_serving_core``.
+        return self._app._live_serving_core.active_auth_providers.get(name)
+
+
 class HttpFacet(_Facet):
     """``app.http`` — middleware + custom-route registration (``AppHttp``)."""
 
@@ -294,8 +307,19 @@ class LifecycleFacet(_Facet):
     def on_reload(self, func: Callable[[], Any]) -> Callable[[], Any]:
         return self._app._on_reload(func)
 
+    def on_post_swap(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        """Register an establisher for a loop-affine background loop, run on the serving
+        loop at boot and after every epoch swap — never on the throwaway build-thread
+        loop the per-epoch handlers run on."""
+        return self._app._on_post_swap(func)
+
     def on_fleet_op_applied(self, func: Callable[[str], Any]) -> Callable[[str], Any]:
         return self._app._on_fleet_op_applied(func)
+
+    def reload_registries(self, manifest: ManifestImpl) -> dict[str, Any]:
+        """Re-initialise the registries from ``manifest`` and run the per-epoch
+        handler list once — the rebuild step the epoch build+swap primitive calls."""
+        return self._app._reload_registries(manifest)
 
     async def wait_until_ready(self) -> None:
         await self._app._wait_until_ready()

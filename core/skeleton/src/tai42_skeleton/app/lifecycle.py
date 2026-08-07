@@ -1,12 +1,10 @@
 import asyncio
 import inspect
 import logging
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import mcp
@@ -23,11 +21,11 @@ from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.mcp import FastMCPClient
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
-from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
 from tai42_skeleton.app.bus import OriginKind, WorkerBus, make_origin
 from tai42_skeleton.app.bus_settings import bus_settings
+from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none
 from tai42_skeleton.app.graceful_exit import graceful_exit_for
 from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.kind_status import collect_kind_status, warn_if_noop_monitoring
@@ -51,11 +49,16 @@ if TYPE_CHECKING:
 
     from tai42_skeleton.agent.binding import AgentBinding
     from tai42_skeleton.app.clients import ClientsFacet
+    from tai42_skeleton.app.http import HttpSurface
+    from tai42_skeleton.app.server import ServingCore
     from tai42_skeleton.app.sessions import SessionRegistry
     from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
+    from tai42_skeleton.backend.registry import BackendHolder
+    from tai42_skeleton.backup import BackupRegistry
     from tai42_skeleton.channels.registry import ChannelRegistry
     from tai42_skeleton.presets.manager import PresetManager
     from tai42_skeleton.template import ResourceManager
+    from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
 logger = logging.getLogger(__name__)
@@ -70,41 +73,12 @@ def _op_field(op: dict[str, Any], key: str) -> Any:
     return value
 
 
-@dataclass
-class _CapturedComponents:
-    """The live, RE-ADDABLE FastMCP components snapshotted before a reload.
-
-    Precisely typed so the ``add_*`` restore is statically checked: ``list_*``
-    returns wire types ``add_*`` cannot re-add, so each surface holds the FastMCP
-    component objects (``Tool`` by name, ``Prompt`` by name, ``Resource`` by URI)
-    the restore path re-adds. A name that vanished between ``list_*`` and
-    ``get_*`` is skipped at capture, so a ``None`` is never stored.
-    """
-
-    tools: dict[str, Tool] = field(default_factory=dict)
-    prompts: dict[str, Prompt] = field(default_factory=dict)
-    resources: dict[str, Resource] = field(default_factory=dict)
-
-
 class TaiMCPLifecycleMixin(ABC):
-    def __init__(self, *args, **kwargs):
-        # None until start() loads a manifest; the registration decorators
-        # truthiness-check it to no-op when a tool module is imported before
-        # the app boots.
-        self._manifest: Manifest | None = None
-
-        # Empty placeholders until start() rebuilds them from the manifest; an
-        # empty registry is a valid registry, so these are never None.
-        self._tool_registry: ToolRegistry = ToolRegistry(set[str](), {})
-        self._extension_registry: ExtensionRegistry = ExtensionRegistry(frozenset[str]())
-
-        # ``on_duplicate="error"`` (server-wide: tools, prompts, resources) makes a
-        # duplicate registration raise instead of the default warn-then-replace
-        # (last-write-win). Every
-        # legitimate rebind removes the name first, so an in-boot duplicate is
-        # always a genuine collision (two modules claiming one tool name, a
-        # normalized-name MCP collision, or an agent run tool shadowing a tool).
-        self._fast_mcp: FastMCP = FastMCP(*args, on_duplicate="error", **kwargs)
+    def __init__(self):
+        # ``_manifest`` / ``_tool_registry`` / ``_extension_registry`` and the
+        # MCP-binding maps below live on the per-epoch ``ServingCore`` and are reached
+        # through the forwarding properties further down, so a build populates the epoch
+        # under construction and a failed build is discarded with it.
 
         # Keyed by qualified name so a module re-import (each start() re-imports
         # the lifecycle modules) replaces rather than accumulates its handler,
@@ -113,31 +87,24 @@ class TaiMCPLifecycleMixin(ABC):
         self._startup_handlers: dict[str, Callable] = {}
         self._shutdown_handlers: dict[str, Callable] = {}
 
-        # Env keys applied by the last _reload_config so the next reload can drop
-        # keys that were removed from the source env (a merge-only update would
-        # leave them lingering as stale config).
-        self._loaded_env_keys: set[str] = set()
-
         # Dynamic tool loaders re-run after every re-init (update() drops all
         # tools). Keyed by qualified name so a module re-import replaces rather
         # than accumulates.
         self._reload_handlers: dict[str, Callable] = {}
 
+        # Establishers for the loop-affine background loops that must run on the REAL
+        # serving loop and retire with their generation (the advisories poll, the
+        # conversations delivery sweep). Run at boot inside app_context (on the serving
+        # loop) and AFTER every epoch swap by the build+swap primitive (also on the
+        # serving loop) — never by the per-epoch handler list, which runs on a
+        # throwaway build-thread loop a spawned task would not survive. Keyed by
+        # qualified name so a module re-import replaces rather than accumulates.
+        self._post_swap_handlers: dict[str, Callable] = {}
+
         # Per-kind tool reloaders (e.g. "flow" / "agentic_flow"), registered
         # by the host app via @tool_reloader; fleet reload_tool/remove_tool
         # ops dispatch through run_tool_reload on every worker.
         self._tool_reloaders: dict[str, Callable] = {}
-
-        # Manifest MCP servers that failed their viability check and were
-        # skipped instead of crashing startup. title -> "unavailable".
-        self._failed_mcps: dict[str, str] = {}
-        # Tools bound on the live server per MCP title, so a targeted reload
-        # can cleanly replace them.
-        self._mcp_bound_tools: dict[str, set[str]] = {}
-        # Per-title names a scoped MCP (re)bind REFUSED because a registered preset
-        # already owns them — the returning server must not clobber the preset, so
-        # the reload surfaces the conflict rather than binding over it.
-        self._mcp_preset_conflicts: dict[str, set[str]] = {}
 
         # The one app-owned worker-bus subscription (cross-worker fleet ops). The
         # bus is internal infrastructure that SURVIVES reloads (it is not a manifest
@@ -172,6 +139,146 @@ class TaiMCPLifecycleMixin(ABC):
         # worker-bus subscription task above.
         self._reprobe_task: asyncio.Task[None] | None = None
 
+    # -- per-epoch serving core (forwarding reads) -----------------------------
+    # Every collaborator the lifecycle swaps per epoch is read through the live
+    # serving generation's ``ServingCore``: the half-built core during a build (so
+    # ``start()`` and the epoch handlers register into the epoch being built), else the
+    # installed epoch's core. A reload that swaps in a fresh epoch is therefore visible
+    # at every read site with no rebinding.
+
+    @property
+    def _serving_core(self) -> "ServingCore":
+        if self._building is not None:
+            return self._building
+        core = current_epoch().core
+        if core is None:
+            raise RuntimeError("the live epoch has no serving core installed")
+        return core
+
+    @property
+    def _live_serving_core(self) -> "ServingCore":
+        """The LIVE epoch's core once one is installed; the pre-boot core before that.
+
+        Request-path reads of per-epoch provider state resolve THIS, not the
+        ``_building``-first :attr:`_serving_core`. During a reload a live epoch is ALWAYS
+        installed (``current_epoch()`` is the outgoing generation until the atomic swap),
+        so a request that interleaves with an in-flight build's serving-app enter sees the
+        LIVE core and NEVER the generation under construction — a build that then FAILS can
+        never leave a surviving epoch's memoized verifier bound onto the discarded
+        generation's provider instances (the D4 zero-mutation invariant). Before the boot
+        epoch is installed there is no live generation, so this falls back to the sole
+        pre-boot core (``_building``), which registration and the pre-boot harness read;
+        no request is served in that window, so the being-built generation is never
+        exposed here."""
+        epoch = current_epoch_or_none()
+        if epoch is not None and epoch.core is not None:
+            return epoch.core
+        if self._building is not None:
+            return self._building
+        raise RuntimeError("the live epoch has no serving core installed")
+
+    # Generation state on the epoch's core, reached read/write through these forwarding
+    # properties: ``start()`` and the runtime MCP mutators write the epoch under
+    # construction during a build (``_building``) and the live epoch's core otherwise, so
+    # a failed build never touches the serving generation. ``_manifest is None`` on a
+    # fresh core is the pre-boot no-op contract the registration decorators check.
+
+    @property
+    def _manifest(self) -> "Manifest | None":
+        return self._serving_core._manifest
+
+    @_manifest.setter
+    def _manifest(self, value: "Manifest | None") -> None:
+        self._serving_core._manifest = value
+
+    @property
+    def _tool_registry(self) -> ToolRegistry:
+        return self._serving_core._tool_registry
+
+    @_tool_registry.setter
+    def _tool_registry(self, value: ToolRegistry) -> None:
+        self._serving_core._tool_registry = value
+
+    @property
+    def _extension_registry(self) -> ExtensionRegistry:
+        return self._serving_core._extension_registry
+
+    @_extension_registry.setter
+    def _extension_registry(self, value: ExtensionRegistry) -> None:
+        self._serving_core._extension_registry = value
+
+    @property
+    def _failed_mcps(self) -> dict[str, str]:
+        return self._serving_core._failed_mcps
+
+    @_failed_mcps.setter
+    def _failed_mcps(self, value: dict[str, str]) -> None:
+        self._serving_core._failed_mcps = value
+
+    @property
+    def _mcp_bound_tools(self) -> dict[str, set[str]]:
+        return self._serving_core._mcp_bound_tools
+
+    @_mcp_bound_tools.setter
+    def _mcp_bound_tools(self, value: dict[str, set[str]]) -> None:
+        self._serving_core._mcp_bound_tools = value
+
+    @property
+    def _mcp_preset_conflicts(self) -> dict[str, set[str]]:
+        return self._serving_core._mcp_preset_conflicts
+
+    @_mcp_preset_conflicts.setter
+    def _mcp_preset_conflicts(self, value: dict[str, set[str]]) -> None:
+        self._serving_core._mcp_preset_conflicts = value
+
+    @property
+    def _resource_manager_cache(self) -> "ResourceManager | None":
+        return self._serving_core._resource_manager_cache
+
+    @_resource_manager_cache.setter
+    def _resource_manager_cache(self, value: "ResourceManager | None") -> None:
+        self._serving_core._resource_manager_cache = value
+
+    @property
+    def _fast_mcp(self) -> FastMCP:
+        return self._serving_core._fast_mcp
+
+    @property
+    def _session_registry(self) -> "SessionRegistry":
+        return self._serving_core._session_registry
+
+    @property
+    def _tool_binding(self) -> "ToolBinding":
+        return self._serving_core._tool_binding
+
+    @property
+    def _agent_binding(self) -> "AgentBinding":
+        return self._serving_core._agent_binding
+
+    @property
+    def _backend_holder(self) -> "BackendHolder":
+        return self._serving_core._backend_holder
+
+    @property
+    def _http_surface(self) -> "HttpSurface":
+        return self._serving_core._http_surface
+
+    @property
+    def _webhook_verifier_registry(self) -> "WebhookVerifierRegistry":
+        return self._serving_core._webhook_verifier_registry
+
+    @property
+    def _channel_registry(self) -> "ChannelRegistry":
+        return self._serving_core._channel_registry
+
+    @property
+    def _backup_registry(self) -> "BackupRegistry":
+        return self._serving_core._backup_registry
+
+    @property
+    def _preset_manager(self) -> "PresetManager":
+        return self._serving_core._preset_manager
+
     def _on_startup(self, func: Callable):
         self._startup_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
@@ -179,6 +286,13 @@ class TaiMCPLifecycleMixin(ABC):
     def _on_reload(self, func: Callable):
         """Register a handler to re-run after every in-place re-init."""
         self._reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
+        return func
+
+    def _on_post_swap(self, func: Callable):
+        """Register a handler that establishes a loop-affine background loop on the
+        serving loop — run at boot and after every epoch swap, never on the throwaway
+        build-thread loop the per-epoch handlers run on."""
+        self._post_swap_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
 
     def _on_fleet_op_applied(self, func: Callable):
@@ -237,6 +351,19 @@ class TaiMCPLifecycleMixin(ABC):
         if raise_on_error and errors:
             raise RuntimeError("lifecycle handlers failed: " + ", ".join(f"{name}: {exc!r}" for name, exc in errors))
 
+    async def _run_post_swap_handlers(self, *, raise_on_error: bool) -> None:
+        """Run the post-swap background-loop establishers on the CURRENT serving loop.
+
+        The caller guarantees this runs on the real serving loop with the target
+        generation already installed as ``current_epoch()``: at boot inside
+        ``app_context``, and after every epoch swap inside the build+swap primitive. Each
+        establisher (re)starts its loop-affine loop here and registers it with the live
+        generation, so the loop attaches to the serving loop and retires with its epoch.
+        Boot raises on failure (a broken boot must not look healthy); a post-swap reload
+        does not — the fresh epoch already serves, so a background-loop start fault is
+        loud but never unwinds the completed swap."""
+        await self._run_handlers(list(self._post_swap_handlers.values()), raise_on_error=raise_on_error)
+
     @asynccontextmanager
     async def app_context(self, manifest: Manifest, *, origin_kind: OriginKind = OriginKind.serve):
         # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
@@ -245,7 +372,20 @@ class TaiMCPLifecycleMixin(ABC):
         # serve stale config after a reload. Refuse loudly before the app starts.
         require_bus_for_k8s()
         require_bus_for_backend(manifest)
+        from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
+
         try:
+            # Install boot epoch 0's serving core BEFORE start(), so start() and the
+            # epoch handlers register into this generation's fresh FastMCP and every
+            # process-spine read resolves to it. Built FRESH here (via the builder)
+            # under the started env rather than reusing the construction-time scaffold,
+            # so a sequential app_context in the same process never inherits a prior
+            # generation's collaborators. Clearing ``_building`` routes reads through the
+            # installed epoch; the worker lifespan attaches the dispatch slot + serving
+            # app (an embedded / pure-``app_context`` caller needs none).
+            self._building = self._build_serving_core()
+            install_boot_core(self._building)
+            self._building = None
             self.start(manifest)
             # raise_on_error: a failed startup handler must abort the boot
             # loudly, never leave a healthy-looking half-initialized app.
@@ -255,6 +395,11 @@ class TaiMCPLifecycleMixin(ABC):
             # checkpoint/store close) back onto the serving loop.
             self._serving_loop = asyncio.get_running_loop()
             reload_gate.bind_to_running_loop()
+            # Establish the boot generation's loop-affine background loops ON this
+            # serving loop, registered with the boot epoch so they retire with it. Boot
+            # raises loudly on a failed establisher (never a healthy-looking half-start).
+            # A reload re-establishes them post-swap through the build+swap primitive.
+            await self._run_post_swap_handlers(raise_on_error=True)
             # Join the worker bus: construct this process's one bus (origin kind
             # ``serve`` or ``backend``) and open its single long-lived subscription.
             # The subscription registers presence and self-resyncs (reload_config)
@@ -275,6 +420,13 @@ class TaiMCPLifecycleMixin(ABC):
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
+            # Keep a serving-core read-target for any post-context read, then drop the
+            # process serving generation (closing its FastMCP lifespan) so a later
+            # app_context in this process starts from a clean slate.
+            live = current_epoch_or_none()
+            if live is not None and live.core is not None:
+                self._building = live.core
+            await clear_epoch()
 
     # --- worker-bus subscription (cross-worker fleet ops) ---
 
@@ -335,12 +487,19 @@ class TaiMCPLifecycleMixin(ABC):
         consumer stays blocked (and fails loudly on its own timeout) rather than
         forking against a registry a broken reload left half-built."""
         try:
-            await self._apply_bus_op({"op": "reload_config"})
+            if self._boot_ready.is_set():
+                # A RECONNECT: a reload_config broadcast may have been missed while
+                # this worker was away, so re-read persisted config by building and
+                # swapping in a fresh epoch. On the FIRST connect (boot) the live
+                # config was JUST built by ``start()``, so a swap would be pure
+                # redundant work (and would retire the just-built epoch) — skip it and
+                # only latch boot-ready below.
+                await self._apply_bus_op({"op": "reload_config"})
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.error(
-                "worker bus: self-resync reload on (re)connect failed — subscription stays live, "
+                "worker bus: self-resync reload on reconnect failed — subscription stays live, "
                 "resync retried on the next reconnect",
                 exc_info=True,
             )
@@ -551,16 +710,17 @@ class TaiMCPLifecycleMixin(ABC):
         # rendering against (and pin open) the previous provider's pool.
         self._resource_manager_cache = None
 
-        # Clear the code-built connector registry before _initialize_components()
-        # re-imports the manifest's connector plugin modules, which re-run their
-        # module-level register_connector(...) calls; the registry's duplicate
-        # guard would otherwise crash every reload. Mirrors the _agents reset.
+        # Clear the connector registry's write-target generation before
+        # _initialize_components() re-imports the manifest's connector plugin modules,
+        # which re-run their module-level register_connector(...) calls; the registry's
+        # duplicate guard would otherwise crash. During an epoch build this clears the
+        # fresh STAGED generation (the live catalog stays untouched); at boot the
+        # committed map. Mirrors the _agents reset.
         reset_registry()
 
-        # Clear the identity-provider registry before _initialize_components()
-        # re-imports the manifest's identity-plugin modules, which re-run their
-        # module-level register_identity_provider(...) calls; the duplicate guard
-        # would otherwise crash every reload. Mirrors the connector reset above.
+        # Clear the identity-provider registry's write-target generation before
+        # _initialize_components() re-imports the manifest's identity-plugin modules,
+        # which re-run their module-level register_identity_provider(...) calls.
         # The skeleton ships NO concrete identity provider: a deployment names one
         # (e.g. tai42_identity_redis.redis_api_key_provider, the default in the example
         # manifest) in its manifest lifecycle_modules, which _initialize_components
@@ -594,19 +754,17 @@ class TaiMCPLifecycleMixin(ABC):
         # still-present tool and crash the reload with "Component already exists".
         self._reset_component_surface()
 
-        # Clear the operation registry before _initialize_components() re-imports
-        # the router modules, which re-fire their module-level @operation
-        # decorators; without this a reload would trip the duplicate-name guard.
-        # Mirrors the agent/webhook/channel resets above.
-        #
-        # Clear AND replay must both run inside ``rebuilding()``: the serving loop keeps
-        # dispatching through this window, and the mark tells a reader that the registry's
-        # silence about a name is not yet an answer. It releases even on a failed reload.
-        with operation_registry.rebuilding():
-            operation_registry.clear()
-
-            self._initialize_registries()
-            self._initialize_components()
+        # Clear the operation registry's write-target generation before
+        # _initialize_components() re-imports the router modules, which re-fire their
+        # module-level @operation decorators; without this a reload would trip the
+        # duplicate-name guard. During an epoch build this clears the fresh STAGED
+        # generation and the replay/route-attach/projection below all read it, so the
+        # live committed surface keeps answering authz/dispatch against a complete
+        # generation the whole time — no unsettled window on the request path. At
+        # boot it clears the committed map.
+        operation_registry.clear()
+        self._initialize_registries()
+        self._initialize_components()
 
         # The route index must be dropped HERE, AFTER the reimport re-attached every
         # route: a request served in the reload window can have rebuilt it against the
@@ -632,76 +790,36 @@ class TaiMCPLifecycleMixin(ABC):
             logger.info(f"\t. {row.kind}: {row.state}{suffix} — {row.detail}")
         warn_if_noop_monitoring(kind_rows, logger)
         # The public doors run unthrottled when no Redis backs the rate limiter —
-        # one loud once-per-process WARNING here (never a boot refusal, R2).
+        # one loud once-per-process WARNING here (never a boot refusal).
         warn_if_rate_limiting_off(logger)
 
-    def _update(self, manifest: Manifest):
-        # Reload-time re-check of the backend-needs-bus invariant, BEFORE registries
-        # rebuild: a reload whose new manifest registers a backend while the bus is
-        # unconfigured is refused here, catching an env-materialized backend or an
-        # out-of-band manifest edit. The k8s rule needs no reload twin — its settings
-        # are boot-fixed env.
+    def _epoch_handlers(self) -> list[Callable]:
+        """The ONE ordered per-epoch handler list: the startup handlers then the
+        reload handlers, de-duplicated by qualified name so a handler registered on
+        BOTH hooks (the presets/sub-MCP/studio rehydration set) runs exactly once per
+        epoch build. First-occurrence order is preserved, so the startup ordering —
+        including presets-before-sub-MCP — holds; the reload-only handlers append
+        after. Every startup handler runs per epoch (eager provider init included), so
+        a rebuilt epoch's providers are instantiated before its first request."""
+        return list({**self._startup_handlers, **self._reload_handlers}.values())
+
+    def _reload_registries(self, manifest: Manifest) -> dict[str, Any]:
+        """Re-initialise the process registries from ``manifest`` and run the per-epoch
+        handler list ONCE — the rebuild step the epoch build+swap primitive calls.
+
+        The proposed env is already live in ``os.environ`` and the settings caches
+        were cleared by the primitive, so this resolves every settings read under the
+        env about to be persisted. It raises loudly on ANY failure so the
+        primitive discards the half-built epoch and restores the env — there is no
+        restore-on-failure dance here (the primitive owns the discard)."""
+        # Reload-time re-check of the backend-needs-bus invariant, BEFORE the
+        # registries rebuild: a reload whose new manifest registers a backend while
+        # the bus is unconfigured is refused here (an env-materialized backend or an
+        # out-of-band manifest edit). The k8s rule is boot-fixed env, no reload twin.
         require_bus_for_backend(manifest)
-        # Capture the live, RE-ADDABLE FastMCP components (tools + prompts +
-        # resources) — component objects ``add_tool`` / ``add_prompt`` /
-        # ``add_resource`` can restore, NOT the wire types ``list_*`` return. This
-        # snapshot is the previous known-good surface the failure path restores and
-        # the baseline the list_changed diff compares against (both keyed on the
-        # tool/prompt/resource surfaces this snapshot holds); the actual clearing of
-        # the old generation happens inside ``start()`` (``_reset_component_surface``),
-        # right before the reimport re-registers the current ones.
-        before = self._capture_components_sync()
-        before_names = {"tool": set(before.tools), "prompt": set(before.prompts), "resource": set(before.resources)}
-
-        try:
-            self.start(manifest)
-            # start() only registers manifest-module tools; dynamically-loaded
-            # tools (DB flows, sub-MCP apps) come back via the reload handlers.
-            # raise_on_error: a failed reload handler must fail the op loudly, not
-            # leave the worker silently short of tools while reporting success.
-            self._run_blocking(lambda: self._run_handlers(list(self._reload_handlers.values()), raise_on_error=True))
-        except Exception:
-            # Restore ONLY the tool/prompt/resource surface. start() reset the
-            # agent/webhook/connector/sub-MCP registries at its top, BEFORE the
-            # failing step, so those stay reset — the re-raise is loud and the
-            # operator must re-reload. Re-adding the captured components keeps the
-            # worker serving the previous known-good tool/prompt/resource set rather
-            # than a bricked (empty) surface.
-            self._restore_components(before)
-            raise
-
-        # Diff-guarded list_changed: emit exactly once per registry whose name
-        # set actually changed across the reload, so a no-op reload notifies
-        # nothing. Runs AFTER rehydration has re-registered, so it reflects the
-        # settled tool/prompt/resource set — never per-register spam mid-reload.
-        after = self._registry_names_sync()
-        for kind in ("tool", "prompt", "resource"):
-            if before_names[kind] != after[kind]:
-                self._session_registry.schedule_list_changed(kind)
-
-    def _restore_components(self, captured: _CapturedComponents) -> None:
-        """Restore the tool/prompt/resource surface to ``captured`` after a failed
-        ``_update``.
-
-        A failed ``start()`` can leave a PARTIAL new surface (some modules imported
-        before the failure), so the current tools/prompts/resources are cleared
-        first, then the captured previous-generation components are re-added. This
-        restores only the FastMCP-served surface — NOT a full known-good generation:
-        the base ``_tool_registry`` reflects the attempted (failed) manifest, which
-        is the acknowledged cost of the loud re-raise."""
-        current = self._capture_components_sync()
-        for name in current.tools:
-            self._fast_mcp.local_provider.remove_tool(name)
-        for name in current.prompts:
-            self._fast_mcp.local_provider.remove_prompt(name)
-        for uri in current.resources:
-            self._fast_mcp.local_provider.remove_resource(uri)
-        for tool in captured.tools.values():
-            self._fast_mcp.add_tool(tool)
-        for prompt in captured.prompts.values():
-            self._fast_mcp.add_prompt(prompt)
-        for resource in captured.resources.values():
-            self._fast_mcp.add_resource(resource)
+        self.start(manifest)
+        self._run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))
+        return {"status": "ok"}
 
     def _initialize_registries(self):
         if self._manifest is None:
@@ -976,19 +1094,21 @@ class TaiMCPLifecycleMixin(ABC):
         with nothing quarantined is left to the identity-provider startup probe."""
         if self._manifest is None:
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
-        from tai42_contract.access_control.registry import get_identity_provider_factory
+        from tai42_contract.access_control.registry import get_identity_provider_factory_staged
 
         from tai42_skeleton.access_control.settings import access_control_settings
         from tai42_skeleton.marketplace.compat import CorePluginBootError
-        from tai42_skeleton.plugins.quarantine import quarantined_plugins
+        from tai42_skeleton.plugins.quarantine import quarantined_plugins_staged
 
         settings = access_control_settings()
         if not settings.enable:
             return
 
         def _registered(name: str) -> bool:
+            # Read the STAGED generation: this build's own decision keys on what THIS
+            # build imported, not the live epoch's registry.
             try:
-                get_identity_provider_factory(name)
+                get_identity_provider_factory_staged(name)
                 return True
             except KeyError:
                 return False
@@ -996,7 +1116,7 @@ class TaiMCPLifecycleMixin(ABC):
         unresolved = [name for name in settings.auth_providers if not _registered(name)]
         lifecycle_modules = set(self._manifest.lifecycle_modules or [])
         quarantined = {
-            module: reason for module, reason in quarantined_plugins().items() if module in lifecycle_modules
+            module: reason for module, reason in quarantined_plugins_staged().items() if module in lifecycle_modules
         }
         if unresolved and quarantined:
             detail = "; ".join(f"{module} ({reason})" for module, reason in sorted(quarantined.items()))
@@ -1009,10 +1129,8 @@ class TaiMCPLifecycleMixin(ABC):
 
     def _registry_names_sync(self) -> dict[str, set[str]]:
         """Snapshot the live server's tool / prompt / resource names off-loop —
-        used by the reload path (which runs outside any event loop) and by
-        ``start()``'s tool log. Keyed by the SINGULAR kind so the reload diff can
-        drive ``schedule_list_changed`` per changed registry. Runs through the one
-        off-loop ``_run_blocking`` runner, safe from a loop-less caller and from
+        used by ``start()``'s tool log. Keyed by the SINGULAR kind. Runs through the
+        one off-loop ``_run_blocking`` runner, safe from a loop-less caller and from
         inside the server loop."""
 
         async def snapshot() -> dict[str, set[str]]:
@@ -1060,37 +1178,6 @@ class TaiMCPLifecycleMixin(ABC):
             provider.remove_template(uri_template)
         for uri in {str(c.uri) for c in components if isinstance(c, Resource)}:
             provider.remove_resource(uri)
-
-    def _capture_components_sync(self) -> _CapturedComponents:
-        """Snapshot the live, RE-ADDABLE FastMCP components off-loop, keyed by name
-        (tools/prompts) or URI (resources).
-
-        ``list_*`` returns wire types (``mcp.types.Tool``/``Prompt``/``Resource``)
-        that ``add_*`` cannot re-add, so each name is re-fetched via
-        ``get_tool`` / ``get_prompt`` / ``get_resource`` — the FastMCP component
-        objects the reload restore path re-adds. A name that vanished between the
-        ``list_*`` snapshot and the ``get_*`` re-fetch (``get_*`` returns ``None``)
-        is skipped, so the captured surface never stores a ``None``. Runs through
-        the one off-loop ``_run_blocking`` runner."""
-
-        async def snapshot() -> _CapturedComponents:
-            captured = _CapturedComponents()
-            for tool in await self._fast_mcp.list_tools():
-                got = await self._fast_mcp.get_tool(tool.name)
-                if got is not None:
-                    captured.tools[tool.name] = got
-            for prompt in await self._fast_mcp.list_prompts():
-                got = await self._fast_mcp.get_prompt(prompt.name)
-                if got is not None:
-                    captured.prompts[prompt.name] = got
-            for resource in await self._fast_mcp.list_resources():
-                uri = str(resource.uri)
-                got = await self._fast_mcp.get_resource(uri)
-                if got is not None:
-                    captured.resources[uri] = got
-            return captured
-
-        return self._run_blocking(snapshot)
 
     async def _probe_mcp(self, config: TaiMCPConfig) -> list["mcp.types.Tool"]:
         """Connect to one MCP server and list its tools, bounded by
@@ -1541,61 +1628,47 @@ class TaiMCPLifecycleMixin(ABC):
         return {"title": title, "status": "ok", "removed": bound}
 
     def _reload_config(self) -> dict[str, Any]:
-        """Soft restart: refresh env into ``os.environ``, reset settings
-        caches, then re-init from the manifest so rebuilt clients read the
-        fresh config. Heavy but in-process — no pod restart."""
+        """Soft restart: build a FRESH serving epoch under the persisted env and swap
+        it in atomically — env refresh + settings reset + registry rebuild +
+        fresh serving surface + retire of the previous generation, all in the one
+        ``build_and_swap_epoch`` primitive. Heavy but in-process — no pod restart. A
+        reload-added router serves after the swap (the epoch's fresh FastMCP snapshots
+        the new route table); a failed build keeps the old epoch serving untouched.
+
+        The build's fresh FastMCP lifespan is loop-affine, so the swap runs ON the
+        serving loop even though this body is driven from a reload-gate worker thread.
+        """
         env = self._config_manager.read_env()
-        # Reconcile removed keys: a key present in the previously applied env but
-        # absent now must be dropped from os.environ, or the stale value would
-        # linger. Only keys THIS method applied are removed — never unrelated
-        # process env.
-        for key in self._loaded_env_keys - set(env):
-            os.environ.pop(key, None)
-        os.environ.update(env)
-        self._loaded_env_keys = set(env)
-        # Release the loop-bound langgraph checkpoint/store pools before resetting
-        # settings. ``reset_all_settings`` drops the per-loop registries so they
-        # rebuild against the fresh config, but it refuses to drop a registry that
-        # still holds live resources on a running loop (dropping it would leak the
-        # open pools). An agent run on this worker leaves live checkpoint/store
-        # resources behind, so close them first — the same release the shutdown
-        # teardown performs, marshalled onto the serving loop the pools are bound
-        # to since this body runs on a reload worker thread.
-        self._close_llm_registries_on_serving_loop()
-        reset_all_settings()
-        manifest = Manifest.model_validate(self._config_manager.read_manifest())
-        self._update(manifest)
-        return {"status": "ok", "env_keys": len(env)}
+
+        from tai42_skeleton.app.epoch import build_and_swap_epoch
+
+        async def _swap() -> dict[str, Any]:
+            # Release the loop-bound langgraph checkpoint/store pools before the
+            # build's settings reset drops their per-loop registries — it refuses to
+            # drop a registry still holding live resources on a running loop.
+            await self._close_llm_registries()
+            await build_and_swap_epoch(env)
+            return {"status": "ok", "env_keys": len(env)}
+
+        loop = self._serving_loop
+        if loop is not None and loop.is_running():
+            try:
+                running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                raise RuntimeError("reload_config must be driven off the serving loop (via reload_gate.run)")
+            # Marshal the swap onto the serving loop and block-wait its result.
+            return asyncio.run_coroutine_threadsafe(_swap(), loop).result()
+        # No serving loop bound (a pure-sync context / test): drive the swap on a
+        # throwaway loop of this caller's own.
+        return asyncio.run(_swap())
 
     async def _close_llm_registries(self) -> None:
         """Close the langgraph checkpoint + store resource pools — the release a
         settings reset requires before it can drop the per-loop registries."""
         await checkpoint_registry().close_all()
         await store_registry().close_all()
-
-    def _close_llm_registries_on_serving_loop(self) -> None:
-        """Close the loop-bound checkpoint/store pools on the serving loop.
-
-        The pools bind to the serving loop that opened them (an agent run), so they
-        must be closed there. A reload body runs on a ``reload_gate`` /
-        ``_run_blocking`` worker thread (no running loop of its own), so the close is
-        marshalled onto the serving loop and awaited. Two paths skip the marshal:
-        with no serving loop bound (a pure-sync context) nothing holds these pools on
-        a running loop; and a reload driven synchronously ON the serving loop itself
-        (a pure-sync / test caller) cannot block on a coroutine only that loop can
-        run — such a caller holds no agent-run resources, so the following settings
-        reset drops the empty registries cleanly (and raises loudly if that ever does
-        not hold, rather than hiding it)."""
-        loop = self._serving_loop
-        if loop is None or loop.is_closed():
-            return
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is loop:
-            return
-        asyncio.run_coroutine_threadsafe(self._close_llm_registries(), loop).result()
 
     def _live_mcp_status(self) -> dict[str, Any]:
         """Snapshot the in-process MCP-binding state.
@@ -1617,14 +1690,12 @@ class TaiMCPLifecycleMixin(ABC):
     def _mcp_tools(self, config: TaiMCPConfig, tools):
         raise NotImplementedError
 
-    # Members the concrete subclass (``TaiMCP``) supplies; declared here so this
-    # mixin's methods can reference them with a known type.
+    # Process-spine members the concrete subclass (``TaiMCP``) supplies; declared here
+    # so this mixin's methods can reference them with a known type. The per-epoch
+    # collaborators are the forwarding properties above, not declared here.
+    _building: "ServingCore | None"
+    _build_serving_core: Callable[[], "ServingCore"]
     clients: "ClientsFacet"
     preset_manager: "PresetManager"
     _config_manager: "ConfigManager"
-    _agent_binding: "AgentBinding"
     _mcp_sub_app_router: "SubMcpAppRouter"
-    _resource_manager_cache: "ResourceManager | None"
-    _webhook_verifier_registry: "WebhookVerifierRegistry"
-    _channel_registry: "ChannelRegistry"
-    _session_registry: "SessionRegistry"

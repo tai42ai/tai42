@@ -176,10 +176,12 @@ marketplace_advisories = register_operation_route(
 )
 
 
-@tai42_app.lifecycle.on_startup
+@tai42_app.lifecycle.on_post_swap
 def _start_advisories_poll() -> None:
-    """Start the advisory poll on the serving loop (the startup hook runs inside
-    the lifespan). It is a no-op when ``MARKETPLACE_ADVISORIES_POLL`` is off.
+    """(Re)establish the advisory poll on the serving loop — run at boot and after
+    every epoch swap, both ON the serving loop, so the poll task attaches to the loop
+    its refreshes run on and retires with its generation. It is a no-op when
+    ``MARKETPLACE_ADVISORIES_POLL`` is off.
 
     Skipped entirely with no install-attribution store configured: the poll would
     otherwise fail every interval reaching for an absent Postgres inventory, so a
@@ -193,16 +195,6 @@ def _start_advisories_poll() -> None:
         )
         return
     advisories.start_poll()
-
-
-@tai42_app.lifecycle.on_reload
-def _restart_advisories_poll() -> None:
-    """Re-pace the advisory poll after a reload. Reload handlers run under
-    ``asyncio.run`` on a throwaway worker-thread loop — a task spawned there would
-    die with that loop — so this marshals the restart onto the remembered serving
-    loop, where it re-reads ``MARKETPLACE_*`` (a reload resets the settings caches)
-    and re-paces/starts/stops the poll to match."""
-    advisories.restart_poll_from_reload()
 
 
 @tai42_app.lifecycle.on_shutdown

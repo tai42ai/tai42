@@ -532,9 +532,10 @@ async def sweep_stalled_deliveries() -> None:
 
 
 def start_delivery_sweep() -> None:
-    """Start (or restart) the periodic recovery sweep — stalled deliveries and lapsed
-    intakes. Must be called ON the serving loop, so the task attaches to the loop its
-    deliveries run on."""
+    """(Re)start the periodic recovery sweep — stalled deliveries and lapsed intakes —
+    the post-swap establisher body. Must be called ON the serving loop (the post-swap
+    hook runs there at boot and after every epoch swap), so the task attaches to the loop
+    its deliveries run on and retires with its generation. Cancels any previous task."""
     global _sweep_task
     task = _sweep_task
     if task is not None and not task.done():
@@ -543,6 +544,29 @@ def start_delivery_sweep() -> None:
     logger.info("conversations: sweeping for stalled deliveries and lapsed intakes every %ss", interval)
     _sweep_task = asyncio.create_task(_sweep_loop(interval), name="tai-conversations-delivery-sweep")
     _sweep_task.add_done_callback(_on_sweep_done)
+    _register_sweep_with_epoch(_sweep_task)
+
+
+def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
+    """Register this sweep task's cancel with the epoch under construction, so the epoch
+    retire cancels exactly the generation's own sweep and no timer outlives its epoch. A
+    no-op when no epoch is installed. The cancel awaits only a task on the retire's own
+    loop, so a task left on a torn-down build loop is cancelled without a cross-loop await."""
+    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+
+    epoch = epoch_under_construction_or_none()
+    if epoch is None:
+        return
+
+    async def _cancel() -> None:
+        if task.done():
+            return
+        task.cancel()
+        if task.get_loop() is asyncio.get_running_loop():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    epoch.register_periodic_loop(_cancel)
 
 
 async def stop_delivery_sweep() -> None:

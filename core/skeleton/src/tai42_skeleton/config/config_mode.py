@@ -16,10 +16,11 @@ their provider, not here — this module names only the seam.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import ClassVar
 
 from pydantic import field_validator
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 
 class ConfigMode(StrEnum):
@@ -30,13 +31,24 @@ class ConfigMode(StrEnum):
 
 
 class ConfigModeSettings(TaiBaseSettings):
-    """Reads ``TAI_CONFIG_MODE`` and validates it against :class:`ConfigMode`."""
+    """Reads ``TAI_CONFIG_MODE`` (+ ``TAI_CONFIG_DIR_PATH``) and validates the mode
+    against :class:`ConfigMode`."""
 
     model_config = SettingsConfigDict(
         env_prefix="TAI_",
     )
 
+    # Config-location seam: the mode selects where profiles live and the dir path
+    # roots the .env/manifest a profile would be read from — neither can be carried
+    # by a profile, so the whole group is excluded from the reload boundary.
+    reload_class: ClassVar[ReloadClass] = "excluded"
+
     config_mode: ConfigMode = ConfigMode.file
+
+    # ``TAI_CONFIG_DIR_PATH`` — the bootstrap config root. The file provider reads
+    # it directly (``file_manager.FileConfigManager.__init__``); this field exists
+    # only to register the key as an excluded boundary member, never to serve the read.
+    config_dir_path: str | None = None
 
     @field_validator("config_mode", mode="before")
     @classmethod
