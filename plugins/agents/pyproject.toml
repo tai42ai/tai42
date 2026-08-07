@@ -83,7 +83,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=1.0,<2",
+    "tai42-skeleton>=1.1,<2",
 ]
 
 [tool.setuptools]
