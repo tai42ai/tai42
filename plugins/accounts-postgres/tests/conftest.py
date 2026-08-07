@@ -42,10 +42,23 @@ class _FakeLifecycle:
         return func
 
 
+class _FakeAccounts:
+    """The ``tai42_app.accounts`` facet: resolves the current epoch's recorded provider
+    instance by name (``wire`` records ``accounts-postgres`` here), so the routes'
+    ``service.provider_settings`` resolution finds the provider under test."""
+
+    def __init__(self) -> None:
+        self.providers: dict[str, object] = {}
+
+    def active_provider(self, name: str) -> object:
+        return self.providers.get(name)
+
+
 class _FakeApp:
     def __init__(self) -> None:
         self.http = _FakeHttp()
         self.lifecycle = _FakeLifecycle()
+        self.accounts = _FakeAccounts()
 
 
 _fake_app = _FakeApp()
@@ -53,6 +66,13 @@ _fake_app = _FakeApp()
 from tai42_contract.app import tai42_app  # noqa: E402
 
 tai42_app.bind(_fake_app)
+
+
+def record_provider_settings(settings: object) -> None:
+    """Record a provider carrying ``settings`` as the current epoch's active accounts
+    provider, so ``service.provider_settings()`` resolves them through the accounts facet
+    (replacing the deleted module holder)."""
+    _fake_app.accounts.providers["accounts-postgres"] = types.SimpleNamespace(settings=settings)
 
 
 # -- a psycopg-shaped seam for stores.py ----------------------------------------
@@ -509,16 +529,16 @@ def _isolate_registries():
 def _reset_plugin_state():
     """Reset the settings cache, the hash gate, and the settings holder so an
     env-dependent test starts clean and never leaks into the next."""
-    from tai42_accounts_postgres import hashing, service
+    from tai42_accounts_postgres import hashing
     from tai42_accounts_postgres.settings import accounts_settings
 
     accounts_settings.cache_clear()
     hashing.reset_hash_gate()
-    service.reset_provider_settings()
+    _fake_app.accounts.providers.clear()
     yield
     accounts_settings.cache_clear()
     hashing.reset_hash_gate()
-    service.reset_provider_settings()
+    _fake_app.accounts.providers.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -560,7 +580,9 @@ def wire(monkeypatch, users_store, sessions_store, invites_store, admin):
     monkeypatch.setattr(service, "sessions_store", lambda: sessions_store)
     monkeypatch.setattr(service, "invites_store", lambda: invites_store)
     settings = FakeProviderSettings(redis=object(), admin=admin)
-    service.set_provider_settings(settings)
+    # Record a provider instance carrying these settings as the active provider, so
+    # ``service.provider_settings()`` resolves them through the accounts facet.
+    _fake_app.accounts.providers["accounts-postgres"] = types.SimpleNamespace(settings=settings)
     return types.SimpleNamespace(
         users=users_store,
         sessions=sessions_store,

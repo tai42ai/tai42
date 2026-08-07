@@ -7,21 +7,21 @@ import pytest
 from tai42_accounts_postgres import service
 from tai42_accounts_postgres.settings import accounts_settings
 
-from .conftest import FakeAdminServices, FakeProviderSettings, FakeRedis, make_redis_ctx
+from .conftest import FakeAdminServices, FakeProviderSettings, FakeRedis, make_redis_ctx, record_provider_settings
 
 # -- settings holder ------------------------------------------------------------
 
 
 def test_provider_settings_raises_before_populated():
-    service.reset_provider_settings()
+    # The autouse reset clears the active provider, so no provider is active this epoch.
     assert service.provider_settings_populated() is False
-    with pytest.raises(RuntimeError, match="ACCESS_CONTROL_ENABLE=true"):
+    with pytest.raises(RuntimeError, match="no active provider"):
         service.provider_settings()
 
 
 def test_provider_settings_returns_after_populated():
     settings = FakeProviderSettings(redis=object(), admin=object())
-    service.set_provider_settings(settings)
+    record_provider_settings(settings)
     assert service.provider_settings_populated() is True
     assert service.provider_settings() is settings
 
@@ -53,7 +53,7 @@ async def test_mint_session_writes_and_returns_raw(monkeypatch, sessions_store):
 
 async def test_apply_role_compensated_success():
     admin = FakeAdminServices()
-    service.set_provider_settings(FakeProviderSettings(admin=admin))
+    record_provider_settings(FakeProviderSettings(admin=admin))
     cleaned = False
 
     async def cleanup() -> None:
@@ -67,7 +67,7 @@ async def test_apply_role_compensated_success():
 
 async def test_apply_role_compensated_failure_cleans_and_reraises():
     admin = FakeAdminServices(fail_apply_role=True)
-    service.set_provider_settings(FakeProviderSettings(admin=admin))
+    record_provider_settings(FakeProviderSettings(admin=admin))
     cleaned = False
 
     async def cleanup() -> None:
@@ -81,7 +81,7 @@ async def test_apply_role_compensated_failure_cleans_and_reraises():
 
 async def test_apply_role_compensated_cleanup_failure_preserves_both():
     admin = FakeAdminServices(fail_apply_role=True)
-    service.set_provider_settings(FakeProviderSettings(admin=admin))
+    record_provider_settings(FakeProviderSettings(admin=admin))
 
     async def cleanup() -> None:
         raise RuntimeError("cleanup boom")

@@ -45,9 +45,10 @@ class PostgresAccountsProvider(AccountsProvider):
     """Validate sessions, declare login methods, and own the bootstrap gate."""
 
     def __init__(self, settings: AccountsProviderSettings) -> None:
+        # The injected settings live on the INSTANCE; the epoch records this provider so
+        # the routes resolve it through the accounts facet — no module holder to leak on
+        # a failed build.
         self.settings = settings
-        # Populate the module holder so route handlers can reach ``settings``.
-        service.set_provider_settings(settings)
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
         # Fast-reject non-session tokens without a DB hit so resolution moves on.

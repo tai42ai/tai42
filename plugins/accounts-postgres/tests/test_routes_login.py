@@ -361,7 +361,7 @@ async def test_invite_replay_rejected_no_reissue(wire, redis_fake):
 
 
 def test_boot_guard_raises_when_unpopulated():
-    service.reset_provider_settings()
+    # The autouse reset clears the active provider, so the boot guard fails loudly.
     with pytest.raises(RuntimeError, match="never instantiated"):
         routes_login._assert_accounts_provider_instantiated()
 

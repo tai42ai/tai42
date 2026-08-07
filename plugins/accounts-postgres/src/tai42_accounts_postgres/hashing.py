@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from tai42_kit.settings import register_settings_reset
 
 from tai42_accounts_postgres.settings import accounts_settings
 
@@ -86,8 +87,14 @@ def _get_gate() -> HashGate:
     return _gate
 
 
+@register_settings_reset
 def reset_hash_gate() -> None:
-    """Drop the cached gate so the next verify rebuilds it (test isolation)."""
+    """Drop the cached gate so the next verify rebuilds it from the current settings.
+
+    Registered as a settings reset so a config reload (which resets settings before the
+    epoch rebuilds) re-reads ``login_hash_concurrency`` / ``login_hash_wait_seconds``
+    rather than pinning the boot values for the process lifetime. Safe to fire anytime:
+    ``_get_gate`` rebuilds lazily on next use, so a stray reset never leaves a hole."""
     global _gate
     _gate = None
 

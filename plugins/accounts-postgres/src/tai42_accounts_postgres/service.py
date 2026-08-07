@@ -1,10 +1,11 @@
 """Shared plumbing for the provider and both route modules.
 
-Three concerns: the module-level settings holder (populated at provider
-``__init__``, read back by handlers, fail-loud when unset); token/id minting and
-email normalization (tokens are distinctly prefixed, stored only as SHA-256); and
-the first-owner bootstrap token (fixed once at startup via SET NX, read per
-request — never generated per call).
+Three concerns: resolving the CURRENT epoch's provider settings (``.admin`` /
+``.redis``) from the live provider instance the epoch recorded — no module holder, so
+a failed epoch build never leaks; token/id minting and email normalization
+(tokens are distinctly prefixed, stored only as SHA-256); and the first-owner
+bootstrap token (fixed once at startup via SET NX, read per request — never generated
+per call).
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ __all__ = ["new_user_id"]
 if TYPE_CHECKING:
     from tai42_contract.accounts import AccountsProviderSettings
 
+    from tai42_accounts_postgres.provider import PostgresAccountsProvider
+
 logger = logging.getLogger(__name__)
 
 # Distinct prefixes let validate_token fast-reject non-session tokens without a DB hit.
@@ -44,39 +47,33 @@ ADMIN_ROLE = "admin"
 PASSWORD_MIN_LENGTH = 10
 
 
-# -- settings holder (populated at provider __init__) ---------------------------
-
-_provider_settings: AccountsProviderSettings | None = None
-
-
-def set_provider_settings(settings: AccountsProviderSettings) -> None:
-    """Store the injected settings so route handlers can reach ``.admin`` /
-    ``.redis``. Called from the provider's ``__init__`` — the only writer."""
-    global _provider_settings
-    _provider_settings = settings
+# -- live provider resolution (per epoch, no module holder) ---------------------
+# The injected settings (``.admin`` / ``.redis``) live on the epoch's provider
+# INSTANCE. Route handlers and the record helpers resolve the CURRENT epoch's instance
+# through the app's accounts facet, so a failed epoch build's provider is discarded
+# with its core and never leaks into the live epoch.
 
 
 def provider_settings() -> AccountsProviderSettings:
-    """Return the injected settings; RAISE if the holder was never populated
-    (the provider was never instantiated — access control is disabled)."""
-    if _provider_settings is None:
+    """The injected settings of the CURRENT epoch's provider instance; RAISE when no
+    provider is active (the accounts kind is disabled / not configured)."""
+    from tai42_contract.app import tai42_app
+
+    provider = tai42_app.accounts.active_provider("accounts-postgres")
+    if provider is None:
         raise RuntimeError(
-            "tai42-accounts-postgres settings holder is unpopulated: the provider was never "
-            "instantiated. The accounts kind requires ACCESS_CONTROL_ENABLE=true and "
-            "'accounts-postgres' present in ACCESS_CONTROL_AUTH_PROVIDERS."
+            "tai42-accounts-postgres has no active provider: access control is disabled or "
+            "'accounts-postgres' is absent from ACCESS_CONTROL_AUTH_PROVIDERS."
         )
-    return _provider_settings
+    return cast("PostgresAccountsProvider", provider).settings
 
 
 def provider_settings_populated() -> bool:
-    """Whether the holder has been populated — the boot guard's input."""
-    return _provider_settings is not None
+    """Whether an accounts-postgres provider is active this epoch — the boot guard's
+    input."""
+    from tai42_contract.app import tai42_app
 
-
-def reset_provider_settings() -> None:
-    """Clear the holder (test isolation)."""
-    global _provider_settings
-    _provider_settings = None
+    return tai42_app.accounts.active_provider("accounts-postgres") is not None
 
 
 # -- store accessors (tests swap these for in-memory fakes) ---------------------
