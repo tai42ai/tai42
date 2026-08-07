@@ -1,3 +1,4 @@
+import keyword
 import logging
 from collections.abc import Callable
 from inspect import Parameter, Signature
@@ -7,6 +8,7 @@ import mcp
 import pydantic_core
 from makefun import create_function
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 from tai42_contract.errors import ClientDisconnectedError
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.monitoring import MonitoringLevel
@@ -38,6 +40,21 @@ from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
 logger = logging.getLogger(__name__)
 
 
+def _exposed_name(field_name: str, field: FieldInfo) -> str:
+    """The signature parameter presented for a model field.
+
+    The presented signature IS the tool's advertised contract, so a usable alias
+    (the original JSON property name) is exposed verbatim; an alias that is not a
+    valid Python identifier or is a keyword keeps the sanitized field name — an
+    inherent limit of callable-shaped contracts. Single source for both the built
+    signature and the kwarg lookup that inverts it, so the two cannot drift.
+    """
+    alias = field.alias
+    if alias and alias.isidentifier() and not keyword.iskeyword(alias):
+        return alias
+    return field_name
+
+
 def _build_signature(
     input_model: type[BaseModel],
     output_schema: dict[str, Any],
@@ -50,7 +67,7 @@ def _build_signature(
         default = Parameter.empty if field.default is pydantic_core.PydanticUndefined else field.default
         params.append(
             Parameter(
-                name=name,
+                name=_exposed_name(name, field),
                 kind=Parameter.KEYWORD_ONLY,
                 default=default,
                 annotation=field.annotation,
@@ -113,9 +130,11 @@ def _build_output_schema(tool):
 def _build_input_value(input_model: type[BaseModel], **kwargs):
     data = {}
     for field_name, field in input_model.model_fields.items():
-        alias = field.alias or field_name
-        if field_name in kwargs:
-            data[alias] = kwargs[field_name]
+        # makefun binds kwargs by the EXPOSED signature name, so invert with the
+        # same mapping; validation still keys by alias.
+        exposed = _exposed_name(field_name, field)
+        if exposed in kwargs:
+            data[field.alias or field_name] = kwargs[exposed]
     input_instance = input_model.model_validate(data)
     return input_instance.model_dump(exclude_none=True, by_alias=True)
 

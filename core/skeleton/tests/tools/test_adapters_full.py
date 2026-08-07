@@ -188,10 +188,58 @@ def test_build_input_value_applies_alias_and_drops_unset():
         q: str = Field(alias="query")
         n: int | None = None
 
-    # Callers pass by field name; the dump emits the alias and drops the unset
-    # Optional ``n``.
-    out = _build_input_value(_M, q="hi")
+    # A usable alias is the exposed signature name, so callers pass by it; the
+    # dump emits the alias and drops the unset Optional ``n``.
+    out = _build_input_value(_M, query="hi")
     assert out == {"query": "hi"}
+
+
+def _tool_with_arg(arg_name: str):
+    class _T:
+        name = "t"
+        description = "d"
+        inputSchema: ClassVar[dict] = {
+            "type": "object",
+            "properties": {arg_name: {"type": "string"}},
+            "required": [arg_name],
+        }
+        outputSchema: ClassVar[dict] = {}
+
+    return _T()
+
+
+def test_reserved_word_arg_exposed_verbatim_and_reaches_wire():
+    # A child arg named ``type`` sanitizes to field ``type_`` with alias ``type``.
+    # ``type`` is a usable identifier, so the advertised signature exposes it
+    # verbatim and the value reaches the wire under the original name.
+    client = _FakeMcpClient(_ok_result())
+    func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _tool_with_arg("type")), name="t", module="mod")
+    assert set(inspect.signature(func).parameters) == {"type"}
+    with patch(_CLIENT, return_value=client):
+        asyncio.run(func(type="x"))
+    assert client.captured_args[0][1] == {"type": "x"}
+
+
+def test_non_identifier_arg_exposes_sanitized_name_but_wire_keeps_original():
+    # ``a-b`` is not a valid Python identifier, so the signature exposes the
+    # sanitized ``a_b`` while the wire still carries the original ``a-b``.
+    client = _FakeMcpClient(_ok_result())
+    func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _tool_with_arg("a-b")), name="t", module="mod")
+    assert set(inspect.signature(func).parameters) == {"a_b"}
+    with patch(_CLIENT, return_value=client):
+        asyncio.run(func(a_b="x"))
+    assert client.captured_args[0][1] == {"a-b": "x"}
+
+
+def test_keyword_arg_exposes_sanitized_name_but_wire_keeps_original():
+    # ``class`` is a Python keyword, so the alias is unusable as a parameter: the
+    # signature exposes the sanitized ``class_`` while the wire carries ``class``.
+    client = _FakeMcpClient(_ok_result())
+    func = mcp_tool_to_func(_http_config(), cast(mcp.types.Tool, _tool_with_arg("class")), name="t", module="mod")
+    assert set(inspect.signature(func).parameters) == {"class_"}
+    with patch(_CLIENT, return_value=client):
+        asyncio.run(func(class_="x"))
+    assert client.captured_args[0][1] == {"class": "x"}
 
 
 # -- transport detection ------------------------------------------------------
