@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import yaml
+from mcp.shared.exceptions import McpError
 
 from tai42_e2e import ports
 from tai42_e2e.httpapi import ApiClient, _is_reloading
@@ -122,6 +123,16 @@ async def _probe_tolerating_reloading[T](open_and_call: Callable[[], Awaitable[T
         return await open_and_call()
     except httpx.HTTPStatusError as exc:
         if _is_reloading(exc.response):
+            return None
+        raise
+    except McpError as exc:
+        # A worker that swaps its epoch mid-probe (a reload / targeted deregister settling)
+        # terminates the just-opened MCP session — D13a: the fresh epoch serves a NEW
+        # session-id space, so the session opened against the old epoch is retired and the
+        # SDK raises "Session terminated". Treat it as "not settled yet" so the enclosing
+        # wait re-polls on a fresh session against the new epoch (exactly what a real client
+        # does — re-initialise). Any other MCP error propagates loudly.
+        if "Session terminated" in str(exc):
             return None
         raise
 
