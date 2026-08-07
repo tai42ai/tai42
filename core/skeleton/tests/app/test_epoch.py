@@ -291,6 +291,27 @@ async def test_drain_in_flight_bounded_by_budget() -> None:
     assert ep.in_flight == 1
 
 
+async def test_cancel_periodic_loops_bounded_by_budget() -> None:
+    """A periodic loop whose cancel-await WEDGES (e.g. an outbound-HTTP poll blocking on
+    its client close during the cancellation unwind) must NOT hang the synchronous retire
+    — and with it a door-driven reload's own request. Each cancel is bounded by the drain
+    budget; an overrun is abandoned so the retire makes progress."""
+    import asyncio
+
+    ep = Epoch(number=current_client_epoch())
+
+    async def _wedged_cancel() -> None:
+        await asyncio.Event().wait()  # never set — a cancel-await that never completes
+
+    ep.register_periodic_loop(_wedged_cancel)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    # Bounded: returns after the budget, abandoning the wedged cancel, rather than
+    # wedging the retire forever.
+    await ep._cancel_periodic_loops(0.05)
+    assert loop.time() - start < 1.0, "a wedged periodic-loop cancel wedged the retire"
+
+
 async def test_reload_over_session_manager_defers_supervisor_close() -> None:
     """A door-driven reload — its own request still admitted on the retiring epoch, e.g. an
     MCP tool call served by that epoch's FastMCP session manager — must NOT ``aclose`` the

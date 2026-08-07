@@ -112,10 +112,25 @@ class Epoch:
                 self._in_flight,
             )
 
-    async def _cancel_periodic_loops(self) -> None:
+    async def _cancel_periodic_loops(self, deadline: float) -> None:
+        """Cancel every periodic loop this generation owns, each BOUNDED by ``deadline``.
+
+        A loop's cancel awaits the loop task's cancellation unwind; if that unwind blocks
+        — e.g. an outbound-HTTP poll (the marketplace advisories poll) closing its client
+        mid-flight — an unbounded await would wedge this synchronous retire, and with it a
+        door-driven reload's own request (an install/apply POST hanging to the client
+        timeout). Bound each cancel: a loop that overruns is logged and abandoned (its task
+        was already ``.cancel()``ed and dies in the background), so the retire always makes
+        progress."""
         for cancel in self._periodic_cancels:
             try:
-                await cancel()
+                await asyncio.wait_for(cancel(), timeout=deadline)
+            except TimeoutError:
+                logger.error(
+                    "epoch %d retire: a periodic-loop cancel exceeded the %.1fs budget; abandoning it",
+                    self.number,
+                    deadline,
+                )
             except Exception:
                 logger.exception("epoch %d retire: a periodic-loop cancel failed", self.number)
 
@@ -346,7 +361,7 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     delivered, so it drains + closes synchronously.
     """
     budget = _drain_budget(deadline)
-    await old._cancel_periodic_loops()
+    await old._cancel_periodic_loops(budget)
     if not tolerate_driver:
         await old._drain_in_flight(budget)
 
