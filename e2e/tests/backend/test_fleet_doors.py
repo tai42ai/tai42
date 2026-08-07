@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+from mcp.shared.exceptions import McpError
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
@@ -79,12 +80,25 @@ async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: Tai
     resp = await _reload(api, [bogus])
     assert resp.status_code == 400, resp.text
     assert bogus in resp.text, resp.text
+
     # The validate-targets raise NAMES the unknown worker on the HTTP door AND, verbatim,
     # on the fleet ``reload_config`` tool.
-    async with core_stack.mcp() as mcp:
-        result = await mcp.call_tool(
-            "reload_config", {"targets": [bogus]}, raise_on_error=False, retry_on_reloading=True
-        )
+    async def _call_bogus_tool():
+        async with core_stack.mcp() as mcp:
+            return await mcp.call_tool(
+                "reload_config", {"targets": [bogus]}, raise_on_error=False, retry_on_reloading=True
+            )
+
+    try:
+        result = await _call_bogus_tool()
+    except McpError as exc:
+        # A concurrent fleet reload swaps the epoch, which by design (D13a) terminates
+        # live MCP sessions — a real client then re-initialises. Tolerate exactly ONE
+        # such termination and re-issue on a fresh session; a persistent problem would
+        # terminate the re-opened session too and still fail here.
+        if "Session terminated" not in str(exc):
+            raise
+        result = await _call_bogus_tool()
     assert result.is_error, f"a bogus target must fail the tool loudly: {result}"
     assert bogus in " ".join(getattr(part, "text", "") for part in result.content), result
 
