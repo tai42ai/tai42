@@ -28,6 +28,11 @@ def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("utf-8")
 
 
+def _secret(data: dict[str, str] | None, rv: str = "rv-1") -> client.V1Secret:
+    """A read-shaped Secret carrying the ``resourceVersion`` the write precondition needs."""
+    return client.V1Secret(data=data, metadata=client.V1ObjectMeta(name=SECRET_NAME, resource_version=rv))
+
+
 class FakeCoreV1Api:
     """In-memory stand-in for ``kubernetes.client.CoreV1Api``.
 
@@ -40,13 +45,13 @@ class FakeCoreV1Api:
         self.secret_exc: Exception | None = None
         self.configmap_result: client.V1ConfigMap | None = None
         self.configmap_exc: Exception | None = None
-        self.patch_secret_exc: Exception | None = None
+        self.replace_secret_exc: Exception | None = None
         self.patch_configmap_exc: Exception | None = None
 
         self.read_secret_calls: list[tuple[str, str]] = []
         self.read_configmap_calls: list[tuple[str, str]] = []
-        self.patched_secret: client.V1Secret | None = None
-        self.patched_secret_call: tuple[str, str] | None = None
+        self.replaced_secret: client.V1Secret | None = None
+        self.replaced_secret_call: tuple[str, str] | None = None
         self.patched_configmap: client.V1ConfigMap | None = None
         self.patched_configmap_call: tuple[str, str] | None = None
 
@@ -57,12 +62,25 @@ class FakeCoreV1Api:
         assert self.secret_result is not None
         return self.secret_result
 
-    def patch_namespaced_secret(self, name: str, namespace: str, body: client.V1Secret) -> client.V1Secret:
-        self.patched_secret_call = (name, namespace)
-        if self.patch_secret_exc is not None:
-            raise self.patch_secret_exc
-        self.patched_secret = body
+    def replace_namespaced_secret(self, name: str, namespace: str, body: client.V1Secret) -> client.V1Secret:
+        self.replaced_secret_call = (name, namespace)
+        if self.replace_secret_exc is not None:
+            raise self.replace_secret_exc
+        self.replaced_secret = body
+        # A whole-object replace: the resulting Secret holds EXACTLY body.string_data
+        # (base64-encoded into data), so a key absent from string_data is gone. The
+        # stored result is exposed so a test asserts the RESULTING Secret state.
+        self.secret_result = client.V1Secret(
+            data={k: _b64(v) for k, v in (body.string_data or {}).items()},
+            metadata=client.V1ObjectMeta(name=name, resource_version="rv-next"),
+        )
         return body
+
+    def resulting_env(self) -> dict[str, str]:
+        """Decode the current stored Secret's data — the RESULTING state after a write."""
+        assert self.secret_result is not None
+        data = self.secret_result.data or {}
+        return {k: base64.b64decode(v, validate=True).decode("utf-8") for k, v in data.items()}
 
     def read_namespaced_config_map(self, name: str, namespace: str) -> client.V1ConfigMap:
         self.read_configmap_calls.append((name, namespace))
@@ -147,44 +165,42 @@ def test_read_env_non_alphabet_base64_raises(manager_and_api) -> None:
 
 def test_write_env_merges_and_filters(manager_and_api) -> None:
     manager, api = manager_and_api
-    api.secret_result = client.V1Secret(data={"API_KEY": _b64("old"), "KEEP": _b64("preserved")})
+    api.secret_result = _secret({"API_KEY": _b64("old"), "KEEP": _b64("preserved")})
     manager.write_env({"API_KEY": "new", "BLANK": "", "EXTRA": "added"})
 
-    body = api.patched_secret
-    assert body is not None
-    # API_KEY overwritten, KEEP preserved (not in new config), BLANK filtered out.
-    assert body.string_data == {"API_KEY": "new", "EXTRA": "added", "KEEP": "preserved"}
-    assert body.metadata.name == SECRET_NAME
-    assert api.patched_secret_call == (SECRET_NAME, NAMESPACE)
+    # Assert the RESULTING Secret state (not the request body): API_KEY overwritten,
+    # KEEP preserved (not in new config), BLANK filtered out.
+    assert api.resulting_env() == {"API_KEY": "new", "EXTRA": "added", "KEEP": "preserved"}
+    assert api.replaced_secret is not None
+    assert api.replaced_secret.metadata.name == SECRET_NAME
+    assert api.replaced_secret_call == (SECRET_NAME, NAMESPACE)
 
 
 def test_write_env_empty_value_removes_key(manager_and_api) -> None:
     manager, api = manager_and_api
-    api.secret_result = client.V1Secret(data={"KEEP": _b64("old"), "OTHER": _b64("keep-me")})
-    # An explicit empty value blanks the key: in config (not preserved), then filtered.
+    api.secret_result = _secret({"KEEP": _b64("old"), "OTHER": _b64("keep-me")})
+    # An explicit empty value DELETES the key. A merge-PATCH could never remove it —
+    # the whole-object replace does. Assert the resulting Secret state, not the body.
     manager.write_env({"KEEP": ""})
-    body = api.patched_secret
-    assert body is not None
-    assert body.string_data == {"OTHER": "keep-me"}
+    assert api.resulting_env() == {"OTHER": "keep-me"}
 
 
 def test_write_env_handles_empty_existing(manager_and_api) -> None:
     manager, api = manager_and_api
-    api.secret_result = client.V1Secret(data=None)
+    api.secret_result = _secret(None)
     manager.write_env({"A": "1"})
-    assert api.patched_secret is not None
-    assert api.patched_secret.string_data == {"A": "1"}
+    assert api.resulting_env() == {"A": "1"}
 
 
 def test_write_env_corrupt_existing_base64_raises(manager_and_api) -> None:
     import binascii
 
     manager, api = manager_and_api
-    # A corrupt existing Secret value aborts the write; nothing is patched.
-    api.secret_result = client.V1Secret(data={"KEEP": "aGVs!bG8="})
+    # A corrupt existing Secret value aborts the write; nothing is replaced.
+    api.secret_result = _secret({"KEEP": "aGVs!bG8="})
     with pytest.raises(binascii.Error):
         manager.write_env({"A": "1"})
-    assert api.patched_secret is None
+    assert api.replaced_secret is None
 
 
 def test_write_env_missing_secret_raises(manager_and_api) -> None:
@@ -201,20 +217,135 @@ def test_write_env_read_other_error_raises(manager_and_api) -> None:
         manager.write_env({"A": "1"})
 
 
+def test_write_env_missing_resource_version_refuses(manager_and_api) -> None:
+    manager, api = manager_and_api
+    # Metadata present but no resourceVersion: the replace would serialize without its
+    # optimistic-concurrency guard (a lost-update window), so the write refuses.
+    api.secret_result = client.V1Secret(data={}, metadata=client.V1ObjectMeta(name=SECRET_NAME, resource_version=""))
+    with pytest.raises(K8sConfigError, match="without a resourceVersion"):
+        manager.write_env({"A": "1"})
+    assert api.replaced_secret is None
+
+
 def test_write_env_permission_denied_raises(manager_and_api) -> None:
     manager, api = manager_and_api
-    api.secret_result = client.V1Secret(data={})
-    api.patch_secret_exc = ApiException(status=403, reason="Forbidden")
+    api.secret_result = _secret({})
+    api.replace_secret_exc = ApiException(status=403, reason="Forbidden")
     with pytest.raises(K8sConfigError, match="Permission denied updating Secret"):
         manager.write_env({"A": "1"})
 
 
-def test_write_env_patch_other_error_raises(manager_and_api) -> None:
+def test_write_env_replace_other_error_raises(manager_and_api) -> None:
     manager, api = manager_and_api
-    api.secret_result = client.V1Secret(data={})
-    api.patch_secret_exc = ApiException(status=500, reason="Server Error")
+    api.secret_result = _secret({})
+    api.replace_secret_exc = ApiException(status=500, reason="Server Error")
     with pytest.raises(K8sConfigError, match="Failed to update Secret"):
         manager.write_env({"A": "1"})
+
+
+# -- replace_env -------------------------------------------------------------
+
+
+def test_replace_env_deletes_uninvited_keys(manager_and_api) -> None:
+    manager, api = manager_and_api
+    api.secret_result = _secret({"KEEP": _b64("old"), "DROP": _b64("gone")})
+    # Whole-map replace: DROP is absent from the new map, so it is deleted; BLANK is
+    # filtered out. Assert the resulting Secret state.
+    manager.replace_env({"KEEP": "new", "ADD": "added", "BLANK": ""})
+    assert api.resulting_env() == {"KEEP": "new", "ADD": "added"}
+    assert api.replaced_secret_call == (SECRET_NAME, NAMESPACE)
+
+
+def test_replace_env_missing_secret_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    api.secret_exc = ApiException(status=404, reason="Not Found")
+    with pytest.raises(K8sConfigError, match="Create it before writing"):
+        manager.replace_env({"A": "1"})
+
+
+def test_replace_env_permission_denied_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    api.secret_result = _secret({})
+    api.replace_secret_exc = ApiException(status=403, reason="Forbidden")
+    with pytest.raises(K8sConfigError, match="Permission denied updating Secret"):
+        manager.replace_env({"A": "1"})
+
+
+class RaceSecretApi:
+    """Fake CoreV1Api modeling a resourceVersion race on the env Secret.
+
+    On the FIRST replace a concurrent writer advances the stored Secret (adds
+    ``C`` alongside the existing keys, bumps ``resourceVersion``), so that replace
+    409s; the re-read returns the advanced Secret and the second replace matches the
+    bumped version.
+    """
+
+    def __init__(self, initial_data: dict[str, str], initial_rv: str) -> None:
+        self._data = dict(initial_data)
+        self._rv = initial_rv
+        self._concurrent_applied = False
+        self.read_calls = 0
+        self.replace_calls = 0
+
+    def read_namespaced_secret(self, name: str, namespace: str) -> client.V1Secret:
+        self.read_calls += 1
+        return client.V1Secret(
+            data=dict(self._data),
+            metadata=client.V1ObjectMeta(name=name, resource_version=self._rv),
+        )
+
+    def replace_namespaced_secret(self, name: str, namespace: str, body: client.V1Secret) -> client.V1Secret:
+        self.replace_calls += 1
+        if not self._concurrent_applied:
+            # A concurrent writer lands between the caller's read and this replace,
+            # ADDING ``C`` while leaving the existing keys in place.
+            self._data["C"] = _b64("3")
+            self._rv = "rv-2"
+            self._concurrent_applied = True
+        assert body.metadata is not None
+        if body.metadata.resource_version != self._rv:
+            raise ApiException(status=409, reason="Conflict")
+        self._data = {k: _b64(v) for k, v in (body.string_data or {}).items()}
+        self._rv = "rv-final"
+        return body
+
+    def stored_env(self) -> dict[str, str]:
+        return {k: base64.b64decode(v, validate=True).decode("utf-8") for k, v in self._data.items()}
+
+
+def test_replace_env_retries_on_conflict(manager_and_api) -> None:
+    manager, _ = manager_and_api
+    api = RaceSecretApi({"A": _b64("1")}, "rv-1")
+    manager._core_api = api  # type: ignore[attr-defined]
+
+    manager.replace_env({"A": "1", "X": "9"})
+
+    # First replace 409s against stale rv-1; the loop re-reads rv-2 and re-applies.
+    assert api.replace_calls == 2
+    # replace wins wholesale: the concurrent `C` is uninvited and gone.
+    assert api.stored_env() == {"A": "1", "X": "9"}
+
+
+def test_write_env_retries_on_conflict_and_reruns(manager_and_api) -> None:
+    manager, _ = manager_and_api
+    api = RaceSecretApi({"A": _b64("1")}, "rv-1")
+    manager._core_api = api  # type: ignore[attr-defined]
+
+    manager.write_env({"B": "2"})
+
+    # write_env re-reads on the 409 and re-merges against the FRESH state, so the
+    # concurrent `C` survives alongside the original `A` and the merged `B`.
+    assert api.replace_calls == 2
+    assert api.stored_env() == {"A": "1", "C": "3", "B": "2"}
+
+
+def test_replace_env_conflict_exhaustion_raises(manager_and_api) -> None:
+    manager, api = manager_and_api
+    api.secret_result = _secret({}, rv="rv-1")
+    # Every replace conflicts: the loop exhausts its bounded attempts and fails loudly.
+    api.replace_secret_exc = ApiException(status=409, reason="Conflict")
+    with pytest.raises(K8sConfigError, match="after 5 attempts"):
+        manager.replace_env({"A": "1"})
 
 
 # -- read_manifest -----------------------------------------------------------

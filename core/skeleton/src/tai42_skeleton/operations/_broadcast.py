@@ -30,10 +30,11 @@ from typing import TYPE_CHECKING, Any
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
+from tai42_skeleton.app.recycle import SELF_DEFERRED
 from tai42_skeleton.operations.errors import BadRequestError
 
 if TYPE_CHECKING:
-    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.config.service import ApplyResult, ProfileApplyOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,36 @@ def apply_response(result: ApplyResult) -> dict[str, Any]:
     fan-out summary — the one shape every ConfigService writer returns from an
     :class:`~tai42_skeleton.config.service.ApplyResult`."""
     return {**result.local, "fanout": result.fanout}
+
+
+def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
+    """The DEDICATED profile-apply response — NOT :func:`apply_response`.
+
+    ``{hot, recycle, refused, fanout}``: ``hot`` are the hot-class diff key NAMES;
+    ``recycle`` is one ``{origin, kind, status}`` line per recycled / timed-out sibling
+    (status ``"recycled"`` / ``"timed-out"``) plus, when the applier itself must self-exit,
+    the applier's own deferred line ``{origin: <self>, kind: "serve", status:
+    SELF_DEFERRED}`` (the one shared ``"self-deferred"`` literal). ``refused`` is ``[]`` on
+    success BY CONSTRUCTION — any refusal aborts the pipeline upfront, before a response is
+    ever built. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
+    report enumerates key names + worker origins, never env VALUES."""
+    entries: list[dict[str, Any]] = []
+    recycle = outcome.recycle
+    if recycle is not None:
+        for origin in recycle.recycled:
+            entries.append({"origin": origin, "kind": outcome.origin_kinds.get(origin, ""), "status": "recycled"})
+        for origin in recycle.timeouts:
+            entries.append({"origin": origin, "kind": outcome.origin_kinds.get(origin, ""), "status": "timed-out"})
+    if outcome.serve_affecting:
+        # The applier's own recycle is a post-response self-exit it cannot confirm — a
+        # serve worker, always reported deferred with the one shared literal.
+        entries.append({"origin": outcome.self_origin, "kind": "serve", "status": SELF_DEFERRED})
+    return {
+        "hot": list(outcome.hot),
+        "recycle": entries,
+        "refused": [],
+        "fanout": fleet_fanout(outcome.fleet),
+    }
 
 
 class FleetBroadcastError(RuntimeError):

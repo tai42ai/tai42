@@ -15,14 +15,18 @@ from tests.routers._auth_boundary import AUTHED, boundary_client
 
 _ROUTES = [
     Route("/api/manifest", router.get_manifest, methods=["GET"]),
+    Route("/api/manifest/preserved", router.get_manifest_preserved, methods=["GET"]),
     Route("/api/mcp-config", router.set_mcp_config, methods=["POST"]),
+    Route("/api/mcp-config/secret-env", router.set_mcp_secret_env, methods=["POST"]),
     Route("/api/mcp-config/schema", router.get_mcp_config_schema, methods=["GET"]),
     Route("/api/mcp-status", router.get_mcp_status, methods=["GET"]),
     Route("/api/mcp-status/{title}/reload", router.reload_mcp, methods=["POST"]),
 ]
 _STANCES = {
     r"/api/manifest": AUTHED,
+    r"/api/manifest/preserved": AUTHED,
     r"/api/mcp-config": AUTHED,
+    r"/api/mcp-config/secret-env": AUTHED,
     r"/api/mcp-config/schema": AUTHED,
     r"/api/mcp-status": AUTHED,
     r"/api/mcp-status/[^/]+/reload": AUTHED,
@@ -34,9 +38,19 @@ def test_get_manifest_rejected_without_auth(monkeypatch):
     assert client.get("/api/manifest").status_code in (401, 403)
 
 
+def test_get_manifest_preserved_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.get("/api/manifest/preserved").status_code in (401, 403)
+
+
 def test_set_mcp_config_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.post("/api/mcp-config", json={}).status_code in (401, 403)
+
+
+def test_set_mcp_secret_env_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post("/api/mcp-config/secret-env", json={}).status_code in (401, 403)
 
 
 def test_mcp_config_schema_rejected_without_auth(monkeypatch):

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -38,6 +40,22 @@ ContextExtractor = Callable[[Request], Awaitable[dict[str, Any]]]
 
 # Path-template segment (``{name}`` / ``{name:path}``) → the argument name.
 _PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
+
+
+@dataclass(frozen=True)
+class OperationResponse:
+    """An operation result that carries a Starlette ``BackgroundTask`` to run AFTER the
+    response body flushes.
+
+    The profile-apply door returns this to arm its self-exit (``request_serve_graceful_exit``)
+    as a post-flush background task — never an inline ``create_task`` that could race the
+    body flush and sever the transport before the response ships. The HTTP adapter unwraps
+    it: ``payload`` is enveloped as usual and ``background`` is attached to the response.
+    Every other surface (the MCP projection) treats it as its ``payload`` alone — a
+    background self-exit is meaningless off the HTTP edge."""
+
+    payload: Any
+    background: BackgroundTask | None = None
 
 
 def _path_param_names(path: str) -> tuple[str, ...]:
@@ -134,12 +152,26 @@ def _build_handler(
             # opted into (e.g. a stable UI ``code``); empty for the common error.
             return JSONResponse({"error": exc.message, **exc.extra}, status_code=exc.status)
 
+        # An operation may return an ``OperationResponse`` to attach a post-flush
+        # BackgroundTask (the profile-apply self-exit); unwrap it so the payload is
+        # enveloped as usual and the task rides the response, firing only after the body
+        # ships. Every other operation returns a bare payload (background stays None).
+        background: BackgroundTask | None = None
+        if isinstance(result, OperationResponse):
+            background = result.background
+            result = result.payload
+
         # ``response_headers`` ride the SUCCESS response only (a caching directive
         # the route's read carries); an error response is uncached and unadorned.
         # ``success_status`` is the operation's own success code — 200 for the
         # common enveloped read/write, or an accepted-but-detached ``202`` (the
         # background tool-run submit door answers 202, not 200).
-        return JSONResponse({"data": _serialize(result)}, status_code=success_status, headers=response_headers)
+        return JSONResponse(
+            {"data": _serialize(result)},
+            status_code=success_status,
+            headers=response_headers,
+            background=background,
+        )
 
     handler.__name__ = op.name
     handler.__doc__ = op.func.__doc__

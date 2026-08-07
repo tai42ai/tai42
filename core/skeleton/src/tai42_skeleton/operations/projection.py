@@ -92,13 +92,21 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
 
     func = op.func
 
+    from tai42_skeleton.operations.adapter import OperationResponse
+
     async def projected(**kwargs: Any) -> object:
         if op.reload_gated and reload_gate.locked:
             raise ToolError(REJECT_MESSAGE)
         try:
-            return await func(**kwargs)
+            result = await func(**kwargs)
         except OperationError as exc:
             raise ToolError(exc.message) from exc
+        # An operation that returns an ``OperationResponse`` attaches an HTTP-edge
+        # post-flush background task (the profile-apply self-exit) that is meaningless
+        # over MCP — project its ``payload`` alone.
+        if isinstance(result, OperationResponse):
+            return result.payload
+        return result
 
     # ``eval_str=True`` resolves string annotations (every operation module carries
     # ``from __future__ import annotations``, so its annotations are strings) against

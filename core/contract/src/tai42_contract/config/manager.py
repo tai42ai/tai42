@@ -44,6 +44,17 @@ class ConfigManager(ABC):
         that are not present in *config*. Filters out empty values.
         """
 
+    @abstractmethod
+    def replace_env(self, config: dict[str, str]) -> None:
+        """Atomically replace the whole persisted env map.
+
+        ``config`` becomes the entire stored env: a key absent from ``config``
+        is DELETED — nothing from the old env survives uninvited (this is a
+        whole-map replace, NOT a merge). Empty values are filtered out, so a
+        key mapped to ``""`` is likewise absent from the result. Its
+        transactional / atomicity guarantee matches :meth:`write_env`.
+        """
+
     # -- Manifest configuration ----------------------------------------------
 
     @abstractmethod

@@ -73,6 +73,11 @@ class FakeConfigStore:
         self.env_writes.append(dict(config))
         self.env = {**self.env, **config}
 
+    def replace_env(self, config: dict[str, str]) -> None:
+        # Whole-map replace: a key absent from ``config`` is deleted; empties filtered.
+        self.env_writes.append(dict(config))
+        self.env = {key: value for key, value in config.items() if value != ""}
+
     def read_env(self) -> dict[str, str]:
         return dict(self.env)
 
@@ -424,6 +429,111 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
     # An env change touches no manifest document.
     assert result.document is None
     assert result.local == {"status": "ok", "env_keys": 0}
+
+
+# ---------------------------------------------------------------------------
+# apply_env_and_change (C9 combined env-write + manifest-mutate)
+# ---------------------------------------------------------------------------
+
+
+def _secret_marker_mutator(var: str) -> Callable[[dict[str, Any]], None]:
+    """A pure mutator that writes an ``!ENV ${var}`` marker into a fresh MCP entry —
+    the shape ``set_mcp_secret_env`` produces (re-runnable, k8s-409-replay-safe)."""
+
+    def mutator(document: dict[str, Any]) -> None:
+        document["mcp"] = [
+            {"title": "gh", "config": {"url": "https://x", "headers": {"Authorization": f"!ENV ${{{var}}}"}}}
+        ]
+
+    return mutator
+
+
+async def test_apply_env_and_change_writes_env_and_mutates_manifest_consistently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, _bus = _service(store)
+
+    result = await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+
+    # Env write + manifest mutate both landed, consistently.
+    assert store.env == {"EXISTING": "1", "GH": "the-secret"}
+    assert store.manifest["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GH}"
+    # The persisted manifest keeps the MARKER (no resolved secret bakes to disk).
+    assert store.persisted[-1]["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GH}"
+    assert admin.calls == 1
+    assert result.document is not None
+
+
+async def test_apply_env_and_change_manifest_failure_rolls_env_back_no_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_bus(monkeypatch)
+
+    class FailingMutateStore(FakeConfigStore):
+        def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            raise RuntimeError("manifest persist boom")
+
+    store = FailingMutateStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, _bus = _service(store)
+
+    with pytest.raises(RuntimeError, match="manifest persist boom"):
+        await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+
+    # The env write landed first, then the manifest persist failed → the env is ROLLED BACK
+    # to its pre-write snapshot, so no orphan secret lingers and nothing reloaded.
+    assert store.env == {"EXISTING": "1"}
+    assert "GH" not in store.env
+    assert store.persisted == []
+    assert admin.calls == 0
+
+
+async def test_apply_env_and_change_k8s_409_replay_writes_env_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The k8s optimistic-concurrency retry re-runs the manifest mutator (RetryingConfigStore
+    # discards a first attempt). The env write is OUTSIDE that replayed span, so it happens
+    # exactly once — env + manifest stay consistent on a 409 replay, no double env write.
+    _no_bus(monkeypatch)
+    store = RetryingConfigStore(manifest={"mcp": []}, env={})
+    service, _admin, _bus = _service(store)
+
+    await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+
+    assert store.env_writes == [{"GH": "the-secret"}]  # single env write despite the manifest replay
+    assert store.env == {"GH": "the-secret"}
+    assert store.manifest["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GH}"
+
+
+async def test_apply_env_and_change_refuses_x_band_env_key_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match="TAI_RUN_MODE"):
+        await service.apply_env_and_change({"GH": "the-secret", "TAI_RUN_MODE": "spoof"}, _secret_marker_mutator("GH"))
+
+    # X-band refused up front — neither store was touched.
+    assert store.env == {"EXISTING": "1"}
+    assert store.env_writes == []
+    assert store.persisted == []
+
+
+async def test_apply_env_and_change_refuses_dangling_marker_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The mutator writes an `!ENV ${MISSING}` marker but the env changes do not supply
+    # MISSING → dangling, refused before any write (naming the var).
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match="MISSING"):
+        await service.apply_env_and_change({"OTHER": "v"}, _secret_marker_mutator("MISSING"))
+
+    assert store.env_writes == []
+    assert store.persisted == []
 
 
 # ---------------------------------------------------------------------------

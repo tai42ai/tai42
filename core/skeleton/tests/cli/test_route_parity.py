@@ -36,6 +36,11 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("POST", "/api/auth/logout"),  # browser/session logout, not an operator function
     ("GET", "/api/auth/capabilities"),  # studio mint-capability gating (browser)
     ("GET", "/api/auth/roles"),  # studio users-admin role picker (browser)
+    # NB the settings-profiles surface is CLI-covered (``tai config profile ...``), so
+    # those routes are attributed via ``@covers`` and NOT allowlisted.
+    # manifest secret-env + preserved-read surface — Studio-only (no CLI command yet).
+    ("GET", "/api/manifest/preserved"),  # studio McpTab preserved-manifest editor read
+    ("POST", "/api/mcp-config/secret-env"),  # studio combined env+manifest secret write
 }
 
 

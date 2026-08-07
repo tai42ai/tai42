@@ -6,7 +6,10 @@ manager, the reload gate, and the worker bus (``instance.app.bus``). Two groups:
 
 Reads (each returns its shape directly; the adapter envelopes it):
 
-* ``get_manifest`` — the live manifest's MCP section + user tools.
+* ``get_manifest`` — the PRESERVED persisted manifest's MCP section + user tools
+  (``!ENV`` markers intact — the no-leak retighten; the resolved read is retired).
+* ``get_manifest_preserved`` — the same preserved ``{mcp, user_tools}`` view behind the
+  explicit ``/api/manifest/preserved`` door the Studio McpTab editor reads.
 * ``get_mcp_config_schema`` — the JSON Schema for one MCP-config entry.
 * ``get_mcp_status`` — the live MCP binding snapshot.
 * ``list_failed_mcps`` — the MCP servers skipped by the viability check; a query op
@@ -19,6 +22,8 @@ the shared :func:`~tai42_skeleton.operations._broadcast.broadcast` primitive. Ea
 report as a ``fanout`` summary:
 
 * ``set_mcp_config`` — replace the manifest's MCP section, persist, and reload the fleet.
+* ``set_mcp_secret_env`` — write a secret env value AND its ``!ENV ${KEY}`` manifest marker
+  together (the combined ``apply_env_and_change`` pipeline), persist, and reload the fleet.
 * ``reload_mcp`` — re-probe a single MCP server by title (all workers, or only
   ``targets``). An unknown title is a loud 404.
 * ``update_manifest`` — replace the WHOLE persisted manifest and reload the whole
@@ -34,6 +39,7 @@ The one response shape every ConfigService writer returns from an
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -42,10 +48,21 @@ from tai42_kit.utils.data import load_manifest
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.boundary import x_band_env_keys
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.manifest import TaiMCPConfig
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast
+from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
+
+# The env var the operator's "treat these env keys as secret" marks live under — a
+# comma-separated key-name list backing ``EnvSecretMarksSettings.secret_keys``. The
+# secret-env door adds its generated key to this mark so the editor masks it.
+_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
+
+# A generated secret-env key is a shell identifier; a hint is sanitized to this charset.
+_ENV_KEY_START = re.compile(r"[A-Za-z_]")
+_NON_ENV_KEY_CHAR = re.compile(r"[^A-Za-z0-9_]+")
 
 
 class McpConfigUpdate(BaseModel):
@@ -72,23 +89,67 @@ class ManifestReplace(BaseModel):
     manifest_text: str
 
 
+class SetMcpSecretEnv(BaseModel):
+    """The combined env+manifest secret op body (``POST /api/mcp-config/secret-env``).
+
+    ``value`` is the raw secret pasted by the operator; the server generates an env KEY
+    (shaped from ``key_hint``), writes ``value`` to the env store under that key (marked
+    secret), and writes an ``!ENV ${KEY}`` MARKER at ``manifest_pointer`` — so the secret
+    lives only in the env store and the manifest carries a placeholder. ``manifest_pointer``
+    is a slash-delimited, no-leading-slash path (e.g. ``mcp/0/config/headers/Authorization``)
+    whose HEAD segment MUST be ``mcp`` (the same mcp-only authority ``set_mcp_config`` holds).
+    The generated key is NOT returned."""
+
+    value: str
+    key_hint: str
+    manifest_pointer: str
+
+
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
 
 
-@operation(summary="Read the live registries' manifest MCP section and user tools", tags=["manifest"])
+def _preserved_manifest_view() -> dict:
+    """The PRESERVED persisted manifest's MCP section + user tools — ``!ENV`` markers
+    intact, so NO resolved secret value ever leaves on the wire. A never-written store
+    yields an empty view."""
+    try:
+        preserved = tai42_app.config.config_manager.read_manifest_preserved()
+    except FileNotFoundError:
+        preserved = {}
+    # user_tools may serialize from a set; JSON needs a stable list.
+    user_tools = sorted(preserved.get("user_tools", []))
+    return {"mcp": preserved.get("mcp", []), "user_tools": user_tools}
+
+
+@operation(summary="Read the PRESERVED manifest MCP section and user tools", tags=["manifest"])
 async def get_manifest() -> dict:
-    """Return the MCP section and user tools of the LIVE in-process manifest — what the
-    running registries currently serve, as re-derived at the last reload. With every
-    mutation crossing the ConfigService pipeline (persist → reload → broadcast), the
-    live view tracks the persisted store through all supported paths; asserting the
-    live-vs-persisted agreement is deferred to a later plan.
+    """Return the MCP section and user tools of the PRESERVED persisted manifest —
+    ``!ENV ${KEY}`` markers kept intact, so a secret leaf is its placeholder marker,
+    NEVER the plaintext value.
+
+    RETIGHTEN (PLAN_3 §D / QUESTIONS decision): this door previously served the RESOLVED
+    in-process ``live_manifest`` (``tai42_app.admin.live_manifest``), which materialized
+    every ``!ENV`` marker and leaked plaintext secrets onto the wire. It is FLIPPED to the
+    preserved read (the no-leak posture PLAN_6 e2e asserts). The resolved read is RETIRED
+    outright — a clean break with no compat path (R2) and NO secret-fenced resolved
+    surface, because no server-side consumer needs the resolved view here: McpTab already
+    reads ``/api/manifest/preserved`` and ManifestTab now renders markers (PLAN_5's
+    ManifestTab expected the resolved view — that Studio adjustment is PLAN_5/PLAN_6 scope,
+    the intended clean-break outcome, out of this wave).
     """
-    live = tai42_app.admin.live_manifest
-    # user_tools serializes from a set; JSON needs a stable list.
-    user_tools = sorted(live.get("user_tools", []))
-    return {"mcp": live.get("mcp", []), "user_tools": user_tools}
+    return _preserved_manifest_view()
+
+
+@operation(summary="Read the PRESERVED manifest (markers intact) MCP section and user tools", tags=["manifest"])
+async def get_manifest_preserved() -> dict:
+    """Return the PRESERVED persisted manifest's MCP section + user tools with every
+    ``!ENV ${KEY}`` marker intact (no secret is resolved) — the source the Studio McpTab
+    config editor reads so it can round-trip markers instead of baking a resolved secret.
+    Same ``{mcp, user_tools}`` view as ``get_manifest`` (both serve the preserved read
+    post-retighten); the explicit ``/preserved`` door is the PLAN_5-pinned contract."""
+    return _preserved_manifest_view()
 
 
 @operation(summary="Get the JSON schema for one MCP-config entry", tags=["manifest"])
@@ -154,6 +215,137 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     except ValueError as exc:
         raise BadRequestError(f"invalid mcp config: {exc}") from exc
     return apply_response(result)
+
+
+def _parse_manifest_pointer(pointer: str) -> list[str]:
+    """Split a slash-delimited, no-leading-slash manifest pointer into segments and
+    enforce the mcp-only authority: the HEAD segment MUST be ``mcp`` (a loud 400 like
+    ``set_mcp_config``'s), and the pointer must address a leaf UNDER ``mcp`` (at least
+    one segment past the head). A leading slash, an empty segment, or a wrong head is a
+    loud 400."""
+    segments = pointer.split("/")
+    if not segments or segments[0] != "mcp":
+        raise BadRequestError(
+            f"manifest_pointer head segment must be 'mcp' (slash-delimited, no leading slash); got {pointer!r}"
+        )
+    if len(segments) < 2 or any(seg == "" for seg in segments):
+        raise BadRequestError(
+            f"manifest_pointer must address a leaf under 'mcp' with no empty segments; got {pointer!r}"
+        )
+    return segments
+
+
+def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
+    """Derive a valid, unique env KEY from ``key_hint`` (a key_hint-based name).
+
+    The hint is uppercased and reduced to the shell-identifier charset; an empty or
+    non-identifier result falls back to ``SECRET``. The name is then made unique against
+    ``taken`` (stored env keys and the X band) by appending ``_2``, ``_3``, … — so a
+    generated key never clobbers an existing key nor collides with a deployment X-band
+    name. The value is NEVER derived from the secret and is never returned to the caller."""
+    base = _NON_ENV_KEY_CHAR.sub("_", key_hint).strip("_").upper()
+    if not base or not _ENV_KEY_START.match(base):
+        base = f"SECRET_{base}".rstrip("_") if base else "SECRET"
+    candidate = base
+    suffix = 2
+    while candidate in taken:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _set_marker_at_pointer(document: dict[str, Any], segments: list[str], marker: str) -> None:
+    """Set ``document`` at the location named by ``segments`` (head ``mcp``) to ``marker``.
+
+    A numeric segment indexes a list (in range, else a loud ``ValueError``); a non-numeric
+    segment keys a mapping — a missing mapping key is created (as a list when the next
+    segment is numeric, else a mapping) so a NEW leaf under an existing MCP entry can be
+    written. Pure / re-runnable: it only edits ``document`` (the k8s 409-replay contract).
+    A path that traverses a non-container, or a numeric segment out of range, is a
+    ``ValueError`` the door maps to a 400."""
+    node: Any = document
+    for depth, seg in enumerate(segments[:-1]):
+        nxt = segments[depth + 1]
+        if isinstance(node, list):
+            node = node[_pointer_index(node, seg, segments)]
+        elif isinstance(node, dict):
+            if seg not in node:
+                node[seg] = [] if nxt.isdigit() else {}
+            node = node[seg]
+        else:
+            raise ValueError(f"manifest_pointer traverses a non-container at {seg!r} in {'/'.join(segments)!r}")
+    last = segments[-1]
+    if isinstance(node, list):
+        node[_pointer_index(node, last, segments)] = marker
+    elif isinstance(node, dict):
+        node[last] = marker
+    else:
+        raise ValueError(f"manifest_pointer traverses a non-container at {last!r} in {'/'.join(segments)!r}")
+
+
+def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
+    """A numeric list-index segment resolved against ``node``; a non-numeric or
+    out-of-range segment is a loud ``ValueError`` (→ 400)."""
+    if not segment.isdigit():
+        raise ValueError(f"manifest_pointer segment {segment!r} must be a list index in {'/'.join(segments)!r}")
+    index = int(segment)
+    if index >= len(node):
+        raise ValueError(f"manifest_pointer list index {index} out of range in {'/'.join(segments)!r}")
+    return index
+
+
+@operation(
+    summary="Write a secret env value and its manifest !ENV marker together, then reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError],
+    request_model=SetMcpSecretEnv,
+)
+async def set_mcp_secret_env(value: str, key_hint: str, manifest_pointer: str) -> dict:
+    """Store a pasted secret as an env value and reference it from the manifest by a marker.
+
+    Generates an env KEY (shaped from ``key_hint``), writes the secret ``value`` to the env
+    store under that key AND marks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and
+    writes an ``!ENV ${KEY}`` MARKER at ``manifest_pointer`` — all through the combined
+    ``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate
+    stay consistent (a manifest-persist failure rolls the env back). The pointer's HEAD
+    segment MUST be ``mcp`` (loud 400 otherwise). The response is the ``reloadConfigResult``
+    shape; the generated key is NEVER returned. A dangling ``!ENV`` / X-band refusal surfaces
+    as a loud 400 naming the key (the shared boundary validator, same as ``POST
+    /api/mcp-config``)."""
+    segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
+
+    service = ConfigService.from_app()
+    stored = _stored_env_for_secret()
+    # The generated key must not clobber a stored key nor collide with an X-band name.
+    taken = frozenset(stored) | x_band_env_keys()
+    key = _derive_secret_env_key(key_hint, taken)
+
+    # Mark the new key secret: current marks plus {key}, order-stable, comma-joined.
+    marks = list(dict.fromkeys([*env_secret_marks_settings().secret_keys, key]))
+    changes = {key: value, _SECRET_MARKS_VAR: ",".join(marks)}
+    marker = f"!ENV ${{{key}}}"
+
+    def mutator(document: dict[str, Any]) -> None:
+        _set_marker_at_pointer(document, segments, marker)
+
+    try:
+        result = await service.apply_env_and_change(changes, mutator)
+    except BackendNeedsBusError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+    return apply_response(result)
+
+
+def _stored_env_for_secret() -> dict[str, str]:
+    """The stored env map (empty when never written) — the collision set the generated
+    secret key is made unique against."""
+    try:
+        return tai42_app.config.config_manager.read_env()
+    except FileNotFoundError:
+        return {}
 
 
 @operation(

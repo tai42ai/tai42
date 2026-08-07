@@ -58,15 +58,24 @@ from pyaml_env import parse_config
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app.boot_rules import check_backend_needs_bus
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerBus
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
+from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
+from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.boundary import (
+    refuse_dangling_env_markers,
+    refuse_x_band,
+    reload_class_by_env_var,
+    x_band_env_keys,
+)
+from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, CapabilityReport, capability_report
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, fleet_fanout, log_non_convergence
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Iterator
 
     from ruamel.yaml.comments import CommentedMap
 
@@ -81,6 +90,8 @@ class _ManifestStore(Protocol):
     def replace_manifest(self, document: dict[str, Any]) -> dict[str, Any]: ...
 
     def write_env(self, config: dict[str, str]) -> None: ...
+
+    def replace_env(self, config: dict[str, str]) -> None: ...
 
     def read_env(self) -> dict[str, str]: ...
 
@@ -127,6 +138,29 @@ class ApplyResult:
         ``fanout`` (local-only / fleet / unreachable). A writer that returns a bare
         result (not the ``apply_response`` merge) embeds this value directly."""
         return fleet_fanout(self.fleet)
+
+
+@dataclass(frozen=True)
+class ProfileApplyOutcome:
+    """The structured outcome of one profile-APPLY pipeline run — the raw material the
+    operations layer folds into the dedicated ``profileApplyResponse``.
+
+    ``hot`` is the hot-class diff key NAMES (names only — never values). ``recycle`` is
+    the fleet recycle report (``None`` when the diff carried no recycle-class key, so no
+    recycle rolled). ``origin_kinds`` maps each live origin name to its worker kind (the
+    extra-census seam that supplies ``recycle[].kind``). ``self_origin`` is the applying
+    worker's own origin. ``serve_affecting`` is whether the applier must self-exit (arm
+    the post-response graceful exit). ``fleet`` is the reload broadcast report;
+    ``census`` is the pre-apply fleet snapshot the swapped-in epoch was built against.
+    """
+
+    hot: list[str]
+    recycle: RecycleReport | None
+    origin_kinds: dict[str, str]
+    self_origin: str
+    serve_affecting: bool
+    fleet: FleetResult
+    census: frozenset[str]
 
 
 class ConfigService:
@@ -200,30 +234,259 @@ class ConfigService:
         self._config_manager.write_env(changes)
         return await self._reload_and_broadcast(document=None)
 
+    async def apply_env_and_change(
+        self, changes: dict[str, str], mutator: Callable[[dict[str, Any]], None]
+    ) -> ApplyResult:
+        """Combined env-write + manifest-mutate as ONE consistent unit (C9).
+
+        The ``set_mcp_secret_env`` door writes a secret VALUE to the env store and a
+        matching ``!ENV ${KEY}`` MARKER into the manifest; the two must stay consistent.
+        VALIDATE runs on the MUTATED manifest resolved against the POST-change effective
+        env (so the marker the mutator writes resolves against the value the env write
+        supplies, an X-band env key in the payload is refused, and no marker is left
+        dangling), BEFORE anything persists.
+
+        Ordering keeps env + manifest consistent:
+
+        1. Build the candidate mutated manifest and validate it against the effective
+           env — a failure raises before any write.
+        2. Snapshot the stored env, then write the env FIRST. Env-first (not
+           manifest-first) guarantees there is never a persisted ``!ENV`` marker
+           referencing an env key that is not yet stored (a marker that would silently
+           resolve to ``"N/A"``); the reverse ordering would.
+        3. Persist the manifest with the PURE ``mutator`` — it only edits the passed
+           document, so the k8s optimistic-concurrency REPLAY (re-read + re-run on a
+           409) is side-effect-free and never double-writes the env, which is not
+           inside the replayed span. A manifest-persist failure ROLLS BACK the env to
+           its pre-write snapshot (no orphan secret lingers) and re-raises — nothing
+           landed.
+        4. Locally reload and broadcast to the whole fleet.
+        """
+        # STEP 1 — validate the combined change against the post-change effective env
+        # (mutated manifest, X-band payload, dangling markers, backend-needs-bus). The
+        # candidate is built OUTSIDE the store so the effective-env-dependent checks run
+        # BEFORE anything persists (the k8s transaction cannot resolve markers against the
+        # not-yet-live env, so validation cannot move inside it).
+        candidate = copy.deepcopy(self._read_preserved_manifest())
+        mutator(candidate)
+        self._validate_env_and_manifest(changes, candidate)
+
+        # STEP 2 — env-write-FIRST, snapshotting the prior stored env for rollback.
+        env_snapshot = self._read_stored_env()
+        self._config_manager.write_env(changes)
+
+        # STEP 3 — persist the manifest with a guarded, PURE, re-runnable mutator: it seals
+        # the mutated document against its pre-mutation snapshot before persist (parity with
+        # ``apply_change`` — a mutator can never bake a resolved secret to disk), and it edits
+        # only the passed document, so the k8s optimistic-concurrency REPLAY (re-read + re-run
+        # on a 409) is side-effect-free and never double-writes the env, which is outside the
+        # replayed span. A failure rolls the env back to its snapshot so no orphan secret is
+        # left behind, then re-raises — env + manifest are all-or-nothing.
+        def guarded(document: dict[str, Any]) -> None:
+            current = copy.deepcopy(document)
+            mutator(document)
+            self._seal_secrets(document, current)
+
+        try:
+            persisted = self._config_manager.mutate_manifest(guarded)
+        except Exception:
+            self._config_manager.replace_env(env_snapshot)
+            raise
+
+        return await self._reload_and_broadcast(document=persisted)
+
+    # -- Profile apply (C5) ----------------------------------------------------
+
+    async def apply_replace_env(
+        self,
+        profile_env: dict[str, str],
+        *,
+        driven: bool,
+        save_previous: Callable[[dict[str, str]], Awaitable[None]],
+        build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
+        orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+    ) -> ProfileApplyOutcome:
+        """Apply a settings profile: the C5 env-write-LAST reload pipeline.
+
+        Ordered so a failed build leaves the STORE untouched and the old surface serving
+        (``os.environ`` restored exactly by :func:`build_and_swap_epoch`):
+
+        1. ``_validate_replace`` (X-band payload refusal + dangling ``!ENV`` + backend-
+           needs-bus); diff the proposed env against the stored env; refuse a recycle-
+           class diff the deployment shape cannot carry; capture the pre-apply census.
+        2. Snapshot the current stored env as the reserved ``@previous`` version.
+        3. ``build_and_swap_epoch(profile_env, drain_tolerate_driver=driven)`` holding the
+           reload gate — ``driven`` excuses THIS door's own still-admitted request from
+           the retire drain (the PLAN_2 self-deadlock fix); a build failure re-raises and
+           this method returns nothing persisted.
+        4. ``replace_env`` — the LAST env write, reached only after a successful build.
+        5. Broadcast the reload to the fleet, then roll a recycle across it for the
+           recycle-class diff (the applier's own recycle is a deferred self-exit).
+
+        ``build_and_swap`` / ``orchestrate`` default to the running primitives and are
+        injectable so the ordering / drain / recycle contract is exercised in isolation.
+        """
+        # STEP 1 — validate the whole-env replace (payload-scoped X-band refusal, dangling
+        # !ENV, backend-needs-bus). A failure raises before anything is snapshotted/built.
+        self._validate_replace(profile_env)
+
+        # STEP 2 — diff the proposed env vs the current stored env; classify each diff key
+        # by its live-registry reload_class (names only — never values).
+        stored = self._read_stored_env()
+        diff_keys = _replace_diff_keys(stored, profile_env)
+        reload_classes = reload_class_by_env_var()
+        hot = sorted(key for key in diff_keys if reload_classes.get(key, "hot") == "hot")
+        recycle_diff_keys = sorted(key for key in diff_keys if reload_classes.get(key) == "recycle")
+
+        # STEP 1b — refuse a recycle-class diff this deployment shape cannot carry, upfront
+        # and naming the key, so an unappliable profile never reaches the build.
+        report = capability_report()
+        _refuse_unrecyclable(diff_keys, recycle_diff_keys, report)
+
+        # "Serve-affecting" is UNDEFINED in code (design seam 2): the CONSERVATIVE default
+        # is that ANY recycle-class diff on a recycle-supported shape affects the serve
+        # surface, so the applier self-exits. This over-fires on a purely backend-only diff
+        # (an unnecessary serve respawn) but always converges; PLAN_4 firms it up with a
+        # per-owning-group serve-vs-backend classification. (Bare shape was refused above,
+        # so a non-empty recycle diff here is always on a supported shape.)
+        serve_affecting = bool(recycle_diff_keys)
+
+        # STEP 1c — pre-apply census, taken from the pipeline's own bus (the process
+        # ``WorkerBus`` in production — the same object :func:`capture_census_snapshot`
+        # reads). ONE snapshot supplies both the pre-apply census the swapped-in epoch is
+        # built against AND the origin->kind map the response's ``recycle[].kind`` needs
+        # (design seam 1: neither the recycle report nor the name-only census carries kind).
+        bus = cast("WorkerBus", self._bus)
+        origins = await bus.census()
+        census = frozenset(origin.origin for origin in origins)
+        origin_kinds = {origin.origin: origin.kind.value for origin in origins}
+        self_origin = bus.origin.origin
+
+        # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
+        # BEFORE the swap. A later failed build leaves it harmlessly reflecting the
+        # unchanged live state.
+        await save_previous(stored)
+
+        # STEP 3 — build a fresh epoch under the proposed env and swap it in atomically.
+        # HOLD the reload gate across the swap: the op is reload_gated (which only rejects
+        # a CONCURRENT reload at the route edge), but a direct build_and_swap needs the
+        # serving-loop-owned lock HELD. ``drain_tolerate_driver=driven`` excuses this
+        # door's own admitted request from the retire's in-flight drain (PLAN_2 fix); a
+        # build failure re-raises here (env restored, store untouched) — STEP 4 never runs.
+        async with reload_gate.lock:
+            new_epoch = await build_and_swap(profile_env, drain_tolerate_driver=driven)
+        # The pre-apply census rides the new generation for the fanout diff.
+        new_epoch.census = census
+
+        # STEP 4 — env-write-LAST: persist the proposed env as the WHOLE stored map only
+        # after the build succeeded. A failed build never reaches this line.
+        self._config_manager.replace_env(profile_env)
+
+        # STEP 5 — broadcast the reload to the fleet (each sibling re-reads the persisted
+        # store), then roll a recycle for the recycle-class diff. The applier's own recycle
+        # is deferred to the post-response self-exit, reported as the applier self-entry.
+        fleet = await self._broadcast_profile_reload()
+        recycle_report: RecycleReport | None = None
+        if recycle_diff_keys:
+            recycle_report = await orchestrate(
+                bus,
+                excluded_origin=self_origin,
+                target_kinds=CENSUS_TARGET_KINDS,
+                applier_self_deferred=serve_affecting,
+                step_timeout=_recycle_step_timeout(),
+            )
+
+        return ProfileApplyOutcome(
+            hot=hot,
+            recycle=recycle_report,
+            origin_kinds=origin_kinds,
+            self_origin=self_origin,
+            serve_affecting=serve_affecting,
+            fleet=fleet,
+            census=census,
+        )
+
+    async def _broadcast_profile_reload(self) -> FleetResult:
+        """Broadcast the profile apply's reload to the whole fleet AFTER the local swap
+        already landed (the swap IS this worker's local apply, so no second local reload
+        runs here). Mirrors the post-persist contract: a raw broadcast failure surfaces as
+        a :class:`FleetBroadcastError` carrying the honest bus-unreachable report, never a
+        raw exception, so the committed env change is never hidden behind a broadcast
+        fault."""
+        local = LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "ok"})
+        try:
+            report = await self._bus.publish({"op": "reload_config"}, None, local)
+        except Exception as broadcast_error:
+            error = f"{type(broadcast_error).__name__}: {broadcast_error}"
+            report = FleetResult(op="reload_config", reachable=False, error=error)
+            raise FleetBroadcastError("reload_config", report, broadcast_error) from broadcast_error
+        log_non_convergence(report)
+        return report
+
     # -- Validation ------------------------------------------------------------
 
     def _validate_manifest(self, document: Mapping[str, Any]) -> None:
         """Validate the resolved projection of a manifest change: the pydantic
-        ``Manifest`` schema plus the backend-needs-bus invariant. The env is unchanged
+        ``Manifest`` schema plus the backend-needs-bus invariant, and refuse any
+        ``!ENV`` marker left dangling against the current env. The env is unchanged
         by a manifest mutation, so markers resolve against the current process env and
         the bus configuration is the current one."""
         manifest = self._validated_projection(document)
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_settings().enabled)
+        refuse_dangling_env_markers(document, dict(os.environ))
 
     def _validate_env(self, changes: dict[str, str]) -> None:
-        """Validate the effective config an env change produces: resolve the persisted
-        manifest's ``!ENV`` markers against the post-change env (so a marker that
-        materializes a backend participates) and evaluate the backend-needs-bus
-        invariant against the post-change bus configuration (so removing the bus while
-        a backend remains is rejected too)."""
+        """Validate the effective config an env change produces: refuse an X-band key
+        in the change PAYLOAD, resolve the persisted manifest's ``!ENV`` markers
+        against the post-change env (so a marker that materializes a backend
+        participates, and a dropped reference is caught as dangling), and evaluate the
+        backend-needs-bus invariant against the post-change bus configuration (so
+        removing the bus while a backend remains is rejected too)."""
+        refuse_x_band(changes.keys())
         effective = self._effective_env(changes)
         with _environ(effective):
-            manifest = self._validated_projection(self._read_preserved_manifest())
+            preserved = self._read_preserved_manifest()
+            refuse_dangling_env_markers(preserved, effective)
+            manifest = self._validated_projection(preserved)
             # Resolve the bus through its settings against the effective env (a fresh
             # read, NOT the cached singleton) so a bus configured only via
             # ``TAI_DEFAULT_REDIS_URL`` — not ``TAI_BUS_REDIS_URL`` — is still seen as
             # enabled; a raw ``TAI_BUS_REDIS_URL`` read would falsely reject every
             # Studio env edit on a default-only deployment.
+            bus_configured = BusSettings().enabled
+        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+
+    def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> None:
+        """Validate a combined env-write + manifest-mutate (C9) before it persists.
+
+        Refuses an X-band key in the env change PAYLOAD, resolves the MUTATED manifest's
+        ``!ENV`` markers against the post-change effective env (so the marker the mutator
+        just wrote resolves against the value the env write supplies, and a dropped
+        reference is caught as dangling), validates the resolved projection, and
+        evaluates backend-needs-bus against the post-change bus configuration."""
+        refuse_x_band(changes.keys())
+        effective = self._effective_env(changes)
+        with _environ(effective):
+            refuse_dangling_env_markers(document, effective)
+            manifest = self._validated_projection(document)
+            bus_configured = BusSettings().enabled
+        check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
+
+    def _validate_replace(self, profile_env: dict[str, str]) -> None:
+        """Validate a whole-env REPLACE (a settings-profile apply) before it persists —
+        the C5 apply's validate-before-persist entry, mirroring :meth:`apply_replace`.
+
+        Refuses any X-band key in the profile's DECLARED payload (NEVER the post-carry
+        effective env — the applier legitimately CARRIES the whole X band across
+        ``replace_env``), refuses a change that leaves a manifest ``!ENV`` marker
+        dangling against the replace-effective env, and evaluates the backend-needs-bus
+        invariant against that same env."""
+        refuse_x_band(profile_env.keys())
+        effective = self._effective_replace_env(profile_env)
+        with _environ(effective):
+            preserved = self._read_preserved_manifest()
+            refuse_dangling_env_markers(preserved, effective)
+            manifest = self._validated_projection(preserved)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
 
@@ -277,6 +540,22 @@ class ConfigService:
         merged = {key: value for key, value in {**stored, **changes}.items() if value != ""}
         effective = {key: value for key, value in os.environ.items() if key not in removed}
         effective.update(merged)
+        return effective
+
+    def _effective_replace_env(self, profile_env: dict[str, str]) -> dict[str, str]:
+        """The effective env a profile REPLACE produces, as the reloaded process would
+        see it.
+
+        The profile env becomes the WHOLE stored env — keys the profile omits are
+        DELETED — while the deployment X band is carried untouched from the current
+        process env (X keys never enter a profile). So the old stored keys drop out,
+        the profile keys overlay, and the carried X band overlays last; system env the
+        store never owned is left in place."""
+        stored = self._read_stored_env()
+        carried = {key: value for key, value in os.environ.items() if key in x_band_env_keys()}
+        effective = {key: value for key, value in os.environ.items() if key not in stored}
+        effective.update(profile_env)
+        effective.update(carried)
         return effective
 
     def _read_stored_env(self) -> dict[str, str]:
@@ -346,6 +625,46 @@ class ConfigService:
             raise FleetBroadcastError(report.op, report, local_failure) from local_failure
         # local_result is set on the success path (no local_failure).
         return ApplyResult(fleet=report, local=cast("dict[str, Any]", local_result), document=document)
+
+
+def _replace_diff_keys(stored: Mapping[str, str], proposed: Mapping[str, str]) -> set[str]:
+    """The env key NAMES a whole-env replace changes: added, removed, or value-changed.
+    Names only — the caller classifies them; a diff never carries a value off this seam."""
+    added = {key for key in proposed if key not in stored}
+    removed = {key for key in stored if key not in proposed}
+    changed = {key for key in proposed if key in stored and stored[key] != proposed[key]}
+    return added | removed | changed
+
+
+def _refuse_unrecyclable(diff_keys: set[str], recycle_diff_keys: list[str], report: CapabilityReport) -> None:
+    """Refuse a profile apply whose diff cannot be carried on this deployment shape.
+
+    A diff key the shape PINS (``refused_keys`` — a pod/container respawn re-injects it,
+    or it reaches the worker bus itself) is refused upfront naming the key: a recycle can
+    never make it stick. A recycle-class diff on a BARE (unsupervised) deployment is
+    refused wholesale — no supervisor exists to respawn a worker under the new env. Both
+    are loud ``ValueError``s the operations layer maps to a 400. Names only."""
+    pinned = sorted(diff_keys & set(report.refused_keys))
+    if pinned:
+        raise ValueError(
+            f"Refusing to apply this settings profile on a {report.shape.value!r} deployment: it changes "
+            f"deployment-pinned key(s) a recycle cannot carry (a pod/container respawn re-injects them, or "
+            f"they reach the worker bus itself): {', '.join(pinned)}. Change them in the deployment manifest."
+        )
+    if recycle_diff_keys and not report.recycle_supported:
+        raise ValueError(
+            "Refusing to apply this settings profile on a bare (unsupervised) deployment: it changes "
+            f"recycle-class key(s) that require a worker recycle, and no supervisor is present to respawn "
+            f"workers under the new env: {', '.join(recycle_diff_keys)}. Run under a supervised deployment."
+        )
+
+
+def _recycle_step_timeout() -> float:
+    """The per-step recycle budget — the same drain budget a retire uses, so a recycled
+    worker's replacement gets the shutdown-drain window to boot and rejoin the census."""
+    from tai42_skeleton.routers.tool_runs_settings import tool_runs_settings
+
+    return tool_runs_settings().shutdown_drain_seconds
 
 
 @contextmanager

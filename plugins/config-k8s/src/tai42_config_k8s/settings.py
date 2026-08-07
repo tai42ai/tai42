@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import ClassVar
 
 from pydantic import model_validator
 from pydantic_settings import SettingsConfigDict
-from tai42_kit.settings import TaiBaseSettings, settings_cache
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ class K8sConfigSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TAI_K8S_",
     )
+
+    # Provider-selection seam: the Secret/ConfigMap names and keys locate where a
+    # profile's env/manifest live — none can be carried by a profile, so the whole
+    # ``TAI_K8S_*`` group is excluded from the reload boundary (the X-band validator
+    # refuses any profile that tries to carry one).
+    reload_class: ClassVar[ReloadClass] = "excluded"
 
     # Empty default means "not chosen"; the validator resolves it to a non-empty value.
     namespace: str = ""

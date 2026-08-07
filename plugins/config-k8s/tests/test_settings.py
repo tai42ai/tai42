@@ -8,6 +8,7 @@ and the tai42-kit settings cache (same instance until cleared).
 from __future__ import annotations
 
 import pytest
+from tai42_kit.settings import registered_settings
 
 from tai42_config_k8s import settings as settings_mod
 from tai42_config_k8s.settings import K8sConfigSettings, k8s_config_settings
@@ -121,3 +122,24 @@ def test_settings_cache_clear_rebuilds(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     k8s_config_settings.cache_clear()
     assert k8s_config_settings().secret_name == "second"
+
+
+def test_k8s_group_registers_as_excluded_from_the_reload_boundary() -> None:
+    """Every ``TAI_K8S_*`` field is a registry ``excluded`` field, so the shared
+    boundary validator folds the whole group into its X-band refusal.
+
+    A profile can never carry the Secret / ConfigMap names or keys: they LOCATE
+    where a profile's env / manifest live. This pins the class-level
+    ``reload_class = "excluded"`` declaration — dropping it would silently let a
+    profile carry ``TAI_K8S_*`` (the boundary validator sources half (a) from the
+    registry, so an unmarked group vanishes from the X band)."""
+    classes = {info.name: info for info in registered_settings()}
+    assert "K8sConfigSettings" in classes
+    excluded = {field.env_var for field in classes["K8sConfigSettings"].fields if field.reload_class == "excluded"}
+    assert {
+        "TAI_K8S_NAMESPACE",
+        "TAI_K8S_SECRET_NAME",
+        "TAI_K8S_CONFIGMAP_NAME",
+        "TAI_K8S_MANIFEST_KEY",
+        "TAI_K8S_DEFAULTS_MANIFEST_KEY",
+    } <= excluded

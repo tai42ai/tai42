@@ -220,6 +220,45 @@ class FileConfigManager(ConfigManager):
                 logger.error("Failed to write env file: %s", path, exc_info=True)
                 raise
 
+    def replace_env(self, config: dict[str, str]) -> None:
+        """Replace the whole ``.env`` file with *config* (whole-map, NOT a merge).
+
+        Identical to :meth:`write_env` — same charset validation, round-trip probe,
+        env-file format, sidecar lock, and atomic write — except *config* becomes the
+        ENTIRE stored env: a key absent from *config* is DELETED (no existing key is
+        preserved), so nothing survives uninvited. Empty / ``None`` values are still
+        dropped.
+        """
+        for key in config:
+            if not _ENV_KEY_RE.fullmatch(key):
+                raise ValueError(f"invalid env key {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
+        path = self._env_path
+        # The whole write runs under the env sidecar lock so a concurrent worker's
+        # write cannot interleave with this replace; unlike write_env there is no
+        # read-of-existing to serialize against, but the atomic write still must not
+        # race another writer's replace.
+        with self._file_lock(path):
+            written = {k: v for k, v in config.items() if v is not None and v != ""}
+            lines = [f"{k}={_dotenv_serialize_value(v)}" for k, v in written.items()]
+            content = "\n".join(lines) + ("\n" if lines else "")
+            # Same trailing-sentinel round-trip probe as write_env: a value the parser
+            # cannot round-trip would silently drop that key and every key after it on
+            # the next reload, so it is caught here rather than corrupting the store.
+            probe_key = "_TAI_ENV_ROUNDTRIP_PROBE"
+            while probe_key in written:
+                probe_key += "_"
+            probe = f'{content}{probe_key}="0"\n'
+            reparsed = dotenv_values(stream=io.StringIO(probe), interpolate=False)
+            corrupted = [key for key, value in written.items() if reparsed.get(key) != value]
+            if corrupted:
+                names = ", ".join(repr(key) for key in corrupted)
+                raise ValueError(f"env value for {names} cannot be round-tripped through the .env format")
+            try:
+                self._atomic_write(path, content)
+            except OSError:
+                logger.error("Failed to write env file: %s", path, exc_info=True)
+                raise
+
     # -- Manifest configuration ----------------------------------------------
 
     # Two YAML views of the manifest: the runtime expands ``!ENV`` tags to their

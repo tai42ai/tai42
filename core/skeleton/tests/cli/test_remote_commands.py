@@ -1108,3 +1108,195 @@ def test_resources_get_render_uses_write_post(monkeypatch: pytest.MonkeyPatch) -
     result = run_cli(monkeypatch, handler, ["resources", "get", "greet.j2", "--kw", "name=Ada"], json_output=True)
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == "Hello Ada"
+
+
+# -- settings profiles --------------------------------------------------------
+
+
+def test_config_profile_list_renders_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/config/profiles"
+        return data_response([{"name": "staging", "description": "Staging band"}])
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "list"])
+    assert result.exit_code == 0, result.output
+    assert "staging" in result.output
+
+
+def test_config_profile_show_reads_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/config/profiles/staging"
+        assert not request.content
+        return data_response({"description": "d", "env": {"LOG_LEVEL": "debug"}, "secret_keys": []})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "show", "staging"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["env"] == {"LOG_LEVEL": "debug"}
+
+
+def test_config_profile_set_puts_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/api/config/profiles/staging"
+        assert json.loads(request.content) == {
+            "description": "Staging band",
+            "env": {"LOG_LEVEL": "debug", "API_KEY": "xyz"},
+            "secret_keys": ["API_KEY"],
+        }
+        return data_response({"ok": True, "version": 1})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "config",
+            "profile",
+            "set",
+            "staging",
+            "LOG_LEVEL=debug",
+            "API_KEY=xyz",
+            "--description",
+            "Staging band",
+            "--secret-key",
+            "API_KEY",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_config_profile_set_empty_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A profile may carry no env keys (description-only); the body still sends {}.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"description": "", "env": {}, "secret_keys": []}
+        return data_response({"ok": True, "version": 1})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "set", "staging"])
+    assert result.exit_code == 0, result.output
+
+
+def test_config_profile_set_rejects_reserved_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "set", "@previous", "X=1"])
+    assert result.exit_code != 0
+    assert "reserved" in result.output
+
+
+def test_config_profile_set_rejects_malformed_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "set", "staging", "NOTANASSIGNMENT"])
+    assert result.exit_code != 0
+
+
+def test_config_profile_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/config/profiles/staging"
+        return data_response({"ok": True})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "delete", "staging"])
+    assert result.exit_code == 0, result.output
+
+
+def test_config_profile_diff_posts_no_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/config/profiles/staging/diff"
+        assert not request.content
+        return data_response({"added": ["A"], "removed": [], "changed": [], "recycle_keys": [], "refused_keys": []})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "diff", "staging"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["added"] == ["A"]
+
+
+def test_config_profile_apply_posts_no_body_prints_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/config/profiles/staging/apply"
+        assert not request.content
+        return data_response(
+            {
+                "hot": ["LOG_LEVEL"],
+                "recycle": [{"origin": "self", "kind": "serve", "status": "self-deferred"}],
+                "refused": [],
+                "fanout": {},
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "apply", "staging"], json_output=True)
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["hot"] == ["LOG_LEVEL"]
+    assert body["refused"] == []
+
+
+def test_config_profile_versions_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/config/profiles/staging/versions"
+        return data_response([{"version": 1, "tags": [], "created_at": "t", "is_current": True}])
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "versions", "staging"])
+    assert result.exit_code == 0, result.output
+    assert "1" in result.output
+
+
+def test_config_profile_versions_show_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/config/profiles/staging/versions/3"
+        return data_response({"version": 3, "tags": [], "created_at": "t", "is_current": False, "body": {"env": {}}})
+
+    result = run_cli(
+        monkeypatch, handler, ["config", "profile", "versions", "staging", "--version", "3"], json_output=True
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["version"] == 3
+
+
+def test_config_profile_rollback_posts_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/config/profiles/staging/rollback"
+        assert json.loads(request.content) == {"version": 2}
+        return data_response({"ok": True, "version": 2})
+
+    result = run_cli(monkeypatch, handler, ["config", "profile", "rollback", "staging", "2"])
+    assert result.exit_code == 0, result.output
+
+
+def test_config_profile_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    # set -> list -> show -> diff -> versions -> rollback each hit their door in turn.
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+        if method == "PUT" and path == "/api/config/profiles/staging":
+            return data_response({"ok": True, "version": 1})
+        if method == "GET" and path == "/api/config/profiles":
+            return data_response([{"name": "staging", "description": "d"}])
+        if method == "GET" and path == "/api/config/profiles/staging":
+            return data_response({"description": "d", "env": {"A": "1"}, "secret_keys": []})
+        if method == "POST" and path == "/api/config/profiles/staging/diff":
+            return data_response({"added": [], "removed": [], "changed": [], "recycle_keys": [], "refused_keys": []})
+        if method == "GET" and path == "/api/config/profiles/staging/versions":
+            return data_response([{"version": 1, "tags": [], "created_at": "t", "is_current": True}])
+        if method == "POST" and path == "/api/config/profiles/staging/rollback":
+            return data_response({"ok": True, "version": 1})
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    for args in (
+        ["config", "profile", "set", "staging", "A=1"],
+        ["config", "profile", "list"],
+        ["config", "profile", "show", "staging"],
+        ["config", "profile", "diff", "staging"],
+        ["config", "profile", "versions", "staging"],
+        ["config", "profile", "rollback", "staging", "1"],
+    ):
+        result = run_cli(monkeypatch, handler, args)
+        assert result.exit_code == 0, result.output

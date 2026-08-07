@@ -294,7 +294,7 @@ def test_config_manager_both_transaction_seams_required():
     # absent from the new document.
     from tai42_contract.config import ConfigManager
 
-    assert {"mutate_manifest", "replace_manifest"} <= ConfigManager.__abstractmethods__
+    assert {"mutate_manifest", "replace_manifest", "replace_env"} <= ConfigManager.__abstractmethods__
 
     class FakeConfigManager(ConfigManager):
         def __init__(self) -> None:
@@ -306,6 +306,9 @@ def test_config_manager_both_transaction_seams_required():
 
         def write_env(self, config: dict[str, str]) -> None:
             self._env.update(config)
+
+        def replace_env(self, config: dict[str, str]) -> None:
+            self._env = {k: v for k, v in config.items() if v != ""}
 
         def read_manifest(self) -> dict[str, Any]:
             return dict(self._manifest)
@@ -341,6 +344,12 @@ def test_config_manager_both_transaction_seams_required():
 
     replaced = mgr.replace_manifest({"a": 5})
     assert replaced == {"a": 5}  # ``b`` absent from the document → deleted
+
+    # ``replace_env`` is a whole-map replace: a key present before but absent from the
+    # new map is deleted, and an empty value is filtered out.
+    mgr.write_env({"KEEP": "1", "DROP": "2"})
+    mgr.replace_env({"KEEP": "1", "BLANK": ""})
+    assert mgr.read_env() == {"KEEP": "1"}  # DROP deleted (absent), BLANK filtered
 
 
 def test_app_lifecycle_accepts_one_arg_fleet_op_handler():

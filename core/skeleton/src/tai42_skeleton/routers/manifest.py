@@ -4,9 +4,11 @@ AUTHED thin adapters over operations in ``tai42_skeleton.operations.manifest`` (
 live manifest can embed connector tokens in MCP headers/env, so this whole surface
 stays behind the credential):
 
-- ``GET  /api/manifest``                     — the LIVE registries' manifest MCP section + user tools.
+- ``GET  /api/manifest``                     — the PRESERVED manifest MCP section + user tools (markers intact).
+- ``GET  /api/manifest/preserved``           — the PRESERVED manifest view the McpTab editor reads.
 - ``POST /api/manifest/replace``             — replace the WHOLE persisted manifest, fleet-wide (tier-2).
 - ``POST /api/mcp-config``                   — replace the MCP section (persist + reload).
+- ``POST /api/mcp-config/secret-env``        — write a secret env value + its manifest !ENV marker together.
 - ``GET  /api/mcp-config/schema``            — the JSON Schema for one MCP-config entry.
 - ``GET  /api/mcp-status``                   — live MCP binding snapshot.
 - ``GET  /api/mcp-status/failed``            — the MCP servers skipped by the viability check.
@@ -30,15 +32,17 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
-from tai42_skeleton.operations.manifest import ManifestReplace
+from tai42_skeleton.operations.manifest import ManifestReplace, SetMcpSecretEnv
 from tai42_skeleton.operations.manifest import deregister_mcp as _deregister_mcp_op
 from tai42_skeleton.operations.manifest import get_manifest as _get_manifest_op
+from tai42_skeleton.operations.manifest import get_manifest_preserved as _get_manifest_preserved_op
 from tai42_skeleton.operations.manifest import get_mcp_config_schema as _get_mcp_config_schema_op
 from tai42_skeleton.operations.manifest import get_mcp_status as _get_mcp_status_op
 from tai42_skeleton.operations.manifest import list_failed_mcps as _list_failed_mcps_op
 from tai42_skeleton.operations.manifest import reload_failed_mcps as _reload_failed_mcps_op
 from tai42_skeleton.operations.manifest import reload_mcp as _reload_mcp_op
 from tai42_skeleton.operations.manifest import set_mcp_config as _set_mcp_config_op
+from tai42_skeleton.operations.manifest import set_mcp_secret_env as _set_mcp_secret_env_op
 from tai42_skeleton.operations.manifest import update_manifest as _update_manifest_op
 
 
@@ -89,6 +93,18 @@ async def _extract_failed_query(request: Request) -> dict[str, Any]:
     return {"targets": targets or None}
 
 
+async def _extract_secret_env(request: Request) -> dict[str, Any]:
+    """The combined secret-env body → the operation's flat kwargs. Preserves the door's
+    hand-authored 400s (a missing/mistyped field would otherwise answer 422): ``value``,
+    ``key_hint``, and ``manifest_pointer`` are all required strings."""
+    body = await _json_object(request)
+    try:
+        model = SetMcpSecretEnv.model_validate(body)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid secret-env body: {exc}") from exc
+    return {"value": model.value, "key_hint": model.key_hint, "manifest_pointer": model.manifest_pointer}
+
+
 async def _extract_manifest_replace(request: Request) -> dict[str, Any]:
     """The full-manifest replacement body → the operation's flat ``manifest_text``.
 
@@ -111,6 +127,14 @@ get_manifest = register_operation_route(
     action="read",
 )
 
+get_manifest_preserved = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_manifest_preserved_op),
+    path="/api/manifest/preserved",
+    method="GET",
+    action="read",
+)
+
 update_manifest = register_operation_route(
     tai42_app,
     operation_metadata_of(_update_manifest_op),
@@ -127,6 +151,15 @@ set_mcp_config = register_operation_route(
     method="POST",
     context_extractor=_extract_mcp_config,
     action="write",
+)
+
+set_mcp_secret_env = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_mcp_secret_env_op),
+    path="/api/mcp-config/secret-env",
+    method="POST",
+    context_extractor=_extract_secret_env,
+    action="fenced",
 )
 
 get_mcp_config_schema = register_operation_route(

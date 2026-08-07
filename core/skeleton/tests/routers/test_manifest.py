@@ -35,8 +35,9 @@ class _FakeConfigManager:
     ``replace_manifest`` swaps the whole document. ``written`` records the last
     persisted document (``None`` until a persist lands)."""
 
-    def __init__(self, manifest):
+    def __init__(self, manifest, env=None):
         self._manifest = manifest
+        self._env = dict(env or {})
         self.written = None
 
     def read_manifest(self):
@@ -46,7 +47,14 @@ class _FakeConfigManager:
         return deepcopy(self._manifest)
 
     def read_env(self):
-        return {}
+        return dict(self._env)
+
+    def write_env(self, config):
+        # Merge (like the file provider), dropping empties.
+        self._env = {k: v for k, v in {**self._env, **config}.items() if v not in (None, "")}
+
+    def replace_env(self, config):
+        self._env = {k: v for k, v in config.items() if v not in (None, "")}
 
     def mutate_manifest(self, mutator):
         document = deepcopy(self._manifest)
@@ -85,11 +93,114 @@ def fake(monkeypatch):
     return SimpleNamespace(app=fake_app, cm=cm, live=live, bus=bus)
 
 
-async def test_get_manifest(fake):
+async def test_get_manifest_serves_preserved_markers_not_resolved_secrets(fake):
+    # RETIGHTEN: GET /api/manifest now serves the PRESERVED persisted manifest (markers
+    # intact), NOT the resolved live_manifest — a secret leaf is its `!ENV ${KEY}` marker,
+    # never the plaintext value. The fake live_manifest carries a resolved secret; the
+    # preserved store carries the marker. The response must reflect the store, not the live view.
+    fake.cm._manifest = {
+        "mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {"Authorization": "!ENV ${GITHUB_TOKEN}"}}}],
+        "user_tools": ["b", "a"],
+    }
+    fake.live["mcp"] = [{"title": "gh", "config": {"headers": {"Authorization": "super-secret-plaintext"}}}]
     resp = await router.get_manifest(_req())
     body = _data(resp)["data"]
-    assert body["mcp"][0]["title"] == "gh"
+    assert body["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GITHUB_TOKEN}"  # marker, no leak
+    assert "super-secret-plaintext" not in json.dumps(body)
     assert body["user_tools"] == ["a", "b"]  # sorted
+
+
+async def test_get_manifest_preserved_route(fake):
+    # The explicit /api/manifest/preserved door serves the same preserved {mcp, user_tools}
+    # view with markers intact — the source the Studio McpTab editor reads.
+    fake.cm._manifest = {
+        "mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {"Authorization": "!ENV ${GITHUB_TOKEN}"}}}],
+        "user_tools": ["search"],
+    }
+    resp = await router.get_manifest_preserved(_req())
+    body = _data(resp)["data"]
+    assert body["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GITHUB_TOKEN}"
+    assert body["user_tools"] == ["search"]
+
+
+async def test_secret_env_writes_marker_and_marked_secret_env_key_not_leaked(fake):
+    # The combined door writes the secret VALUE to the env store (marked secret), writes an
+    # `!ENV ${KEY}` MARKER at the pointer, and returns reloadConfigResult — the generated key
+    # is NEVER in the response, and the two writes stay consistent.
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "a-pasted-secret",
+                "key_hint": "GITHUB_TOKEN",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 200
+    body = _data(resp)["data"]
+    # reloadConfigResult shape (NOT profileApplyResponse): status + env_keys + fanout.
+    assert body["status"] == "ok"
+    assert "fanout" in body
+    # The manifest carries the marker (no plaintext secret baked in).
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GITHUB_TOKEN}"
+    # The env store holds the secret value, marked secret via TAI_ENV_SECRET_KEYS.
+    assert fake.cm._env["GITHUB_TOKEN"] == "a-pasted-secret"
+    assert "GITHUB_TOKEN" in fake.cm._env["TAI_ENV_SECRET_KEYS"].split(",")
+    # Neither the generated key NAME nor the secret VALUE ever rides the response.
+    serialized = json.dumps(body)
+    assert "GITHUB_TOKEN" not in serialized
+    assert "a-pasted-secret" not in serialized
+
+
+async def test_secret_env_non_mcp_head_is_400(fake):
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "s", "key_hint": "K", "manifest_pointer": "tools/0/env/API_KEY"})
+    )
+    assert resp.status_code == 400
+    assert "mcp" in _data(resp)["error"]
+    # Neither store was touched by a rejected pointer.
+    assert fake.cm._env == {}
+
+
+async def test_secret_env_out_of_range_pointer_is_400_and_writes_nothing(fake):
+    # A pointer whose list index is out of range fails at candidate validation (before any
+    # write), so it is a loud 400 and neither store is touched.
+    fake.cm._manifest = {"mcp": []}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "s", "key_hint": "K", "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert resp.status_code == 400
+    assert fake.cm._env == {}
+    assert fake.cm.written is None
+
+
+async def test_secret_env_dangling_marker_elsewhere_is_400_naming_var(fake, monkeypatch):
+    # The shared boundary validator fires on the secret-env door too: a manifest carrying a
+    # pre-existing `!ENV ${VAR}` marker with no env var behind it is a loud 400 naming the var,
+    # and nothing is written (the refusal is at candidate validation, before any store write).
+    monkeypatch.delenv("PREEXISTING_MISSING", raising=False)
+    fake.cm._manifest = {
+        "mcp": [
+            {
+                "title": "gh",
+                "config": {"url": "https://x", "headers": {"X-Other": "!ENV ${PREEXISTING_MISSING}"}},
+            }
+        ]
+    }
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "s",
+                "key_hint": "GITHUB_TOKEN",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 400
+    assert "PREEXISTING_MISSING" in _data(resp)["error"]
+    assert fake.cm._env == {}
 
 
 async def test_mcp_config_schema_shape():
@@ -135,6 +246,28 @@ async def test_mcp_reload_unknown_404(fake):
 async def test_mcp_config_missing_key_400(fake):
     resp = await router.set_mcp_config(_req({}))
     assert resp.status_code == 400
+
+
+async def test_mcp_config_dangling_marker_is_400_naming_var(fake, monkeypatch):
+    # The shared boundary validator fires on the EXISTING POST /api/mcp-config too: an mcp
+    # entry that introduces an `!ENV ${VAR}` marker with no env var behind it is a loud 400
+    # naming the var (it would otherwise silently resolve to "N/A").
+    monkeypatch.delenv("MISSING_DANGLER", raising=False)
+    resp = await router.set_mcp_config(
+        _req(
+            {
+                "mcp": [
+                    {
+                        "title": "gh",
+                        "config": {"url": "https://x", "headers": {"Authorization": "!ENV ${MISSING_DANGLER}"}},
+                    }
+                ]
+            }
+        )
+    )
+    assert resp.status_code == 400
+    assert "MISSING_DANGLER" in _data(resp)["error"]
+    assert fake.cm.written is None
 
 
 async def test_mcp_config_invalid_400(fake):

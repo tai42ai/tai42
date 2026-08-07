@@ -300,6 +300,60 @@ def test_write_env_empty_merge_writes_no_trailing_newline(tmp_path) -> None:
     assert (tmp_path / ".env").read_text(encoding="utf-8") == ""
 
 
+# --- replace_env seam -------------------------------------------------------
+
+
+def test_replace_env_deletes_uninvited_keys(tmp_path) -> None:
+    (tmp_path / ".env").write_text("KEEP=old\nDROP=gone\n", encoding="utf-8")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    # Whole-map replace: DROP, present before but absent from the new map, is gone.
+    mgr.replace_env({"KEEP": "new", "ADD": "added"})
+    assert mgr.read_env() == {"KEEP": "new", "ADD": "added"}
+
+
+def test_replace_env_drops_empty_and_none_values(tmp_path) -> None:
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    mgr.replace_env({"A": "1", "B": "", "C": None})  # type: ignore[dict-item]
+    assert mgr.read_env() == {"A": "1"}
+
+
+def test_replace_env_rejects_malformed_key(tmp_path) -> None:
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    with pytest.raises(ValueError, match="invalid env key"):
+        mgr.replace_env({"BAD KEY": "1"})
+
+
+def test_replace_env_rejects_value_that_cannot_round_trip_leaves_no_file(tmp_path) -> None:
+    """A value the parser cannot round-trip fails loudly and writes nothing, so the
+    whole-map replace never lands a corrupt store."""
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    with pytest.raises(ValueError, match="cannot be round-tripped"):
+        mgr.replace_env({"WINPATH": "C:\\data\\"})
+    assert not (tmp_path / ".env").exists()
+
+
+def test_replace_env_atomic_write_cleans_up_temp_on_replace_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """When ``os.replace`` fails mid-write, the error propagates loudly, the orphan
+    temp is removed, and the prior ``.env`` is left intact (atomic — never a
+    half-written store)."""
+    import tai42_skeleton.config.file_manager as fm
+
+    (tmp_path / ".env").write_text('PRIOR="kept"\n', encoding="utf-8")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(fm.os, "replace", boom)
+    with pytest.raises(OSError, match="replace failed"):
+        mgr.replace_env({"A": "1"})
+
+    # The prior store is untouched and no orphan temp lingers (only ``.env`` + its
+    # persistent flock sidecar remain).
+    assert mgr.read_env() == {"PRIOR": "kept"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env", ".env.lock"]
+
+
 # --- manifest read ----------------------------------------------------------
 
 

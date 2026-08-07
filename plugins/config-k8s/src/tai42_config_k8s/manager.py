@@ -37,8 +37,9 @@ class K8sConfigError(Exception):
     """Raised when a Kubernetes API operation fails."""
 
 
-class _ConfigMapConflict(Exception):
-    """Internal signal for a 409 resourceVersion conflict; never escapes the manager."""
+class _ResourceVersionConflict(Exception):
+    """Internal signal for a 409 resourceVersion conflict on a Secret or ConfigMap
+    write; never escapes the manager."""
 
 
 class K8sConfigManager(ConfigManager):
@@ -95,22 +96,38 @@ class K8sConfigManager(ConfigManager):
         return {k: base64.b64decode(v, validate=True).decode("utf-8") for k, v in secret.data.items()}
 
     def write_env(self, config: dict[str, str]) -> None:
-        """Patch a K8s Secret with env config key-value pairs.
+        """Merge *config* into the K8s Secret, deleting keys blanked to ``""``.
 
-        Uses ``string_data`` so K8s handles base64 encoding. Merges with existing
-        keys and filters out empty values. Each entry is an independent Secret key,
-        so the strategic-merge patch is per-key (same key is last-writer-wins).
+        Reads the existing Secret, overlays *config* (last-writer-wins per key),
+        drops every empty value, and REPLACES the whole Secret with the result under
+        a ``resourceVersion`` precondition. Existing keys not named in *config* are
+        preserved; a key mapped to ``""`` is genuinely removed (a strategic-merge
+        patch cannot delete a Secret key, so the write is a whole-object replace).
         """
-        from kubernetes import client
+        self._commit_secret_with_retry(
+            lambda existing_data: {k: v for k, v in {**existing_data, **config}.items() if v != ""}
+        )
+
+    def replace_env(self, config: dict[str, str]) -> None:
+        """Replace the whole Secret with *config* (whole-map, NOT a merge).
+
+        *config* becomes the entire stored env: a key absent from *config* is
+        DELETED, nothing from the old Secret survives uninvited. Empty values are
+        filtered out. Shares the ``resourceVersion`` precondition + bounded 409-retry
+        machinery of :meth:`write_env`.
+        """
+        self._commit_secret_with_retry(lambda _existing_data: {k: v for k, v in config.items() if v != ""})
+
+    # -- Environment write machinery (Secret) --------------------------------
+
+    def _read_secret_for_write(self) -> V1Secret:
+        """Read the Secret an env write replaces; an absent one (404) fails loudly."""
         from kubernetes.client.exceptions import ApiException
 
-        api = self._core_api
-
-        # Read existing secret to merge
         try:
-            existing = cast(
+            return cast(
                 "V1Secret",
-                api.read_namespaced_secret(self._settings.secret_name, self._settings.namespace),
+                self._core_api.read_namespaced_secret(self._settings.secret_name, self._settings.namespace),
             )
         except ApiException as exc:
             if exc.status == 404:
@@ -121,36 +138,100 @@ class K8sConfigManager(ConfigManager):
                 ) from exc
             raise K8sConfigError(f"Failed to read Secret: {exc.reason}") from exc
 
-        existing_data: dict[str, str] = {}
-        if existing.data:
-            # validate=True: a corrupt existing value aborts the write, never mangled.
-            existing_data = {k: base64.b64decode(v, validate=True).decode("utf-8") for k, v in existing.data.items()}
+    @staticmethod
+    def _decode_secret_data(secret: V1Secret) -> dict[str, str]:
+        """Decode a Secret's base64 ``data`` map; a corrupt value aborts loudly.
 
-        preserved = {k: v for k, v in existing_data.items() if k not in config}
-        merged = {**config, **preserved}
-        filtered = {k: v for k, v in merged.items() if v != ""}
+        ``validate=True`` so a non-base64 value raises rather than being silently
+        mangled or dropped.
+        """
+        if not secret.data:
+            return {}
+        return {k: base64.b64decode(v, validate=True).decode("utf-8") for k, v in secret.data.items()}
 
-        body = client.V1Secret(
-            string_data=filtered,
-            metadata=client.V1ObjectMeta(name=self._settings.secret_name),
+    def _secret_replace_body(self, existing: V1Secret, string_data: dict[str, str], resource_version: str) -> V1Secret:
+        """Build the whole-Secret replace body carrying *string_data* and the precondition.
+
+        ``data`` is left unset so the replaced Secret holds EXACTLY *string_data* (a
+        key absent from it is deleted). The Secret ``type`` and the operator-relevant
+        identity metadata (name, namespace, uid, labels, annotations) are carried from
+        *existing* so the replace does not wipe them; the ``resourceVersion`` is the
+        optimistic-concurrency precondition.
+        """
+        from kubernetes import client
+
+        meta = existing.metadata
+        return client.V1Secret(
+            string_data=string_data,
+            type=existing.type,
+            metadata=client.V1ObjectMeta(
+                name=self._settings.secret_name,
+                namespace=meta.namespace if meta else None,
+                uid=meta.uid if meta else None,
+                resource_version=resource_version,
+                labels=meta.labels if meta else None,
+                annotations=meta.annotations if meta else None,
+            ),
         )
+
+    def _replace_secret_precondition(self, existing: V1Secret, string_data: dict[str, str]) -> None:
+        """Replace the Secret under its ``resourceVersion`` precondition.
+
+        A 409 conflict surfaces as :class:`_ResourceVersionConflict` so the retry loop
+        can re-read and re-run; a 403 and any other API error fail loudly.
+        """
+        from kubernetes.client.exceptions import ApiException
+
+        resource_version = self._require_resource_version(existing, f"Secret '{self._settings.secret_name}'")
+        body = self._secret_replace_body(existing, string_data, resource_version)
         try:
-            api.patch_namespaced_secret(
+            self._core_api.replace_namespaced_secret(
                 self._settings.secret_name,
                 self._settings.namespace,
                 body,
             )
         except ApiException as exc:
+            if exc.status == 409:
+                raise _ResourceVersionConflict from exc
             if exc.status == 403:
                 raise K8sConfigError(
                     f"Permission denied updating Secret '{self._settings.secret_name}': {exc.reason}"
                 ) from exc
             raise K8sConfigError(f"Failed to update Secret: {exc.reason}") from exc
 
-        logger.info(
-            "Updated K8s Secret '%s' in namespace '%s'",
-            self._settings.secret_name,
-            self._settings.namespace,
+    def _commit_secret_with_retry(self, build_desired: Callable[[dict[str, str]], dict[str, str]]) -> None:
+        """Run the optimistic-concurrency retry loop for a whole-Secret env write.
+
+        Each attempt freshly reads the Secret, decodes its data, calls ``build_desired``
+        with that decoded map to produce the full desired env map, then replaces the
+        Secret under the ``resourceVersion`` precondition. A 409 re-reads and re-invokes
+        ``build_desired`` on the fresh state, so ``build_desired`` must be re-runnable.
+        Attempts are bounded; exhaustion fails loudly.
+        """
+        for attempt in range(1, _MAX_CONFLICT_ATTEMPTS + 1):
+            existing = self._read_secret_for_write()
+            existing_data = self._decode_secret_data(existing)
+            desired = build_desired(existing_data)
+            try:
+                self._replace_secret_precondition(existing, desired)
+            except _ResourceVersionConflict:
+                logger.info(
+                    "resourceVersion conflict updating Secret '%s' (attempt %d/%d); re-reading",
+                    self._settings.secret_name,
+                    attempt,
+                    _MAX_CONFLICT_ATTEMPTS,
+                )
+                continue
+            logger.info(
+                "Updated K8s Secret '%s' in namespace '%s'",
+                self._settings.secret_name,
+                self._settings.namespace,
+            )
+            return
+
+        raise K8sConfigError(
+            f"Failed to update Secret '{self._settings.secret_name}' after "
+            f"{_MAX_CONFLICT_ATTEMPTS} attempts due to repeated resourceVersion conflicts"
         )
 
     # -- Manifest configuration (ConfigMap) ----------------------------------
@@ -308,20 +389,20 @@ class K8sConfigManager(ConfigManager):
                 ) from exc
             raise K8sConfigError(f"Failed to read ConfigMap: {exc.reason}") from exc
 
-    def _require_resource_version(self, existing: V1ConfigMap) -> str:
-        """Return the ConfigMap ``resourceVersion``, refusing the write if it is absent.
+    def _require_resource_version(self, existing: V1ConfigMap | V1Secret, resource_label: str) -> str:
+        """Return the resource ``resourceVersion``, refusing the write if it is absent.
 
-        Without it the patch would serialize without the optimistic-concurrency
-        precondition, silently allowing a lost update.
+        Without it the write would serialize without the optimistic-concurrency
+        precondition, silently allowing a lost update. ``resource_label`` names the
+        resource (e.g. ``"ConfigMap 'tai-manifest'"``) in the refusal message.
         """
         if existing.metadata is None:
             raise K8sConfigError(
-                f"ConfigMap '{self._settings.configmap_name}' was returned without metadata; "
-                "cannot apply the optimistic-concurrency precondition"
+                f"{resource_label} was returned without metadata; cannot apply the optimistic-concurrency precondition"
             )
         if not existing.metadata.resource_version:
             raise K8sConfigError(
-                f"ConfigMap '{self._settings.configmap_name}' was returned without a resourceVersion; "
+                f"{resource_label} was returned without a resourceVersion; "
                 "cannot apply the optimistic-concurrency precondition"
             )
         return existing.metadata.resource_version
@@ -347,12 +428,12 @@ class K8sConfigManager(ConfigManager):
     def _patch_manifest_precondition(self, existing: V1ConfigMap, content: str) -> None:
         """Patch the manifest key under the ``resourceVersion`` precondition.
 
-        A 409 conflict is surfaced as :class:`_ConfigMapConflict` so the retry
+        A 409 conflict is surfaced as :class:`_ResourceVersionConflict` so the retry
         loop can re-read and re-run; a 403 and any other API error fail loudly.
         """
         from kubernetes.client.exceptions import ApiException
 
-        resource_version = self._require_resource_version(existing)
+        resource_version = self._require_resource_version(existing, f"ConfigMap '{self._settings.configmap_name}'")
         body = self._manifest_patch_body(existing, content, resource_version)
         try:
             self._core_api.patch_namespaced_config_map(
@@ -362,7 +443,7 @@ class K8sConfigManager(ConfigManager):
             )
         except ApiException as exc:
             if exc.status == 409:
-                raise _ConfigMapConflict from exc
+                raise _ResourceVersionConflict from exc
             if exc.status == 403:
                 raise K8sConfigError(
                     f"Permission denied updating ConfigMap '{self._settings.configmap_name}': {exc.reason}"
@@ -387,7 +468,7 @@ class K8sConfigManager(ConfigManager):
             content, document = render(existing, defaults)
             try:
                 self._patch_manifest_precondition(existing, content)
-            except _ConfigMapConflict:
+            except _ResourceVersionConflict:
                 logger.info(
                     "resourceVersion conflict updating ConfigMap '%s' (attempt %d/%d); re-reading",
                     self._settings.configmap_name,
