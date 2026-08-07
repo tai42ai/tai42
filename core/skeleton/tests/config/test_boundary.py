@@ -2,7 +2,7 @@
 (:mod:`tai42_skeleton.config.boundary`) and its wiring into
 :class:`~tai42_skeleton.config.service.ConfigService`.
 
-Two refusals guard every env / manifest writer:
+Three refusals guard every env / manifest writer:
 
 * X-band refusal — no profile or editor may CARRY a deployment / boot-identity
   key. The refusal reads the writer's PAYLOAD keys, never the post-carry
@@ -10,6 +10,9 @@ Two refusals guard every env / manifest writer:
   ``replace_env``). Asserted per writer path (``apply_env_change`` and the C5
   ``_validate_replace`` entry) and spanning both halves of the union plus the two
   PLAN_4 deployment keys.
+* Key-material refusal — no profile or editor may NAME a ``key_material`` field (a
+  KEK / signing key). These are ``hot``-class (not X-band) yet must rotate through
+  their own path, never be bulk-set through a profile. Reads the PAYLOAD keys too.
 * Dangling ``!ENV`` refusal — a manifest ``!ENV ${VAR}`` marker with no default,
   referencing a var absent from the effective env, resolves silently to ``"N/A"``
   and is refused pre-persist, naming the var and its json-pointer.
@@ -41,7 +44,9 @@ import tai42_skeleton.settings.settings  # noqa: F401
 from tai42_skeleton.config.boundary import (
     X_BAND_EXTRA,
     excluded_env_var_names,
+    key_material_env_keys,
     refuse_dangling_env_markers,
+    refuse_key_material,
     refuse_x_band,
     x_band_env_keys,
 )
@@ -122,6 +127,65 @@ def test_validate_replace_allows_a_plain_profile_env() -> None:
     store = FakeConfigStore(manifest={}, env={"OLD": "1"})
     service, _admin, _bus = _service(store)
     service._validate_replace({"NEW_KEY": "v"})  # no raise
+
+
+# ---------------------------------------------------------------------------
+# Key-material refusal — per writer path (a hot-class key_material field, NOT X-band)
+# ---------------------------------------------------------------------------
+
+# Both are ``KeyMaterial`` fields on ``ConnectorsSettings`` (imported above) and
+# resolve to reload_class ``hot`` — so ONLY the key-material refusal guards them, never
+# the X band. A profile naming either must be refused and pointed at rotation.
+_KEY_MATERIAL_KEYS = ["CONNECTORS_KEK", "CONNECTORS_STATE_HMAC_KEY"]
+
+
+def test_key_material_keys_are_registered_and_not_x_band() -> None:
+    # The premise the refusal exists for: these ARE key material and are NOT caught by
+    # the X band (they are hot-class), so without the dedicated refusal a profile could
+    # bulk-set a KEK.
+    km = key_material_env_keys()
+    assert set(_KEY_MATERIAL_KEYS) <= km
+    assert not (km & x_band_env_keys())
+
+
+@pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
+async def test_apply_env_change_refuses_key_material_key(monkeypatch: pytest.MonkeyPatch, km_key: str) -> None:
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match=km_key):
+        await service.apply_env_change({km_key: "new-secret"})
+
+    # Refused before any write / reload / broadcast — the KEK never reaches the store.
+    assert store.env_writes == []
+    assert store.env == {"EXISTING": "1"}
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+@pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
+def test_validate_replace_refuses_key_material_key(km_key: str) -> None:
+    store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match=km_key):
+        service._validate_replace({km_key: "new-secret"})
+
+
+def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
+    with pytest.raises(ValueError, match="CONNECTORS_KEK") as exc:
+        refuse_key_material(["CONNECTORS_KEK", "OK_KEY"])
+    message = str(exc.value)
+    assert "CONNECTORS_KEK" in message
+    assert "OK_KEY" not in message
+    # Names the rotation path, per the plan's "names the rotation path" refusal rule.
+    assert "rotat" in message.lower()
+
+
+def test_refuse_key_material_allows_a_plain_payload() -> None:
+    refuse_key_material(["OK_KEY", "ANOTHER"])  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -276,5 +340,23 @@ async def test_backup_import_carrying_x_key_and_dangling_marker_is_refused(monke
 
     assert store.env_writes == []
     assert store.env == {"SECRET_TOKEN": "live"}
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_backup_import_carrying_key_material_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Backup restore drives apply_env_change directly, so a crafted backup carrying a
+    # key-material key (a KEK) is refused by the shared validator BY CONSTRUCTION — the
+    # KEK never reaches the store, exactly as the env editor and profile paths refuse it.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match="CONNECTORS_KEK"):
+        await service.apply_env_change({"CONNECTORS_KEK": "leaked-key"})
+
+    assert store.env_writes == []
+    assert store.env == {"EXISTING": "1"}
     assert admin.calls == 0
     assert bus.publish_calls == []

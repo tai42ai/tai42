@@ -1,4 +1,4 @@
-"""The shared env-write boundary validator — two refusals every env/manifest
+"""The shared env-write boundary validator — three refusals every env/manifest
 writer crosses at the :class:`~tai42_skeleton.config.service.ConfigService`
 validation layer.
 
@@ -12,6 +12,13 @@ X-band refusal
     effective env — a profile apply legitimately CARRIES the whole X band across
     ``replace_env``, so refusing the effective env would reject the applier's own
     carry.
+
+Key-material refusal
+    An env write may never NAME a ``key_material`` field (a KEK, a signing/HMAC key).
+    These are ``hot``-class — not X-band — so the X refusal misses them, yet bulk-setting
+    one through a profile would silently invalidate every secret the old key secured.
+    Rotation runs through its own controlled path. Reads the PAYLOAD keys, like the X
+    refusal (the applier legitimately carries the stored key material across ``replace_env``).
 
 Dangling ``!ENV`` refusal
     ``pyaml_env`` resolves a marker whose var is absent to the literal ``"N/A"``
@@ -104,6 +111,33 @@ def refuse_x_band(written_keys: Iterable[str]) -> None:
         raise ValueError(
             "Refusing an env write carrying deployment / boot-identity (X-band) keys "
             f"no profile or editor may set: {', '.join(offenders)}."
+        )
+
+
+def key_material_env_keys() -> frozenset[str]:
+    """Every registered field flagged ``key_material`` (the kit ``KeyMaterial`` type)
+    that carries a non-empty ``env_var``. Reflects only IMPORTED settings classes, so a
+    key-material field only enters the set once its settings module is loaded."""
+    return frozenset(
+        field.env_var for info in registered_settings() for field in info.fields if field.key_material and field.env_var
+    )
+
+
+def refuse_key_material(written_keys: Iterable[str]) -> None:
+    """Refuse an env write whose PAYLOAD names a key-material field.
+
+    Key material (a KEK, a signing/HMAC key) is rotated through its own controlled
+    path — re-encrypt / re-sign what the old key secured — never bulk-set through a
+    profile or the env editor, where a careless value silently invalidates every
+    secret the old key protected. Reads the writer's declared payload, never the
+    effective env (a profile apply legitimately carries the stored key material across
+    ``replace_env``). Raises :class:`ValueError` naming every offender and the
+    rotation path (names only) — the operations layer maps it to a 400."""
+    offenders = sorted(set(written_keys) & key_material_env_keys())
+    if offenders:
+        raise ValueError(
+            "Refusing an env write naming key-material keys — rotate these out of band "
+            f"through their own key-rotation path, never through a profile: {', '.join(offenders)}."
         )
 
 
