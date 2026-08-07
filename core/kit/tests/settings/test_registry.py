@@ -3,7 +3,7 @@ as a plain-data group. Extraction honors aliases, marks secrets, skips
 non-JSON-safe defaults, and references nested settings as their own group."""
 
 import enum
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 import pytest
 from pydantic import AliasChoices, AliasPath, Field, SecretStr
@@ -476,3 +476,46 @@ def test_key_material_masks_a_baked_in_default():
     assert kek.key_material is True
     assert kek.secret is True
     assert kek.default is None  # a secret default is never emitted on the wire
+
+
+def test_optional_key_material_keeps_both_flags():
+    class OptionalCryptoSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="OPTIONALCRYPTO_")
+
+        kek: KeyMaterial | None = None
+
+    kek = _field("OptionalCryptoSettings", "kek")
+    # The flags live on Annotated metadata nested inside the Optional; extraction
+    # hoists them so a nullable key-material field is not silently unmasked.
+    assert kek.key_material is True
+    assert kek.secret is True
+    assert kek.default is None  # masked to None like any secret field
+    assert kek.type == "string"  # the null-union resolves to the SecretStr scalar
+
+
+def test_optional_secretstr_stays_secret():
+    class OptionalSecretSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="OPTIONALSECRET_")
+
+        api_key: SecretStr | None = None
+
+    field = _field("OptionalSecretSettings", "api_key")
+    # A plain ``SecretStr | None`` is detected via the annotation subclass check;
+    # unwrapping Annotated must not regress this path.
+    assert field.secret is True
+    assert field.key_material is False
+    assert field.default is None
+
+
+def test_reload_override_on_optional_field_is_honored():
+    class OptionalReloadSettings(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        model_config = SettingsConfigDict(env_prefix="OPTIONALRELOAD_")
+
+        pinned: Annotated[int, Field(json_schema_extra={"reload": "excluded"})] | None = None
+        rebuilt: int | None = None
+
+    # The override rides Annotated metadata nested in the Optional and still wins;
+    # a sibling nullable field with no override keeps the class disposition.
+    assert _field("OptionalReloadSettings", "pinned").reload_class == "excluded"
+    assert _field("OptionalReloadSettings", "rebuilt").reload_class == "recycle"

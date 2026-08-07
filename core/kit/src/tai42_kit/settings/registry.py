@@ -80,6 +80,36 @@ def _union_members(annotation: Any) -> list[Any]:
     return [annotation]
 
 
+def _strip_annotated(annotation: Any) -> Any:
+    """The underlying type of an ``Annotated[...]``, else the annotation itself.
+
+    A nullable classified type (e.g. ``KeyMaterial | None``) leaves its non-null
+    branch as ``Annotated[SecretStr, FieldInfo(...)]``; unwrap it so the subclass
+    check that identifies a secret reaches the ``SecretStr`` underneath."""
+    if getattr(annotation, "__metadata__", None) is not None:
+        return annotation.__origin__
+    return annotation
+
+
+def _extra_dicts(field_info: FieldInfo) -> list[dict[str, Any]]:
+    """Every ``json_schema_extra`` mapping reachable from a field's classification.
+
+    Covers the field's own ``json_schema_extra`` plus any carried on ``Annotated``
+    metadata nested inside an ``Optional``/``Union`` annotation. Pydantic tucks a
+    classified type's flag-bearing ``FieldInfo`` into the union member's metadata
+    rather than onto the outer field, so ``KeyMaterial | None`` would otherwise
+    lose its ``key_material``/``secret``/``reload`` flags."""
+    dicts: list[dict[str, Any]] = []
+    own = field_info.json_schema_extra
+    if isinstance(own, dict):
+        dicts.append(own)
+    for member in _union_members(field_info.annotation):
+        for meta in getattr(member, "__metadata__", ()):
+            if isinstance(meta, FieldInfo) and isinstance(meta.json_schema_extra, dict):
+                dicts.append(meta.json_schema_extra)
+    return dicts
+
+
 def _settings_member(annotation: Any) -> type[BaseSettings] | None:
     """The nested ``BaseSettings`` class in the annotation (unwrapping unions), if any."""
     for member in _union_members(annotation):
@@ -90,19 +120,21 @@ def _settings_member(annotation: Any) -> type[BaseSettings] | None:
 
 def _is_secret(field_info: FieldInfo) -> bool:
     """A field is secret if its annotation is/contains ``SecretStr``/``SecretBytes``,
-    or it is explicitly flagged via ``json_schema_extra={"secret": True}``."""
+    or it is explicitly flagged via ``json_schema_extra={"secret": True}``.
+
+    Union members are unwrapped through ``Annotated`` so ``KeyMaterial | None``
+    (whose non-null branch is ``Annotated[SecretStr, ...]``) is still recognized."""
     for member in _union_members(field_info.annotation):
-        if isinstance(member, type) and issubclass(member, (SecretStr, SecretBytes)):
+        stripped = _strip_annotated(member)
+        if isinstance(stripped, type) and issubclass(stripped, (SecretStr, SecretBytes)):
             return True
-    extra = field_info.json_schema_extra
-    return isinstance(extra, dict) and extra.get("secret") is True
+    return any(extra.get("secret") is True for extra in _extra_dicts(field_info))
 
 
 def _is_key_material(field_info: FieldInfo) -> bool:
     """A field holds key material when flagged via
     ``json_schema_extra={"key_material": True}`` (the ``KeyMaterial`` type)."""
-    extra = field_info.json_schema_extra
-    return isinstance(extra, dict) and extra.get("key_material") is True
+    return any(extra.get("key_material") is True for extra in _extra_dicts(field_info))
 
 
 def _as_reload_class(value: Any, source: str) -> ReloadClass:
@@ -115,10 +147,13 @@ def _as_reload_class(value: Any, source: str) -> ReloadClass:
 
 def _reload_override(field_info: FieldInfo) -> Any | None:
     """The field's own ``json_schema_extra={"reload": ...}`` value, or ``None`` when
-    it carries no override and so takes its class's ``reload_class``."""
-    extra = field_info.json_schema_extra
-    if isinstance(extra, dict):
-        return extra.get("reload")
+    it carries no override and so takes its class's ``reload_class``.
+
+    Reads through ``Annotated`` metadata nested in an ``Optional``/``Union`` so a
+    per-field override composes with a nullable classified type."""
+    for extra in _extra_dicts(field_info):
+        if "reload" in extra:
+            return extra["reload"]
     return None
 
 
