@@ -75,12 +75,21 @@ class StubBackends:
 
 
 class StubLifecycle:
+    """Records shutdown handlers and drives the boot-ready latch the worker gate
+    awaits. ``ready`` is pre-set, so ``wait_until_ready`` resolves at once unless a
+    test clears it to exercise the gate."""
+
     def __init__(self) -> None:
         self.shutdown_handlers: list[Callable[..., Any]] = []
+        self.ready = asyncio.Event()
+        self.ready.set()
 
     def on_shutdown(self, func: Callable[..., Any]) -> Callable[..., Any]:
         self.shutdown_handlers.append(func)
         return func
+
+    async def wait_until_ready(self) -> None:
+        await self.ready.wait()
 
 
 class StubAdmin:
@@ -155,6 +164,10 @@ def stub_app() -> StubApp:
 def _reset_stub_run_tool() -> None:
     _stub_app.tools.run_tool_mock = AsyncMock(return_value=None)
     _stub_app.admin.calls.clear()
+    # A fresh, pre-set boot-ready latch per test: the stub app is process-global,
+    # so a reused Event would stay bound to a prior test's (closed) loop.
+    _stub_app.lifecycle.ready = asyncio.Event()
+    _stub_app.lifecycle.ready.set()
 
 
 # -- In-memory Redis fakes ---------------------------------------------------------

@@ -248,6 +248,11 @@ class WorkerBus:
         self._backoff_initial = reconnect_backoff_initial
         self._backoff_max = reconnect_backoff_max
         self._backoff_factor = reconnect_backoff_factor
+        # Single-shot post-terminal-reply slot: an op handler arms it during its
+        # callback, and the subscription loop fires it AFTER the op's terminal reply
+        # ships (recycle's graceful self-exit). At most one op is in flight on the
+        # single subscription task, so there is never more than one armed action.
+        self._post_reply_slot: Callable[[], None] | None = None
         if not local:
             # Fork safety: a forked child inherits this bus object — origin included —
             # so it re-mints its own origin in the child (see _remint_origin_after_fork).
@@ -289,6 +294,12 @@ class WorkerBus:
         :meth:`_remint_origin_after_fork`) so an op the child publishes is applied by
         the parent, not echo-skipped."""
         return self._origin
+
+    def arm_post_reply(self, action: Callable[[], None]) -> None:
+        """Arm the single-shot slot the subscription loop fires AFTER the current op's
+        terminal reply ships and only on a clean apply (recycle's post-reply self-exit).
+        Called from an op handler during its callback; the last arming wins."""
+        self._post_reply_slot = action
 
     # -- Publisher side --------------------------------------------------------
 
@@ -709,28 +720,43 @@ class WorkerBus:
             await self._reply(r, reply_to, {"origin": origin.origin, "phase": "received"})
 
         op_payload = {k: v for k, v in frame.items() if k not in _TRANSPORT_KEYS}
+        applied = False
         try:
-            result = await callback(op_payload)
-            terminal: dict[str, Any] = {
-                "origin": origin.origin,
-                "phase": "terminal",
-                "outcome": OpOutcome.applied.value,
-            }
-            if result is not None:
-                terminal["payload"] = result
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("worker bus: op %r failed on %s", op_payload.get("op"), origin.origin, exc_info=True)
-            terminal = {
-                "origin": origin.origin,
-                "phase": "terminal",
-                "outcome": OpOutcome.failed.value,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            try:
+                result = await callback(op_payload)
+                terminal: dict[str, Any] = {
+                    "origin": origin.origin,
+                    "phase": "terminal",
+                    "outcome": OpOutcome.applied.value,
+                }
+                if result is not None:
+                    terminal["payload"] = result
+                applied = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("worker bus: op %r failed on %s", op_payload.get("op"), origin.origin, exc_info=True)
+                terminal = {
+                    "origin": origin.origin,
+                    "phase": "terminal",
+                    "outcome": OpOutcome.failed.value,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
 
-        if reply_to:
-            await self._reply(r, reply_to, terminal)
+            if reply_to:
+                await self._reply(r, reply_to, terminal)
+
+            # Fire the armed post-reply slot (recycle's self-exit) only once the terminal
+            # reply has shipped AND the op applied cleanly, so the publisher records the
+            # applied outcome before this process departs. A handler may ONLY arm the slot:
+            # scheduling the exit inside the callback would race the reply and be reported
+            # ``timed_out``.
+            if applied and self._post_reply_slot is not None:
+                self._post_reply_slot()
+        finally:
+            # Single-shot: disarm on EVERY exit — clean fire, failed apply, a reply-publish
+            # error, or cancellation — so no later op ever misfires a stale self-exit.
+            self._post_reply_slot = None
 
     async def _reply(self, r: Any, channel: str, frame: dict[str, Any]) -> None:
         await r.publish(channel, json.dumps(frame))

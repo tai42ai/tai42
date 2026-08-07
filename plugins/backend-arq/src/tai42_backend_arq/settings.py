@@ -123,6 +123,13 @@ class ArqSettings(DefaultNamespaceMixin, TaiBaseSettings):
     # How long a callback job waits for its predecessor to complete.
     callback_timeout: int = 5
 
+    # Seconds a graceful SIGTERM lets in-flight jobs finish before the worker
+    # exits (arq's warm drain). arq CANCELS running jobs on signal unless this is
+    # non-zero, so it is what gives arq the warm-drain behavior celery/rq have by
+    # default. Must cover the longest job, and the deployment's termination grace
+    # period must be >= this, or a drain still severs running work.
+    job_completion_wait: int = 300
+
     # Shared backend-settings surface (host-agreed names and defaults):
     # ``manifest_key`` names the env var the manifest is exported under,
     # ``task_timeout`` bounds synchronous waits on job results, ``tool_name_arg``

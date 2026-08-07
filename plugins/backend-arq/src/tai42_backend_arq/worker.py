@@ -16,6 +16,7 @@ import sys
 import click
 from arq import Worker, func
 from arq.constants import default_queue_name
+from tai42_contract.app import tai42_app
 
 from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.scheduler import recover_stalled_schedules, task_scheduler
@@ -23,6 +24,11 @@ from tai42_backend_arq.settings import arq_settings, job_deserializer, job_seria
 from tai42_backend_arq.tasks import callback_job, tool_execution
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on the wait for the app to become boot-ready before the worker
+# consumes — a loud backstop for a boot that never completes. A worker that times
+# out here refuses to run jobs against a half-built tool registry and fails loudly.
+_APP_READY_TIMEOUT_SECONDS = 120
 
 
 async def start_arq_worker(
@@ -36,7 +42,21 @@ async def start_arq_worker(
     max_tries: int,
     health_check_interval: int,
 ) -> None:
-    redis_settings = arq_settings().make_redis_settings(redis_url)
+    settings = arq_settings()
+
+    # The tool registry is (re)built by the boot self-resync running concurrently
+    # on this loop; a worker consuming before it finished would run jobs against a
+    # half-built registry and fail them permanently. Await the readiness latch
+    # first; a timeout is a boot that never completed — fail loudly.
+    try:
+        await asyncio.wait_for(tai42_app.lifecycle.wait_until_ready(), timeout=_APP_READY_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"arq worker: the app did not become ready within {_APP_READY_TIMEOUT_SECONDS}s "
+            "(boot self-resync never completed); refusing to consume jobs against a half-built tool registry"
+        ) from exc
+
+    redis_settings = settings.make_redis_settings(redis_url)
 
     functions = [
         func(task_scheduler),
@@ -57,6 +77,10 @@ async def start_arq_worker(
         poll_delay=poll_delay,
         max_tries=max_tries,
         health_check_interval=health_check_interval,
+        # A graceful SIGTERM drains in-flight jobs for up to this many seconds
+        # rather than cancelling them; arq cancels running jobs on signal when
+        # this is 0 (its default), so it is required for warm-drain parity.
+        job_completion_wait=settings.job_completion_wait,
         on_startup=recover_stalled_schedules,
         # Required for the scheduler and cancel/delete tools to abort jobs
         # through ``Job.abort``; without it abort requests are never processed.

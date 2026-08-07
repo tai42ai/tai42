@@ -28,8 +28,10 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
 from tai42_skeleton.app.bus import OriginKind, WorkerBus, make_origin
 from tai42_skeleton.app.bus_settings import bus_settings
+from tai42_skeleton.app.graceful_exit import graceful_exit_for
 from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.kind_status import collect_kind_status, warn_if_noop_monitoring
+from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel, write_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.connectors.providers.registry import reset_registry
@@ -264,6 +266,10 @@ class TaiMCPLifecycleMixin(ABC):
             self._spawn_reprobe_task()
             yield self
         finally:
+            # Shutdown start: drop the readiness sentinel FIRST so the readiness probe
+            # fails immediately and this process leaves the load balancer's endpoints
+            # before draining begins.
+            remove_ready_sentinel()
             await self._cancel_bus_subscription()
             await self._cancel_reprobe_task()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
@@ -344,8 +350,14 @@ class TaiMCPLifecycleMixin(ABC):
     def _mark_boot_ready(self) -> None:
         """Latch the boot-ready signal on the FIRST successful self-resync. One-way:
         a reconnect resync re-enters here on a live app but must never clear the
-        latch, so a consumer already past it is never retroactively un-readied."""
+        latch, so a consumer already past it is never retroactively un-readied.
+
+        Writes the readiness sentinel BEFORE latching, so ``boot-ready`` and the
+        sentinel the readiness probe tests are consistent: an unwritable sentinel path
+        raises here (a loud boot fault), leaving the latch unset for the next reconnect
+        to retry rather than reporting ready without the probe's signal."""
         if not self._boot_ready.is_set():
+            write_ready_sentinel()
             logger.info("app boot-ready: first self-resync complete — tool registry built and stable")
             self._boot_ready.set()
 
@@ -418,7 +430,21 @@ class TaiMCPLifecycleMixin(ABC):
         if op_name == "list_failed_mcps":
             # Bare list, matching the self-apply shape — see reload_failed_mcps above.
             return tai42_app.admin.list_failed_mcps()
+        if op_name == "recycle":
+            return self._apply_recycle()
         raise ValueError(f"unknown fleet op {op_name!r}")
+
+    def _apply_recycle(self) -> dict[str, Any]:
+        """Apply a targeted recycle op: arm the bus's single-shot post-terminal-reply
+        slot with this process's graceful self-exit, then return the applied payload.
+
+        The exit fires only AFTER the terminal ``applied`` reply ships, so the
+        orchestrator records a successful recycle before this process departs.
+        Scheduling the exit here (e.g. ``create_task``) would race that reply. The
+        payload names the graceful-exit kind only — never an env value."""
+        kind = self.bus.origin.kind
+        self.bus.arm_post_reply(graceful_exit_for(kind))
+        return {"recycling": kind.value}
 
     async def _run_fleet_op_applied_handlers(self, op_name: str) -> None:
         """Fire every ``on_fleet_op_applied`` handler with the op name. A raising

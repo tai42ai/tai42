@@ -35,6 +35,7 @@ class _FakeWorker:
 
 @pytest.fixture
 def worker_env(monkeypatch) -> type[_FakeWorker]:
+    _FakeWorker.captured = {}
     monkeypatch.setattr(worker, "Worker", _FakeWorker)
     monkeypatch.setattr(RedisPoolManager, "close", AsyncMock())
     return _FakeWorker
@@ -89,6 +90,50 @@ async def test_start_arq_worker_redis_url_override_applies(worker_env) -> None:
     assert redis_settings.host == "elsewhere"
     assert redis_settings.port == 6390
     assert redis_settings.database == 3
+
+
+async def test_start_arq_worker_sets_job_completion_wait_from_settings(worker_env, monkeypatch) -> None:
+    """The warm-drain window is the ``job_completion_wait`` setting, not a
+    hardcoded constant: a non-zero value makes arq's SIGTERM handler drain
+    in-flight jobs instead of cancelling them."""
+    from tai42_backend_arq.settings import ArqSettings
+
+    monkeypatch.setattr(worker, "arq_settings", lambda: ArqSettings(job_completion_wait=42))
+    await worker.start_arq_worker(None, False, 3600, "arq:queue", 10, 300, 0.5, 5, 60)
+
+    assert worker_env.captured["job_completion_wait"] == 42
+
+
+async def test_start_arq_worker_waits_for_boot_ready_before_consuming(stub_app, worker_env) -> None:
+    """The worker must not be built or run until the boot-ready latch opens: a
+    worker consuming against a half-built tool registry fails jobs permanently."""
+    stub_app.lifecycle.ready.clear()
+    task = asyncio.create_task(worker.start_arq_worker(None, False, 3600, "arq:queue", 10, 300, 0.5, 5, 60))
+    try:
+        # While the latch is closed the worker stays unbuilt (never consumes).
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            assert not task.done()
+            assert worker_env.captured == {}
+        # Opening the latch releases the worker start.
+        stub_app.lifecycle.ready.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert worker_env.captured["job_completion_wait"] == 300
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+async def test_start_arq_worker_readiness_timeout_raises_without_consuming(stub_app, worker_env, monkeypatch) -> None:
+    """A boot that never becomes ready fails loudly at the timeout, and the worker
+    is never built."""
+    monkeypatch.setattr(worker, "_APP_READY_TIMEOUT_SECONDS", 0.05)
+    stub_app.lifecycle.ready.clear()
+
+    with pytest.raises(RuntimeError, match=r"did not become ready within 0\.05s"):
+        await worker.start_arq_worker(None, False, 3600, "arq:queue", 10, 300, 0.5, 5, 60)
+
+    assert worker_env.captured == {}
 
 
 def test_main_runs_worker(monkeypatch) -> None:
