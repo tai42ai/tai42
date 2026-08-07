@@ -291,31 +291,26 @@ async def test_drain_in_flight_bounded_by_budget() -> None:
     assert ep.in_flight == 1
 
 
-async def test_drain_in_flight_tolerates_the_driving_request() -> None:
-    import asyncio
-
-    ep = Epoch(number=current_client_epoch())
-    ep.admit()  # the request DRIVING the reload — stays admitted across the swap
-    assert ep.in_flight == 1
-    # residual=1 excuses that single driver and returns PROMPTLY — it must NOT self-wait
-    # the (generous) budget for the request that can only release once the reload returns.
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    await ep._drain_in_flight(5.0, residual=1)
-    assert loop.time() - start < 1.0, "residual-tolerant drain self-waited the budget on its own driver"
-    assert ep.in_flight == 1
-
-
-async def test_reload_driven_by_request_does_not_self_wait() -> None:
-    """A door-driven reload (its own request still admitted on the retiring epoch) must
-    NOT self-wait the drain budget for that request — the regression that made every
-    door reload take ~10s. With the driving-request signal set, ``build_and_swap_epoch``
-    excuses exactly that one admitted request and returns near-instantly."""
+async def test_reload_over_session_manager_defers_supervisor_close() -> None:
+    """A door-driven reload — its own request still admitted on the retiring epoch, e.g. an
+    MCP tool call served by that epoch's FastMCP session manager — must NOT ``aclose`` the
+    old lifespan while that request is in flight: doing so tears down the transport
+    delivering the tool's own response and the client hangs. ``build_and_swap`` must return
+    promptly (the drain + close are DEFERRED, not awaited), the old session manager must
+    stay live while the driver is in flight, and the deferred task closes it only once the
+    driver's request drains (its response flushed)."""
     import asyncio
 
     _install_boot("boot-app")
     boot = current_epoch()
-    boot.admit()  # the driving request, admitted on the epoch about to be retired
+    closed: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+    boot.admit()  # the driving MCP tool call, still admitted on the epoch being retired
     token = epoch_mod._reload_driven_by_request.set(True)
     loop = asyncio.get_running_loop()
     try:
@@ -327,7 +322,15 @@ async def test_reload_driven_by_request_does_not_self_wait() -> None:
             drain_deadline=5.0,
             drain_tolerate_driver=True,
         )
+        # Returned promptly (drain + close deferred, not awaited on the driving request)...
         assert loop.time() - start < 1.0, "reload self-waited the drain budget on its own driving request"
+        # ...and did NOT close the session manager serving the still-in-flight driver.
+        assert closed == [], "reload aclose()d the session manager serving its own driving request"
+        # The driver finishes (its response flushed) -> the deferred task drains + closes.
+        boot.release()
+        async with asyncio.timeout(2.0):
+            while closed != ["closed"]:
+                await asyncio.sleep(0.01)
     finally:
         epoch_mod._reload_driven_by_request.reset(token)
         os.environ.pop("TAI_EPOCH_DRIVER", None)

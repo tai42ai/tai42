@@ -97,42 +97,20 @@ class Epoch:
         fresh one."""
         self._periodic_cancels.append(cancel)
 
-    async def _drain_in_flight(self, deadline: float, *, residual: int = 0) -> None:
+    async def _drain_in_flight(self, deadline: float) -> None:
         """Wait, bounded by ``deadline``, for this generation's admitted requests to
-        finish — down to ``residual`` still in flight. A request still in flight past
-        the budget is logged loudly and the retire proceeds (the fresh epoch already
-        serves new traffic).
-
-        ``residual=1`` excuses the single request that is itself DRIVING this reload: a
-        door-triggered reload runs the swap synchronously while its own request stays
-        admitted on the retiring epoch, so that request can never release until the
-        reload returns — waiting for it would burn the whole budget every reload. Other
-        in-flight requests are still drained; only the driver is left."""
-        if self._in_flight <= residual:
+        finish. A request still in flight past the budget is logged loudly and the
+        retire proceeds (the fresh epoch already serves new traffic)."""
+        if self._idle.is_set():
             return
-        if residual == 0:
-            # Fast path: the idle event fires exactly at zero in-flight.
-            try:
-                await asyncio.wait_for(self._idle.wait(), timeout=deadline)
-            except TimeoutError:
-                logger.error(
-                    "epoch %d retire: %d request(s) still in flight after the drain budget",
-                    self.number,
-                    self._in_flight,
-                )
-            return
-        # Non-zero residual: the idle event never fires above zero, so poll.
-        loop = asyncio.get_running_loop()
-        end = loop.time() + deadline
-        while self._in_flight > residual:
-            if loop.time() >= end:
-                logger.error(
-                    "epoch %d retire: %d request(s) still in flight after the drain budget",
-                    self.number,
-                    self._in_flight,
-                )
-                return
-            await asyncio.sleep(_DRAIN_POLL_SECONDS)
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=deadline)
+        except TimeoutError:
+            logger.error(
+                "epoch %d retire: %d request(s) still in flight after the drain budget",
+                self.number,
+                self._in_flight,
+            )
 
     async def _cancel_periodic_loops(self) -> None:
         for cancel in self._periodic_cancels:
@@ -195,17 +173,20 @@ _loaded_env_keys: set[str] = set()
 _retiring_epoch: int | None = None
 
 # True within the context of an HTTP request (set by ``EpochAdmissionApp``). A
-# door-triggered reload (``write_env`` / ``reload_config`` / ``fleet_reload_config``)
-# runs the swap synchronously WHILE its own request is still admitted on the retiring
-# epoch — that request can never release until the reload returns, so retiring drains
-# it as the single excused ``residual`` rather than self-waiting the full budget for it.
-# ``asyncio.to_thread`` (which ``reload_gate.run`` uses) copies this context into the
-# reload thread; the bus-driven reload path runs with it unset, so it drains normally.
+# door-triggered reload (``write_env`` / ``reload_config`` / ``fleet_reload_config``, incl.
+# when invoked as an MCP tool) runs the swap synchronously WHILE its own request is still
+# admitted on the retiring epoch and — for an MCP tool call — is served by that epoch's
+# FastMCP session manager. Retiring must therefore DEFER its two request-severing steps
+# (the in-flight drain and the session-manager ``aclose``) to a background task, so the
+# driver finishes and flushes its response before its transport is torn down. This flag is
+# how ``_retire`` tells the two cases apart. ``asyncio.to_thread`` (which ``reload_gate.run``
+# uses) copies this context into the reload thread; the bus-driven reload path runs with it
+# unset, so it drains + closes synchronously.
 _reload_driven_by_request: ContextVar[bool] = ContextVar("reload_driven_by_request", default=False)
 
-# Poll cadence for the residual-tolerant in-flight drain (the idle event only fires at
-# zero in-flight, so a non-zero residual is polled).
-_DRAIN_POLL_SECONDS = 0.02
+# Strong references to the deferred door-driven-retire tasks, so the loop does not GC a
+# still-running one; each removes itself on completion.
+_deferred_retire_tasks: set[asyncio.Task[None]] = set()
 
 
 def current_epoch() -> Epoch:
@@ -351,13 +332,23 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     step is independent so one failure cannot skip the rest — the fresh epoch already
     serves new traffic, so a retire fault is loud but never fatal.
 
-    ``tolerate_driver`` excuses the single request that drove this reload from the
-    in-flight drain (a door-triggered reload's own request stays admitted across the
-    swap), so the retire never self-waits the full budget for it.
+    ``tolerate_driver`` marks a door-driven reload: it runs the swap synchronously INSIDE
+    the request that drove it, and if that request is an MCP tool call it is served by THIS
+    epoch's FastMCP session manager (``old.supervisor``). Draining/``aclose``-ing that here —
+    before the tool returns — would sever the transport delivering the tool's own response,
+    hanging the client. So for a door-driven reload the two request-severing steps (the
+    in-flight drain and the session-manager close) are DEFERRED to a background task on the
+    serving loop: ``build_and_swap`` returns at once, the driver finishes and flushes its
+    response on the still-live session manager, then the task drains the old epoch and
+    ``aclose``s it (D13a for every OTHER session, a beat later, off the reload's hot path —
+    so long-lived streamable-http streams no longer gate reload latency either). A bus-driven
+    reload (``tolerate_driver=False``) serves no in-flight request that needs its response
+    delivered, so it drains + closes synchronously.
     """
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops()
-    await old._drain_in_flight(budget, residual=1 if tolerate_driver else 0)
+    if not tolerate_driver:
+        await old._drain_in_flight(budget)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 
@@ -374,8 +365,10 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
 
     # Close the retired generation's FastMCP lifespan: its ``__aexit__`` terminates
     # every live transport and drops its session manager, so the fresh epoch serves a
-    # NEW session-id space and stateful clients re-initialise — no handoff.
-    if old.supervisor is not None:
+    # NEW session-id space and stateful clients re-initialise — no handoff. For a
+    # door-driven reload this is deferred (see below), so the driver's own transport
+    # survives long enough to deliver the tool result.
+    if not tolerate_driver and old.supervisor is not None:
         try:
             await old.supervisor.aclose()
         except Exception:
@@ -394,6 +387,32 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
         await drain_epoch(retired, budget)
     except Exception:
         logger.exception("epoch %d retire: client-pool drain failed", retired)
+
+    if tolerate_driver and old.supervisor is not None:
+        # Defer the driver-severing drain + session-manager close so the reload returns now
+        # and the driving request flushes its response on the still-live session manager.
+        task = asyncio.create_task(
+            _deferred_drain_and_close(old, budget),
+            name=f"tai-epoch-{old.number}-deferred-retire",
+        )
+        _deferred_retire_tasks.add(task)
+        task.add_done_callback(_deferred_retire_tasks.discard)
+
+
+async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
+    """Background tail of a door-driven reload's retire: wait (bounded by the drain budget)
+    for the old generation's in-flight requests — including the driver, whose response then
+    flushes on the still-live session manager — to finish, then ``aclose`` its FastMCP
+    lifespan (D13a for every remaining/streaming session). Runs on the serving loop (the
+    supervisor's owner loop), so the lifespan close stays loop-correct."""
+    try:
+        await old._drain_in_flight(budget)
+    finally:
+        if old.supervisor is not None:
+            try:
+                await old.supervisor.aclose()
+            except Exception:
+                logger.exception("epoch %d retire: deferred serving-lifespan close failed", old.number)
 
 
 def _default_rebuild() -> None:
