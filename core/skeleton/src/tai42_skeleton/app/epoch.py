@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -96,20 +97,42 @@ class Epoch:
         fresh one."""
         self._periodic_cancels.append(cancel)
 
-    async def _drain_in_flight(self, deadline: float) -> None:
+    async def _drain_in_flight(self, deadline: float, *, residual: int = 0) -> None:
         """Wait, bounded by ``deadline``, for this generation's admitted requests to
-        finish. A request still in flight past the budget is logged loudly and the
-        retire proceeds (the fresh epoch already serves new traffic)."""
-        if self._idle.is_set():
+        finish — down to ``residual`` still in flight. A request still in flight past
+        the budget is logged loudly and the retire proceeds (the fresh epoch already
+        serves new traffic).
+
+        ``residual=1`` excuses the single request that is itself DRIVING this reload: a
+        door-triggered reload runs the swap synchronously while its own request stays
+        admitted on the retiring epoch, so that request can never release until the
+        reload returns — waiting for it would burn the whole budget every reload. Other
+        in-flight requests are still drained; only the driver is left."""
+        if self._in_flight <= residual:
             return
-        try:
-            await asyncio.wait_for(self._idle.wait(), timeout=deadline)
-        except TimeoutError:
-            logger.error(
-                "epoch %d retire: %d request(s) still in flight after the drain budget",
-                self.number,
-                self._in_flight,
-            )
+        if residual == 0:
+            # Fast path: the idle event fires exactly at zero in-flight.
+            try:
+                await asyncio.wait_for(self._idle.wait(), timeout=deadline)
+            except TimeoutError:
+                logger.error(
+                    "epoch %d retire: %d request(s) still in flight after the drain budget",
+                    self.number,
+                    self._in_flight,
+                )
+            return
+        # Non-zero residual: the idle event never fires above zero, so poll.
+        loop = asyncio.get_running_loop()
+        end = loop.time() + deadline
+        while self._in_flight > residual:
+            if loop.time() >= end:
+                logger.error(
+                    "epoch %d retire: %d request(s) still in flight after the drain budget",
+                    self.number,
+                    self._in_flight,
+                )
+                return
+            await asyncio.sleep(_DRAIN_POLL_SECONDS)
 
     async def _cancel_periodic_loops(self) -> None:
         for cancel in self._periodic_cancels:
@@ -137,9 +160,13 @@ class EpochAdmissionApp:
             await self._app(scope, receive, send)
             return
         self._epoch.admit()
+        # Mark this request's context as reload-driving: if it calls a reload door, the
+        # retire excuses THIS still-admitted request rather than self-waiting on it.
+        token = _reload_driven_by_request.set(True)
         try:
             await self._app(scope, receive, send)
         finally:
+            _reload_driven_by_request.reset(token)
             self._epoch.release()
 
 
@@ -166,6 +193,19 @@ _loaded_env_keys: set[str] = set()
 # Set to the retiring epoch number for the span of the retire's settings reset so
 # the registered sweep hook sweeps exactly that generation; ``None`` otherwise.
 _retiring_epoch: int | None = None
+
+# True within the context of an HTTP request (set by ``EpochAdmissionApp``). A
+# door-triggered reload (``write_env`` / ``reload_config`` / ``fleet_reload_config``)
+# runs the swap synchronously WHILE its own request is still admitted on the retiring
+# epoch — that request can never release until the reload returns, so retiring drains
+# it as the single excused ``residual`` rather than self-waiting the full budget for it.
+# ``asyncio.to_thread`` (which ``reload_gate.run`` uses) copies this context into the
+# reload thread; the bus-driven reload path runs with it unset, so it drains normally.
+_reload_driven_by_request: ContextVar[bool] = ContextVar("reload_driven_by_request", default=False)
+
+# Poll cadence for the residual-tolerant in-flight drain (the idle event only fires at
+# zero in-flight, so a non-zero residual is polled).
+_DRAIN_POLL_SECONDS = 0.02
 
 
 def current_epoch() -> Epoch:
@@ -302,7 +342,7 @@ def _drain_budget(deadline: float | None) -> float:
     return tool_runs_settings().shutdown_drain_seconds
 
 
-async def _retire(old: Epoch, retired: int, deadline: float | None) -> None:
+async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_driver: bool = False) -> None:
     """Retire the previous generation, bounded by the drain budget.
 
     Cancels the generation's periodic loops first (no timer outlives its epoch),
@@ -310,10 +350,14 @@ async def _retire(old: Epoch, retired: int, deadline: float | None) -> None:
     client pools, and sweeps its stale settings (via the registered reset hook). Each
     step is independent so one failure cannot skip the rest — the fresh epoch already
     serves new traffic, so a retire fault is loud but never fatal.
+
+    ``tolerate_driver`` excuses the single request that drove this reload from the
+    in-flight drain (a door-triggered reload's own request stays admitted across the
+    swap), so the retire never self-waits the full budget for it.
     """
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops()
-    await old._drain_in_flight(budget)
+    await old._drain_in_flight(budget, residual=1 if tolerate_driver else 0)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 
@@ -428,6 +472,7 @@ async def build_and_swap_epoch(
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
     establish_background_loops: Callable[[], Awaitable[None]] | None = None,
     drain_deadline: float | None = None,
+    drain_tolerate_driver: bool = False,
 ) -> Epoch:
     """Build a fresh serving epoch under ``proposed_env`` and swap it in atomically.
 
@@ -507,7 +552,7 @@ async def build_and_swap_epoch(
     # dispatch-slot swap, so no request ever sees a mix of the old and new generations.
     commit_staging_all()
     old_epoch = _swap(new_epoch)
-    await _retire(old_epoch, retired, drain_deadline)
+    await _retire(old_epoch, retired, drain_deadline, tolerate_driver=drain_tolerate_driver)
     # Post-swap, ON the serving loop: (re)establish this generation's loop-affine
     # background loops and register them with the now-current epoch. Runs AFTER the
     # retire cancelled the previous generation's loops, so there is no cross-generation
