@@ -15,8 +15,12 @@ from tai42_contract.accounts.provider import (
     AccountsProviderSettings,
 )
 from tai42_contract.accounts.registry import (
+    abort_staging,
+    begin_staging,
+    commit_staging,
     get_accounts_provider_factory,
     iter_accounts_provider_factories,
+    iter_accounts_provider_factories_staged,
     register_accounts_provider,
     reset_registry,
 )
@@ -29,8 +33,12 @@ __all__ = [
     "FormField",
     "FormMethod",
     "LoginMethod",
+    "abort_staging",
+    "begin_staging",
+    "commit_staging",
     "get_accounts_provider_factory",
     "iter_accounts_provider_factories",
+    "iter_accounts_provider_factories_staged",
     "register_accounts_provider",
     "reset_registry",
 ]

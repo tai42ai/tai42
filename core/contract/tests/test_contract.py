@@ -19,12 +19,12 @@ from _helpers import protocol_members  # stdlib-only helper, no application pack
 
 import tai42_contract
 
-# The frozen facade surface: the 58 (sub-protocol, member) pairs over 55
+# The frozen facade surface: the 60 (sub-protocol, member) pairs over 57
 # distinct flat names, grouped into the 19 sub-protocols. This is the
 # contract's own source of truth — no external lookup needed. Three leaf names
 # are shared: ``store`` (versioning + presets) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (55) is three
-# fewer than the pair count (58).
+# (webhook_verifiers + channels), so the distinct-name union (57) is three
+# fewer than the pair count (60).
 EXPECTED_FACADE = {
     # tools (11)
     "tool",
@@ -51,6 +51,8 @@ EXPECTED_FACADE = {
     # connectors (2)
     "register_connector",
     "token_store",
+    # accounts (1)
+    "active_provider",
     # webhook_verifiers (2)
     "register",
     "get",
@@ -72,10 +74,11 @@ EXPECTED_FACADE = {
     # clients (2)
     "client_ctx",
     "shutdown_clients",
-    # lifecycle (5)
+    # lifecycle (6)
     "on_startup",
     "on_shutdown",
     "on_reload",
+    "on_post_swap",
     "on_fleet_op_applied",
     "wait_until_ready",
     # admin (9)
@@ -147,6 +150,7 @@ def test_declared_route_metadata_reexported():
 
 def test_facade_partition_against_frozen_surface():
     from tai42_contract.app import (
+        AppAccounts,
         AppAdmin,
         AppAgents,
         AppBackends,
@@ -174,6 +178,7 @@ def test_facade_partition_against_frozen_surface():
         AppBackends,
         AppStorage,
         AppConnectors,
+        AppAccounts,
         AppWebhookVerifiers,
         AppChannels,
         AppConversations,
@@ -198,14 +203,14 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 58 (sub-protocol, member) pairs over 55 distinct names — ``store`` is
+    # 60 (sub-protocol, member) pairs over 57 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 55, f"union={len(union)}"
-    assert total == 58 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 57, f"union={len(union)}"
+    assert total == 60 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_nineteen_namespaces():
+def test_taiapp_exposes_twenty_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
@@ -214,6 +219,7 @@ def test_taiapp_exposes_nineteen_namespaces():
         "backends",
         "storage",
         "connectors",
+        "accounts",
         "webhook_verifiers",
         "channels",
         "conversations",
@@ -361,6 +367,9 @@ def test_app_lifecycle_accepts_one_arg_fleet_op_handler():
             return func
 
         def on_reload(self, func: object) -> object:
+            return func
+
+        def on_post_swap(self, func: object) -> object:
             return func
 
         def on_fleet_op_applied(self, func: object) -> object:

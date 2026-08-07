@@ -30,38 +30,87 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Provider name -> factory (a callable that builds a live IdentityProvider from
-# settings).
+# settings). ``_REGISTRY`` is the COMMITTED generation the request path resolves
+# against; ``_pending`` is the generation an epoch build stages into, promoted to
+# committed in ONE reference assignment (atomic under the GIL) only if the build
+# succeeds. A failed build drops ``_pending`` and never touches ``_REGISTRY``.
+# This module stays epoch-free — the skeleton owns the staging lifecycle.
 _REGISTRY: dict[str, Callable[..., IdentityProvider]] = {}
+_pending: dict[str, Callable[..., IdentityProvider]] | None = None
+
+
+def _write_target() -> dict[str, Callable[..., IdentityProvider]]:
+    """Where a registration lands: the staged generation while a build is staging,
+    else the committed registry (boot writes straight to the empty committed map).
+    Safe without thread-locals: the reload gate serialises builds one at a time and
+    nothing on the serving path registers."""
+    return _pending if _pending is not None else _REGISTRY
 
 
 def register_identity_provider(name: str, factory: Callable[..., IdentityProvider]) -> None:
-    if name in _REGISTRY:
+    target = _write_target()
+    if name in target:
         raise ValueError(f"Identity provider {name!r} already registered")
-    _REGISTRY[name] = factory
+    target[name] = factory
     logger.info("access_control: registered identity provider %s", name)
 
 
 def get_identity_provider_factory(name: str) -> Callable[..., IdentityProvider]:
+    """Resolve a factory from the COMMITTED generation — the request-path accessor
+    (the live verifier's lazy resolve). Never sees a mid-build staged registration."""
     factory = _REGISTRY.get(name)
     if factory is None:
         raise KeyError(f"Unknown identity provider: {name!r}")
     return factory
 
 
-def reset_registry() -> None:
-    """Clear the identity-provider registry.
+def get_identity_provider_factory_staged(name: str) -> Callable[..., IdentityProvider]:
+    """Resolve a factory from the STAGED generation if a build is staging, else the
+    committed one — the build's own accessor (quarantine abort, startup probe, kind
+    status), so a build decides against the generation it is assembling."""
+    factory = _write_target().get(name)
+    if factory is None:
+        raise KeyError(f"Unknown identity provider: {name!r}")
+    return factory
 
-    Called by ``start()`` before it re-imports the manifest's plugin modules,
-    which re-run their module-level ``register_identity_provider(...)`` calls.
-    Without this the duplicate guard in :func:`register_identity_provider` would
-    raise on every reload. The skeleton ships no concrete provider, so a reload
-    that re-imports the identity plugin re-registers it without tripping the guard.
-    """
-    _REGISTRY.clear()
+
+def reset_registry() -> None:
+    """Clear the write-target registry — the STAGED generation while a build is staging
+    (``start()`` clears the fresh staged map before it re-imports the plugin modules,
+    never the committed one, so a reload leaves the live registry untouched), else
+    the committed map (boot, and test isolation)."""
+    _write_target().clear()
+
+
+def begin_staging() -> None:
+    """Open a fresh staged generation an epoch build registers into, leaving the
+    committed registry serving the live generation untouched."""
+    global _pending
+    _pending = {}
+
+
+def commit_staging() -> None:
+    """Promote the staged generation to committed in one reference assignment (atomic
+    under the GIL). A no-op if no build staged."""
+    global _REGISTRY, _pending
+    if _pending is not None:
+        _REGISTRY = _pending  # pyright: ignore[reportConstantRedefinition]  # atomic generation swap
+        _pending = None
+
+
+def abort_staging() -> None:
+    """Drop the staged generation on a failed build — the committed registry never saw
+    any of its registrations."""
+    global _pending
+    _pending = None
 
 
 __all__ = [
+    "abort_staging",
+    "begin_staging",
+    "commit_staging",
     "get_identity_provider_factory",
+    "get_identity_provider_factory_staged",
     "register_identity_provider",
     "reset_registry",
 ]

@@ -24,6 +24,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.agent import Agent
 from tai42_contract.backend import Backend
 from tai42_contract.backup import BackupSectionInfo
@@ -248,6 +249,25 @@ class AppConversations(Protocol):
 
 
 @runtime_checkable
+class AppAccounts(Protocol):
+    """Read access to the CURRENT epoch's live identity/accounts provider instances.
+
+    An accounts-provider plugin ships login routes that need the SAME provider instance
+    the epoch built and probed (its resolved config, cached discovery/JWKS, injected
+    settings). Rather than a module-level holder — which a failed epoch build would
+    leave pointing at a half-built generation — the plugin's routes resolve the live
+    instance here. The contract exposes only this read; the runtime forwards it to the
+    current epoch, so the contract never learns about epochs.
+    """
+
+    def active_provider(self, name: str) -> IdentityProvider | None:
+        """The provider the CURRENT epoch instantiated under ``name`` (an
+        ``AccountsProvider`` is an ``IdentityProvider``), or ``None`` when no provider is
+        active under that name — the name is not configured, or a build is mid-flight."""
+        ...
+
+
+@runtime_checkable
 class AppConnectors(Protocol):
     def register_connector(self, descriptor: ProviderDescriptor) -> None:
         """Register an OAuth connector provider from its pure descriptor data. A
@@ -343,6 +363,13 @@ class AppLifecycle(Protocol):
     def on_reload(self, func: Callable[[], Any]) -> Callable[[], Any]:
         """Register a handler re-run after every in-place re-init (``reload_config``) —
         e.g. dynamic tool loaders that ``on_startup`` ran once."""
+        ...
+
+    def on_post_swap(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        """Register an establisher for a loop-affine background loop (a periodic poll or
+        sweep). Run on the real serving loop at boot and after every epoch swap — never
+        on the throwaway build-thread loop the per-epoch handlers run on — so the loop
+        it spawns attaches to the serving loop and retires with its generation."""
         ...
 
     def on_fleet_op_applied(self, func: Callable[[str], Any]) -> Callable[[str], Any]:

@@ -17,6 +17,7 @@ from typing import Protocol, cast, runtime_checkable
 from tai42_contract.tools import AppTools
 
 from .facets import (
+    AppAccounts,
     AppAdmin,
     AppAgents,
     AppBackends,
@@ -59,6 +60,9 @@ class TaiApp(Protocol):
 
     @property
     def connectors(self) -> AppConnectors: ...
+
+    @property
+    def accounts(self) -> AppAccounts: ...
 
     @property
     def webhook_verifiers(self) -> AppWebhookVerifiers: ...
@@ -118,6 +122,7 @@ tai42_app: _TaiAppRuntime = cast("_TaiAppRuntime", _tai_app_handle)
 
 
 __all__ = [
+    "AppAccounts",
     "AppAdmin",
     "AppAgents",
     "AppBackends",
