@@ -343,9 +343,20 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
         backend_lost_tool, deadline=15.0, message="the backend worker never lost the detached tool from its registry"
     )
 
-    # The serve workers were not targeted, so they still serve the tool.
-    async with stack.mcp() as mcp:
-        serve_tools = await mcp.tool_names()
+    # The serve workers were not targeted, so they still serve the tool. The module's
+    # whole-fleet ``_normalize`` reload (and the boot self-resync) can leave a serve
+    # worker's deferred session-manager close still settling when this listing opens, so a
+    # freshly-opened session can be retired mid-listing (D13a -> "Session terminated");
+    # re-open on a fresh session until the listing lands.
+    async def _serve_tool_names() -> list[str]:
+        async with stack.mcp() as mcp:
+            return await mcp.tool_names()
+
+    serve_tools = await wait_for_async(
+        lambda: _probe_tolerating_reloading(_serve_tool_names),
+        deadline=10.0,
+        message="the serve worker tool listing never left the reload/session-swap window",
+    )
     assert _MCP_TOOL in serve_tools, f"a serve worker lost a tool the detach targeted only at the backend: {_MCP_TOOL}"
 
 

@@ -32,8 +32,9 @@ from _fleet import (
     wait_present,
 )
 
+from tai42_e2e import wait_for_async
 from tai42_e2e.netfixtures import OAuthIdp
-from tai42_e2e.stack import TaiStack
+from tai42_e2e.stack import TaiStack, _probe_tolerating_reloading
 
 pytestmark = pytest.mark.backendless
 
@@ -44,8 +45,22 @@ async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
 
 
 async def _serves(stack: TaiStack, tool: str) -> bool:
-    async with stack.mcp() as mcp:
-        return tool in await mcp.tool_names()
+    # A connect/disconnect fans a ``reload_config`` out over the fleet; even after
+    # ``converged_digest`` confirms the mutation landed, a worker's deferred session-manager
+    # close can still retire a freshly-opened MCP session mid-listing (D13a — the swapped-in
+    # epoch serves a new session-id space -> "Session terminated"). Re-open on a fresh
+    # session until the listing lands, so this returns the TRUE presence (never a
+    # session-swap sentinel — ``_not_serves`` inverts it, so a collapsed False would falsely
+    # report the tool gone).
+    async def _thunk() -> bool:
+        async with stack.mcp() as mcp:
+            return tool in await mcp.tool_names()
+
+    return await wait_for_async(
+        lambda: _probe_tolerating_reloading(_thunk),
+        deadline=10.0,
+        message=f"the tool listing for {tool!r} never left the reload/session-swap window",
+    )
 
 
 async def _authorize(authorize_url: str) -> tuple[str, str]:
