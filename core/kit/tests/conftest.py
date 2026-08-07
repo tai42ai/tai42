@@ -53,6 +53,21 @@ _SETTINGS_ENV_NAMES = (
 
 
 @pytest.fixture(autouse=True)
+def _reset_client_epoch() -> object:
+    """Restore the process-wide client epoch after any test that advances it.
+
+    ``advance_client_epoch`` mutates one module-level counter shared by the pool
+    maps, the registries, and the settings-cache stamp; without a restore, a test
+    that advances it would leak a non-zero epoch into every later test.
+    """
+    from tai42_kit.clients import base as client_base
+
+    saved = client_base._client_epoch
+    yield
+    client_base._client_epoch = saved
+
+
+@pytest.fixture(autouse=True)
 def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Clear ambient kit settings env and run each test from a scratch CWD.
 

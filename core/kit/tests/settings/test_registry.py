@@ -3,6 +3,7 @@ as a plain-data group. Extraction honors aliases, marks secrets, skips
 non-JSON-safe defaults, and references nested settings as their own group."""
 
 import enum
+from typing import ClassVar
 
 import pytest
 from pydantic import AliasChoices, AliasPath, Field, SecretStr
@@ -10,7 +11,7 @@ from pydantic.fields import FieldInfo
 from pydantic_settings import SettingsConfigDict
 
 from tai42_kit.clients.settings import RedisConnectionSettings
-from tai42_kit.settings import TaiBaseSettings, registered_settings
+from tai42_kit.settings import KeyMaterial, ReloadClass, TaiBaseSettings, registered_settings
 from tai42_kit.settings.registry import (
     _clear_registry,
     _factory_needs_validated_data,
@@ -360,3 +361,118 @@ def test_fieldless_subclass_is_not_registered():
     # No fields means nothing env-configurable, so the empty-model_fields guard
     # skips the class — it never appears as a group.
     assert all(info.name != "MarkerSettings" for info in registered_settings())
+
+
+def test_reload_class_defaults_to_hot():
+    class HotSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="HOT_")
+
+        value: int = 1
+
+    group = _group("HotSettings")
+    assert group.reload_class == "hot"  # kit default when nothing is declared
+    assert _field("HotSettings", "value").reload_class == "hot"
+
+
+def test_reload_class_class_var_declares_group_and_fields():
+    class RecycleSettings(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        model_config = SettingsConfigDict(env_prefix="RECYCLE_")
+
+        value: int = 1
+
+    group = _group("RecycleSettings")
+    assert group.reload_class == "recycle"
+    # A field with no override takes its class's disposition.
+    assert _field("RecycleSettings", "value").reload_class == "recycle"
+
+
+def test_reload_class_is_inherited_by_subclass():
+    class RecycleBase(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        registry_exclude: ClassVar[bool] = True
+
+    class ChildRecycleSettings(RecycleBase):
+        model_config = SettingsConfigDict(env_prefix="CHILDRECYCLE_")
+
+        value: int = 1
+
+    # Inheriting getattr semantics: the subclass carries the base's declaration
+    # even though it never restates it (unlike the own-attribute registry_exclude).
+    group = _group("ChildRecycleSettings")
+    assert group.reload_class == "recycle"
+    assert _field("ChildRecycleSettings", "value").reload_class == "recycle"
+
+
+def test_reload_field_override_wins_over_class():
+    class MixedReloadSettings(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        model_config = SettingsConfigDict(env_prefix="MIXEDRELOAD_")
+
+        rebuilt: int = 1
+        pinned: int = Field(default=2, json_schema_extra={"reload": "excluded"})
+
+    # The per-field override wins; sibling fields keep the class disposition.
+    assert _field("MixedReloadSettings", "rebuilt").reload_class == "recycle"
+    assert _field("MixedReloadSettings", "pinned").reload_class == "excluded"
+    # The group-level value is unaffected by a field override.
+    assert _group("MixedReloadSettings").reload_class == "recycle"
+
+
+def test_nested_group_reference_inherits_class_reload_class():
+    class NestedChildSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="NESTEDCHILD_")
+
+        flag: bool = True
+
+    class RecycleParentSettings(TaiBaseSettings):
+        reload_class: ClassVar[ReloadClass] = "recycle"
+        model_config = SettingsConfigDict(env_prefix="RECYCLEPARENT_")
+
+        child: NestedChildSettings = NestedChildSettings()
+
+    # A nested-group reference inherits its owning class's disposition, exactly
+    # like a sibling scalar field would — not the "hot" default.
+    child_field = _field("RecycleParentSettings", "child")
+    assert child_field.nested_group == "NestedChildSettings"
+    assert child_field.reload_class == "recycle"
+    assert child_field.key_material is False  # a group reference is not key material
+
+
+def test_invalid_reload_override_raises():
+    # A non-``ReloadClass`` override surfaces loudly at registration, never a
+    # silent coercion to a default.
+    with pytest.raises(ValueError, match="reload class"):
+
+        class BadReloadSettings(TaiBaseSettings):
+            model_config = SettingsConfigDict(env_prefix="BADRELOAD_")
+
+            value: int = Field(default=1, json_schema_extra={"reload": "warm"})
+
+
+def test_key_material_field_is_flagged_and_secret():
+    class CryptoSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="CRYPTO_")
+
+        kek: KeyMaterial
+        note: str = "n"
+
+    kek = _field("CryptoSettings", "kek")
+    assert kek.key_material is True
+    assert kek.secret is True  # KeyMaterial is a SecretStr, so masking still applies
+    assert kek.default is None
+
+    note = _field("CryptoSettings", "note")
+    assert note.key_material is False  # plain fields are not key material
+
+
+def test_key_material_masks_a_baked_in_default():
+    class SeededCryptoSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="SEEDEDCRYPTO_")
+
+        kek: KeyMaterial = SecretStr("baked-in")
+
+    kek = _field("SeededCryptoSettings", "kek")
+    assert kek.key_material is True
+    assert kek.secret is True
+    assert kek.default is None  # a secret default is never emitted on the wire

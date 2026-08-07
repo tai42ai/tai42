@@ -21,6 +21,19 @@ logger = logging.getLogger(__name__)
 CleanupFn = Callable[[], Awaitable[None]]
 ResourceFactory = Callable[[], Awaitable[tuple[Any, CleanupFn | None]]]
 
+# How long ``drain_epoch`` sleeps between resource-release polls while waiting for
+# a retired epoch's registry to go idle.
+_DRAIN_POLL_SECONDS = 0.01
+
+
+def _current_epoch() -> int:
+    # The single process-wide epoch lives in ``clients.base``; import lazily so
+    # this module (reached through ``settings`` during its import) takes no
+    # import-time dependency on the clients package.
+    from tai42_kit.clients.base import current_client_epoch
+
+    return current_client_epoch()
+
 
 class ResourceRegistry:
     """Create-once cache of long-lived async resources keyed by a string.
@@ -92,59 +105,109 @@ class ResourceRegistry:
 
 
 class LoopRegistryMap[R: ResourceRegistry]:
-    """Per-event-loop map of :class:`ResourceRegistry` instances.
+    """Per-event-loop, per-epoch map of :class:`ResourceRegistry` instances.
 
     Registries are keyed per event loop (their ``asyncio.Lock``s and pooled
     resources bind to the loop that first uses them) in a ``WeakKeyDictionary``,
-    so a loop's registry drops when the loop is collected. The map can be reached
-    from multiple threads (each running its own loop), so every explicit access
-    is serialized under a ``threading.Lock``.
+    so a loop's registries drop when the loop is collected, and per epoch under
+    that: a retired epoch's registry stays reachable so an old-epoch agent stream
+    keeps its resources until it releases them, while the current epoch rebuilds
+    fresh. The map can be reached from multiple threads (each running its own
+    loop), so every explicit access is serialized under a ``threading.Lock``.
     """
 
     def __init__(self, factory: Callable[[], R], label: str) -> None:
         self._factory = factory
         self._label = label
-        self._registries: WeakKeyDictionary[AbstractEventLoop, R] = WeakKeyDictionary()
+        self._registries: WeakKeyDictionary[AbstractEventLoop, dict[int, R]] = WeakKeyDictionary()
         self._lock = threading.Lock()
 
     def current(self) -> R:
-        """Return the registry for the running loop, rebuilding after close_all."""
+        """Return the current-epoch registry for the running loop, rebuilding after close_all."""
         loop = asyncio.get_running_loop()
+        epoch = _current_epoch()
         with self._lock:
-            registry = self._registries.get(loop)
+            per_epoch = self._registries.get(loop)
+            if per_epoch is None:
+                per_epoch = {}
+                self._registries[loop] = per_epoch
+            registry = per_epoch.get(epoch)
             if registry is None or registry._closed:
                 registry = self._factory()
-                self._registries[loop] = registry
+                per_epoch[epoch] = registry
             return registry
 
     def reset(self) -> None:
-        """Drop the per-loop registries so a settings reload rebuilds them.
+        """Drop the current-epoch per-loop registries so a settings reload rebuilds them.
 
-        A registry on a still-running loop that holds live resources cannot be
-        closed from this synchronous reset path — dropping it would silently
-        leak its open pools. That is a caller error: ``close_all()`` must run on
-        the owning loop first, so this raises loudly instead. Registries whose
-        loop has already closed can never be closed cleanly (their resources are
-        bound to a dead loop); those are dropped, and any that still held
-        resources are logged so the drop is visible rather than silent.
+        A CURRENT-epoch registry on a still-running loop that holds live resources
+        cannot be closed from this synchronous reset path — dropping it would
+        silently leak its open pools. That is a caller error: ``close_all()`` must
+        run on the owning loop first, so this raises loudly. RETIRED-epoch
+        registries on a running loop are excluded: they drain on live-resource
+        release and force-close at the drain deadline (:meth:`drain_epoch`), so a
+        new epoch's reload must not refuse on them. Registries whose loop has
+        already closed can never be closed cleanly (their resources bind to a dead
+        loop); those are dropped at any epoch, and any that still held resources
+        are logged so the drop is visible rather than silent.
         """
+        current = _current_epoch()
         with self._lock:
-            live_loops = [
-                loop
-                for loop, registry in self._registries.items()
-                if not loop.is_closed() and registry.has_live_resources
+            blocking = [
+                (loop, epoch)
+                for loop, per_epoch in self._registries.items()
+                for epoch, registry in per_epoch.items()
+                if epoch == current and not loop.is_closed() and registry.has_live_resources
             ]
-            if live_loops:
+            if blocking:
                 raise RuntimeError(
-                    f"{self._label}: {len(live_loops)} registry/registries on a running event loop "
+                    f"{self._label}: {len(blocking)} registry/registries on a running event loop "
                     "still hold live resources; call close_all() on the owning loop before resetting settings."
                 )
-            for registry in self._registries.values():
-                if registry.has_live_resources:
-                    logger.warning(
-                        "%s: dropping registry for a closed event loop that still held %d resource(s); "
-                        "its loop-bound resources cannot be closed from a settings reset.",
-                        self._label,
-                        len(registry._resources),
-                    )
-            self._registries.clear()
+            for loop, per_epoch in list(self._registries.items()):
+                for epoch, registry in list(per_epoch.items()):
+                    if epoch != current and not loop.is_closed():
+                        continue  # retired registry on a live loop: drain_epoch owns it
+                    if registry.has_live_resources:
+                        # Only a closed-loop registry can still hold resources here
+                        # (a live current-epoch one raised above); its loop-bound
+                        # resources cannot be closed from this sync reset.
+                        logger.warning(
+                            "%s: dropping registry for a closed event loop that still held %d resource(s); "
+                            "its loop-bound resources cannot be closed from a settings reset.",
+                            self._label,
+                            len(registry._resources),
+                        )
+                    del per_epoch[epoch]
+                if not per_epoch:
+                    del self._registries[loop]
+
+    async def drain_epoch(self, epoch: int, deadline: float) -> None:
+        """Close a retired epoch's registry for the running loop, draining first.
+
+        Waits up to ``deadline`` seconds for the registry's resources to release
+        (``has_live_resources`` is the lease-equivalent), then force-closes via
+        ``close_all`` — which raises an ``ExceptionGroup`` on any close failure.
+        Must run on the loop that owns the registry; the current epoch cannot be
+        drained.
+        """
+        if epoch == _current_epoch():
+            raise ValueError(f"{self._label}: cannot drain the current epoch {epoch}")
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            per_epoch = self._registries.get(loop)
+            registry = per_epoch.get(epoch) if per_epoch is not None else None
+        if registry is None:
+            return
+        end = loop.time() + deadline
+        while registry.has_live_resources and loop.time() < end:
+            await asyncio.sleep(_DRAIN_POLL_SECONDS)
+        try:
+            await registry.close_all()
+        finally:
+            with self._lock:
+                per_epoch = self._registries.get(loop)
+                if per_epoch is not None:
+                    per_epoch.pop(epoch, None)
+                    if not per_epoch:
+                        del self._registries[loop]

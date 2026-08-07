@@ -8,7 +8,13 @@ driver each impl needs is declared by an extra (``tai42-kit[curl]`` /
 
 from tai42_contract.errors import ClientDisconnectedError
 
-from tai42_kit.clients.base import PooledClient, shutdown_all_clients
+from tai42_kit.clients.base import (
+    PooledClient,
+    advance_client_epoch,
+    current_client_epoch,
+    drain_epoch,
+    shutdown_all_clients,
+)
 from tai42_kit.clients.facade import client_ctx
 from tai42_kit.clients.settings import (
     ClientSettings,
@@ -22,6 +28,9 @@ __all__ = [
     "PooledClient",
     "PostgresConnectionSettings",
     "RedisConnectionSettings",
+    "advance_client_epoch",
     "client_ctx",
+    "current_client_epoch",
+    "drain_epoch",
     "shutdown_all_clients",
 ]

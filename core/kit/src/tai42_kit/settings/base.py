@@ -1,7 +1,18 @@
 import json
-from typing import Any
+from typing import Annotated, Any, ClassVar, Literal
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Reload disposition of a settings group (or a single field) across a settings
+# epoch flip: ``hot`` re-reads live, ``recycle`` needs its pooled resource torn
+# down and rebuilt, ``excluded`` must not change without a full process restart.
+ReloadClass = Literal["hot", "recycle", "excluded"]
+
+# Field type for env-sourced key material (KEKs, HMAC/signing keys). A
+# ``SecretStr`` so masking applies everywhere a secret does; the ``key_material``
+# flag is what the registry surfaces so downstream policy can refuse to expose it.
+KeyMaterial = Annotated[SecretStr, Field(json_schema_extra={"key_material": True})]
 
 
 class TaiBaseSettings(BaseSettings):
@@ -15,6 +26,11 @@ class TaiBaseSettings(BaseSettings):
         env_ignore_empty=True,
         extra="ignore",
     )
+
+    # Group-level reload disposition, read with inheriting ``getattr`` semantics
+    # so a subclass inherits its base's declaration. Kit ships only the ``hot``
+    # default; core-owned classes declare ``recycle``/``excluded`` downstream.
+    reload_class: ClassVar[ReloadClass] = "hot"
 
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:

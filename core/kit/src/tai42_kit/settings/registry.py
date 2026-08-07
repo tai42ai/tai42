@@ -17,6 +17,8 @@ from pydantic import AliasChoices, BaseModel, SecretBytes, SecretStr, TypeAdapte
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings
 
+from tai42_kit.settings.base import ReloadClass
+
 
 class SettingsFieldInfo(BaseModel):
     """One env-configurable field on a settings class, as plain data."""
@@ -33,6 +35,11 @@ class SettingsFieldInfo(BaseModel):
     # namespace leaves it unset, or ``None`` for a field with no default-namespace
     # mapping (every behavior knob and every nested-group reference).
     default_namespace_var: str | None = None
+    # This field's reload disposition: its own ``json_schema_extra={"reload": ...}``
+    # override, else its class's ``reload_class``.
+    reload_class: ReloadClass = "hot"
+    # True when the field carries key material (the ``KeyMaterial`` type).
+    key_material: bool = False
 
 
 class SettingsClassInfo(BaseModel):
@@ -42,6 +49,8 @@ class SettingsClassInfo(BaseModel):
     module: str
     qualname: str
     fields: list[SettingsFieldInfo]
+    # The group's declared reload disposition (default ``hot``).
+    reload_class: ReloadClass = "hot"
 
 
 # Keyed by qualified name (``module.__qualname__``) so a module re-import
@@ -87,6 +96,30 @@ def _is_secret(field_info: FieldInfo) -> bool:
             return True
     extra = field_info.json_schema_extra
     return isinstance(extra, dict) and extra.get("secret") is True
+
+
+def _is_key_material(field_info: FieldInfo) -> bool:
+    """A field holds key material when flagged via
+    ``json_schema_extra={"key_material": True}`` (the ``KeyMaterial`` type)."""
+    extra = field_info.json_schema_extra
+    return isinstance(extra, dict) and extra.get("key_material") is True
+
+
+def _as_reload_class(value: Any, source: str) -> ReloadClass:
+    """Narrow an untyped declaration to a ``ReloadClass``, raising with ``source``
+    on any value outside the literal set — never a silent coercion to a default."""
+    if value in get_args(ReloadClass):
+        return cast("ReloadClass", value)
+    raise ValueError(f"{source} reload class {value!r} is not one of {get_args(ReloadClass)}")
+
+
+def _reload_override(field_info: FieldInfo) -> Any | None:
+    """The field's own ``json_schema_extra={"reload": ...}`` value, or ``None`` when
+    it carries no override and so takes its class's ``reload_class``."""
+    extra = field_info.json_schema_extra
+    if isinstance(extra, dict):
+        return extra.get("reload")
+    return None
 
 
 def _resolve_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any]:
@@ -218,6 +251,9 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
     # ``{field_name: default_key}`` map for classes carrying the default-namespace
     # fallback (empty for every other settings class).
     default_fields: Mapping[str, str] = getattr(cls, "tai_default_fields", {})
+    # Inheriting read (a subclass inherits its base's declaration); the field-level
+    # value falls back to this when a field declares no ``reload`` override.
+    class_reload = _as_reload_class(getattr(cls, "reload_class", "hot"), f"class {cls.__name__!r}")
     fields: list[SettingsFieldInfo] = []
     for name, field_info in cls.model_fields.items():
         nested = _settings_member(field_info.annotation)
@@ -234,6 +270,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                     secret=False,
                     description=field_info.description,
                     nested_group=nested.__name__,
+                    reload_class=class_reload,
                 )
             )
             continue
@@ -250,6 +287,10 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 raw_default = raw_default.value
             default = _json_safe(raw_default)
         default_key = default_fields.get(name)
+        reload_override = _reload_override(field_info)
+        field_reload = (
+            _as_reload_class(reload_override, f"field {name!r}") if reload_override is not None else class_reload
+        )
         fields.append(
             SettingsFieldInfo(
                 name=name,
@@ -261,6 +302,8 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 description=field_info.description,
                 nested_group=None,
                 default_namespace_var=f"TAI_DEFAULT_{default_key.upper()}" if default_key is not None else None,
+                reload_class=field_reload,
+                key_material=_is_key_material(field_info),
             )
         )
     return SettingsClassInfo(
@@ -268,6 +311,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
         module=cls.__module__,
         qualname=_qualname(cls),
         fields=fields,
+        reload_class=class_reload,
     )
 
 
