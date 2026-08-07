@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from tai42_e2e import wait_for_async
-from tai42_e2e.stack import TaiStack, _probe_tolerating_reloading
+from tai42_e2e.stack import TaiStack
 
 
 async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
@@ -17,15 +17,10 @@ async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack,
     # Apply the extension on A, polling past A's boot-time reload gate.
     result = await api_a.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]}, retry_on_reloading=True)
 
-    # A serves the branch locally (the local apply). The apply's reload_config fan-out
-    # can retire this freshly-opened session mid-listing (D13a — a reload swaps the
-    # epoch); tolerate it so the enclosing wait re-polls on a fresh session.
+    # A serves the branch locally (the local apply).
     async def a_serves_batch() -> bool:
-        async def _thunk() -> bool:
-            async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
-                return "e2e_echo_batch" in await mcp.tool_names()
-
-        return bool(await _probe_tolerating_reloading(_thunk))
+        async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
+            return "e2e_echo_batch" in await mcp.tool_names()
 
     await wait_for_async(a_serves_batch, deadline=5.0, message="A never served e2e_echo_batch after local apply")
 
@@ -45,13 +40,8 @@ async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack,
         )
 
     # The sibling HTTP replica rebound from the same fan-out, so it serves the branch too.
-    # B's own reload (driven by the fan-out) can retire this freshly-opened session
-    # mid-listing (D13a); tolerate it so the enclosing wait re-polls on a fresh session.
     async def b_serves_batch() -> bool:
-        async def _thunk() -> bool:
-            async with replicas_stack.mcp(port=replicas_stack.port_b) as mcp:
-                return "e2e_echo_batch" in await mcp.tool_names()
-
-        return bool(await _probe_tolerating_reloading(_thunk))
+        async with replicas_stack.mcp(port=replicas_stack.port_b) as mcp:
+            return "e2e_echo_batch" in await mcp.tool_names()
 
     await wait_for_async(b_serves_batch, deadline=5.0, message="B never served e2e_echo_batch from the fan-out")

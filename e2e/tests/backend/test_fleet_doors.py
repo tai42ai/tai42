@@ -16,7 +16,7 @@ import httpx
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.stack import TaiStack, _probe_tolerating_reloading
+from tai42_e2e.stack import TaiStack
 
 _PASSWORD = "fleet-fence-password-1"
 
@@ -88,15 +88,10 @@ async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: Tai
                 "reload_config", {"targets": [bogus]}, raise_on_error=False, retry_on_reloading=True
             )
 
-    # The prior test's fleet reload swaps the epoch; its deferred session-manager close
-    # can retire a freshly-opened MCP session mid-call (D13a: a swap terminates sessions).
-    # Re-open and re-issue on a fresh session until it lands cleanly (past the swap window
-    # and the boot reload gate) — exactly as a real client re-initialises.
-    result = await wait_for_async(
-        lambda: _probe_tolerating_reloading(_call_bogus_tool),
-        deadline=10.0,
-        message="the bogus reload_config tool never left the reload/session-swap window",
-    )
+    # A prior test's fleet reload can retire a freshly-opened MCP session mid-call
+    # (D13a: a swap terminates sessions); ``McpClient`` re-initialises transparently and
+    # returns the real result, so the bogus-target verdict is asserted on a plain call.
+    result = await _call_bogus_tool()
     assert result.is_error, f"a bogus target must fail the tool loudly: {result}"
     assert bogus in " ".join(getattr(part, "text", "") for part in result.content), result
 

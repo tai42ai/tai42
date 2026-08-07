@@ -9,21 +9,9 @@ from collections.abc import Callable
 from typing import Any
 
 from fastmcp.exceptions import ToolError
-from mcp.shared.exceptions import McpError
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
-
-
-def _session_terminated(exc: McpError) -> bool:
-    """True for the D13a session-swap rejection.
-
-    A sibling/backend worker applying a fan-out reload swaps its serving epoch, retiring
-    the MCP session a poll opened against the old epoch (the new epoch serves a fresh
-    session-id space); the SDK raises ``McpError`` "Session terminated". A polled
-    predicate treats it as "not yet" and re-polls on a fresh session — exactly as a real
-    client re-initialises. Any other MCP error is real and propagates."""
-    return "Session terminated" in str(exc)
 
 
 def _tool_text(result: Any) -> str:
@@ -125,10 +113,6 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
             if _reloading(exc):
                 return False
             raise
-        except McpError as exc:
-            if _session_terminated(exc):
-                return False
-            raise
 
     await wait_for_async(b_serves_baked, deadline=5.0, message="B never rebound the preset after its reload")
 
@@ -145,10 +129,6 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
             if _reloading(exc):
                 return False
             raise
-        except McpError as exc:
-            if _session_terminated(exc):
-                return False
-            raise
 
     await wait_for_async(backend_sees_new, deadline=5.0, message="backend worker never saw the new preset version")
 
@@ -158,15 +138,6 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     assert await _call_preset(replicas_stack, replicas_stack.port_b, name) == baked
 
     async def backend_sees_old() -> bool:
-        try:
-            return await _backend_call(replicas_stack, name) == baked
-        except ToolError as exc:
-            if _reloading(exc):
-                return False
-            raise
-        except McpError as exc:
-            if _session_terminated(exc):
-                return False
-            raise
+        return await _backend_call(replicas_stack, name) == baked
 
     await wait_for_async(backend_sees_old, deadline=5.0, message="backend worker never saw the rolled-back preset")

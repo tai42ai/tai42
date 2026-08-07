@@ -30,7 +30,7 @@ from dataclasses import replace
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import StackConfig, StackResources, TaiStack, _probe_tolerating_reloading
+from tai42_e2e.stack import StackConfig, StackResources, TaiStack
 from tai42_e2e.variants import Variants
 
 _WORKERS = 4
@@ -106,16 +106,8 @@ async def test_sub_mcp_registered_at_runtime_serves_over_the_mcp_surface(
         # GET /api/sub-mcp unwraps to a {slug: config} mapping.
         if slug not in await stack.api().get("/api/sub-mcp"):
             return False
-
-        # The sub-MCP registration reloaded the worker, swapping its serving epoch; a
-        # session opened on the mount can be retired mid-listing (D13a — the new epoch
-        # serves a fresh session-id space). Tolerate it so this wait re-polls on a fresh
-        # session, exactly as a real client re-initialises.
-        async def _thunk() -> bool:
-            async with stack.mcp(path=f"/app/{slug}") as mcp:
-                return "e2e_record" in await mcp.tool_names()
-
-        return bool(await _probe_tolerating_reloading(_thunk))
+        async with stack.mcp(path=f"/app/{slug}") as mcp:
+            return "e2e_record" in await mcp.tool_names()
 
     await wait_for_async(mount_serves, deadline=10.0, message=f"sub-MCP {slug} never served over the MCP surface")
 

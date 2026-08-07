@@ -43,7 +43,7 @@ from tai42_e2e import wait_for_async
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import build_core_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, _probe_tolerating_reloading
+from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
 from tai42_e2e.variants import BusOrigin
 
 if TYPE_CHECKING:
@@ -160,29 +160,14 @@ async def _stable_serve_digests(stack: TaiStack, n: int) -> dict[int, str]:
 async def _backend_dispatch(stack: TaiStack, tool: str, arguments: dict) -> CallToolResult:
     """Run ``tool`` INSIDE the backend worker via the ``run_tool_sync_task`` door (the
     task-execution readback) and return the raw MCP result — ``is_error`` when the
-    backend can no longer dispatch the name.
-
-    A whole-fleet reload (``_normalize``) or a targeted op settling on the serve worker
-    this dispatch enters can swap that worker's serving epoch and retire the freshly-opened
-    MCP session (D13a — the new epoch serves a fresh session-id space -> "Session
-    terminated"). Re-open on a fresh session until the dispatch lands, exactly as a real
-    client re-initialises; a genuine ``is_error`` dispatch result (the backend lost the
-    tool) is a delivered result and passes straight through."""
-
-    async def _thunk() -> CallToolResult:
-        async with stack.mcp() as mcp:
-            return await mcp.call_tool(
-                "run_tool_sync_task",
-                {"tool_name": tool, "arguments": arguments},
-                raise_on_error=False,
-                retry_on_reloading=True,
-            )
-
-    return await wait_for_async(
-        lambda: _probe_tolerating_reloading(_thunk),
-        deadline=15.0,
-        message=f"the backend dispatch of {tool!r} never left the reload/session-swap window",
-    )
+    backend can no longer dispatch the name."""
+    async with stack.mcp() as mcp:
+        return await mcp.call_tool(
+            "run_tool_sync_task",
+            {"tool_name": tool, "arguments": arguments},
+            raise_on_error=False,
+            retry_on_reloading=True,
+        )
 
 
 async def _normalize(stack: TaiStack) -> None:
@@ -343,20 +328,9 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
         backend_lost_tool, deadline=15.0, message="the backend worker never lost the detached tool from its registry"
     )
 
-    # The serve workers were not targeted, so they still serve the tool. The module's
-    # whole-fleet ``_normalize`` reload (and the boot self-resync) can leave a serve
-    # worker's deferred session-manager close still settling when this listing opens, so a
-    # freshly-opened session can be retired mid-listing (D13a -> "Session terminated");
-    # re-open on a fresh session until the listing lands.
-    async def _serve_tool_names() -> list[str]:
-        async with stack.mcp() as mcp:
-            return await mcp.tool_names()
-
-    serve_tools = await wait_for_async(
-        lambda: _probe_tolerating_reloading(_serve_tool_names),
-        deadline=10.0,
-        message="the serve worker tool listing never left the reload/session-swap window",
-    )
+    # The serve workers were not targeted, so they still serve the tool.
+    async with stack.mcp() as mcp:
+        serve_tools = await mcp.tool_names()
     assert _MCP_TOOL in serve_tools, f"a serve worker lost a tool the detach targeted only at the backend: {_MCP_TOOL}"
 
 
