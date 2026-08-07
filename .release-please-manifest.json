@@ -1,11 +1,11 @@
 {
   "core/contract": "1.0.0",
   "core/kit": "1.1.0",
-  "core/skeleton": "1.0.0",
+  "core/skeleton": "1.1.0",
   "plugins/accounts-oidc": "0.3.1",
   "plugins/accounts-postgres": "1.0.1",
   "plugins/agents": "0.3.7",
-  "plugins/backend-arq": "0.4.6",
+  "plugins/backend-arq": "0.5.0",
   "plugins/backend-celery": "0.4.6",
   "plugins/backend-rq": "0.4.7",
   "plugins/channel-slack": "0.5.1",
