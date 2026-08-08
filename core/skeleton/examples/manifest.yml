@@ -76,6 +76,8 @@ extensions_modules: []      # modules registering tool extensions
 #     module: tai42_skeleton.tools.builtin.file_loader  # file_loader (url or resource id -> text/media)
 #   - title: ask-user
 #     module: tai42_skeleton.tools.builtin.interactions  # ask_user (human-in-the-loop)
+#   - title: get-pairing-code
+#     module: tai42_skeleton.tools.builtin.get_pairing_code  # get_pairing_code (mint a channel pair code)
 #
 # Management tools (run_tool, reload_config, update_manifest, list_hooks,
 # the mcp/template/resource families, notify_user, ...) are not builtin

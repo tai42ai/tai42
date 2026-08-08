@@ -15,6 +15,7 @@ from tai42_skeleton.manifest import Manifest
 BUILTIN_TOOLS: dict[str, list[str]] = {
     "tai42_skeleton.tools.builtin.file_loader": ["file_loader"],
     "tai42_skeleton.tools.builtin.interactions": ["ask_user"],
+    "tai42_skeleton.tools.builtin.get_pairing_code": ["get_pairing_code"],
 }
 
 BUILTIN_EXTENSION_MODULE = "tai42_skeleton.extensions.builtin.monitor"

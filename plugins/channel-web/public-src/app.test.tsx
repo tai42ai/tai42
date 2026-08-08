@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import { StrictMode, type ReactElement } from 'react';
 import {
   act,
   cleanup,
@@ -282,6 +282,106 @@ describe('sending', () => {
 
     expect(screen.getAllByText('hello')).toHaveLength(1);
     expect(screen.queryByLabelText('Sent')).not.toBeInTheDocument();
+  });
+});
+
+describe('invite pairing', () => {
+  // Each test sets the page URL by hand; reset it so a leftover `pair` cannot leak
+  // into the next render (the pairing effect runs on every mount).
+  afterEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('submits a valid pair code once as the first message, then strips it from the URL', async () => {
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    render(app());
+
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        'site-alpha',
+        'LINK-ABCD1234',
+        expect.stringMatching(CLIENT_MESSAGE_ID),
+      ),
+    );
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    // The code rode the normal send path, so it shows as the visitor's own first bubble.
+    expect(screen.getByText('LINK-ABCD1234')).toBeInTheDocument();
+    // Stripped from the URL so a reload or a shared link cannot resubmit it.
+    expect(window.location.search).toBe('');
+  });
+
+  it('removes only the pair parameter, leaving the rest of the URL intact', async () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/api/channels/web/chat/site-alpha?ref=email&pair=LINK-ABCD1234&x=1',
+    );
+    render(app());
+
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('pair')).toBeNull();
+    expect(params.get('ref')).toBe('email');
+    expect(params.get('x')).toBe('1');
+  });
+
+  it('submits the pair code only once, even as the page re-renders', async () => {
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    const { rerender } = render(app());
+
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+
+    // A stream frame re-renders the page; the code must not be resubmitted.
+    stream.state = streamState({ items: [agentSaid('m1', 'hi')] });
+    rerender(app());
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits the pair code exactly once under a StrictMode double-invoke', async () => {
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    render(<StrictMode>{app()}</StrictMode>);
+
+    // StrictMode mounts, tears the effect down, then remounts and re-runs it — a replay
+    // that exposes any mount-time work not guarded against running twice. The pairing
+    // ref-guard rides through it: the code is submitted once, not once per mount.
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      'site-alpha',
+      'LINK-ABCD1234',
+      expect.stringMatching(CLIENT_MESSAGE_ID),
+    );
+    expect(window.location.search).toBe('');
+  });
+
+  it('does nothing when there is no pair parameter', () => {
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha');
+    render(app());
+
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'link-abcd1234', // lower-case
+    'LINK-abcd1234', // lower-case body
+    'LINK-ABCD123', // too short
+    'LINK-ABCD12345', // too long
+    'xLINK-ABCD1234', // leading noise
+    'LINK-ABCD1234x', // trailing noise
+    'LINK-ABCD 234', // a non-alphanumeric in the body
+    'LINK-ABCD1234<script>alert(1)</script>', // script tag trailing an otherwise-valid code
+    '"><img src=x onerror=alert(1)>', // attribute-breakout markup
+  ])('ignores a pair value that does not match the code shape: %s', (bad) => {
+    window.history.replaceState(
+      {},
+      '',
+      `/api/channels/web/chat/site-alpha?pair=${encodeURIComponent(bad)}`,
+    );
+    render(app());
+
+    // Never submitted, never stripped, never reflected into the page.
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(new URLSearchParams(window.location.search).get('pair')).toBe(bad);
+    expect(screen.queryByText(bad)).not.toBeInTheDocument();
   });
 });
 
