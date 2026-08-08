@@ -5844,7 +5844,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-redis", marker = "extra == 'llm'", specifier = ">=0.5" },
     { name = "langgraph-checkpoint-sqlite", marker = "extra == 'langgraph-checkpoint-sqlite'", specifier = ">=3.0.3" },
     { name = "mcp", specifier = ">=1" },
-    { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.2" },
+    { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.4" },
     { name = "psycopg", extras = ["pool"], marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.3.2" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-settings", specifier = ">=2.11" },

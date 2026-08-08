@@ -105,7 +105,7 @@ langgraph-checkpoint-sqlite = [
 # driver at module top, so install the matching extra to use that client.
 redis = ["redis>=5"]
 curl = ["curl-cffi>=0.7"]
-postgres = ["psycopg[binary,pool]>=3.3.2"]
+postgres = ["psycopg[binary,pool]>=3.3.4"]
 
 # OIDC discovery + JWKS + JWT verification (net/jwt.py imports joserfc at module top).
 jwt = ["joserfc>=1.7"]
