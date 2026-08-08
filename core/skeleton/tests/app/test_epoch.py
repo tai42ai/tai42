@@ -533,6 +533,23 @@ def test_current_epoch_raises_before_boot() -> None:
         current_epoch()
 
 
+async def test_is_epoch_rebuild_in_progress_true_only_during_a_build() -> None:
+    """The MCP viability probe reads this to pick the SHORT reload budget during a rebuild and
+    the generous cold-boot one otherwise: it is True only while ``build_and_swap_epoch`` is
+    populating the new generation, and False at steady serve (and after the swap)."""
+    _install_boot("boot-app")
+    assert epoch_mod.is_epoch_rebuild_in_progress() is False  # steady serve, no build
+
+    seen: list[bool] = []
+
+    def _rebuild() -> None:
+        seen.append(epoch_mod.is_epoch_rebuild_in_progress())
+
+    await build_and_swap_epoch({"K": "v"}, rebuild=_rebuild, build_serving_app=_serve("new-app"))
+    assert seen == [True]  # True while the build populated the new generation
+    assert epoch_mod.is_epoch_rebuild_in_progress() is False  # cleared once the swap completed
+
+
 def test_settings_cache_is_used_by_the_sweep_roster() -> None:
     # A sanity anchor that the sweep roster the epoch retire depends on is populated
     # by the standard cached-accessor path.
