@@ -32,7 +32,20 @@ class ChannelDeliveryError(Exception):
     ``deliver`` NEVER returns a bool and NEVER silently drops a message: an
     undeliverable question is a loud failure, so the only success signal is a
     plain return.
+
+    ``retryable`` classifies the failure for the caller's retry decision: True
+    means transient (a medium 5xx, a rate limit, a transport fault or timeout)
+    and a fresh attempt may land. It defaults to False — a rejected recipient, a
+    bad credential, and any unrecognised fault fail on the first try rather than
+    being blind-retried. ``retry_after`` is the seconds the medium asked the
+    caller to wait (an HTTP ``Retry-After``, say); meaningful only when
+    ``retryable`` is True.
     """
+
+    def __init__(self, message: str, *, retryable: bool = False, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 class ChannelDelivery(BaseModel):
@@ -222,10 +235,10 @@ class Channel(Protocol):
         outside the operator allowlist, a required credential or recipient not
         configured, a bad send response — raises
         :class:`ChannelDeliveryError`; a plain return is the only success
-        signal. One send attempt only:
-        retrying is the caller's decision, never an implicit loop here (no
-        medium API offers an idempotency key, so a blind retry risks a
-        double-send).
+        signal. One send attempt only: retrying is the caller's decision, never
+        an implicit loop here — the raised error's ``retryable`` and
+        ``retry_after`` drive that decision, so a fault the medium can recover
+        from is classified rather than blind-retried here.
         """
         ...
 

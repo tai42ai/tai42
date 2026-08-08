@@ -24,7 +24,7 @@ from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError
 from tai42_contract.interactions import MediaItem
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.interactions import InteractionStore, ask_user
+from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError, ask_user
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
@@ -115,6 +115,15 @@ async def _await_delivery(channel: FakeChannel, timeout: float = 2.0) -> Channel
 
 def _ticket(delivery: ChannelDelivery) -> str:
     return delivery.callback_url.rsplit("/", 1)[-1]
+
+
+def _tune(monkeypatch, wired, **overrides) -> InteractionsSettings:
+    """Re-point both seams at a copy of the wired settings carrying ``overrides``
+    (the retry knobs, dialled down so a test never waits whole seconds)."""
+    settings = wired.settings.model_copy(update=overrides)
+    monkeypatch.setattr(router, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    return settings
 
 
 def _empty(fake_redis) -> bool:
@@ -462,7 +471,7 @@ async def test_hung_delivery_times_out_prunes_and_raises(wired):
     app._channel_registry.reset()
     tai42_app.channels.register("hung", HungChannel())
     try:
-        with pytest.raises(ChannelDeliveryError, match=r"delivery timed out after 0\.05s"):
+        with pytest.raises(ChannelDeliveryError, match=r"delivery timed out after .*interaction"):
             await ask_user("q", channel="hung", timeout=0.05)
 
         # The persisted question was pruned: nothing open, nothing claimable.
@@ -471,10 +480,155 @@ async def test_hung_delivery_times_out_prunes_and_raises(wired):
         app._channel_registry.reset()
 
 
-async def test_hung_delivery_after_recorded_answer_falls_through(wired):
-    # The reply lands while deliver is still hanging: the timeout's prune
-    # reports already-answered, so the recorded answer is returned — the same
-    # fall-through as any other post-answer delivery failure.
+async def test_retryable_failure_retries_and_the_second_attempt_delivers(wired, monkeypatch):
+    # A transient failure is re-attempted inside the ask's budget; the question
+    # stays open between attempts (never pruned), so the retry's delivery still
+    # carries a claimable ticket and the loop closes normally.
+    _tune(monkeypatch, wired, delivery_retry_backoff_seconds=0.01)
+    attempts: list[Any] = []
+
+    class FlakyChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            if len(attempts) == 1:
+                raise ChannelDeliveryError("provider throttled", retryable=True)
+            # Still persisted: the intermediate failure pruned nothing.
+            assert await wired.store.get_state(wired.fake, delivery.interaction_id) is not None
+            resp = await router.callback(
+                _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "second"}')
+            )
+            assert resp.status_code == 200
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("flaky", FlakyChannel())
+    try:
+        assert await ask_user("q", channel="flaky", timeout=5) == "second"
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 2
+    assert attempts[0].interaction_id == attempts[1].interaction_id  # the same question, re-sent
+
+
+async def test_non_retryable_failure_is_not_retried(wired, monkeypatch):
+    # The default classification: one attempt, then prune + raise. An unknown
+    # fault is never blind-retried.
+    _tune(monkeypatch, wired, delivery_retry_backoff_seconds=0.01)
+    attempts: list[ChannelDelivery] = []
+
+    class HardFailer(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            raise ChannelDeliveryError("recipient refused")
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("hard", HardFailer())
+    try:
+        with pytest.raises(ChannelDeliveryError, match="recipient refused"):
+            await ask_user("q", channel="hard", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 1
+    assert await wired.store.count_open(wired.fake) == 0
+
+
+async def test_retries_exhaust_the_attempt_cap_then_prune_and_raise(wired, monkeypatch):
+    # ``delivery_max_attempts`` is the total attempt count; the LAST error is the
+    # one that surfaces, and only then is the question pruned.
+    _tune(monkeypatch, wired, delivery_max_attempts=2, delivery_retry_backoff_seconds=0.01)
+    attempts: list[ChannelDelivery] = []
+
+    class AlwaysThrottled(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            raise ChannelDeliveryError(f"throttled #{len(attempts)}", retryable=True)
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("throttled", AlwaysThrottled())
+    try:
+        with pytest.raises(ChannelDeliveryError, match="throttled #2"):
+            await ask_user("q", channel="throttled", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 2
+    assert await wired.store.count_open(wired.fake) == 0
+
+
+async def test_retry_after_wins_over_the_backoff(wired, monkeypatch):
+    # The medium asked for longer than the computed backoff — its wait is honored.
+    _tune(monkeypatch, wired, delivery_max_attempts=2, delivery_retry_backoff_seconds=0.001)
+    asked_for = 0.08
+    at: list[float] = []
+
+    class RetryAfterChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            at.append(asyncio.get_running_loop().time())
+            raise ChannelDeliveryError("slow down", retryable=True, retry_after=asked_for)
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("slowdown", RetryAfterChannel())
+    try:
+        with pytest.raises(ChannelDeliveryError, match="slow down"):
+            await ask_user("q", channel="slowdown", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(at) == 2
+    assert at[1] - at[0] >= asked_for  # the retry_after wait, not the 1ms backoff
+
+
+async def test_no_retry_once_the_budget_cannot_hold_the_wait(wired, monkeypatch):
+    # Attempts remain, but the ask's budget cannot hold the backoff wait: no
+    # further attempt is made — prune + raise the failure at hand.
+    _tune(monkeypatch, wired, delivery_max_attempts=5, delivery_retry_backoff_seconds=10)
+    attempts: list[ChannelDelivery] = []
+
+    class AlwaysThrottled(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            raise ChannelDeliveryError("throttled", retryable=True)
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("nobudget", AlwaysThrottled())
+    try:
+        with pytest.raises(ChannelDeliveryError, match="throttled"):
+            await ask_user("q", channel="nobudget", timeout=0.2)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 1
+    assert await wired.store.count_open(wired.fake) == 0
+
+
+async def test_cancelled_delivery_is_never_retried(wired, monkeypatch):
+    # Cancellation is not a transient send failure: no retry, prune, propagate.
+    _tune(monkeypatch, wired, delivery_max_attempts=3, delivery_retry_backoff_seconds=0.01)
+    attempts: list[ChannelDelivery] = []
+
+    class CancelledChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            raise asyncio.CancelledError
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("cancelled", CancelledChannel())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await ask_user("q", channel="cancelled", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 1
+    assert await wired.store.count_open(wired.fake) == 0
+
+
+async def test_hung_delivery_that_recorded_an_answer_times_out_at_the_budget(wired):
+    # The reply lands while deliver is still hanging, then the hang consumes the
+    # rest of the ONE ask budget. The answer wait gets what is left — nothing — so
+    # the ask times out at the budget rather than blocking past it (the durable
+    # answered state remains, but this caller is not held open beyond its deadline).
     class AnswerThenHang(DeliverOnlyChannel):
         async def deliver(self, delivery: ChannelDelivery) -> None:
             resp = await router.callback(
@@ -486,6 +640,100 @@ async def test_hung_delivery_after_recorded_answer_falls_through(wired):
     app._channel_registry.reset()
     tai42_app.channels.register("hang", AnswerThenHang())
     try:
-        assert await ask_user("q", channel="hang", timeout=0.3) == "fast"
+        with pytest.raises(InteractionTimeoutError, match="an answer was recorded after the budget"):
+            await ask_user("q", channel="hang", timeout=0.3)
+    finally:
+        app._channel_registry.reset()
+
+
+# -- one budget for the whole ask: delivery time shrinks the answer wait --------
+
+
+async def test_delivery_time_shrinks_the_answer_wait(wired, monkeypatch):
+    # ONE deadline bounds the whole ask — delivery attempts, their backoff, AND the
+    # answer wait together — so a delivery phase that consumed measurable time leaves
+    # the reply wait strictly LESS than the full budget.
+    original = InteractionStore.wait_for_reply
+    captured: dict[str, float] = {}
+
+    async def capturing(self, r, reply_to, timeout_seconds, grace_seconds):
+        captured["timeout"] = timeout_seconds
+        return await original(self, r, reply_to, timeout_seconds, grace_seconds)
+
+    monkeypatch.setattr(InteractionStore, "wait_for_reply", capturing)
+    delivery_cost = 0.1
+
+    class SlowDeliverChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            await asyncio.sleep(delivery_cost)  # measurable delivery time
+            resp = await router.callback(
+                _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "ok"}')
+            )
+            assert resp.status_code == 200
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("slowdeliver", SlowDeliverChannel())
+    try:
+        assert await ask_user("q", channel="slowdeliver", timeout=5) == "ok"
+    finally:
+        app._channel_registry.reset()
+
+    assert captured["timeout"] < 5  # not the full budget
+    assert captured["timeout"] <= 5 - delivery_cost  # the delivery time was subtracted
+
+
+async def test_delivery_that_eats_the_budget_times_out_without_a_forever_wait(wired, monkeypatch):
+    # A delivery that consumes effectively the whole budget leaves only a shrunken
+    # answer wait: the ask times out, the question is pruned, and the reply wait is
+    # never handed a non-positive timeout (which redis BLPOP would read as
+    # block-forever).
+    original = InteractionStore.wait_for_reply
+    timeouts: list[float] = []
+
+    async def capturing(self, r, reply_to, timeout_seconds, grace_seconds):
+        timeouts.append(timeout_seconds)
+        return await original(self, r, reply_to, timeout_seconds, grace_seconds)
+
+    monkeypatch.setattr(InteractionStore, "wait_for_reply", capturing)
+
+    class BudgetEatingChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            # Return successfully but only after most of the budget is gone; no
+            # answer is posted, so the shrunken wait finds nothing.
+            await asyncio.sleep(0.2)
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("budgeteater", BudgetEatingChannel())
+    try:
+        with pytest.raises(InteractionTimeoutError, match="with no answer"):
+            await ask_user("q", channel="budgeteater", timeout=0.3)
+    finally:
+        app._channel_registry.reset()
+
+    assert await wired.store.count_open(wired.fake) == 0  # pruned
+    # BLPOP is never asked to block forever: the wait is either skipped (delivery ate
+    # the whole budget) or handed the shrunken remainder — never a non-positive value.
+    assert all(0 < t < 0.3 for t in timeouts)
+
+
+async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch):
+    # TOCTOU at the timeout prune: the question record has already vanished
+    # (expired, or the backlog reconciler pruned a deadline-crossed question)
+    # before the timeout prune runs, so the prune reports "gone". The timeout
+    # message must name that state — never claim a late answer was recorded.
+    async def gone(self, r, interaction_id, group_id):
+        return "gone"
+
+    monkeypatch.setattr(InteractionStore, "prune_pending", gone)
+
+    class SilentChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            return  # delivered, but no answer is ever posted
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("silent", SilentChannel())
+    try:
+        with pytest.raises(InteractionTimeoutError, match="already gone"):
+            await ask_user("q", channel="silent", timeout=0.05)
     finally:
         app._channel_registry.reset()

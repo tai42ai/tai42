@@ -402,11 +402,15 @@ def verify_request(
     return build_request(method="GET", headers={"host": "public.example"}, query=query)
 
 
-def response(status_code: int, *, json: Any = None, text: str | None = None) -> httpx.Response:
+def response(
+    status_code: int, *, json: Any = None, text: str | None = None, headers: dict[str, str] | None = None
+) -> httpx.Response:
     """A real ``httpx.Response`` (with a request attached) for the fake client queues."""
     kwargs: dict[str, Any] = {"request": httpx.Request("POST", "https://queued.example/")}
     if json is not None:
         kwargs["json"] = json
     if text is not None:
         kwargs["text"] = text
+    if headers is not None:
+        kwargs["headers"] = headers
     return httpx.Response(status_code, **kwargs)

@@ -1,8 +1,9 @@
 """Outbound WhatsApp (Meta Graph) send.
 
 One endpoint: ``POST {api}/{phone_number_id}/messages``, Bearer auth, JSON body,
-via the kit's pooled ``HttpxClient``. Exactly ONE send attempt per message — a
-blind retry of an ambiguous failure risks messaging the human twice. Any failure
+via the kit's pooled ``HttpxClient``. Exactly ONE send attempt per message — no
+loop here; the raised ``ChannelDeliveryError`` carries ``retryable`` (and Meta's
+``Retry-After`` when it sent one) so the central caller decides. Any failure
 raises ``ChannelDeliveryError``.
 
 One builder per message shape (text, interactive buttons, interactive list,
@@ -13,12 +14,19 @@ seam (auth, transport, error mapping, wamid extraction); each returns the send's
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError, ChannelTemplate
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_channel_whatsapp.settings import require_delivery_secret, whatsapp_settings
+
+# Meta ``error.code`` values that mean throttled, not refused: the app request
+# limit (4), the rate limit hit (80007), the throughput limit (130429), the spam
+# rate limit (131048), and the per-pair rate limit (131056).
+_RATE_LIMIT_CODES = frozenset({4, 80007, 130429, 131048, 131056})
 
 
 async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
@@ -27,7 +35,9 @@ async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
 
     The single send seam for every message shape. Raises ``ChannelDeliveryError``
     on a missing access token (checked before any network work), transport
-    failure, a non-2xx response, or a 2xx that carries no message id. Never retries.
+    failure, a non-2xx response, or a 2xx that carries no message id. Never
+    retries: the raised error carries the transient/hard classification the
+    central caller retries on.
     """
     settings = whatsapp_settings()
     access_token = require_delivery_secret(settings.access_token, "CHANNEL_WHATSAPP_ACCESS_TOKEN")
@@ -37,10 +47,16 @@ async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
         async with tai42_app.clients.client_ctx(HttpxClient, timeout=settings.http_timeout_seconds) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
-        raise ChannelDeliveryError(f"WhatsApp send failed in transport: {exc!r}") from exc
+        # A transport fault may have landed Meta-side; a re-send is accepted —
+        # both sends carry the same reply correlation.
+        raise ChannelDeliveryError(f"WhatsApp send failed in transport: {exc!r}", retryable=True) from exc
     if response.status_code not in (200, 201):
+        body = _parse_json(response)  # parsed once: the detail and the classification share it
+        retryable, retry_after = _retry_policy(response, body)
         raise ChannelDeliveryError(
-            f"WhatsApp rejected the send: HTTP {response.status_code}: {_error_detail(response)}"
+            f"WhatsApp rejected the send: HTTP {response.status_code}: {_error_detail(response, body)}",
+            retryable=retryable,
+            retry_after=retry_after,
         )
     messages = response.json().get("messages") or []
     if not messages or not messages[0].get("id"):
@@ -127,12 +143,49 @@ async def send_template(phone_number_id: str, to: str, template: ChannelTemplate
     return await _post(phone_number_id, payload)
 
 
-def _error_detail(response: httpx.Response) -> str:
-    """Meta's ``error.code``/``error.message`` when the body is JSON, else raw
-    text; bounded to 500 chars so an HTML error page cannot flood the exception."""
+def _parse_json(response: httpx.Response) -> Any:
+    """The response body parsed as JSON, or ``None`` when it carries none."""
     try:
-        payload = response.json()
+        return response.json()
     except ValueError:
+        return None
+
+
+def _error_detail(response: httpx.Response, payload: Any) -> str:
+    """Meta's ``error.code``/``error.message`` from the parsed body, else raw
+    text; bounded to 500 chars so an HTML error page cannot flood the exception."""
+    if not isinstance(payload, dict):
         return response.text[:500]
-    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return response.text[:500]
     return f"code={error.get('code')} message={error.get('message')!r}"[:500]
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The ``Retry-After`` header as seconds, or ``None`` when absent or sent in
+    the HTTP-date form (the backoff stands in for it)."""
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _retry_policy(response: httpx.Response, payload: Any) -> tuple[bool, float | None]:
+    """Whether a rejected send may be re-attempted, and the seconds Meta asked the
+    caller to wait for. A ``Retry-After`` header is honored on every transient
+    rejection, not only the 429.
+
+    Transient: any 5xx, an HTTP 429, or a Meta rate-limit ``error.code`` whatever
+    the status. Everything else — a recipient outside the allowed list (131030),
+    a send past the 24-hour window (131047), an expired token (190), any other
+    4xx, an unreadable body — is a hard rejection a fresh attempt cannot fix.
+    """
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    code = error.get("code") if isinstance(error, dict) else None
+    if response.status_code == 429 or response.status_code >= 500 or code in _RATE_LIMIT_CODES:
+        return True, _retry_after_seconds(response)
+    return False, None

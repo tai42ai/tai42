@@ -40,6 +40,11 @@ ANSWERED_EVENT = "interaction.answered"
 REMOVED_EVENT = "interaction.removed"
 _EVENTS_MAXLEN = 10000
 
+# The three end states ``prune_pending`` distinguishes: ``"pruned"`` deleted a
+# still-pending question; ``"answered"`` found an answered status (no writes);
+# ``"gone"`` found no state key at all (missing/expired, no writes).
+PruneResult = Literal["pruned", "answered", "gone"]
+
 # Atomic phantom self-heal for the pending-deadline index. A waiter killed
 # mid-flight (SIGKILL/OOM) never runs cleanup, so its group lingers in
 # ``pending_key``. This script — run on every ``add`` — reads the groups whose
@@ -433,12 +438,12 @@ class InteractionStore:
                 except WatchError:
                     continue
 
-    async def prune_pending(self, r: Redis, interaction_id: str, group_id: str) -> bool:
+    async def prune_pending(self, r: Redis, interaction_id: str, group_id: str) -> PruneResult:
         """Remove a still-open question that is being abandoned (cancel-cleanup or
         the timeout path). Status-gated exactly like ``record_answer``, INCLUDING
         its ``except WatchError: continue`` retry loop: an answer committing
         between the status read and EXEC fires WatchError, the retry then reads
-        ``answered`` and returns False cleanly.
+        ``answered`` and returns ``"answered"`` cleanly.
 
         WATCHes the state key AND the count key — the count WATCH for the same
         reason ``record_answer`` has it: a concurrent ``add()`` to the group INCRs
@@ -446,14 +451,15 @@ class InteractionStore:
         would delete the count key and drop the group from the pending index while
         a just-added sibling is still open.
 
-        When ``status`` is ``None`` or ``"answered"`` this is a no-op returning
-        ``False`` with NO writes (an answered interaction must never be pruned).
-        When still ``pending``, in one MULTI: delete the state key, ``ZREM
+        Returns the end state, distinguishing the two no-op cases the caller must
+        tell apart: ``"answered"`` when ``status`` is ``"answered"`` and ``"gone"``
+        when the state key is missing/expired — both no-ops with NO writes (an
+        answered interaction must never be pruned, a vanished one has nothing to
+        prune). When still ``pending``, in one MULTI: delete the state key, ``ZREM
         open_key``, ``DECR`` the group count, and at zero delete the count key +
         ``ZREM`` the group from BOTH the pending index and the parallel
         pending-deadline index; then append an ``interaction.removed`` event so a
-        live SSE consumer can drop the pruned question. Returns ``True`` when it
-        pruned, ``False`` otherwise."""
+        live SSE consumer can drop the pruned question, and return ``"pruned"``."""
         state_key = self.state_key(interaction_id)
         count_key = self.count_key(group_id)
 
@@ -462,9 +468,12 @@ class InteractionStore:
                 try:
                     await pipe.watch(state_key, count_key)
                     status = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "status")))
-                    if status is None or status == "answered":
+                    if status is None:
                         await pipe.reset()
-                        return False
+                        return "gone"
+                    if status == "answered":
+                        await pipe.reset()
+                        return "answered"
                     current = await pipe.get(count_key)
                     if current is None:
                         # count_key shares the pending state's idle_ttl, so a live
@@ -493,7 +502,7 @@ class InteractionStore:
                         approximate=True,
                     )
                     await pipe.execute()
-                    return True
+                    return "pruned"
                 except WatchError:
                     continue
 
@@ -590,7 +599,7 @@ class InteractionStore:
         """Block on the reply channel up to ``timeout_seconds``. Returns the
         recorded response, or ``None`` when the budget elapses with no answer.
 
-        The BLPOP blocks legitimately for the whole answer budget, so its
+        The BLPOP blocks legitimately for the whole ``timeout_seconds``, so its
         connection carries no socket read timeout (the caller strips it). To keep
         a black-holed redis from wedging the loop task forever, the BLPOP is wrapped
         in an outer ``asyncio.wait_for(timeout_seconds + grace_seconds)``: ``grace``

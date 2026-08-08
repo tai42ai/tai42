@@ -35,7 +35,7 @@ from tai42_kit.settings import require
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
-from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.interactions.store import InteractionStore, PruneResult
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +134,28 @@ def _validate_channel(channel: Any) -> Channel:
         raise ValueError(f"unknown channel: {channel!r}") from exc
 
 
-async def _prune(settings: InteractionsSettings, store: InteractionStore, interaction_id: str, group_id: str) -> bool:
+def _retry_delay(exc: BaseException, attempt: int, remaining: float, settings: InteractionsSettings) -> float | None:
+    """Seconds to wait before re-attempting a failed channel delivery, or ``None``
+    when it must not be retried: a non-transient (or non-delivery) failure, the
+    attempt budget spent, or too little of the ask's budget left for the wait
+    itself. The delay is the exponential backoff off the configured base,
+    widened to the medium's own ``retry_after`` when it asked for longer."""
+    if not isinstance(exc, ChannelDeliveryError) or not exc.retryable:
+        return None
+    if attempt >= settings.delivery_max_attempts:
+        return None
+    delay = max(exc.retry_after or 0.0, settings.delivery_retry_backoff_seconds * 2 ** (attempt - 1))
+    return delay if delay < remaining else None
+
+
+async def _prune(
+    settings: InteractionsSettings, store: InteractionStore, interaction_id: str, group_id: str
+) -> PruneResult:
     """Prune an abandoned question on its OWN connection — never the cancelled
     BLPOP connection, which is not safely reusable for a WATCH/MULTI. Returns
-    ``prune_pending``'s result: ``True`` when it pruned, ``False`` when there
-    was nothing to prune (already answered, or already gone)."""
+    ``prune_pending``'s result: ``"pruned"`` when it pruned, ``"answered"`` when an
+    answer was already recorded, ``"gone"`` when the state key was already
+    missing/expired."""
     async with client_ctx(RedisClient, settings.redis) as conn:
         return await store.prune_pending(conn, interaction_id, group_id)
 
@@ -192,10 +209,15 @@ async def ask_user(
     forbids ``link`` and ``verifier`` (the channel owns delivery, and its
     forward is unsigned), and rejects ``answer_format="form"`` (a multi-field
     form has no single-reply mapping on a chat/SMS medium). An unknown name
-    raises ``ValueError`` before any state is written. A failed delivery prunes
-    the question and re-raises (``ChannelDeliveryError`` for a delivery
-    failure, including a deliver call that does not return within the ask's
-    timeout budget) — unless the reply already landed first, in which case the
+    raises ``ValueError`` before any state is written. The timeout budget bounds
+    the WHOLE ask — the delivery attempts, their backoff sleeps, AND the answer
+    wait together — so delivery time shrinks the answer wait, and a delivery phase
+    that consumes the whole budget leaves no wait and times out. A delivery failure
+    the channel typed as ``retryable`` is re-attempted (``delivery_max_attempts``,
+    exponential backoff, all within that one budget); any other failure, and the
+    last retryable one, prunes the question and re-raises (``ChannelDeliveryError``
+    for a delivery failure, including a deliver call that does not return within the
+    ask's timeout budget) — unless the reply already landed first, in which case the
     recorded answer is returned.
 
     ``recipient`` is an OPTIONAL per-call address (chat id, phone number, ...)
@@ -303,6 +325,13 @@ async def ask_user(
         raise ValueError(f"timeout must be positive, got {budget!r}")
     created_at = datetime.now(UTC)
     timeout_at = created_at + timedelta(seconds=budget)
+    # ONE monotonic deadline for the WHOLE ask, anchored with ``created_at`` so the
+    # persisted ``timeout_at`` and the callback ticket TTL (both created here) can
+    # never outlive it. Delivery attempts, their backoff sleeps, and the answer wait
+    # all share this deadline: delivery time shrinks the answer wait, and the caller
+    # can never block past the budget.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
 
     interaction_id = str(uuid.uuid4())
     group = group_id or str(uuid.uuid4())
@@ -389,79 +418,147 @@ async def ask_user(
 
     # Deliver through the channel AFTER the question is persisted (the callback
     # ticket must be claimable before any human can act on it) and BEFORE the
-    # blocking wait. A failed delivery normally means the human never received
-    # the question, so the persisted state must not linger open/claimable:
-    # prune, then re-raise loudly. The ONE exception: ``prune_pending``
-    # returning False means the answer was already recorded (a fast reply beat
-    # the failure) — a recorded answer is never discarded, so fall through to
-    # the blocking wait, which returns it immediately.
+    # blocking wait. Each ``deliver`` is ONE send attempt; a failure the plugin
+    # typed as ``retryable`` (a medium 5xx, a rate limit, a transport fault, a
+    # hung send) is re-attempted up to ``delivery_max_attempts`` with exponential
+    # backoff, and everything else — an unknown fault included — fails on the
+    # first try rather than being blind-retried. The whole phase, attempts and
+    # backoff sleeps together, shares ONE monotonic deadline with the answer wait
+    # that follows: the timeout budget bounds them TOGETHER, so delivery time
+    # shrinks the answer wait and the caller can never be blocked past the budget
+    # with the question persisted (a delivery phase that eats the whole budget
+    # leaves no wait and times out).
+    # A FINAL failure normally means the human never received the question, so
+    # the persisted state must not linger open/claimable: prune, then re-raise
+    # loudly. The ONE exception is when the prune finds nothing pending —
+    # ``"answered"`` (a fast reply beat the failure) or ``"gone"`` (the record
+    # expired/was pruned elsewhere): a recorded answer is never discarded, so fall
+    # through to the blocking wait, which returns it immediately or times out.
     if channel is not None:
         assert channel_obj is not None  # resolved with the up-front validation
         assert callback_url is not None  # a set channel forces the mint above
-        try:
+        # Built once and reused across attempts — the frame is frozen.
+        delivery_frame = ChannelDelivery(
+            interaction_id=interaction_id,
+            recipient=recipient,
+            question=question,
+            answer_format=fmt.value,
+            options=options,
+            callback_url=callback_url,
+            timeout_at=timeout_at,
+        )
+        attempt = 0
+        retry_in: float | None = None
+        while True:
+            attempt += 1
             try:
-                # ``deliver`` is one prompt send attempt; the whole answer
-                # budget is a generous ceiling for it. A plugin that consumes
-                # the budget is hung, and an unbounded await here would block
-                # the caller forever with the question persisted — so the send
-                # is bounded, and a timeout is a typed delivery failure.
-                await asyncio.wait_for(
-                    channel_obj.deliver(
-                        ChannelDelivery(
-                            interaction_id=interaction_id,
-                            recipient=recipient,
-                            question=question,
-                            answer_format=fmt.value,
-                            options=options,
-                            callback_url=callback_url,
-                            timeout_at=timeout_at,
-                        )
-                    ),
-                    timeout=budget,
-                )
-            except TimeoutError as exc:
-                raise ChannelDeliveryError(
-                    f"channel {channel!r} delivery timed out after {budget}s (interaction {interaction_id})"
-                ) from exc
-        except BaseException as exc:
-            pruned = await _prune(settings, store, interaction_id, group)
-            if pruned or not isinstance(exc, Exception):
-                # Pruned → nothing was answered; propagate the failure loudly.
-                # A non-Exception (asyncio.CancelledError mid-send, SystemExit)
-                # ALWAYS propagates — cancellation is never swallowed, even
-                # when an answer was recorded.
-                raise
-            logger.warning(
-                "channel %r delivery failed for interaction %s after the answer"
-                " was already recorded; returning the recorded answer",
-                channel,
-                interaction_id,
-                exc_info=exc,
-            )
+                if retry_in is not None:
+                    await asyncio.sleep(retry_in)
+                try:
+                    # Each attempt is bounded by what is left of the budget: a
+                    # plugin that consumes it is hung, and an unbounded await here
+                    # would block the caller forever with the question persisted —
+                    # so a timeout is a typed, retryable delivery failure.
+                    attempt_timeout = deadline - loop.time()
+                    await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
+                except TimeoutError as exc:
+                    raise ChannelDeliveryError(
+                        f"channel {channel!r} delivery timed out after {attempt_timeout:.1f}s "
+                        f"of the ask's {budget}s budget (interaction {interaction_id})",
+                        retryable=True,
+                    ) from exc
+            except BaseException as exc:
+                retry_in = _retry_delay(exc, attempt, deadline - loop.time(), settings)
+                if retry_in is not None:
+                    # Intermediate failure: the question stays open for the next
+                    # attempt — never pruned here, never silent.
+                    logger.warning(
+                        "channel %r delivery attempt %d/%d failed for interaction %s; retrying in %ss",
+                        channel,
+                        attempt,
+                        settings.delivery_max_attempts,
+                        interaction_id,
+                        retry_in,
+                        exc_info=exc,
+                    )
+                    continue
+                result = await _prune(settings, store, interaction_id, group)
+                if result == "pruned" or not isinstance(exc, Exception):
+                    # Pruned → nothing was answered; propagate the failure loudly.
+                    # A non-Exception (asyncio.CancelledError mid-send or
+                    # mid-backoff, SystemExit) ALWAYS propagates — cancellation is
+                    # never retried and never swallowed, even when an answer was
+                    # recorded.
+                    raise
+                if result == "answered":
+                    logger.warning(
+                        "channel %r delivery failed for interaction %s after the answer"
+                        " was already recorded; falling through to the answer wait",
+                        channel,
+                        interaction_id,
+                        exc_info=exc,
+                    )
+                else:
+                    logger.warning(
+                        "channel %r delivery failed for interaction %s but the question"
+                        " record was already gone; falling through to the answer wait",
+                        channel,
+                        interaction_id,
+                        exc_info=exc,
+                    )
+            break
 
-    # Block for the answer on a dedicated connection: a human-scale wait holds
-    # its connection for the whole budget, so pinning one from the shared pool
-    # would starve other concurrent ask_user calls once the pool is drained.
-    try:
-        # Strip the socket read timeout on this connection only: the BLPOP blocks
-        # legitimately for the whole budget, so a blanket 5s read timeout would
-        # kill it. The store wraps the BLPOP in an outer wait_for (budget + grace)
-        # instead, so a black-holed redis still fails loudly.
-        reply_redis = settings.redis.model_copy(update={"socket_timeout": None})
-        async with client_ctx(RedisClient, reply_redis, fresh=True) as reply_conn:
-            response = await store.wait_for_reply(reply_conn, reply_to, budget, settings.blocking_grace_seconds)
-    except asyncio.CancelledError:
-        # Prune on cancel so an abandoned question does not inflate the group
-        # count / open index. The status gate makes the cancelled-after-answer
-        # race a no-op. A cleanup failure propagates (chained on the
-        # CancelledError context), never swallowed.
-        await _prune(settings, store, interaction_id, group)
-        raise
+    # The answer wait gets what is LEFT of the budget after delivery — the same
+    # deadline the delivery attempts ran against — so the whole ask stays inside
+    # the budget. A delivery phase that consumed it all leaves nothing to wait on;
+    # Redis BLPOP reads its timeout at 1ms resolution and a 0/negative timeout as
+    # "block forever", so a sub-millisecond remainder degrades to 0 = block-forever
+    # too — anything below 1ms skips the wait entirely and takes the timeout path
+    # directly.
+    remaining = deadline - loop.time()
+    if remaining < 0.001:
+        response = None
+    else:
+        # Block for the answer on a dedicated connection: a human-scale wait holds
+        # its connection for the remaining wait (up to the budget), so pinning one
+        # from the shared pool would starve other concurrent ask_user calls once the
+        # pool is drained.
+        try:
+            # Strip the socket read timeout on this connection only: the BLPOP blocks
+            # legitimately for the remaining wait, so a blanket 5s read timeout would
+            # kill it. The store wraps the BLPOP in an outer wait_for (the passed
+            # timeout + grace) instead, so a black-holed redis still fails loudly.
+            reply_redis = settings.redis.model_copy(update={"socket_timeout": None})
+            async with client_ctx(RedisClient, reply_redis, fresh=True) as reply_conn:
+                response = await store.wait_for_reply(reply_conn, reply_to, remaining, settings.blocking_grace_seconds)
+        except asyncio.CancelledError:
+            # Prune on cancel so an abandoned question does not inflate the group
+            # count / open index. The status gate makes the cancelled-after-answer
+            # race a no-op. A cleanup failure propagates (chained on the
+            # CancelledError context), never swallowed.
+            await _prune(settings, store, interaction_id, group)
+            raise
     if response is None:
         # Timeout: prune first, else the abandoned question inflates the group
-        # count until the idle TTL and stays claimable by a late callback.
-        await _prune(settings, store, interaction_id, group)
+        # count until the idle TTL and stays claimable by a late callback. The
+        # prune result names which of the three end states the question reached,
+        # and each message asserts only what that state guarantees: ``"pruned"`` an
+        # open question was removed (genuinely no answer); ``"answered"`` an answer
+        # was recorded after the budget and this caller never got it; ``"gone"``
+        # the record had already vanished (expired, or pruned elsewhere) with no
+        # answer returned.
+        result = await _prune(settings, store, interaction_id, group)
+        if result == "pruned":
+            raise InteractionTimeoutError(
+                f"ask_user timed out after {budget}s with no answer (interaction {interaction_id})"
+            )
+        if result == "answered":
+            raise InteractionTimeoutError(
+                f"ask_user timed out after {budget}s; an answer was recorded after the budget "
+                f"and was not returned (interaction {interaction_id})"
+            )
         raise InteractionTimeoutError(
-            f"ask_user timed out after {budget}s with no answer (interaction {interaction_id})"
+            f"ask_user timed out after {budget}s; the question record was already gone "
+            f"(expired or pruned elsewhere) and no answer was returned (interaction {interaction_id})"
         )
     return response.answer

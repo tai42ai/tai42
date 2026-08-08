@@ -83,6 +83,17 @@ class InteractionsSettings(TaiBaseSettings):
     # are open platform-wide. None = unlimited; a set value must be positive.
     max_concurrent: int | None = Field(default=None, gt=0)
 
+    # Total channel-delivery attempts per ask, retries included: a transiently
+    # failing send (a medium 5xx, a rate limit, a transport fault) is attempted
+    # up to this many times in total, all inside the ask's own timeout budget.
+    # 1 = one attempt, no retry. Must be at least 1.
+    delivery_max_attempts: int = Field(default=3, ge=1)
+
+    # Base of the exponential backoff between delivery attempts: attempt n waits
+    # ``base * 2**(n-1)`` seconds, or the medium's own longer ``retry_after``.
+    # Must be positive.
+    delivery_retry_backoff_seconds: float = Field(default=1.0, gt=0)
+
     # Slack past a legitimately-blocking command's own server-side block window
     # after which its connection is presumed stalled: the BLPOP reply wait and the
     # keepalive XREAD tail run with no socket read timeout, so this bounds them via
