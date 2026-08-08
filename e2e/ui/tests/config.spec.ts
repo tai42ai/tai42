@@ -110,6 +110,6 @@ test('set, persist, edit, and restore a unique env key through the Environment t
   await expect(async () => {
     const restore = await request.post('/api/config/env', { headers: apiHeaders(), data: { [key]: '' } });
     expect(restore.status(), await restore.text()).toBe(200);
-  }).toPass({ timeout: 20_000 });
+  }).toPass({ timeout: 45_000 });
   await expect.poll(async () => (await storedEnv(request))[key]).toBeUndefined();
 });

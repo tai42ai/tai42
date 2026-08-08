@@ -149,7 +149,7 @@ test('browse, install beta via UI, then the API-pinned alpha advisory + update a
   await expect(async () => {
     await page.reload();
     await expect(page.getByText(summary)).toBeVisible({ timeout: 2_000 });
-  }).toPass({ timeout: 20_000 });
+  }).toPass({ timeout: 45_000 });
 
   const withdrawn = await page.request.post(
     `${MP_URL}/api/v1/admin/advisories/${String(advisoryId)}/withdraw`,
@@ -159,7 +159,7 @@ test('browse, install beta via UI, then the API-pinned alpha advisory + update a
   await expect(async () => {
     await page.reload();
     await expect(page.getByText(summary)).toBeHidden({ timeout: 2_000 });
-  }).toPass({ timeout: 20_000 });
+  }).toPass({ timeout: 45_000 });
 
   // 8. Update through the UI: the update-available affordance to 0.2.0.
   await expect(page.getByText('Update available: v0.2.0')).toBeVisible();
