@@ -52,11 +52,13 @@ class _TaiWorkerMixin:
     * Skips rq's signal-handler install when the work loop runs off the main
       thread (``signal.signal`` requires the main thread; shutdown then arrives
       via :func:`request_warm_shutdown`).
-    * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) so an off-thread
-      warm-shutdown request is honored within seconds.
+    * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) AND returns to the
+      outer ``work`` loop each poll so an off-thread warm-shutdown request is honored
+      within seconds even while the worker is idle.
     """
 
     name: str  # provided by the RQ worker base class
+    _stop_requested: bool  # provided by the RQ worker base class
 
     # The timer-based penalty is thread-agnostic, so it is what the PARENT arms
     # (``signal.signal`` cannot arm the signal penalty off the main thread). Its
@@ -77,6 +79,30 @@ class _TaiWorkerMixin:
     @property
     def dequeue_timeout(self) -> int:
         return _DEQUEUE_POLL_SECONDS
+
+    def dequeue_job_and_maintain_ttl(self, timeout: int | None, max_idle_time: int | None = None) -> Any:
+        """Honor an off-thread warm-shutdown request even while IDLE.
+
+        rq's own idle shutdown relies on ``request_stop`` raising ``StopRequested`` INSIDE the
+        blocked dequeue — a signal delivered on the worker's own (main) thread. Here the work
+        loop runs off the main thread, so :func:`request_warm_shutdown` can only set
+        ``_stop_requested``; it cannot raise into this blocked call. And rq's
+        ``dequeue_job_and_maintain_ttl`` re-loops INTERNALLY on every ``DequeueTimeout`` when
+        ``max_idle_time`` is ``None`` (a continuous worker), so control never returns to the
+        outer ``work`` loop that checks the flag — an idle worker would then never stop.
+
+        Bound each blocking poll (via ``max_idle_time = dequeue_timeout``) so the base returns
+        every ``_DEQUEUE_POLL_SECONDS`` with no job, and re-check ``_stop_requested`` between
+        polls: when set, raise ``StopRequested`` so the outer ``work`` loop breaks and the
+        process exits cleanly (the recycle self-exit + any graceful backend shutdown). A
+        dequeued job returns immediately, exactly as before."""
+        poll = self.dequeue_timeout
+        while True:
+            if self._stop_requested:
+                raise StopRequested()
+            result = super().dequeue_job_and_maintain_ttl(poll, max_idle_time=poll)  # pyright: ignore[reportAttributeAccessIssue]
+            if result is not None:
+                return result
 
 
 class CustomRQWorker(_TaiWorkerMixin, Worker):
