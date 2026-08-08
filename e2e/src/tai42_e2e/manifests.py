@@ -1493,6 +1493,17 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # ``harness.seed_studio_auth`` before boot.
     env["ACCESS_CONTROL_PATH_PATTERNS"] = json.dumps(STUDIO_PATH_PATTERNS)
     env["STUDIO_DIST_PATH"] = res.studio_dist_path
+    # Lift the ``root`` rate-limit family for the browser leg. Every SPA request — the
+    # index shell AND every JS/CSS asset a page load fans out to — charges the single
+    # ``root`` family (``/{spa_path:path}`` has no static stem). Human-paced per-IP
+    # traffic never approaches the default budget, but the serial UI suite fires many
+    # page loads in quick succession from ONE client bucket (the Playwright loopback),
+    # and their aggregate burst occasionally trips the default root ceiling (120/10s),
+    # 429-ing a critical JS chunk so the app never boots — a blank page that surfaces as
+    # a 60s nav-click timeout. Lift it for the harness exactly as channels_web /
+    # interactions_callback / trigger are lifted for their own harness fan-outs.
+    env["TAI_RATE_LIMIT_FAMILIES__ROOT__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__ROOT__BURST"] = "100000"
     # The github webhook verifier reads its secret from this env var; a bound-but-unsigned
     # delivery then fails verification with a clean 401 rather than a 500.
     if res.gh_webhook_secret is not None:
