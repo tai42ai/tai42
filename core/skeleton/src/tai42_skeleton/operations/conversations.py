@@ -27,7 +27,7 @@ from tai42_contract.conversations import (
 )
 from tai42_kit.utils.data import get_compiled_jq
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX
+from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
@@ -45,6 +45,7 @@ from tai42_skeleton.operations._authority import (
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError
 
 if TYPE_CHECKING:
+    from tai42_skeleton.conversations.persons import ConversationPersonStore, Person
     from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
 # Surfaced before a create does any bind work it would then have to discard.
@@ -368,19 +369,47 @@ def _thread_not_found(thread_id: str) -> NotFoundError:
     return NotFoundError(f"conversation thread not found: {thread_id!r}")
 
 
-def _caller_owns_thread(route: ConversationRoute, thread_id: str, caller: Caller) -> bool:
+def _person_store() -> ConversationPersonStore:
+    """The person store over the live conversations settings. Called only after
+    :func:`_require_backend`, so its own backend guard never fires here."""
+    from tai42_skeleton.conversations.persons import ConversationPersonStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    return ConversationPersonStore(ConversationsSettings())
+
+
+def _person_routes(person: Person) -> set[str]:
+    """Every route name the person has written under, straight off its address rows — the
+    routes whose indexes the aggregated transcript spans and the authz check reads."""
+    return {route for address in person.addresses for route in address.routes}
+
+
+async def _caller_owns_thread(route: ConversationRoute, thread_id: str, caller: Caller) -> bool:
     """Whether ``caller`` owns ``thread_id`` — decided from the thread's IDENTITY alone, so
     it is decided before any record is read and cannot vary with the page asked for.
 
-    A bridge thread id is ``bridge:{route_name}:{client_address}``, and on the api door the
-    address is ``{percent-encoded caller principal}/{external user id}``. So an api-door
-    thread names its owner in its own id, and the caller's own principal encoded the same
-    way is the only prefix that can match. A ``channel`` route's addresses are the medium's,
-    attested by the provider and owned by nobody who can call this door, so its threads are
-    admin-only by construction — the route's door is checked too, and not just the address
-    shape, so a channel address spelled like an api one still cannot be claimed."""
+    A route-keyed bridge thread is ``bridge:{route_name}:{client_address}``, and on the api
+    door the address is ``{percent-encoded caller principal}/{external user id}``. So an
+    api-door thread names its owner in its own id, and the caller's own principal encoded the
+    same way is the only prefix that can match. A LINKED person's thread is
+    ``bridge:@person:{person_id}``; the api caller owns it iff the person (on this route's
+    target) holds an api address whose embedded caller principal is this caller — ownership
+    grants the FULL merged read (R13), resolved against the person store, never by parsing an
+    address out of the thread id. A ``channel`` route's addresses are the medium's, attested
+    by the provider and owned by nobody who can call this door, so its threads are admin-only
+    by construction — the route's door is checked too, so a channel address spelled like an
+    api one still cannot be claimed. This resolves the store for a person thread, so it is
+    async; every caller awaits it."""
     if route.door != "api" or caller.caller_id is None:
         return False
+    if thread_id.startswith(PERSON_THREAD_PREFIX):
+        person = await _person_store().get_by_id(thread_id[len(PERSON_THREAD_PREFIX) :])
+        if person is None or (route.target_kind, route.target_name) != (person.target_kind, person.target_name):
+            return False
+        principal_prefix = f"{quote(caller.caller_id, safe='')}/"
+        return any(
+            address.door == "api" and address.address.startswith(principal_prefix) for address in person.addresses
+        )
     prefix = f"{BRIDGE_THREAD_PREFIX}{route.route_name}:"
     if not thread_id.startswith(prefix):
         return False
@@ -483,6 +512,13 @@ async def get_conversation_thread(
     offset, limit = _page_bounds(page, page_size)
     manager = _require_backend()
     caller = await resolve_caller()
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    if thread_id.startswith(PERSON_THREAD_PREFIX):
+        return await _read_person_thread(
+            manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order
+        )
     if caller.is_admin:
         # An admin may know which names route, so the unknown route keeps its own 404.
         await _require_route(manager, route_name)
@@ -490,16 +526,20 @@ async def get_conversation_thread(
         # One answer for "no such route" and "not your thread": the reader is authorized
         # from the thread id alone, so the route's existence never reaches the answer.
         route = await manager.get_route(route_name)
-        if route is None or not _caller_owns_thread(route, thread_id, caller):
+        if route is None or not await _caller_owns_thread(route, thread_id, caller):
             raise _thread_not_found(thread_id)
-    from tai42_skeleton.conversations.records import ConversationRecordStore
-    from tai42_skeleton.conversations.settings import ConversationsSettings
 
     transcript = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
         route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc"
     )
     if transcript.total == 0:
         raise _thread_not_found(thread_id)
+    return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
+
+
+def _transcript_response(transcript, caller: Caller, *, page: int, limit: int, order: str) -> dict[str, Any]:
+    """The shared transcript page shape both the route-keyed and the aggregated person read
+    return: an admin reads whole records, a non-admin the caller-safe projection."""
     view = (lambda record: record.view()) if caller.is_admin else (lambda record: record.caller_view())
     return {
         "items": [view(record) for record in transcript.records],
@@ -509,6 +549,51 @@ async def get_conversation_thread(
         "next_page": _next_page(page, limit, transcript.total),
         "order": order,
     }
+
+
+async def _read_person_thread(
+    manager: BaseConversationsManager,
+    route_name: str,
+    thread_id: str,
+    caller: Caller,
+    *,
+    page: int,
+    offset: int,
+    limit: int,
+    order: str,
+) -> dict[str, Any]:
+    """One page of a LINKED person's AGGREGATED transcript (R11): the merged history across
+    every route the person has written under, keyed by ``bridge:@person:{person_id}``.
+
+    Authorized from the thread's identity exactly as a route-keyed thread is: an admin reads
+    any person thread on a valid route (an unknown route keeps its own 404), a non-admin only
+    a person its own api principal belongs to. The supplied ``route_name`` governs AUTHZ only
+    — it must be one of the person's routes — while the fetch spans the indexes of ALL of
+    them; a route the person never wrote under, a target mismatch, an unknown person, or an
+    empty aggregate all answer the one uniform not-found, so the door probes nothing."""
+    person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
+    if caller.is_admin:
+        route = await _require_route(manager, route_name)
+    else:
+        route = await manager.get_route(route_name)
+        if route is None or not await _caller_owns_thread(route, thread_id, caller):
+            raise _thread_not_found(thread_id)
+    person = await _person_store().get_by_id(person_id)
+    if (
+        person is None
+        or (route.target_kind, route.target_name) != (person.target_kind, person.target_name)
+        or route_name not in _person_routes(person)
+    ):
+        raise _thread_not_found(thread_id)
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    transcript = await ConversationRecordStore(ConversationsSettings()).list_person_thread_records(
+        sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc"
+    )
+    if transcript.total == 0:
+        raise _thread_not_found(thread_id)
+    return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
 
 
 @operation(

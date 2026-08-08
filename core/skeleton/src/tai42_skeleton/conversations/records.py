@@ -951,6 +951,57 @@ class ConversationRecordStore:
                     )
         return TranscriptPage(records=records, total=total)
 
+    async def list_person_thread_records(
+        self, route_names: list[str], thread_id: str, *, offset: int, limit: int, newest_first: bool = False
+    ) -> TranscriptPage:
+        """One page of a LINKED person's aggregated transcript — the k-way merge of the same
+        ``thread_id`` (``bridge:@person:{id}``) across the person's N per-route indexes, so
+        one full history is served and never a partial slice.
+
+        ``total`` is ``Σ zcard`` over the N indexes. For a page at ``offset``/``limit`` the
+        first ``offset + limit`` members are fetched from EACH index in the requested order
+        (``zrange`` ascending, ``zrevrange`` descending — the front of the page can draw at
+        most that many from any one index), merged and sorted by ``(created_at, message_id)``
+        in that same direction — the ``message_id`` tie-break mirrors redis's own equal-score
+        member ordering, so cross-index ties page deterministically — then sliced
+        ``[offset : offset + limit]``. NEVER a per-index offset (wrong global pages) and never
+        an ascending fetch reversed (wrong descending window)."""
+        thread_keys = [self.settings.thread_index_key(route_name, thread_id) for route_name in route_names]
+        end = offset + limit - 1
+        scored: list[tuple[float, str]] = []
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            total = 0
+            for key in thread_keys:
+                total += int(await awaited(r.zcard(key)))
+            if total == 0:
+                return TranscriptPage(records=[], total=0)
+            for key in thread_keys:
+                window = (
+                    r.zrevrange(key, 0, end, withscores=True)
+                    if newest_first
+                    else r.zrange(key, 0, end, withscores=True)
+                )
+                scored.extend((float(score), _member(member)) for member, score in await awaited(window))
+            scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=newest_first)
+            records: list[ConversationRecord] = []
+            for _score, message_id in scored[offset : offset + limit]:
+                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                if not hashed:
+                    logger.warning(
+                        "conversations: record %r is indexed in person thread %r but has no row; "
+                        "skipped in the transcript, left for the prune pass",
+                        message_id,
+                        thread_id,
+                    )
+                    continue
+                try:
+                    records.append(self._from_hash(hashed))
+                except (ValueError, KeyError):
+                    logger.warning(
+                        "conversations: record %r is corrupt and was skipped in the person transcript", message_id
+                    )
+        return TranscriptPage(records=records, total=total)
+
     async def _thread_summary(
         self, r: AsyncRedis, route_name: str, thread_id: str, *, last_activity_at: float
     ) -> ThreadSummary | None:

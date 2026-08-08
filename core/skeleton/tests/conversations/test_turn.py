@@ -261,6 +261,15 @@ async def test_no_matching_route_raises_loudly(env, monkeypatch):
         await turn_module.accept("twilio", "+19999999999", "+15550002222", "+15550002222", "hi", "PID9")
 
 
+async def test_two_routes_claiming_one_channel_identity_is_a_loud_corrupt_table(env, monkeypatch):
+    # Two channel routes bound to the SAME (channel, our_identity) is a corrupt routing table:
+    # the resolver refuses to pick one and raises rather than silently routing to either.
+    _wire(monkeypatch, FakeManager(_channel_route("line-a"), _channel_route("line-b")))
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+    with pytest.raises(RuntimeError, match="routing table is inconsistent"):
+        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PIDX")
+
+
 async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)

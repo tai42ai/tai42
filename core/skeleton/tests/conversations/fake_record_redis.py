@@ -177,6 +177,11 @@ class FakeRecordRedis:
         target[field] = value
         return 1 if is_new else 0
 
+    async def incr(self, key: str) -> int:
+        new = int(self._strings.get(key, "0")) + 1
+        self._strings[key] = str(new)
+        return new
+
     async def hincrby(self, key: str, field: str, amount: int) -> int:
         target = self._hashes.setdefault(key, {})
         new = int(target.get(field, "0")) + amount

@@ -135,6 +135,22 @@ class ConversationsSettings(TaiBaseSettings):
     # unredeemed. The raw code exists only in flight; only its sha256 is ever stored.
     pair_code_ttl_seconds: int = Field(default=900, gt=0)
 
+    # -- Redeem brute-force backoff ------------------------------------------
+    #
+    # A failures-only throttle on the pair-code REDEEM path (per target + the door's
+    # accountable party): a valid redeem clears the counter, so an honest user is never
+    # blocked, while a source that keeps submitting INVALID codes is locked out with capped
+    # exponential backoff — a throttled attempt returns the SAME uniform invalid-code
+    # reply (no oracle). The defaults allow a few honest fat-finger retries before the
+    # backoff begins and cap the lock at the pair-code TTL; both are deployment-tunable.
+
+    # Consecutive INVALID redeems from one (target, source) before the backoff engages.
+    redeem_backoff_threshold: int = Field(default=5, gt=0)
+
+    # Seconds; the exponential per-source redeem lock is capped here, and the failure
+    # counter decays after this long of inactivity so a source is never escalated forever.
+    redeem_backoff_cap_seconds: int = Field(default=900, gt=0)
+
     @field_validator("max_message_chars")
     @classmethod
     def _split_caps_are_positive(cls, value: dict[str, int]) -> dict[str, int]:
@@ -183,12 +199,12 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The fifteen conversation keyspaces. Every literal key string lives ONLY here. A
+    # The seventeen conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
-    # exception is ``open_code_key``, whose variable part is a single opaque ``sha256``
-    # terminal segment folding charset-unconstrained inputs into a hash, so it carries no
-    # qualifier guard.
+    # exceptions are ``open_code_key`` and the two redeem-throttle keys, whose variable
+    # part is a single opaque ``sha256`` terminal segment folding charset-unconstrained
+    # inputs into a hash, so they carry no qualifier guard.
 
     def dedupe_key(self, channel: str, provider_message_id: str) -> str:
         """Inbound-dedupe marker key, channel-qualified (a provider message id is unique
@@ -324,3 +340,28 @@ class ConversationsSettings(TaiBaseSettings):
         kept in lockstep with the per-config keys by the upsert/delete scripts. A member
         appended to :attr:`target_config_key_prefix` rebuilds the row key it names."""
         return f"{self.prefix}:config_names"
+
+    # -- Redeem-throttle keyspace --------------------------------------------
+
+    def _redeem_scope(self, target_kind: str, target_name: str, source_key: str) -> str:
+        """The opaque terminal segment scoping a redeem throttle to ONE (target, source):
+        the sha256 of the deterministic JSON array ``[target_kind, target_name,
+        source_key]``. ``target_name`` and ``source_key`` (a door-qualified accountable-party
+        encoding) are both charset-unconstrained, so the hash removes all delimiter ambiguity
+        while keeping an ordinary per-key TTL."""
+        _require_key_segment("target_kind", target_kind)
+        _require_key_segment("target_name", target_name)
+        _require_key_segment("source_key", source_key)
+        return hashlib.sha256(
+            json.dumps([target_kind, target_name, source_key], separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def redeem_fail_key(self, target_kind: str, target_name: str, source_key: str) -> str:
+        """Consecutive-invalid-redeem counter key for one (target, source). Cleared by a
+        valid redeem and decays after the backoff cap of inactivity."""
+        return f"{self.prefix}:redeem_fail:{self._redeem_scope(target_kind, target_name, source_key)}"
+
+    def redeem_lock_key(self, target_kind: str, target_name: str, source_key: str) -> str:
+        """Backoff-lock marker key for one (target, source): present (with a TTL) exactly
+        while that source's redeems are throttled after crossing the failure threshold."""
+        return f"{self.prefix}:redeem_lock:{self._redeem_scope(target_kind, target_name, source_key)}"

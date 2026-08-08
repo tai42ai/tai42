@@ -16,6 +16,12 @@ from tai42_contract.agent import Agent
 # The reserved thread namespace the messaging bridge alone writes.
 BRIDGE_THREAD_PREFIX = "bridge:"
 
+# The sub-namespace a LINKED person's aggregated thread is keyed under:
+# ``bridge:@person:{person_id}``. ``@person`` can never be a route name
+# (``ROUTE_NAME_RE = ^[a-z0-9-]+$``), so this form can never collide with a
+# route-keyed ``bridge:{route_name}:{address}`` thread.
+PERSON_THREAD_PREFIX = f"{BRIDGE_THREAD_PREFIX}@person:"
+
 # LangGraph thread-scoping keys a caller could steer into the reserved namespace.
 _RESERVED_CONFIGURABLE_KEYS = ("thread_id", "checkpoint_id")
 
@@ -58,6 +64,7 @@ def run_kwargs_from_tool_input(agent: Agent, validated: BaseModel) -> dict[str, 
 
 __all__ = [
     "BRIDGE_THREAD_PREFIX",
+    "PERSON_THREAD_PREFIX",
     "ReservedThreadNamespaceError",
     "reserved_thread_namespace_error",
     "run_kwargs_from_tool_input",

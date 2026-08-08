@@ -52,7 +52,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations.errors import NotSupportedError
-from tai42_skeleton.utils.redis_typing import eval_script
+from tai42_skeleton.utils.redis_typing import awaited, eval_script
 
 _NO_BACKEND = "conversation persons require the redis conversations backend"
 
@@ -314,6 +314,16 @@ class ConversationPersonStore:
         if status == "hit":
             return Person.model_validate_json(_as_str(result[1]))
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
+
+    async def get_by_id(self, person_id: str) -> Person | None:
+        """The person row named by ``person_id``, or ``None`` when no such row exists. The
+        aggregated person-thread read door resolves the ``bridge:@person:{person_id}`` key
+        this way — against the store, never by parsing addresses out of the thread id."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            raw = await awaited(r.get(self.settings.person_key(person_id)))
+        if raw is None:
+            return None
+        return Person.model_validate_json(_as_str(raw))
 
     async def ensure_provisional(self, target: PairingTarget, address_row: PersonAddress) -> tuple[Person, bool]:
         """Get-or-create the single-address person for ``address_row`` on ``target``, atomic

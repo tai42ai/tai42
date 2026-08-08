@@ -445,13 +445,13 @@ async def test_the_thread_id_a_turn_mints_is_the_one_its_caller_owns(store, monk
     )
     _as_caller(monkeypatch, _Caller(principal, is_admin=False))
 
-    assert ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(principal)) is True
+    assert await ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(principal)) is True
     read = await ops.get_conversation_thread("support", thread_id)
     assert [item["message_id"] for item in read["items"]] == ["t0"]
 
     # And nobody else keys it — not even a principal the encoded form starts with.
     for other in ("oidc", principal[:-1], f"{principal}x"):
-        assert ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(other)) is False
+        assert await ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(other)) is False
 
 
 async def test_an_unknown_thread_is_404_before_any_authorization(store, monkeypatch):

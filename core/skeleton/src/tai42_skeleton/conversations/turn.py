@@ -12,9 +12,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import string
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
@@ -22,22 +24,34 @@ from uuid import uuid4
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal
 from tai42_contract.conversations import (
+    GREETING_PLACEHOLDER,
     AnswerStatus,
     BlankInboundTextError,
     ConversationAnswer,
+    ConversationDoor,
     ConversationRoute,
+    CrossTargetMergeError,
+    NotLinkedError,
+    PairCodeInvalidError,
+    Person,
+    PersonAddress,
 )
 from tai42_kit.utils.data import run_jq_bounded
 
-from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX
+from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.authz.execution import authorize_execution_agent_run, bind_execution_identity
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, TurnCaps, get_turn_caps
 from tai42_skeleton.conversations.delivery import mark_wait_delivered, spawn_delivery
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore, MintingConversation
+from tai42_skeleton.conversations.pairing import Link, Passthrough, Redeem, Unlink, classify
+from tai42_skeleton.conversations.persons import ConversationPersonStore, PairingTarget
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.redeem_throttle import ConversationRedeemThrottle
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
 
 logger = logging.getLogger(__name__)
@@ -50,6 +64,15 @@ _ERROR_ANSWER_TEXT = "Sorry, something went wrong handling your message. Please 
 
 # Delivered once per refill window to an address over its rate cap.
 _SLOW_DOWN_TEXT = "You are sending messages faster than I can answer. Please wait a moment and try again."
+
+# Fixed, generic pairing-turn replies — no channel names, no links (operators who want
+# richer wording compose it from the pairing tool + their own flow, R8).
+_LINKED_TEXT = "Done — this conversation is now linked to your other one."
+_UNLINKED_TEXT = "Done — this conversation is no longer linked."
+_NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is nothing to unlink."
+# The UNIFORM redeem refusal: an unknown/expired/already-redeemed code, a cross-target code,
+# or a throttled attempt all read the same, so the reply reveals no oracle (D11).
+_INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
 
 
 class ConversationRouteResolutionError(LookupError):
@@ -97,8 +120,145 @@ def _api_bucket_key(route_name: str, caller_principal: str) -> str:
     return f"{route_name}|caller:{caller_principal}"
 
 
+def _throttle_source_key(door: ConversationDoor, accountable: str) -> str:
+    """The redeem-throttle SOURCE scope: the DOOR-QUALIFIED accountable party, never the
+    conversation address (whose cardinality the caller freely chooses). Same accountability
+    model the rate caps use — the api door keys on its authenticated ``caller_principal``
+    (:func:`_api_bucket_key`), the channel door on the provider-attested ``cap_key``
+    (:func:`_channel_bucket_key``). A deterministic JSON array (no delimiter joining) whose
+    leading door element keeps an api principal string and a channel value from ever
+    colliding, and whose accountable part an attacker cannot rotate per attempt — so the
+    lock actually arms against a brute-force run."""
+    return json.dumps([door, accountable], separators=(",", ":"))
+
+
 def _store() -> ConversationRecordStore:
     return ConversationRecordStore(ConversationsSettings())
+
+
+def _person_store() -> ConversationPersonStore:
+    return ConversationPersonStore(ConversationsSettings())
+
+
+def _pair_code_store() -> ConversationPairCodeStore:
+    return ConversationPairCodeStore(ConversationsSettings())
+
+
+def _config_store() -> ConversationTargetConfigStore:
+    return ConversationTargetConfigStore(ConversationsSettings())
+
+
+def _redeem_throttle() -> ConversationRedeemThrottle:
+    return ConversationRedeemThrottle(ConversationsSettings())
+
+
+def _person_thread_id(person_id: str) -> str:
+    return f"{PERSON_THREAD_PREFIX}{person_id}"
+
+
+@dataclass(frozen=True)
+class _Multichannel:
+    """The per-accept multichannel context for a target with ``multichannel: true`` — the
+    target, the sending address in the door's own terms, the accountable party the redeem
+    throttle keys on, and the first-contact greeting template. ``None`` everywhere
+    multichannel is OFF, which is what keeps an unconfigured or unlinked conversation
+    byte-identical to today (R10).
+
+    ``address`` is the PERSON IDENTITY (the thread, the transcript, the pair-code's stored
+    conversation); ``accountable`` is the rotation-resistant party the brute-force throttle
+    scopes to — the api ``caller_principal`` or the channel ``cap_key`` — and is NEVER the
+    conversation address."""
+
+    target: PairingTarget
+    door: ConversationDoor
+    channel: str | None
+    our_identity: str | None
+    address: str
+    accountable: str
+    route_name: str
+    greeting_template: str | None
+
+    def address_row(self) -> PersonAddress:
+        """This sending address as a fresh :class:`PersonAddress` row (its route attributed)."""
+        return PersonAddress(
+            door=self.door,
+            routes=[self.route_name],
+            channel=self.channel,
+            our_identity=self.our_identity,
+            address=self.address,
+            linked_at=datetime.now(UTC),
+        )
+
+    def minting_conversation(self) -> MintingConversation:
+        """This conversation as the value a minted pair code stores, so the redeem side can
+        rebuild a complete address for it."""
+        return MintingConversation(
+            target_kind=self.target.target_kind,
+            target_name=self.target.target_name,
+            route_name=self.route_name,
+            door=self.door,
+            channel=self.channel,
+            our_identity=self.our_identity,
+            address=self.address,
+        )
+
+    def throttle_source_key(self) -> str:
+        """The redeem-throttle source key: this accept's DOOR-QUALIFIED accountable party (the
+        api ``caller_principal`` or the channel ``cap_key``), NOT the conversation address —
+        so an attacker cannot rotate a caller-composed address to dodge the lock."""
+        return _throttle_source_key(self.door, self.accountable)
+
+
+async def _multichannel_context(
+    route: ConversationRoute,
+    *,
+    door: ConversationDoor,
+    channel: str | None,
+    our_identity: str | None,
+    address: str,
+    accountable: str,
+) -> _Multichannel | None:
+    """The multichannel context for ``route``, or ``None`` when the target has no config row
+    or its ``multichannel`` is off (D6 default-false). Read once per accept, BEFORE the gates:
+    it decides the thread key (C3) and, later, the pairing turn and greeting.
+
+    ``address`` is the conversation identity; ``accountable`` is the rotation-resistant party
+    the redeem throttle scopes to (the caller of the door, the same key its rate cap uses)."""
+    config = await _config_store().get(route.target_kind, route.target_name)
+    if config is None or not config.multichannel:
+        return None
+    return _Multichannel(
+        target=PairingTarget(target_kind=route.target_kind, target_name=route.target_name),
+        door=door,
+        channel=channel,
+        our_identity=our_identity,
+        address=address,
+        accountable=accountable,
+        route_name=route.route_name,
+        greeting_template=config.greeting_template,
+    )
+
+
+async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichannel | None, address: str) -> str:
+    """The thread key for this accept. A LINKED person on an AGENT target (D3) keys the
+    aggregated ``bridge:@person:{person_id}`` thread; everyone else keeps today's
+    route-keyed ``bridge:{route}:{address}`` (R10). Read-only: no person row is created here,
+    so a redelivered, refused or shed message never mints identity.
+
+    In-flight merge race: a turn admitted under the old key while the merge lands completes
+    under that key (its FIFO slot lives there); the NEXT message keys to the person thread.
+    Histories are never migrated (linked memory starts at the pairing moment)."""
+    if multichannel is not None and route.target_kind == "agent":
+        person = await _person_store().get_person(
+            multichannel.target,
+            door=multichannel.door,
+            channel=multichannel.channel,
+            our_identity=multichannel.our_identity,
+            address=multichannel.address,
+        )
+        if person is not None and len(person.addresses) > 1:
+            return _person_thread_id(person.person_id)
+    return _thread_id(route.route_name, address)
 
 
 # -- route resolution --------------------------------------------------------
@@ -161,7 +321,9 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str:
     return ""
 
 
-async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str) -> tuple[AnswerStatus, str, str | None]:
+async def _run_agent_turn(
+    route: ConversationRoute, text: str, thread_id: str
+) -> tuple[Literal["answered", "error"], str, str | None]:
     """Run one agent turn as the route's execution key and return ``(answer_status, answer,
     error_detail)``. The identity is bound for the turn's duration and the run authorized
     against it before the agent runs. A denied run, a mid-turn error or an empty answer
@@ -215,6 +377,9 @@ class _ResolvedOutcome:
 
 #: A tool turn resolves to exactly one of these two shapes — no third, coercible state.
 _ToolOutcome = _SilentOutcome | _ResolvedOutcome
+
+#: A freshly minted pair code and its expiry, as :meth:`ConversationPairCodeStore.mint` returns.
+_MintedCode = tuple[str, datetime]
 
 
 def _tool_error(detail: str) -> _ResolvedOutcome:
@@ -402,30 +567,178 @@ def _with_api_silent(intake: ConversationRecord) -> ConversationRecord:
     )
 
 
-async def _resolve_turn_record(
-    *, route: ConversationRoute, intake: ConversationRecord, text: str
-) -> ConversationRecord:
-    """Run the route's target and build the completed record the transition persists: an
-    agent or an answered tool turn carries the answer (``pending_delivery``); a silent tool
-    turn is terminal ``silent`` on the channel door and a deliverable ``silent`` marker on
-    the api door."""
+async def _target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
+    """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
+    agent run (always answered/error). The single dispatch both the plain and the
+    multichannel paths route ordinary text to."""
     if route.target_kind == "tool":
-        outcome = await _run_tool_turn(route, text, intake.client_address)
-        if isinstance(outcome, _SilentOutcome):
-            return _with_channel_silent(intake) if route.door == "channel" else _with_api_silent(intake)
-        return _with_outcome(intake, outcome.answer_status, outcome.answer, outcome.error)
+        return await _run_tool_turn(route, text, intake.client_address)
     answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id)
-    return _with_outcome(intake, answer_status, answer, error_detail)
+    return _ResolvedOutcome(answer_status=answer_status, answer=answer, error=error_detail)
 
 
-async def _complete_turn(*, route: ConversationRoute, intake: ConversationRecord, text: str) -> ConversationRecord:
+def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> ConversationRecord:
+    """Build the completed record from a resolved outcome: an answer goes to
+    ``pending_delivery``; a silent outcome is terminal ``silent`` on the channel door and a
+    deliverable ``silent`` marker on the api door."""
+    if isinstance(outcome, _SilentOutcome):
+        return _with_channel_silent(intake) if intake.door == "channel" else _with_api_silent(intake)
+    return _with_outcome(intake, outcome.answer_status, outcome.answer, outcome.error)
+
+
+async def _resolve_turn_record(
+    *, route: ConversationRoute, intake: ConversationRecord, text: str, multichannel: _Multichannel | None = None
+) -> ConversationRecord:
+    """Run the route's target (or a pairing turn) and build the completed record the
+    transition persists. With ``multichannel`` off this is byte-identical to the target turn
+    (R10). With it on, the canonical per-accept order runs at the HEAD of this scheduled
+    execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
+    person WRITE, keying the first-contact greeting and the redeem's own side) → classify
+    → dispatch to the pairing turn or the target — and a due first-contact greeting is
+    PREPENDED into the answer before it is persisted."""
+    if multichannel is None:
+        return _outcome_record(intake, await _target_outcome(route, intake, text))
+
+    person, created = await _person_store().ensure_provisional(multichannel.target, multichannel.address_row())
+    greeting, greeting_code = await _greeting_and_code(multichannel) if created else (None, None)
+    action = classify(text)
+    if isinstance(action, Passthrough):
+        outcome = await _target_outcome(route, intake, text)
+    else:
+        # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
+        # ``/link`` reuses it rather than minting a SECOND code that D1 rotation would delete,
+        # leaving the greeting carrying a now-dead code (a Redeem/Unlink ignore it).
+        outcome = await _run_pairing_turn(multichannel, person, action, greeting_code)
+    return _outcome_record(intake, _with_greeting(outcome, greeting))
+
+
+def _template_references_code(template: str) -> bool:
+    """Whether a validated greeting template references ``{pairing_code}`` (vs a fixed
+    string), so a code is minted ONLY when the greeting will actually carry one."""
+    return any(field == GREETING_PLACEHOLDER for _literal, field, _spec, _conv in string.Formatter().parse(template))
+
+
+async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _MintedCode | None]:
+    """The rendered first-contact greeting for a created-now person and the code it minted, or
+    ``(None, None)`` when the target configures no template. ``{pairing_code}`` is substituted
+    with a freshly minted code (rotating any open one, D1) that is RETURNED so a same-turn
+    ``/link`` can present that SAME live code instead of minting a second one; a template with
+    no placeholder mints nothing and returns no code."""
+    template = multichannel.greeting_template
+    if template is None:
+        return None, None
+    if _template_references_code(template):
+        minted = await _pair_code_store().mint(multichannel.minting_conversation())
+        return template.format(pairing_code=minted[0]), minted
+    return template.format(), None
+
+
+def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
+    """Prepend a due greeting into the turn's answer. A silent outcome due a greeting becomes
+    an answered greeting-only reply — a greeting, once due, is never silently dropped (D11);
+    an error outcome keeps the greeting prefixed to its client-safe text."""
+    if greeting is None:
+        return outcome
+    if isinstance(outcome, _SilentOutcome):
+        return _ResolvedOutcome(answer_status="answered", answer=greeting, error=None)
+    return _ResolvedOutcome(
+        answer_status=outcome.answer_status, answer=f"{greeting}\n\n{outcome.answer}", error=outcome.error
+    )
+
+
+def _pairing_reply(text: str) -> _ResolvedOutcome:
+    return _ResolvedOutcome(answer_status="answered", answer=text, error=None)
+
+
+async def _run_pairing_turn(
+    multichannel: _Multichannel, person: Person, action: Link | Unlink | Redeem, greeting_code: _MintedCode | None
+) -> _ToolOutcome:
+    """Dispatch a classified pairing action against the multichannel target and return its
+    resolved outcome. ``Link`` presents ``greeting_code`` when a first-contact greeting
+    already minted one this turn (so only ONE code is minted and the greeting's code stays
+    live), else mints its own; ``Redeem`` redeems then ensures BOTH sides and merges;
+    ``Unlink`` detaches the sending address.
+
+    Error scoping: ONLY the named pairing domain errors (``PairCodeInvalidError``,
+    ``CrossTargetMergeError``, ``NotLinkedError``) become the uniform answered refusal — it
+    IS the answer, detail logged (D11). ANY other exception (a redis fault, a reset) takes
+    the platform's standard client-safe ``error`` outcome, so an infra fault never
+    masquerades as an invalid code."""
+    try:
+        if isinstance(action, Link):
+            code, expires_at = greeting_code or await _pair_code_store().mint(multichannel.minting_conversation())
+            return _pairing_reply(_link_reply(code, expires_at))
+        if isinstance(action, Unlink):
+            await _person_store().detach(
+                person.person_id,
+                door=multichannel.door,
+                channel=multichannel.channel,
+                our_identity=multichannel.our_identity,
+                address=multichannel.address,
+            )
+            return _pairing_reply(_UNLINKED_TEXT)
+        return await _redeem_turn(multichannel, person, action)
+    except NotLinkedError as exc:
+        logger.info("conversations: /unlink refused on route %r: %s", multichannel.route_name, exc)
+        return _pairing_reply(_NOT_LINKED_TEXT)
+    except (PairCodeInvalidError, CrossTargetMergeError) as exc:
+        logger.info("conversations: pairing refused on route %r: %s", multichannel.route_name, exc)
+        return _pairing_reply(_INVALID_CODE_TEXT)
+    except Exception as exc:
+        logger.error("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
+        return _tool_error(f"pairing turn error: {exc}")
+
+
+async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Redeem) -> _ToolOutcome:
+    """Redeem a pair code and merge the two persons — behind the brute-force throttle. A
+    locked source, and an invalid code, both return the SAME uniform reply (no oracle); a
+    valid redeem clears the throttle. The minting side's provisional row is ensured from the
+    code's stored value (a tool-minted code may name an address with no admitted inbound
+    yet); such a row consumes no greeting — the person is already linked, and the greeting
+    predicate fires only at that address's OWN admitted inbound, which this is not."""
+    throttle = _redeem_throttle()
+    source = multichannel.throttle_source_key()
+    if await throttle.is_locked(multichannel.target, source):
+        return _pairing_reply(_INVALID_CODE_TEXT)
+    try:
+        minting = await _pair_code_store().redeem(action.code)
+    except PairCodeInvalidError:
+        await throttle.record_failure(multichannel.target, source)
+        return _pairing_reply(_INVALID_CODE_TEXT)
+    await throttle.clear(multichannel.target, source)
+    minting_person, _created = await _person_store().ensure_provisional(
+        PairingTarget(target_kind=minting.target_kind, target_name=minting.target_name),
+        PersonAddress(
+            door=minting.door,
+            routes=[minting.route_name],
+            channel=minting.channel,
+            our_identity=minting.our_identity,
+            address=minting.address,
+            linked_at=datetime.now(UTC),
+        ),
+    )
+    await _person_store().merge(person.person_id, minting_person.person_id)
+    return _pairing_reply(_LINKED_TEXT)
+
+
+def _link_reply(code: str, expires_at: datetime) -> str:
+    """The fixed neutral ``/link`` reply carrying the fresh code and its expiry."""
+    return (
+        f"Your pairing code is {code}. Send it from your other conversation to link the two. "
+        f"It expires at {expires_at.isoformat()}."
+    )
+
+
+async def _complete_turn(
+    *, route: ConversationRoute, intake: ConversationRecord, text: str, multichannel: _Multichannel | None = None
+) -> ConversationRecord:
     """Run the turn and move its intake record to its outcome (persist before send);
     delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
     silent tool turn goes straight to terminal ``silent`` with nothing to deliver. The
     transition is guarded on the record still being at intake, so a turn finishing after a
     re-drive resolved its record raises rather than overwriting the outcome the client was
     given."""
-    completed = await _resolve_turn_record(route=route, intake=intake, text=text)
+    completed = await _resolve_turn_record(route=route, intake=intake, text=text, multichannel=multichannel)
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await _store().complete_silent(completed)
         verb = "complete_silent"
@@ -564,7 +877,15 @@ async def accept(
     address = canonical_address(client_address)
     cap_bucket = canonical_address(cap_key)
     route = await _resolve_channel_route(channel, channel_identity)
-    thread_id = _thread_id(route.route_name, address)
+    multichannel = await _multichannel_context(
+        route,
+        door="channel",
+        channel=route.channel,
+        our_identity=route.our_identity,
+        address=address,
+        accountable=cap_bucket,
+    )
+    thread_id = await _resolve_thread_id(route, multichannel, address)
     store = _store()
 
     owner = await store.get_inbound_owner(channel, provider_message_id)
@@ -606,6 +927,7 @@ async def accept(
         client_address=address,
         text=text,
         provider_message_id=provider_message_id,
+        multichannel=multichannel,
     )
 
 
@@ -619,6 +941,7 @@ async def _accept_for_turn(
     client_address: str,
     text: str,
     provider_message_id: str,
+    multichannel: _Multichannel | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the
     release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
@@ -658,7 +981,15 @@ async def _accept_for_turn(
         await store.delete_record(intake)
         return owner
 
-    _schedule_turn(caps, route=route, intake=intake, text=text, intake_token=intake_token, deliver_on_completion=True)
+    _schedule_turn(
+        caps,
+        route=route,
+        intake=intake,
+        text=text,
+        intake_token=intake_token,
+        deliver_on_completion=True,
+        multichannel=multichannel,
+    )
     return message_id
 
 
@@ -691,7 +1022,10 @@ async def submit_api_message(
     address = canonical_address(external_user_id)
     route = await _get_api_route(route_name)
     client_address = _api_client_address(caller_principal, address)
-    thread_id = _thread_id(route.route_name, client_address)
+    multichannel = await _multichannel_context(
+        route, door="api", channel=None, our_identity=None, address=client_address, accountable=caller_principal
+    )
+    thread_id = await _resolve_thread_id(route, multichannel, client_address)
     message_id = str(uuid4())
 
     caps = get_turn_caps()
@@ -722,7 +1056,13 @@ async def submit_api_message(
         raise
 
     task = _schedule_turn(
-        caps, route=route, intake=intake, text=text, intake_token=intake_token, deliver_on_completion=False
+        caps,
+        route=route,
+        intake=intake,
+        text=text,
+        intake_token=intake_token,
+        deliver_on_completion=False,
+        multichannel=multichannel,
     )
 
     if wait_seconds > 0:
@@ -759,6 +1099,7 @@ def _schedule_turn(
     text: str,
     intake_token: str,
     deliver_on_completion: bool,
+    multichannel: _Multichannel | None = None,
 ) -> asyncio.Task[ConversationRecord]:
     """Schedule ``intake``'s turn as a background task consuming the caller's reservation;
     returns the task whose result is the completed :class:`ConversationRecord`.
@@ -769,7 +1110,7 @@ def _schedule_turn(
 
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
-            return await _complete_turn(route=route, intake=intake, text=text)
+            return await _complete_turn(route=route, intake=intake, text=text, multichannel=multichannel)
 
     task = asyncio.create_task(_run())
     _TURN_TASKS.add(task)
