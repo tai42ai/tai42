@@ -112,6 +112,145 @@ refuses to start without one, naming `TAI_BUS_REDIS_URL`. On a shared Redis,
 `TAI_BUS_NAMESPACE` must diverge per stack — Redis pub/sub is server-global, so
 co-tenant deployments would otherwise cross-talk.
 
+## Conversations and person linking
+
+The conversation bridge turns one inbound message — from an authed API caller
+(`door=api`) or a registered channel adapter (`door=channel`) — into an agent or
+tool turn whose answer is durably stored and delivered back. A **route** binds a
+door to a target: an `agent` run (threaded conversation memory) or a `tool`
+dispatch (stateless, one call per message). Routes are managed over
+`POST /api/conversations/{route_name}` (the `tai conversations create` CLI), and a
+thread reads over `/api/conversations/{route_name}/threads` and `/transcript`. An
+unlinked conversation keys its thread `bridge:{route_name}:{address}`.
+
+One person who reaches a target on several channels can prove, by an explicit pair
+code, that those addresses are the same person — and the bridge then treats them
+as **one person for that target**. Nothing changes for anyone who never pairs: an
+unlinked conversation keeps its route-keyed thread byte-for-byte. Person linking is
+**off by default** and opted in per target.
+
+### Per-target conversation config
+
+Each `(target_kind, target_name)` may carry a `TargetConversationConfig`:
+
+| Field | Meaning |
+|---|---|
+| `multichannel` | `bool`, default `false`. Opts the target into person linking. With it off, `/link`, `/unlink` and any pair code reach the target as ordinary text — no behavior change. |
+| `greeting_template` | `str \| None`, default `None`. A first-contact greeting. `None` means no greeting; a blank string is refused — `null` is the spelling for "no greeting". |
+
+`greeting_template` may reference **only** the `{pairing_code}` placeholder; any
+other `{...}` field is refused at write time so a typo cannot render literally.
+When the template references `{pairing_code}`, a fresh single-use code is minted at
+greeting time and substituted in. The greeting fires on **first contact only** —
+the first message the bridge admits from an address on that target; a later message
+from the same address carries no greeting. It also fires **only on a
+`multichannel: true` target** — the greeting lives inside the multichannel path, so
+a greeting set on a target with multichannel off stays inert until multichannel is
+enabled (the two fields are accepted independently).
+
+Set it over the config API / CLI (`config-set` is an upsert and requires the agent
+or tool target to exist):
+
+```bash
+# PUT /api/conversation-configs/{target_kind}/{target_name}
+tai conversations config-set agent concierge --multichannel \
+  --greeting-template 'Hi! Pair another channel with {pairing_code}'
+tai conversations config-list                  # GET /api/conversation-configs
+tai conversations config-get agent concierge   # GET .../{target_kind}/{target_name}
+tai conversations config-delete agent concierge # DELETE .../{target_kind}/{target_name}
+```
+
+### Pairing protocol
+
+On a target with `multichannel: true`, the bridge intercepts three exact things in
+the inbound text — everything else passes through unchanged to the target:
+
+- `/link` (the whole trimmed message) — mints a fresh pair code and replies with
+  it. `/link extra` is ordinary text, not a command.
+- `/unlink` (the whole trimmed message) — detaches the **sending** address from its
+  person; the rest of the person stays linked, and the detached address returns to
+  its own route-keyed thread.
+- a **pair code** anywhere in the text — `LINK-` followed by 8 `[A-Z0-9]`
+  characters (matched as `\bLINK-[A-Z0-9]{8}\b`, so a code pasted inside a sentence
+  still redeems). Redeeming merges the two conversations into one person.
+
+A pair code is **single-use** and expires **15 minutes** after it is minted. One
+code is open per conversation at a time: minting again **rotates** — a fresh code
+is issued and the previous one stops working (the newest code wins). The raw code
+exists only in flight and is never stored recoverably.
+
+Merging is **transitive**: each redemption folds the two persons into one (the
+union of their addresses), so a chain of pairings across three or more channels
+always converges to a single person for that target.
+
+Both doors join persons. On the `channel` door the address is the medium's (a phone
+number, a chat id, ...); on the `api` door it is the composed caller/end-user
+string. An API caller whose address belongs to a linked person reads the full
+merged person thread. Errors are uniform: an unknown, expired, or already-redeemed
+code all get the same refusal reply, so the wording reveals nothing about whether a
+code ever existed.
+
+Person **scope is per target**: pairing on one `(target_kind, target_name)` never
+links addresses on any other target.
+
+**Known limits**
+
+- **Histories are never merged.** Linking two conversations does not stitch their
+  two past transcripts together; the shared person thread starts at the pairing
+  moment (agent targets — a tool target has no thread and shares identity only).
+- **Slack pairs the room.** A Slack channel address is the room, not a user, so
+  pairing on Slack links the room rather than one person in it.
+- **Web identity is a browser cookie.** A web visitor who clears cookies or opens
+  another browser/device is a new person until they pair again; an invite link
+  re-pairs them in one load (see the `channel-web` plugin's invite links).
+
+### The `get_pairing_code` tool
+
+`get_pairing_code` is a runtime-native builtin that mints a pair code for a live
+channel conversation, so an operator can compose an invite (a typed code, or a
+`channel-web` `?pair=` URL) around it. Opt the module in with a manifest
+`tools[].module` row:
+
+```yaml
+tools:
+  - title: get-pairing-code
+    module: tai42_skeleton.tools.builtin.get_pairing_code
+```
+
+| Parameter | Meaning |
+|---|---|
+| `channel` | The registry channel name the conversation runs on (e.g. `telegram`). |
+| `our_identity` | The medium address the conversation is texted at — the route's identity for `channel`. |
+| `sender` | The address the code will link. |
+
+It returns `{"code", "expires_at"}` and **nothing else** — no link and no wording;
+the operator composes the invite text themselves. Calling it again rotates the
+conversation's open code (newest wins). Refusals are loud: a blank `channel`,
+`our_identity`, or `sender` raises; a null/absent argument — which the api door
+carries, having no channel identity — is refused by the typed signature before the
+tool body runs; and a resolved target with `multichannel` off is refused with no
+code minted.
+
+**Wiring it as a tool-target route.** A `tool` route maps the inbound message to
+the tool's kwargs with a `payload_expr` (jq) and the result to the reply with a
+`reply_expr` (jq). The payload the expr runs over is
+`{message, sender, our_identity, channel}` — `our_identity` and `channel` are the
+route's, `sender` is the conversation address. Map those onto the tool's own
+parameter names and pull `.code` out of the result:
+
+```bash
+tai conversations create pair-mint --door channel --target-kind tool \
+  --target-name get_pairing_code --execution-key svc \
+  --channel telegram --identity <bot-id> \
+  --payload-expr '{channel: .channel, our_identity: .our_identity, sender: .sender}' \
+  --reply-expr '.code'
+```
+
+`payload_expr` must emit exactly one JSON object; `reply_expr` must emit null or a
+string — here the raw code — so the route replies with just the code. The tool
+mints for the conversation named by `(channel, our_identity)`, whose resolved
+target must itself have `multichannel` on.
+
 ## Development
 
 Set up the dev venv and run the gates. `--no-sources` ignores the workspace-source

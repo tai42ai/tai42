@@ -898,6 +898,10 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         "tools": [
             _probe_tools_entry(with_backend_branches=True),
             *_builtin_entries(),
+            # The pairing-code mint builtin, opted in as a tool[].module row exactly as a
+            # deployment does: the bridge suite drives it as a tool-target route to prove the
+            # R8 {code, expires_at} contract end to end.
+            {"title": "builtin-pairing", "module": "tai42_skeleton.tools.builtin.get_pairing_code"},
         ],
         "agents": [
             {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},

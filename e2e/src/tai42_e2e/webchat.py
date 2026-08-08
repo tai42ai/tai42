@@ -93,13 +93,20 @@ class WebChatClient:
     visitor_id: str
 
     @classmethod
-    async def open_page(cls, base_url: str, identity: str, *, store_url: str) -> tuple[WebChatClient, httpx.Response]:
+    async def open_page(
+        cls, base_url: str, identity: str, *, store_url: str, query: dict[str, str] | None = None
+    ) -> tuple[WebChatClient, httpx.Response]:
         """GET the chat page and adopt the session cookie the server minted, exactly as a
         first-time visitor's browser does, then read the visitor id that token was
         registered against. Raises when the door mints no cookie — without a session
-        there is no conversation to open."""
+        there is no conversation to open.
+
+        ``query`` appends URL query parameters to the page load — the browser-side coordinates
+        the shell reads (e.g. the ``pair`` invite code, which the bundle submits once as the
+        visitor's first message). The server ignores them, so the shell it returns is
+        identical; the caller stands in for the bundle by sending whatever the query implies."""
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{base_url.rstrip('/')}/api/channels/web/chat/{identity}")
+            response = await client.get(f"{base_url.rstrip('/')}/api/channels/web/chat/{identity}", params=query)
         token = response.cookies.get(SESSION_COOKIE)
         if token is None:
             raise AssertionError(

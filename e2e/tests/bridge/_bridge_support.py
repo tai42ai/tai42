@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,31 @@ WHATSAPP_INBOUND_PATH = "/api/channels/whatsapp/inbound"
 # a leg asserting an error outcome matches the answer against this.
 ERROR_ANSWER_TEXT = "Sorry, something went wrong handling your message. Please try again."
 SLOW_DOWN_TEXT = "You are sending messages faster than I can answer. Please wait a moment and try again."
+
+# Fixed, generic pairing-turn replies (each mirrors the turn engine's own constant); a
+# pairing leg matches the delivered answer against these. They carry no per-test marker, so a
+# leg waiting on one scopes the wait by recipient (``wait_send_to``) to keep another
+# conversation's identical reply on the shared stack from being counted.
+LINK_REPLY_PREFIX = "Your pairing code is "
+LINKED_TEXT = "Done — this conversation is now linked to your other one."
+UNLINKED_TEXT = "Done — this conversation is no longer linked."
+NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is nothing to unlink."
+# The UNIFORM redeem refusal — an unknown / expired / already-redeemed / throttled code all
+# read the same, so a redeem reply reveals no oracle (D11).
+INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
+
+# The D1 pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token — a leg pulls
+# the minted code out of a link reply or a rendered greeting with this.
+PAIR_CODE_RE = re.compile(r"\bLINK-[A-Z0-9]{8}\b")
+
+
+def extract_pair_code(text: str) -> str:
+    """The single ``LINK-XXXXXXXX`` pair code carried in ``text`` (a link reply or a
+    greeting). Raises unless EXACTLY one is present — a leg that asked for a code never
+    proceeds on a wrong, absent, or ambiguous one."""
+    matches = PAIR_CODE_RE.findall(text)
+    assert len(matches) == 1, f"expected exactly one pair code in {text!r}, found {matches!r}"
+    return matches[0]
 
 
 @dataclass
@@ -192,6 +218,26 @@ class BridgeHarness:
             body["reply_expr"] = reply_expr
         return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
+    async def set_target_config(
+        self,
+        *,
+        target_kind: str,
+        target_name: str,
+        multichannel: bool = False,
+        greeting_template: str | None = None,
+        token: str | None = None,
+        expect: int = 200,
+    ) -> Any:
+        """Create-or-replace the per-target conversation config (the multichannel opt-in +
+        first-contact greeting) over the admin door, keyed ``(target_kind, target_name)``.
+        The target agent/tool must already exist (the operation checks it, as route create
+        does)."""
+        return await self.api(token=token).put(
+            f"/api/conversation-configs/{target_kind}/{target_name}",
+            json={"multichannel": multichannel, "greeting_template": greeting_template},
+            expect=expect,
+        )
+
     async def get_record(self, route_name: str, message_id: str, *, token: str | None = None, expect: int = 200) -> Any:
         return await self.api(token=token).get(f"/api/conversations/{route_name}/messages/{message_id}", expect=expect)
 
@@ -333,6 +379,27 @@ async def wait_channel_send_count(fake: Any, text: str, count: int, *, deadline:
         probe, deadline=deadline, message=f"fewer than {count} sends carrying {text!r} were recorded"
     )
     assert len(matches) == count, f"expected exactly {count} sends carrying {text!r}, saw {len(matches)}"
+    return matches
+
+
+async def wait_send_to(fake: Any, *, to: str, needle: str = "", count: int = 1, deadline: float = 12.0) -> list[dict]:
+    """Wait until ``count`` outbound sends addressed to ``to`` and carrying ``needle`` are
+    recorded on ``fake`` (a twilio or whatsapp stub); assert it settled at EXACTLY ``count``
+    and return them, newest last.
+
+    Scoping by recipient is what makes a fixed platform reply assertable: a link / linked /
+    invalid-code text carries no per-test marker, so ``sends_matching`` alone would also
+    count another conversation's identical reply on the shared module stack. An empty
+    ``needle`` matches every send to ``to``."""
+
+    async def probe() -> list[dict] | None:
+        matches = [record for record in fake.sends_matching(needle) if record.get("to") == to]
+        return matches if len(matches) >= count else None
+
+    matches = await wait_for_async(
+        probe, deadline=deadline, message=f"fewer than {count} sends to {to!r} carrying {needle!r} were recorded"
+    )
+    assert len(matches) == count, f"expected exactly {count} sends to {to!r} carrying {needle!r}, saw {len(matches)}"
     return matches
 
 

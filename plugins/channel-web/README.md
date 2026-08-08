@@ -79,6 +79,26 @@ than as a dead URL. The page itself is a plugin-rendered HTML shell around a bui
 bundle that ships inside the wheel (`src/tai42_channel_web/public/`); an unbuilt
 bundle is a loud `500` naming the build step, never a blank page.
 
+## Invite links
+
+An invite link is the chat page URL with a `?pair=<code>` query parameter carrying
+a conversation pair code (`LINK-` followed by 8 `[A-Z0-9]` characters):
+
+```
+https://<your deployment>/api/channels/web/chat/<identity>?pair=LINK-ABCD1234
+```
+
+On load the page submits that code **once**, as the visitor's first message —
+exactly as if they had typed it, so the conversation bridge's intercept redeems it
+— and then strips the `pair` parameter from the URL, so a reload or a re-shared
+link never resubmits it. Only a value that FULLY matches the code shape is acted
+on; any other `pair` value is ignored entirely — never submitted, never stripped,
+never reflected back into the page — and the rest of the URL is left intact.
+Because the session cookie is already minted by the navigation that served the
+page, an invite re-pairs a returning visitor in a single load — the counterpart to
+the cookie-bound identity in [Limits](#limits): a visitor who cleared cookies is a
+new person until an invite (or a typed code) links them again.
+
 ## Configuration
 
 Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
@@ -341,7 +361,8 @@ widget opens one. The channel sends plain text only (no media, no templates).
 | Bounded replay | The transcript keeps the newest `TRANSCRIPT_MAX_ENTRIES` entries; older ones are trimmed (the bridge holds the durable record) |
 | Single forward attempt | A failed answer forward restores the pending question so the visitor can retry; the door never blind-retries the callback |
 | Bounded re-answering | One question is restored at most `MAX_ANSWER_RESTORES` times; after that it is left dropped and resolves by its own timeout |
-| Cookie-bound conversation | A visitor who clears cookies (or opens another browser) starts a new conversation; there is no account to resume from |
+| Cookie-bound conversation | A visitor who clears cookies (or opens another browser) starts a new conversation; there is no account to resume from — an invite link (`?pair=`) re-pairs them in one load |
+| Invite links | The chat URL accepts `?pair=<LINK-code>`; the page submits it once as the first message and strips it. A `pair` value that is not a well-formed code is ignored |
 | One route per session | A session serves the web route it was minted on; a visitor who opens a second route's chat page holds a second, separate conversation |
 | No plugin-side flood control | Abuse control on these public doors is the platform limiter's and the operator's ingress; the plugin caps only concurrent SSE streams |
 | Store required | Every door but the assets door refuses `501` without `CHANNEL_WEB_REDIS_URL` — a session cannot be registered, so nothing downstream can work |
