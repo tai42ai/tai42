@@ -1552,14 +1552,65 @@ class TaiMCPLifecycleMixin(ABC):
         backoff with a controllable clock instead of real time."""
         await asyncio.sleep(seconds)
 
+    async def _probe_and_apply_failed(self, snapshot: dict[str, TaiMCPConfig]) -> tuple[list[dict[str, Any]], set[str]]:
+        """Re-probe the snapshotted failed MCP servers OFF the reload gate, then bind
+        the recovered ones back UNDER it.
+
+        ``snapshot`` is the ``{title: config}`` a reprobe pass captured under the
+        gate. The probe is a network read that mutates no shared state, so it runs
+        unlocked and on the SHORT reload budget (parity with ``_load_mcps``, not the
+        generous cold-boot timeout) — a persistently-down server therefore never
+        holds the gate across the probe. The gate is re-acquired only to apply, and
+        each title is re-verified STILL failed AND STILL in the manifest before its
+        bind: a concurrent admin reload/deregister may have cleared or removed it
+        while probing, and a stale/removed title must not be re-applied. Returns the
+        per-title results and the gate-consistent still-failed set.
+        """
+        titles = list(snapshot)
+        probes = await asyncio.gather(
+            *(self._probe_mcp(snapshot[t], timeout=mcp_reload_probe_timeout()) for t in titles),
+            return_exceptions=True,
+        )
+        out: list[dict[str, Any]] = []
+        # Every read/write of ``_failed_mcps`` (and the bind it drives) happens under
+        # the reload gate; a worker-thread reload holds the same lock, so the
+        # re-verify and apply below cannot race a concurrent mutation.
+        async with reload_gate.lock:
+            manifest = self._manifest
+            mcp_map = (manifest.mcp_map if manifest else {}) or {}
+            for title, probe in zip(titles, probes, strict=True):
+                if title not in self._failed_mcps or title not in mcp_map:
+                    # Cleared or removed by a concurrent admin reload/deregister while
+                    # probing — a stale/removed title must not be re-applied.
+                    continue
+                config = snapshot[title]
+                if isinstance(probe, BaseException):
+                    self._record_failed_mcp(config, type(probe).__name__)
+                    out.append({"title": title, "status": "unavailable"})
+                    continue
+                try:
+                    out.append(await self._apply_reloaded_mcp(title, config, probe))
+                except Exception:
+                    # A post-probe bind/reconcile failure must not lose the other
+                    # titles' results — log the trace loudly, surface this one coarsely.
+                    logger.error(
+                        "reload_failed_mcps: applying reloaded MCP %r failed after probe", title, exc_info=True
+                    )
+                    out.append({"title": title, "status": "error"})
+            still_failed = set(self._failed_mcps)
+        return out, still_failed
+
     async def _reprobe_failed_mcps_loop(self) -> None:
         """Re-probe failed-at-boot MCP servers on an exponential backoff.
 
         Each pass sleeps the current interval, then — only when a server is
-        currently failed — holds the reload gate and drives the existing
-        ``_reload_failed_mcps_async`` path (probe → drop stale → rebind recovered
-        tools → clear from the failed set), logging the outcome at INFO. The
-        interval starts at ``mcp_reprobe_initial_seconds``, doubles (capped at
+        currently failed — SNAPSHOTS the failed titles under the reload gate, PROBES
+        them off the gate on the short reload budget, and re-acquires the gate to
+        rebind the recovered tools and clear them from the failed set, logging the
+        outcome at INFO. The gate wraps only the brief snapshot and apply, never the
+        probe: holding it across the network probe would stall every reload-gated
+        write for up to the probe timeout each pass. The interval starts at
+        ``mcp_reprobe_initial_seconds``, doubles (capped at
         ``mcp_reprobe_max_seconds``) after a pass where every probed server stayed
         down, and resets to the initial value the moment any server recovers or a
         new one appears in the failed set. An empty failed set probes nothing.
@@ -1579,11 +1630,15 @@ class TaiMCPLifecycleMixin(ABC):
             try:
                 settings = CoreSettings()
                 initial = settings.mcp_reprobe_initial_seconds
-                # Every read/write of _failed_mcps happens under the reload-gate
-                # lock: a worker-thread reload holds the same lock, so this is the
-                # only place the failed set is touched concurrency-safely (a bare
-                # snapshot would race a concurrent mutation → dict-changed-size).
+                # SNAPSHOT the failed set + each title's probe config under the
+                # reload-gate lock: a worker-thread reload holds the same lock, so
+                # this is the only place the failed set is read concurrency-safely (a
+                # bare snapshot would race a concurrent mutation → dict-changed-size).
+                # The probe that follows runs OFF the gate.
                 async with reload_gate.lock:
+                    self._refresh_manifest_mcp()
+                    manifest = self._manifest
+                    mcp_map = (manifest.mcp_map if manifest else {}) or {}
                     current_failed = set(self._failed_mcps)
                     if known_failed is None:
                         known_failed = current_failed
@@ -1592,8 +1647,10 @@ class TaiMCPLifecycleMixin(ABC):
                         known_failed = set()
                         continue
                     newly_appeared = not current_failed <= known_failed
-                    results = await self._reload_failed_mcps_async()
-                    still_failed = set(self._failed_mcps)
+                    snapshot = {t: mcp_map[t] for t in current_failed if t in mcp_map}
+                # Probe off the gate, then re-acquire it to bind the recovered
+                # servers and read the settled failed set (both gate-consistent).
+                results, still_failed = await self._probe_and_apply_failed(snapshot)
                 recovered = sorted(r["title"] for r in results if r.get("status") == "ok")
                 logger.info(
                     "failed-MCP re-probe pass: probed=%s recovered=%s still_failed=%s",

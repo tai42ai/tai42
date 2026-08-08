@@ -4,13 +4,14 @@ Two layers:
 
 * A network-free ``_Mixin`` drives ``_reprobe_failed_mcps_loop`` with a
   controllable clock (an instance ``_reprobe_sleep`` seam) and a scripted
-  ``_reload_failed_mcps_async``, proving: a recovering title gets its tools
-  bound and leaves the failed set (real reload path); the interval doubles per
-  all-failed pass and caps at the max, resetting on recovery; an empty failed
-  set probes nothing; the task holds the reload gate during a pass (a concurrent
-  gated route sees 503); a per-pass error is logged at ERROR and the loop
-  survives; and the shutdown cancel swallows a non-``CancelledError`` failure
-  (already surfaced by the done-callback) so teardown is never aborted.
+  ``_probe_and_apply_failed``, proving: a recovering title gets its tools bound
+  and leaves the failed set (real reload path); the interval doubles per
+  all-failed pass and caps at the max, resetting on recovery; an empty failed set
+  probes nothing; the failed-set snapshot is taken under the reload gate; the
+  probe runs OFF the gate so a reload-gated write is not blocked mid-probe; a
+  per-pass error is logged at ERROR and the loop survives; and the shutdown cancel
+  swallows a non-``CancelledError`` failure (already surfaced by the done-callback)
+  so teardown is never aborted.
 * The real process ``app`` proves ``app_context`` spawns the task and cancels it
   cleanly at shutdown.
 """
@@ -19,27 +20,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from starlette.requests import Request
-from tai42_contract.app import tai42_app
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
-
-# The router modules bind their routes onto the global handle at import, exactly
-# as external plugins do — so bind the process app singleton before importing
-# one, mirroring the router-suite conftest.
-tai42_app.bind(app)
-from tai42_skeleton.routers import tools as tools_router  # noqa: E402
+from tai42_skeleton.settings.cache import mcp_reload_probe_timeout
 
 
 class _FakeMcpTool:
@@ -107,19 +100,6 @@ def _settings(initial: float, maximum: float):
     return lambda: SimpleNamespace(mcp_reprobe_initial_seconds=initial, mcp_reprobe_max_seconds=maximum)
 
 
-def _body_req(body: bytes, path: str) -> Request:
-    scope = {"type": "http", "method": "POST", "path": path, "headers": [], "query_string": b""}
-    delivered = {"done": False}
-
-    async def receive() -> dict[str, Any]:
-        if delivered["done"]:
-            return {"type": "http.disconnect"}
-        delivered["done"] = True
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    return Request(scope, receive)
-
-
 # -- a recovering title binds tools + leaves the failed set (real reload path) --
 
 
@@ -143,7 +123,7 @@ async def test_recovering_title_binds_tools_and_leaves_failed_set(monkeypatch):
     with pytest.raises(_Stop):
         await m._reprobe_failed_mcps_loop()
 
-    # The real _reload_failed_mcps_async ran: svc probed viable, bound, cleared.
+    # The real probe/apply path ran: svc probed viable, bound, cleared.
     assert "svc" not in m._failed_mcps
     assert m._mcp_bound_tools.get("svc") == {"svc_t"}
 
@@ -159,15 +139,15 @@ async def test_backoff_doubles_caps_and_resets_on_recovery(monkeypatch):
 
     pass_index = {"n": 0}
 
-    async def fake_reload():
+    async def fake_probe_apply(_snapshot):
         i = pass_index["n"]
         pass_index["n"] += 1
         if i == 5:  # recovers on the sixth probe pass
             m._failed_mcps.pop("a", None)
-            return [{"title": "a", "status": "ok"}]
-        return [{"title": "a", "status": "unavailable"}]
+            return [{"title": "a", "status": "ok"}], set(m._failed_mcps)
+        return [{"title": "a", "status": "unavailable"}], set(m._failed_mcps)
 
-    m._reload_failed_mcps_async = fake_reload  # type: ignore[method-assign]
+    m._probe_and_apply_failed = fake_probe_apply  # type: ignore[method-assign]
 
     intervals: list[float] = []
 
@@ -196,10 +176,10 @@ async def test_new_failed_title_resets_backoff(monkeypatch):
     m._failed_mcps = {"a": "unavailable"}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
-    async def fake_reload():
-        return [{"title": t, "status": "unavailable"} for t in m._failed_mcps]
+    async def fake_probe_apply(_snapshot):
+        return [{"title": t, "status": "unavailable"} for t in m._failed_mcps], set(m._failed_mcps)
 
-    m._reload_failed_mcps_async = fake_reload  # type: ignore[method-assign]
+    m._probe_and_apply_failed = fake_probe_apply  # type: ignore[method-assign]
 
     intervals: list[float] = []
 
@@ -241,11 +221,11 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
 
     reload_ran = asyncio.Event()
 
-    async def fake_reload():
+    async def fake_probe_apply(_snapshot):
         reload_ran.set()
-        return [{"title": t, "status": "unavailable"} for t in sorted(m._failed_mcps)]
+        return [{"title": t, "status": "unavailable"} for t in sorted(m._failed_mcps)], set(m._failed_mcps)
 
-    m._reload_failed_mcps_async = fake_reload  # type: ignore[method-assign]
+    m._probe_and_apply_failed = fake_probe_apply  # type: ignore[method-assign]
 
     slept = {"done": False}
 
@@ -291,8 +271,8 @@ async def test_empty_failed_set_probes_nothing(monkeypatch):
     m._failed_mcps = {}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
-    reload = AsyncMock()
-    m._reload_failed_mcps_async = reload  # type: ignore[method-assign]
+    probe_apply = AsyncMock()
+    m._probe_and_apply_failed = probe_apply  # type: ignore[method-assign]
 
     intervals: list[float] = []
 
@@ -307,27 +287,37 @@ async def test_empty_failed_set_probes_nothing(monkeypatch):
     with pytest.raises(_Stop):
         await m._reprobe_failed_mcps_loop()
 
-    reload.assert_not_awaited()
+    probe_apply.assert_not_awaited()
     assert intervals == [1.0, 1.0, 1.0]  # stays idle at the initial cadence
 
 
-# -- the pass holds the reload gate (a concurrent gated route sees 503) ---------
+# -- the probe runs OFF the gate, so a reload-gated write is not blocked ---------
 
 
-async def test_pass_holds_reload_gate_route_sees_503():
+async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
+    """A persistently-down MCP's re-probe must NOT hold the reload gate across the
+    network probe: the gate wraps only the brief snapshot/apply, so a reload-gated
+    write stays fast while a pass is mid-probe.
+
+    Fails against the old under-gate code, which held the gate for the whole probe
+    (up to the 15s cold-boot budget) → the gated write below would block on the gate
+    until the probe finished, so ``wait_for`` would fire."""
     m = _Mixin()
-    m._manifest = Manifest.model_validate({})
-    m._failed_mcps = {"a": "unavailable"}
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._failed_mcps = {"svc": "unavailable"}
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
-    entered = asyncio.Event()
+    probing = asyncio.Event()
     release = asyncio.Event()
+    seen: dict[str, Any] = {}
 
-    async def blocking_reload():
-        entered.set()
-        await release.wait()
-        return [{"title": "a", "status": "unavailable"}]
+    async def parked_probe(_config, timeout=None):
+        seen["timeout"] = timeout
+        probing.set()
+        await release.wait()  # stay mid-probe until the test lets go
+        raise TimeoutError("never recovers")
 
-    m._reload_failed_mcps_async = blocking_reload  # type: ignore[method-assign]
+    m._probe_mcp = parked_probe  # type: ignore[method-assign]
 
     sleeps = {"n": 0}
 
@@ -342,12 +332,20 @@ async def test_pass_holds_reload_gate_route_sees_503():
     assert not reload_gate.locked
     task = asyncio.create_task(m._reprobe_failed_mcps_loop())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        # The pass holds the gate: a run route answers the retriable 503.
-        assert reload_gate.locked
-        resp = await tools_router.run_tool(_body_req(b"{}", "/api/run-tool"))
-        assert resp.status_code == 503
-        assert json.loads(bytes(resp.body))["reloading"] is True
+        await asyncio.wait_for(probing.wait(), timeout=5)  # the pass is mid-probe
+
+        # A reload-gated write takes reload_gate.lock; with the probe off the gate it
+        # acquires promptly. Under the old under-gate probe the lock is held for the
+        # whole (here, parked) probe, so this acquire would block and time out.
+        async def gated_write() -> str:
+            async with reload_gate.lock:
+                return "ok"
+
+        assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
+        assert not reload_gate.locked  # nothing holds the gate during the probe
+        # Parity with _load_mcps: the reprobe path probes on the short reload budget,
+        # never the generous cold-boot timeout the under-gate bug used.
+        assert seen["timeout"] == mcp_reload_probe_timeout()
     finally:
         release.set()
         await asyncio.sleep(0)  # let the pass finish and release the gate
@@ -369,13 +367,13 @@ async def test_pass_error_is_logged_and_loop_survives(monkeypatch, caplog):
 
     calls = {"n": 0}
 
-    async def fake_reload():
+    async def fake_probe_apply(_snapshot):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("probe subsystem exploded")
-        return [{"title": "a", "status": "unavailable"}]
+        return [{"title": "a", "status": "unavailable"}], set(m._failed_mcps)
 
-    m._reload_failed_mcps_async = fake_reload  # type: ignore[method-assign]
+    m._probe_and_apply_failed = fake_probe_apply  # type: ignore[method-assign]
 
     sleeps = {"n": 0}
 
