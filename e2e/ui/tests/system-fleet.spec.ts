@@ -60,25 +60,24 @@ test('system (admin): worker census + enabled fleet-reload → reload-framed con
   const reload = page.getByRole('button', { name: 'Reload config (all)' });
   await expect(reload).toBeEnabled();
 
-  // Drive the fleet soft-restart through the reload-framed dialog and assert convergence.
+  // Drive the fleet soft-restart through the reload-framed dialog.
+  await reload.click();
+  const dialog = page.getByRole('dialog', { name: 'Reload worker config' });
+  await dialog.getByRole('button', { name: 'Reload config' }).click();
+
   // A healthy fleet converges: the System page shows the reload-framed success status
   // ("reload" framing, NOT the config-save "Change saved" framing). A non-converged fleet
-  // would instead render the shared <FleetReport> alert; a real degraded state is not
-  // forcible through this harness, so convergence is the honest observable here.
+  // would instead render the shared <FleetReport> alert; a real degraded state is not forcible
+  // through this harness, so convergence is the honest observable here.
   //
-  // Retried as a WHOLE reload op: under heavy CI epoch churn the publisher's reply-collection
-  // pub/sub can transiently drop (Redis closing the socket under connection pressure), so the
-  // convergence REPORT can be a one-off false negative even though the reload itself applied.
-  // Re-driving the idempotent fleet reload observes a clean convergence instead of a transient
-  // bus blip — it verifies the fleet CAN converge and report it (the property under test). It
-  // does NOT mask a degraded fleet: a genuine non-convergence is not forcible through this
-  // harness, so every retry re-drives a healthy reload and only a transient blip is retried past.
-  await expect(async () => {
-    await reload.click();
-    const dialog = page.getByRole('dialog', { name: 'Reload worker config' });
-    await dialog.getByRole('button', { name: 'Reload config' }).click();
-    await expect(page.getByText('Reload converged across the fleet.')).toBeVisible({ timeout: 15_000 });
-  }).toPass({ timeout: 60_000 });
+  // The request stays PENDING (the dialog's Reload button spins) until the fan-out converges:
+  // the publisher awaits every sibling's terminal reload reply up to the bus apply_timeout
+  // (TAI_BUS_APPLY_TIMEOUT, 30s). Under CI load a slow sibling reload pushes convergence toward
+  // that ceiling, so the success banner can take ~20-30s to render — far past the default 10s
+  // expect budget. Wait past the apply_timeout so the assertion observes the settled convergence
+  // rather than a mid-flight spinner; a genuine non-convergence still renders the <FleetReport>
+  // alert (not this text) within the same window and fails.
+  await expect(page.getByText('Reload converged across the fleet.')).toBeVisible({ timeout: 45_000 });
 });
 
 test('system (non-admin viewer): census visible, fleet-reload button gated out', async ({

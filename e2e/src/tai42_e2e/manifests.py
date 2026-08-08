@@ -1504,6 +1504,21 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # interactions_callback / trigger are lifted for their own harness fan-outs.
     env["TAI_RATE_LIMIT_FAMILIES__ROOT__LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_FAMILIES__ROOT__BURST"] = "100000"
+    # Push the failed-MCP re-probe interval past the whole browser run. The reprobe loop holds
+    # the reload gate for the duration of a probe (up to mcp_probe_timeout) on every pass, and
+    # resets to its short initial interval each time a NEW failed server appears — and the
+    # secret-ref / mcp specs continuously seed intentionally-failing stub servers (`/bin/true`,
+    # dangling secret refs) that NEVER recover, so on CI the reprobe fires ~every 30s and keeps
+    # the reload gate closed, widening every reload-gated write's 503 window past the specs'
+    # retry budgets and stalling fleet-reload convergence. Re-probing test fixtures that can
+    # never recover buys nothing, so defer the loop beyond the run (in production the default
+    # 30s reprobe still self-heals a genuinely transient MCP outage — this is harness-only).
+    # Env names carry the double ``MCP`` — ``CoreSettings`` has env_prefix ``TAI_MCP_`` and the
+    # fields are ``mcp_reprobe_*`` (composed name ``TAI_MCP_MCP_REPROBE_*``, as the sibling
+    # ``mcp_probe_timeout`` → ``TAI_MCP_MCP_PROBE_TIMEOUT``). A single-``MCP`` name is silently
+    # dropped (settings ``extra="ignore"``) and the default 30s would stand.
+    env["TAI_MCP_MCP_REPROBE_INITIAL_SECONDS"] = "3600"
+    env["TAI_MCP_MCP_REPROBE_MAX_SECONDS"] = "3600"
     # The github webhook verifier reads its secret from this env var; a bound-but-unsigned
     # delivery then fails verification with a clean 401 rather than a 500.
     if res.gh_webhook_secret is not None:
