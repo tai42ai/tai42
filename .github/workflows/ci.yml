@@ -476,7 +476,10 @@ jobs:
     needs: [changes, e2e]
     if: ${{ !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The failed-MCP reprobe runs unmasked throughout the suite (the mcp / secret-ref specs seed
+    # many never-recovering stub servers it keeps probing off the reload gate), lengthening the
+    # browser run beyond the old masked 50m budget.
+    timeout-minutes: 75
     services:
       redis:
         image: redis:7-alpine
