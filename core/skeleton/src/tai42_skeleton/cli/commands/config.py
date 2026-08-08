@@ -81,7 +81,8 @@ def set_env(
 def reload_config(
     ctx: typer.Context,
     target: Annotated[
-        list[str] | None, typer.Option("--target", help="A worker to restrict the reload to (repeatable).")
+        list[str] | None,
+        typer.Option("--target", help="A worker slot name to restrict the reload to (e.g. serve-1; repeatable)."),
     ] = None,
 ) -> None:
     """Soft-restart this process from its manifest, fanning out to every worker.

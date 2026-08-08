@@ -40,10 +40,10 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for, wait_for_async
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
     from tai42_e2e.tcprelay import TcpRelay
-    from tai42_e2e.variants import BrokerLease, BusOrigin, Variants
+    from tai42_e2e.variants import BrokerLease, BusWorker, Variants
 
 
 def venv_console_script(name: str) -> str:
@@ -689,8 +689,8 @@ class TaiStack:
         self._wait_full_census(deadline)
         self._drain_boot_gate(deadline)
 
-    def _expected_serve_origins(self) -> int:
-        """How many ``serve``-kind presence origins the booted fleet registers: a
+    def _expected_serve_workers(self) -> int:
+        """How many ``serve``-kind presence rows the booted fleet registers: a
         REPLICAS stack runs one worker per app port, a MULTIWORKER master runs
         ``--workers N`` on its single port, and the embed host is one app process
         (a MULTIWORKER shape with ``workers=1``)."""
@@ -707,20 +707,20 @@ class TaiStack:
 
     def _wait_full_census(self, deadline: float) -> None:
         """Poll the bus census until the FULL expected fleet is present — every
-        serve-origin the topology spawns plus the backend origin when a backend is
+        serve worker the topology spawns plus the backend worker when a backend is
         registered — so readiness never returns on a half-formed fleet."""
-        expected_serve = self._expected_serve_origins()
+        expected_serve = self._expected_serve_workers()
 
         def probe() -> bool:
             early = self._early_exit_detail()
             if early is not None:
                 raise RuntimeError(f"fleet census: {early}")
-            origins = self.census()
-            if sum(1 for o in origins if o.kind == "serve") < expected_serve:
+            workers = self.census()
+            if sum(1 for w in workers if w.kind == "serve") < expected_serve:
                 return False
-            return not (self.config.run_backend and not any(o.kind == "backend" for o in origins))
+            return not (self.config.run_backend and not any(w.kind == "backend" for w in workers))
 
-        want = f"{expected_serve} serve origins" + (" + backend" if self.config.run_backend else "")
+        want = f"{expected_serve} serve workers" + (" + backend" if self.config.run_backend else "")
         wait_for(probe, deadline=deadline, message=f"the worker-bus census never reached the full fleet ({want})")
 
     def _drain_boot_gate(self, deadline: float) -> None:
@@ -765,34 +765,32 @@ class TaiStack:
 
         wait_for(probe, deadline=deadline, message=f"{label} never became ready at {url}")
 
-    def _wait_backend_census(self, deadline: float, exclude: frozenset[str] | set[str] = frozenset()) -> None:
-        # The bus census lists ALL origins (serve + backend), so readiness keys on
-        # the origin KIND: the backend worker is up once a ``backend``-kind origin
-        # appears, not merely once the census is non-empty (the serve workers
-        # register first). ``exclude`` carries the pre-restart backend origins so a
-        # restart waits for a GENUINELY NEW worker: a SIGKILLed worker's presence key
-        # lingers until its heartbeat TTL, and keying on "any backend origin" would
-        # pass on that corpse before the replacement has joined.
-        #
-        # Scoped to the restart path (called only from ``_wait_after_restart``), which
-        # runs a SINGLE backend worker: the one being restarted. Census identities are
-        # unstable across subscription re-homes, so "a new backend-kind origin" could
-        # in general be a surviving worker that merely re-keyed — but with exactly one
-        # backend worker in play, the only backend origin that can appear outside the
-        # pre-restart set is the restarted process.
-        #
-        # For a fleet with MULTIPLE new backend origins (a per-kind rolling recycle across a
-        # multi-backend supervised fleet), use :meth:`wait_new_origin` with an explicit
-        # ``count`` and the pre-recycle origin snapshot as ``before`` — the generalized
-        # census wait that keys on N genuinely-new origins of a kind rather than "any new
-        # one", so it does not pass on a single re-key when several replacements are due.
+    def _wait_backend_census(self, deadline: float, baseline: Mapping[str, int] | None = None) -> None:
+        # The bus census lists ALL workers (serve + backend) by slot name, so a restart
+        # keys on a fresh ``backend``-kind LIFE: a worker's slot name is STABLE across a
+        # restart, so a respawn reuses the same name at an INCREMENTED generation (or, if
+        # the old claim has not yet lapsed, the next free name) — never a fresh unrelated
+        # id. ``baseline`` is the pre-restart ``{name: generation}`` of the kind; the wait
+        # holds until BOTH facts land: every baseline life is GONE (its name absent, or a
+        # higher generation on that name) AND at least one fresh READY life of the kind
+        # exists (a name absent from the baseline, or a higher generation on a baseline
+        # name). Keying on the generation ignores a SIGKILLed worker's corpse row — its
+        # presence key lingers at the OLD generation until its heartbeat TTL — so the wait
+        # never passes on the corpse before the replacement has joined and gone ready.
+        base = dict(baseline or {})
+
         def probe() -> bool:
             early = self._early_exit_detail()
             if early is not None:
                 raise RuntimeError(f"backend census: {early}")
-            return any(origin.kind == "backend" and origin.origin not in exclude for origin in self.census())
+            rows = {w.name: w for w in self.census() if w.kind == "backend"}
+            old_gone = all(name not in rows or rows[name].generation > gen for name, gen in base.items())
+            fresh_ready = any(
+                w.state == "ready" and (w.name not in base or w.generation > base[w.name]) for w in rows.values()
+            )
+            return old_gone and fresh_ready
 
-        want = "a new backend-kind origin" if exclude else "a backend-kind origin"
+        want = "a fresh ready backend-kind life" if base else "a ready backend-kind worker"
         wait_for(probe, deadline=deadline, message=f"{want} never appeared in the worker-bus census")
 
     def _run_readiness_coro(self, coro: Coroutine[Any, Any, None]) -> None:
@@ -877,9 +875,9 @@ class TaiStack:
         """Scrape a serve worker's in-app ``/metrics`` route."""
         return scrape(f"http://{self.host}:{port or self.port_a}/metrics")
 
-    def census(self) -> list[BusOrigin]:
+    def census(self) -> list[BusWorker]:
         """The live fleet currently on the app-owned worker bus — every subscribed
-        origin (HTTP ``serve`` workers AND the ``backend`` runtime), scanned off the
+        worker (HTTP ``serve`` workers AND the ``backend`` runtime), scanned off the
         bus presence keys under this stack's namespace. Backend-independent."""
         # Local import: variants.py imports this module, so the census helper is
         # reached at call time to avoid a module-load cycle.
@@ -903,11 +901,14 @@ class TaiStack:
             # supervisor (a graceful self-exit), never a manual restart.
             raise RuntimeError(f"restart({name!r}) is unsupported on a supervised stack; recycle via the supervisor")
         handle = self._procs[name]
-        # The backend worker joins no port — its readiness keys on a ``backend``-kind
-        # census origin. The dying worker's presence key lingers until its heartbeat
-        # TTL, so capture the pre-restart backend origins BEFORE the kill; the
-        # post-restart wait then keys on a genuinely NEW origin, never the corpse.
-        before_backends = {o.origin for o in self.census() if o.kind == "backend"} if name == "backend" else frozenset()
+        # The backend worker joins no port — its readiness keys on a fresh ``backend``-kind
+        # census LIFE. A restarted worker reuses its stable slot name at an incremented
+        # generation, so capture the pre-restart backend lives (``{name: generation}``)
+        # BEFORE the kill; the post-restart wait then holds until those lives are gone and
+        # a fresh READY backend life has joined, keying on the generation not a new string.
+        before_backends = (
+            {w.name: w.generation for w in self.census() if w.kind == "backend"} if name == "backend" else {}
+        )
         handle.terminate()
         # The respawn reuses the same port; wait for the killed process to release
         # it before rebinding, else the new process fails to bind and exits early.
@@ -945,7 +946,7 @@ class TaiStack:
         and asserts it left nothing listening (like a leaked port)."""
         self._relays.append(relay)
 
-    def _wait_after_restart(self, name: str, before_backends: frozenset[str] | set[str] = frozenset()) -> None:
+    def _wait_after_restart(self, name: str, before_backends: Mapping[str, int] | None = None) -> None:
         deadline = self.infra.settings.boot_timeout
         if name.startswith("serve"):
             idx = 0 if name in ("serve", "serve-a") else 1
@@ -964,7 +965,7 @@ class TaiStack:
             assert self.metrics_port is not None
             self._wait_http_ok(f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
         elif name == "backend":
-            self._wait_backend_census(deadline, exclude=before_backends)
+            self._wait_backend_census(deadline, baseline=before_backends)
 
     # ---- respawn-on-exit supervisor (opt-in supervised shape) ------------
 
@@ -1004,7 +1005,8 @@ class TaiStack:
         """Re-launch a self-exited supervised process from its saved spec — the external
         supervisor a graceful recycle self-exit assumes. The caller holds
         ``_supervisor_lock``. Reaps the exited handle, waits for its port to free, then
-        respawns; the replacement rejoins the bus census under a FRESH origin (new pid)."""
+        respawns; the replacement rejoins the bus census under its stable slot name at an
+        incremented generation (a new pid)."""
         old = self._procs.get(name)
         if old is not None:
             with contextlib.suppress(Exception):
@@ -1014,25 +1016,57 @@ class TaiStack:
                 wait_for(lambda p=port: ports.is_free(p), deadline=15.0, message=f"port {port} never freed for respawn")
         self._spawn(self._specs[name])
 
-    def wait_new_origin(
-        self, kind: str, before: set[str] | frozenset[str], *, count: int = 1, deadline: float = 90.0
-    ) -> set[str]:
-        """Wait until at least ``count`` NEW ``kind`` origins (absent from ``before``) are on
-        the bus census, then return the full set of new origins. The recycle assertions use
-        it to confirm a recycled/self-exited worker's REPLACEMENT rejoined under a fresh
-        identity (the old origin's presence key lingers until its heartbeat TTL, so keying on
-        a genuinely new origin is what proves the respawn, not the corpse)."""
-        before_set = set(before)
+    def wait_generation_bump(
+        self, kind_or_name: str, baseline: int | Mapping[str, int], *, deadline: float = 90.0
+    ) -> dict[str, BusWorker]:
+        """Wait until a fresh READY life supersedes the baseline generation(s), returning
+        the matching census rows keyed by slot name.
 
-        def probe() -> bool:
+        A worker's slot name is STABLE across lives; a new life bumps its generation. Two
+        forms distinguished by ``baseline``:
+
+        * Single-life (``baseline`` an ``int``): ``kind_or_name`` is a slot NAME. Waits
+          until that name shows a READY row at a generation greater than ``baseline`` — the
+          scenario-scoped deterministic wait for one named slot's next life.
+        * Fleet (``baseline`` a ``{name: generation}`` map): ``kind_or_name`` is a worker
+          KIND. Waits until EVERY baseline name shows a READY row of that kind at a
+          generation greater than its baseline — proves a recycle/respawn rolled every
+          targeted life without keying on a fresh unrelated id."""
+        if isinstance(baseline, int):
+            name, base_gen = kind_or_name, baseline
+
+            def one_probe() -> bool:
+                early = self._early_exit_detail_supervised()
+                if early is not None:
+                    raise RuntimeError(f"generation-bump wait: {early}")
+                row = next((w for w in self.census() if w.name == name), None)
+                return row is not None and row.state == "ready" and row.generation > base_gen
+
+            wait_for(
+                one_probe, deadline=deadline, message=f"{name!r} never reached a ready life past generation {base_gen}"
+            )
+            row = next(w for w in self.census() if w.name == name)
+            return {name: row}
+
+        kind, targets = kind_or_name, dict(baseline)
+
+        def fleet_probe() -> bool:
             early = self._early_exit_detail_supervised()
             if early is not None:
-                raise RuntimeError(f"census wait: {early}")
-            current = {origin.origin for origin in self.census() if origin.kind == kind}
-            return len(current - before_set) >= count
+                raise RuntimeError(f"generation-bump wait: {early}")
+            rows = {w.name: w for w in self.census() if w.kind == kind}
+            return all(
+                name in rows and rows[name].state == "ready" and rows[name].generation > gen
+                for name, gen in targets.items()
+            )
 
-        wait_for(probe, deadline=deadline, message=f"{count} new {kind!r} origin(s) never joined the census")
-        return {origin.origin for origin in self.census() if origin.kind == kind} - before_set
+        wait_for(
+            fleet_probe,
+            deadline=deadline,
+            message=f"not every {kind!r} life bumped past its baseline generation ({targets})",
+        )
+        rows = {w.name: w for w in self.census() if w.kind == kind}
+        return {name: rows[name] for name in targets if name in rows}
 
     def _early_exit_detail_supervised(self) -> str | None:
         """Like ``_early_exit_detail`` but tolerant of the supervised churn: a serve/backend

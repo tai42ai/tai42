@@ -8,7 +8,7 @@ over the running app, not a snapshot taken at registration.
 
 An exporter returns a JSON-safe payload; an importer returns a section report
 ``{"created", "updated", "skipped", "skipped_existing", "errors"}`` (``access_control``
-adds ``"new_api_keys"``; ``manifest`` and ``env`` add ``"fanout"``, the per-origin fleet
+adds ``"new_api_keys"``; ``manifest`` and ``env`` add ``"fanout"``, the per-worker fleet
 report of their reload broadcast). A section whose backing subsystem is absent lets
 the seam raise; the router catches it per-section — these functions never swallow it.
 """

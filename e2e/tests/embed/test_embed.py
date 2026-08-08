@@ -63,7 +63,7 @@ async def test_in_process_metrics_render_the_tool_counter(embed_stack: TaiStack)
 
 async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Fleet config-reload fan-out works from an embedded worker: the config-reload
-    door broadcasts on the worker bus, and the confirmed-origin set covers the bus
+    door broadcasts on the worker bus, and the confirmed-worker set covers the bus
     presence census (the embed worker + its backend-worker sibling)."""
     marker = uniq("E2E_MARKER").upper()
     api = embed_stack.api()
@@ -74,7 +74,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     # the subset assertion below could pass while proving nothing about the
     # backend sibling.
     async def full_fleet_census() -> set[str]:
-        members = {origin.origin for origin in embed_stack.census()}
+        members = {worker.name for worker in embed_stack.census()}
         return members if len(members) >= 2 else set()
 
     census = await wait_for_async(
@@ -92,7 +92,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     assert fanout["mode"] == "fleet", f"embedded worker did not broadcast the reload over the fleet: {fanout!r}"
 
     # (b) The fleet ``reload_config`` tool returns a FleetResult (no ``workers`` key)
-    # whose per-origin outcomes cover the census — the embedded worker joined the bus
+    # whose per-worker outcomes cover the census — the embedded worker joined the bus
     # exactly like a CLI worker, and the backend sibling applied the reload.
     async with embed_stack.mcp() as mcp:
         # Prime the SDK's per-session tool-output-schema cache (ClientSession
@@ -106,8 +106,8 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     result_data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(result_data, dict), f"reload_config returned no result map: {result!r}"
     assert result_data["reachable"] is True, f"the bus was unreachable: {result_data}"
-    outcomes = {r["origin"]: r["outcome"] for r in result_data["results"]}
+    outcomes = {r["name"]: r["outcome"] for r in result_data["results"]}
     # The pre-op full-fleet census snapshot (embed worker + backend worker) must be
     # covered and applied — this is what proves the backend sibling applied the reload.
     assert census <= outcomes.keys(), f"not every census worker confirmed: census={census} report={outcomes}"
-    assert all(outcomes[origin] == "applied" for origin in census), f"an origin did not apply: {result_data}"
+    assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply: {result_data}"

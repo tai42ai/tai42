@@ -400,7 +400,7 @@ class TaiMCPLifecycleMixin(ABC):
             # raises loudly on a failed establisher (never a healthy-looking half-start).
             # A reload re-establishes them post-swap through the build+swap primitive.
             await self._run_post_swap_handlers(raise_on_error=True)
-            # Join the worker bus: construct this process's one bus (origin kind
+            # Join the worker bus: construct this process's one bus (worker kind
             # ``serve`` or ``backend``) and open its single long-lived subscription.
             # The subscription registers presence and self-resyncs (reload_config)
             # through on_ready on every (re)connect.

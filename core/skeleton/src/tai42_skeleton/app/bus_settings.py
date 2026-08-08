@@ -68,7 +68,7 @@ class BusSettings(TaiBaseSettings):
     ack_timeout: float = Field(default=2.0, gt=0)
 
     # Long apply deadline — the report cut. Budgets a worst-case reload (MCP
-    # re-probes included) AND the post-apply ``on_fleet_op_applied`` hook. An origin
+    # re-probes included) AND the post-apply ``on_fleet_op_applied`` hook. A worker
     # that acked but exceeds this is re-checked against presence: expired ⇒
     # departed, alive ⇒ timed_out.
     apply_timeout: float = Field(default=30.0, gt=0)

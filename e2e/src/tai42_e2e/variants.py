@@ -8,7 +8,7 @@ naming the valid values. Adding a fourth backend is one adapter class plus one
 registry entry — no edits to the boot engine or the manifest builders.
 
 The live-fleet census is backend-INDEPENDENT: it reads the app-owned worker bus
-(:func:`bus_census`), a scan of the per-origin presence keys that every subscribed
+(:func:`bus_census`), a scan of the per-name presence keys that every subscribed
 process — HTTP ``serve`` worker and backend runtime alike — advertises. It is a
 module function, not a per-backend method, because the bus is app infrastructure
 the plugin does not own. The harness never imports a system-under-test package to
@@ -39,31 +39,39 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class BusOrigin:
-    """One live worker on the app-owned worker bus, parsed from a presence key +
-    value: the ``{kind}-{uuid}`` origin id, the worker ``kind`` (``serve`` for an
-    HTTP worker, ``backend`` for a runtime worker), and the ``pid`` the presence
-    value carries."""
+class BusWorker:
+    """One live worker on the app-owned worker bus, parsed from a presence key + value:
+    the slot ``name`` (``{kind}-{n}``, the lowest-free ordinal held for one claim's life)
+    off the key, and the presence value's ``kind`` (``serve`` for an HTTP worker,
+    ``backend`` for a runtime worker), ``pid``, ``generation`` (the monotonic life counter
+    minted with the claim), lifecycle ``state`` (``ready`` / ``resyncing`` / ``recycling``),
+    the ``joined_at`` / ``beat_at`` timestamps, and the optional ``last_op`` summary."""
 
-    origin: str
+    name: str
     kind: str
     pid: int
+    generation: int
+    joined_at: str
+    beat_at: str
+    state: str
+    last_op: dict[str, Any] | None = None
 
 
-def bus_census(bus_redis_url: str, namespace: str) -> list[BusOrigin]:
-    """The live fleet on the worker bus: scan the per-origin presence keys under
-    this stack's namespace on the bus Redis and parse each value's ``{kind, pid}``.
+def bus_census(bus_redis_url: str, namespace: str) -> list[BusWorker]:
+    """The live fleet on the worker bus: scan the per-name presence keys under this
+    stack's namespace on the bus Redis and parse each value's
+    ``{kind, pid, generation, joined_at, beat_at, state, last_op?}``.
 
-    Backend-independent — every subscribed origin (both the HTTP ``serve`` workers
-    and the ``backend`` runtime) advertises exactly one presence key, so this is
-    the whole fleet the reload/readiness seams draw from, read straight off the bus
-    Redis (the harness never imports the system under test). A key that expires
+    Backend-independent — every subscribed worker (both the HTTP ``serve`` workers and
+    the ``backend`` runtime) advertises exactly one presence key under its slot name, so
+    this is the whole fleet the reload/readiness seams draw from, read straight off the
+    bus Redis (the harness never imports the system under test). A key that expires
     between the scan and the value read is skipped; a malformed value raises loudly
     (a stack scans only its own namespace, so it sees only its own well-formed keys)."""
     prefix = f"{namespace}:bus:presence:"
     client = redis.Redis.from_url(bus_redis_url, decode_responses=True)
     try:
-        origins: list[BusOrigin] = []
+        workers: list[BusWorker] = []
         for key in client.scan_iter(match=f"{prefix}*"):
             value = client.get(key)
             if value is None:
@@ -71,8 +79,19 @@ def bus_census(bus_redis_url: str, namespace: str) -> list[BusOrigin]:
             if not isinstance(value, str):
                 raise TypeError(f"presence value for {key!r} is not a decoded string: {type(value)!r}")
             meta = json.loads(value)
-            origins.append(BusOrigin(origin=key[len(prefix) :], kind=meta["kind"], pid=int(meta["pid"])))
-        return origins
+            workers.append(
+                BusWorker(
+                    name=key[len(prefix) :],
+                    kind=meta["kind"],
+                    pid=int(meta["pid"]),
+                    generation=int(meta["generation"]),
+                    joined_at=meta["joined_at"],
+                    beat_at=meta["beat_at"],
+                    state=meta["state"],
+                    last_op=meta.get("last_op"),
+                )
+            )
+        return workers
     finally:
         client.close()
 

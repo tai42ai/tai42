@@ -46,14 +46,14 @@ async def test_fleet_workers_lists_the_live_fleet(core_stack: TaiStack) -> None:
     api = core_stack.api()
     workers = (await api.get("/api/fleet/workers"))["workers"]
     assert workers, "the fleet-backed stack reported an empty worker fleet"
-    # Each worker is an origin OBJECT — identity, kind, and pid — not a bare name.
+    # Each worker is a typed row — its stable slot name, kind, and pid.
     for worker in workers:
-        assert worker.keys() >= {"origin", "kind", "pid"}, f"worker missing origin fields: {worker}"
-        assert worker["origin"], f"worker carries a blank origin: {worker}"
+        assert worker.keys() >= {"name", "kind", "pid"}, f"worker missing identity fields: {worker}"
+        assert worker["name"], f"worker carries a blank name: {worker}"
         assert worker["kind"] in {"serve", "backend"}, f"worker carries an unknown kind: {worker}"
         assert isinstance(worker["pid"], int), f"worker pid is not an int: {worker}"
     # The door's census is exactly the bus presence census the harness scanned at boot.
-    assert {w["origin"] for w in workers} == {origin.origin for origin in core_stack.census()}
+    assert {w["name"] for w in workers} == {worker.name for worker in core_stack.census()}
 
 
 async def test_fleet_reload_config_all_confirms(core_stack: TaiStack) -> None:
@@ -61,13 +61,13 @@ async def test_fleet_reload_config_all_confirms(core_stack: TaiStack) -> None:
     resp = await _reload(api, None)
     assert resp.status_code == 200, resp.text
     result = resp.json()["data"]
-    # A bare FleetResult (no ``reloaded`` key): reachable, one per-origin outcome each.
+    # A bare FleetResult (no ``reloaded`` key): reachable, one per-worker outcome each.
     assert result["op"] == "reload_config"
     assert result["reachable"] is True
-    outcomes = {r["origin"]: r["outcome"] for r in result["results"]}
-    assert all(outcome == "applied" for outcome in outcomes.values()), f"an origin did not apply: {result}"
-    # Every live census origin (the backend worker + each HTTP worker) confirmed.
-    assert {origin.origin for origin in core_stack.census()} <= outcomes.keys()
+    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
+    assert all(outcome == "applied" for outcome in outcomes.values()), f"a worker did not apply: {result}"
+    # Every live census worker (the backend worker + each HTTP worker) confirmed.
+    assert {worker.name for worker in core_stack.census()} <= outcomes.keys()
 
 
 async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: TaiStack) -> None:
@@ -104,10 +104,10 @@ async def test_backend_absent_is_honest(bare_stack: TaiStack) -> None:
     assert info == {"present": False, "backend": None, "module": None}
 
     # The bus-backed doors SUCCEED busless: the census lists this worker's own local
-    # origin and the reload applies to it locally (``local_only``) — no backend needed.
+    # name and the reload applies to it locally (``local_only``) — no backend needed.
     workers = (await api.get("/api/fleet/workers"))["workers"]
     assert workers, "the busless stack reported an empty local worker fleet"
-    assert all(worker["kind"] == "serve" and worker["origin"] for worker in workers), workers
+    assert all(worker["kind"] == "serve" and worker["name"] for worker in workers), workers
 
     resp = await _reload(api, None)
     assert resp.status_code == 200, resp.text

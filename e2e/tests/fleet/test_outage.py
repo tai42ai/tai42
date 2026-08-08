@@ -15,12 +15,16 @@ redis or a silent worker) is surfaced honestly and healed.
 * Bus redis down (the BUS relay severed, feature stores untouched): a feature call
   still succeeds and every presence key EXPIRES within the SHORT heartbeat TTL. A
   separate test asserts that a config mutation during the outage returns a 200
-  carrying the honest bus-unreachable fanout (connection error, no origin list),
-  persists and local-reloads, and — once the relay is restored — re-registers every
-  origin and reconverges the fleet without a restart.
+  carrying the honest bus-unreachable fanout (connection error, no worker list),
+  persists and local-reloads, and — once the relay is restored past the claim TTL —
+  re-mints each worker's life (SAME names, ADVANCED generations) and reconverges the
+  fleet without a restart.
 * A SILENT worker (one REPLICAS master SIGSTOPped, its presence key kept alive by
-  a long TTL): a mutation's report NAMES that origin ``missing`` (not ``departed``);
+  a long TTL): a mutation's report NAMES that worker ``missing`` (not ``departed``);
   after SIGCONT the fleet converges to the final persisted state.
+* A STALE worker (one REPLICAS master SIGSTOPped under a 30s TTL): its presence row
+  decays past the server-computed freshness bound while still present, so the fleet
+  listing flags it ``stale`` and a broadcast reports it ``outcome=stale``.
 """
 
 from __future__ import annotations
@@ -216,8 +220,8 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     api = stack.api()
 
     await converged_baseline(stack)
-    pre_origins = {origin.origin for origin in stack.census()}
-    assert len(pre_origins) >= FLEET_WORKERS, f"the fleet did not fully register before the outage: {pre_origins}"
+    pre_names = {worker.name for worker in stack.census()}
+    assert len(pre_names) >= FLEET_WORKERS, f"the fleet did not fully register before the outage: {pre_names}"
 
     # Sever the BUS only — the feature Redis/PG endpoints are not relayed.
     bus_relay.sever()
@@ -236,21 +240,22 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
 
 
 async def test_mutation_during_outage_reports_and_fleet_recovers(
-    relayed_bus_fleet: tuple[TaiStack, TcpRelay], uniq: Callable[[str], str]
+    relayed_bus_fleet: tuple[TaiStack, TcpRelay], infra: Infra, uniq: Callable[[str], str]
 ) -> None:
     """With the bus severed a config mutation PERSISTS + local-reloads and returns a 200
-    whose fanout is the honest bus-unreachable failure (connection error, NO origin
-    list); restoring the relay re-registers every origin and reconverges the fleet
-    without a restart, with a fleet reload as belt-and-braces."""
+    whose fanout is the honest bus-unreachable failure (connection error, NO worker list);
+    holding the sever past the claim TTL lapses every claim, so restoring the relay re-mints
+    each worker's life — the SAME slot names re-appear at ADVANCED generations — and
+    reconverges the fleet without a restart, with a fleet reload as belt-and-braces."""
     stack, bus_relay = relayed_bus_fleet
     api = stack.api()
 
     baseline = await converged_baseline(stack)
-    pre_origins = {origin.origin for origin in stack.census()}
+    pre_lives = {worker.name: worker.generation for worker in stack.census()}
     bus_relay.sever()
 
     # A 200 (so the local persist + reload committed — a failed local reload would raise)
-    # whose fanout is the honest unreachable shape (connection error, no origin list).
+    # whose fanout is the honest unreachable shape (connection error, no worker list).
     title = uniq("d3a_mcp")
     result = await api.post(
         "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
@@ -259,7 +264,7 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
     assert isinstance(fanout, dict), f"the mutation carried no fanout report: {result}"
     assert fanout["mode"] == "unreachable", f"a dead bus must report unreachable, not {fanout!r}"
     assert fanout["reachable"] is False, fanout
-    assert fanout["results"] == [], f"an unreachable bus must name NO origins: {fanout}"
+    assert fanout["results"] == [], f"an unreachable bus must name NO workers: {fanout}"
     assert fanout["error"], f"the unreachable report must carry the connection error: {fanout}"
 
     # It persisted despite the dead bus.
@@ -267,16 +272,30 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
     titles = [entry["title"] for entry in document.get("mcp", [])]
     assert title in titles, f"the mutation did not persist during the outage: {titles}"
 
-    # Restore the bus — recovery WITHOUT a restart. Registration PRECEDES the self-resync,
-    # so re-registration is a precondition; then the digests reconverge onto the new state.
+    # Hold the sever open until every claim has PROVABLY lapsed: with the SUT's bus endpoint
+    # severed no worker can renew, so within one (short) TTL every presence key expires on
+    # the directly-read bus Redis. A sub-TTL sever would leave the claims held — the identity
+    # would be carried at the SAME generation, and the advanced-generation assertion below
+    # would flake — so the wait is a precondition, not a courtesy.
+    real_bus, namespace = _real_bus_url(infra, stack), stack.resources.bus_namespace
+
+    async def claims_lapsed() -> bool:
+        return not bus_census(real_bus, namespace)
+
+    await wait_for_async(claims_lapsed, deadline=20.0, message="the severed claims never lapsed before restore")
+
+    # Restore the bus — recovery WITHOUT a restart. Each lapsed claim re-mints a NEW life:
+    # the SAME slot names re-appear (the fleet size is unchanged, so the lowest-free claims
+    # land on the same names) at ADVANCED generations (a fresh claim INCRs the counter).
     bus_relay.restore()
     wait_relay_ready(bus_relay)
 
-    async def reregistered() -> bool:
+    async def relived() -> bool:
         workers = (await api.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
-        return {worker["origin"] for worker in workers} >= pre_origins
+        live = {worker["name"]: worker["generation"] for worker in workers}
+        return set(live) == set(pre_lives) and all(live[name] > pre_lives[name] for name in pre_lives)
 
-    await wait_for_async(reregistered, deadline=30.0, message="the fleet never re-registered after bus restore")
+    await wait_for_async(relived, deadline=30.0, message="the fleet never re-minted its lives after bus restore")
     await converged_digest(stack, differ_from=baseline)
     # Belt-and-braces recovery path.
     await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
@@ -344,7 +363,7 @@ async def test_silent_worker_reports_missing_then_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
     """One REPLICAS master SIGSTOPped goes silent while its presence key survives
-    (long TTL). A mutation on the LIVE replica names the silent origin ``missing`` in
+    (long TTL). A mutation on the LIVE replica names the silent worker ``missing`` in
     its publish-time report — alive but silent, not ``departed``. After SIGCONT the
     fleet converges to the final persisted state (a fleet reload converges it; the
     buffered broadcast may also apply on resume — the assertion is the final digest)."""
@@ -355,33 +374,33 @@ async def test_silent_worker_reports_missing_then_converges(
     await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     baseline = await _replicas_converged(stack)
 
-    # Map replica B's bus origin via the pid it serves on port_b (a single-process
+    # Map replica B's bus slot name via the pid it serves on port_b (a single-process
     # ``--workers 1`` master answers the probe from the same pid the bus presence carries).
     b_pid, _ = await _probe(stack, stack.port_b)
 
-    async def both_serve_origins() -> list | None:
-        serve = [origin for origin in stack.census() if origin.kind == "serve"]
+    async def both_serve_workers() -> list | None:
+        serve = [worker for worker in stack.census() if worker.kind == "serve"]
         return serve if len(serve) >= 2 else None
 
-    origins = await wait_for_async(
-        both_serve_origins, deadline=20.0, message="the two serve replicas never both registered"
+    workers = await wait_for_async(
+        both_serve_workers, deadline=20.0, message="the two serve replicas never both registered"
     )
-    b_origin = next((origin.origin for origin in origins if origin.pid == b_pid), None)
-    assert b_origin is not None, f"no bus origin matched replica B pid {b_pid}: {origins}"
+    b_name = next((worker.name for worker in workers if worker.pid == b_pid), None)
+    assert b_name is not None, f"no bus slot name matched replica B pid {b_pid}: {workers}"
 
     b_pgid = os.getpgid(stack.process("serve-b").pid)
     os.killpg(b_pgid, signal.SIGSTOP)
     try:
         # A mutation on the live replica: replica B is in the census (its key survives),
-        # so it is an expected origin — silent, it is cut to ``missing`` at the apply
+        # so it is an expected worker — silent, it is cut to ``missing`` at the apply
         # deadline (not ``departed``, which would need an expired key).
         title = uniq("d3b_mcp")
         result = await api_a.post(
             "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
         )
         fanout = assert_fleet_fanout(result)
-        outcomes = {entry["origin"]: entry["outcome"] for entry in fanout["results"]}
-        assert outcomes.get(b_origin) == "missing", f"the SIGSTOPped replica was not reported missing: {fanout}"
+        outcomes = {entry["name"]: entry["outcome"] for entry in fanout["results"]}
+        assert outcomes.get(b_name) == "missing", f"the SIGSTOPped replica was not reported missing: {fanout}"
     finally:
         # Always resume replica B — a stopped process left behind would fail teardown.
         os.killpg(b_pgid, signal.SIGCONT)
@@ -390,5 +409,99 @@ async def test_silent_worker_reports_missing_then_converges(
     # state, so both replicas land on ONE new digest carrying the mutation.
     await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     await _replicas_converged(stack, differ_from=baseline)
+    document = yaml.safe_load(manifest_file(stack).read_text()) or {}
+    assert title in [entry["title"] for entry in document.get("mcp", [])], "the mutation did not persist"
+
+
+# ---- stale worker (SIGSTOP, presence row decays past the freshness bound) -------------
+
+# The stale envelope: a REPLICAS(2) fleet on a 30s heartbeat TTL. A SIGSTOPped replica
+# renews no presence key, so its remaining PTTL decays below the D5 freshness bound
+# (``ttl - 2*interval`` = ``ttl/3`` = 10s) at ~``2*ttl/3`` = 20s while the row is STILL
+# present (it expires only at ``ttl`` = 30s). That ~10s window — row present but past the
+# freshness gate — is where a ``ready`` row reads STALE. A NEW builder rather than a TTL
+# edit to ``build_d3b_stack``: that stack's 60s TTL is load-bearing for the silent-worker
+# leg (its key must survive well above the window so the verdict is ``missing``).
+_STALE_TTL = "30"
+
+
+def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """A REPLICAS(2) no-backend fleet like the silent-worker stack but on a 30s heartbeat
+    TTL, so a SIGSTOPped replica's presence row decays past the freshness bound while still
+    present — the server-computed ``stale`` flag flips true and a broadcast reports it
+    ``stale``. The short ack/apply deadlines keep the broadcast bounded."""
+    cfg = build_bare_stack(res, variants)
+    env = {
+        **cfg.env,
+        "PYTHONHASHSEED": "0",
+        "TAI_BUS_ACK_TIMEOUT": _D3B_ACK_TIMEOUT,
+        "TAI_BUS_APPLY_TIMEOUT": _D3B_APPLY_TIMEOUT,
+        "TAI_BUS_HEARTBEAT_TTL": _STALE_TTL,
+    }
+    return replace(
+        cfg, name="stale-replicas", topology=Topology.REPLICAS, run_backend=False, run_metrics=False, env=env
+    )
+
+
+@pytest.mark.timeout(120)
+async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """One REPLICAS master SIGSTOPped renews no presence key: its row decays past the
+    server-computed freshness bound while STILL present (30s TTL), so the fleet listing
+    flags it ``stale``. A broadcast fired the instant the flag flips reports that worker
+    ``outcome=stale`` — a quiet ``ready`` row past the D5 gate, never silently skipped.
+    A flag-poll makes the exact moment deterministic (no fixed-sleep window). After
+    SIGCONT a fleet reload converges the resumed replica."""
+    stack = fresh_stack(build_stale_stack)
+    api_a = stack.api(port=stack.port_a)
+
+    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    await _replicas_converged(stack)
+
+    # Map replica B's bus slot name via the pid it serves on port_b.
+    b_pid, _ = await _probe(stack, stack.port_b)
+
+    async def both_serve_workers() -> list | None:
+        serve = [worker for worker in stack.census() if worker.kind == "serve"]
+        return serve if len(serve) >= 2 else None
+
+    workers = await wait_for_async(
+        both_serve_workers, deadline=20.0, message="the two serve replicas never both registered"
+    )
+    b_name = next((worker.name for worker in workers if worker.pid == b_pid), None)
+    assert b_name is not None, f"no bus slot name matched replica B pid {b_pid}: {workers}"
+
+    b_pgid = os.getpgid(stack.process("serve-b").pid)
+    os.killpg(b_pgid, signal.SIGSTOP)
+    try:
+        # Poll the fleet listing until replica B's server-computed ``stale`` flag flips true
+        # while its row is still a ``ready`` row (present but past the freshness bound).
+        async def b_is_stale() -> bool:
+            listing = (await api_a.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
+            row = next((worker for worker in listing if worker["name"] == b_name), None)
+            return row is not None and row["stale"] and row["state"] == "ready"
+
+        await wait_for_async(
+            b_is_stale, deadline=60.0, message="the SIGSTOPped replica's stale flag never flipped while present"
+        )
+
+        # Broadcast IMMEDIATELY, while the stale row is still present: it fails the D5
+        # freshness gate as a quiet ``ready`` row, so the report names it ``stale`` (never a
+        # silent skip, never ``missing`` — that verdict needs a FRESH key).
+        title = uniq("stale_mcp")
+        result = await api_a.post(
+            "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
+        )
+        fanout = assert_fleet_fanout(result)
+        outcomes = {entry["name"]: entry["outcome"] for entry in fanout["results"]}
+        assert outcomes.get(b_name) == "stale", f"the stale replica was not reported stale: {fanout}"
+    finally:
+        # Always resume replica B — a stopped process left behind would fail teardown.
+        os.killpg(b_pgid, signal.SIGCONT)
+
+    # Post-recovery a fleet reload converges the resumed replica back onto the persisted state.
+    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    await _replicas_converged(stack)
     document = yaml.safe_load(manifest_file(stack).read_text()) or {}
     assert title in [entry["title"] for entry in document.get("mcp", [])], "the mutation did not persist"

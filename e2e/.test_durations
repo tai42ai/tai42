@@ -182,7 +182,7 @@
   "tests/fleet/test_connectors.py::test_sub_service_toggle_converges": 23.339,
   "tests/fleet/test_convergence.py::test_env_write_moves_resolved_view": 11.568,
   "tests/fleet/test_convergence.py::test_fleet_reload_applies_out_of_band_edit": 10.897,
-  "tests/fleet/test_convergence.py::test_fleet_workers_lists_every_worker_origin": 6.053,
+  "tests/fleet/test_convergence.py::test_fleet_workers_lists_every_worker": 6.053,
   "tests/fleet/test_convergence.py::test_mcp_config_add_server_converges": 10.424,
   "tests/fleet/test_convergence.py::test_tool_extensions_apply_converges": 11.451,
   "tests/fleet/test_convergence.py::test_update_manifest_persists_across_fleet_reload": 13.364,
@@ -194,10 +194,6 @@
   "tests/fleet/test_outage.py::test_mutation_during_outage_reports_and_fleet_recovers": 14.808,
   "tests/fleet/test_outage.py::test_silent_worker_reports_missing_then_converges": 11.673,
   "tests/harness/test_allocate_override.py::test_override_endpoints_reach_the_rendered_env": 0.076,
-  "tests/harness/test_backend_census.py::test_wait_backend_census_ignores_the_lingering_pre_restart_origin": 0.201,
-  "tests/harness/test_backend_census.py::test_wait_backend_census_returns_on_a_new_backend_origin": 0.001,
-  "tests/harness/test_backend_census.py::test_wait_backend_census_without_exclude_accepts_any_backend_origin": 0.001,
-  "tests/harness/test_backend_census.py::test_wait_backend_census_without_exclude_times_out_with_no_backend": 0.201,
   "tests/harness/test_channel_stubs.py::test_channel_modules_render_per_profile": 0.003,
   "tests/harness/test_channel_stubs.py::test_fake_slack_records_mints_and_fails_loud": 0.306,
   "tests/harness/test_channel_stubs.py::test_fake_telegram_records_mints_and_fails_loud": 0.305,
@@ -343,5 +339,11 @@
   "tests/redis_semantics/test_access_control.py::test_concurrent_policy_updates_are_atomic": 6.257,
   "tests/redis_semantics/test_rate_limit_global.py::test_rate_limit_is_global_not_per_worker": 15.176,
   "tests/reload/test_fanout.py::test_dispatch_names_dead_worker": 125.443,
-  "tests/reload/test_fanout.py::test_reload_config_fans_out_confirmed": 16.08
+  "tests/reload/test_fanout.py::test_reload_config_fans_out_confirmed": 16.08,
+  "tests/harness/test_backend_census.py::test_wait_backend_census_ignores_the_pre_restart_corpse_at_the_old_generation": 0.2,
+  "tests/harness/test_backend_census.py::test_wait_backend_census_returns_on_the_next_generation_ready": 0.02,
+  "tests/harness/test_backend_census.py::test_wait_backend_census_waits_out_a_resyncing_next_life": 0.2,
+  "tests/harness/test_backend_census.py::test_wait_backend_census_without_baseline_accepts_any_ready_backend": 0.02,
+  "tests/harness/test_backend_census.py::test_wait_backend_census_without_baseline_times_out_with_no_backend": 0.2,
+  "tests/fleet/test_outage.py::test_stale_worker_flag_flips_and_broadcast_reports_stale": 40.0
 }

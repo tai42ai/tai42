@@ -49,6 +49,10 @@ async def e2e_worker_info() -> dict:
     """Report identity + metrics/socket state + a state digest of the process that
     ran this call.
 
+    ``name`` + ``generation`` are this process's bus identity — the stable slot name it
+    holds for one claim's life and the monotonic life counter minted with that claim
+    (read off the in-process worker bus, distinct from the settings epoch).
+
     ``value_class`` is the frozen ``prometheus_client`` value backend —
     ``MmapedValue`` when the multiproc env froze correctly, ``MutexValue`` when
     it did not (the C2 in-vivo probe). ``socket_class`` doubles as the C8
@@ -63,15 +67,19 @@ async def e2e_worker_info() -> dict:
     import hashlib
 
     import prometheus_client.values
+    from tai42_skeleton.app import instance
 
     value_class = getattr(prometheus_client.values.ValueClass, "__name__", repr(prometheus_client.values.ValueClass))
     tool_names = sorted(await tai42_app.tools.get_tools())
     material = json.dumps({"manifest": tai42_app.admin.live_manifest, "tools": tool_names}, sort_keys=True, default=str)
     state_digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    identity = instance.app.bus.identity
     return {
         "pid": os.getpid(),
         "ppid": os.getppid(),
         "cwd": os.getcwd(),
+        "name": identity.name,
+        "generation": identity.generation,
         "value_class": value_class,
         "multiproc_dir_env": os.environ.get("PROMETHEUS_MULTIPROC_DIR"),
         "socket_class": f"{socket.socket.__module__}.{socket.socket.__qualname__}",

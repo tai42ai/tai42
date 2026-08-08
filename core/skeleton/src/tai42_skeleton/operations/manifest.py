@@ -13,12 +13,12 @@ Reads (each returns its shape directly; the adapter envelopes it):
 * ``get_mcp_config_schema`` — the JSON Schema for one MCP-config entry.
 * ``get_mcp_status`` — the live MCP binding snapshot.
 * ``list_failed_mcps`` — the MCP servers skipped by the viability check; a query op
-  over the bus, so every origin's list arrives as its per-origin report payload.
+  over the bus, so every worker's list arrives as its per-worker report payload.
 
 Mutations cross the single :class:`~tai42_skeleton.config.service.ConfigService`
 pipeline (validate → persist → local reload → broadcast) or, for pure runtime ops,
 the shared :func:`~tai42_skeleton.operations._broadcast.broadcast` primitive. Each is
-``destructive`` + ``reload_gated`` and its response embeds the per-origin fleet
+``destructive`` + ``reload_gated`` and its response embeds the per-worker fleet
 report as a ``fanout`` summary:
 
 * ``set_mcp_config`` — replace the manifest's MCP section, persist, and reload the fleet.
@@ -176,7 +176,7 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
 
     Each entry is ``{"title": <name>, "status": "unavailable"}`` — title plus a
     coarse status only. A query op rides the same fan-out primitive as a mutation:
-    every origin's list arrives as its per-origin ``payload`` in the fleet report
+    every worker's list arrives as its per-worker ``payload`` in the fleet report
     (this worker's list on its own self entry); ``targets`` optionally restricts the
     query to specific workers.
     """
@@ -401,7 +401,7 @@ async def set_mcp_secret_env(
 async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
     # Re-probe a single MCP server by title (unknown title → loud 404), applied on
     # this worker through the gate and broadcast to the fleet (all workers, or only
-    # ``targets``); the response embeds the per-origin fleet report. A pure runtime
+    # ``targets``); the response embeds the per-worker fleet report. A pure runtime
     # op: if the local re-probe raises, nothing is broadcast. (No docstring here, so
     # the route description in projection falls back to the operation summary.)
     live = tai42_app.admin.live_manifest
@@ -431,7 +431,7 @@ async def update_manifest(manifest_text: str) -> Any:
     server loads it to the preserved document and pushes it through the pipeline —
     validate the RESOLVED projection, persist verbatim (no secret bakes to disk),
     reload locally, and broadcast the reload so every worker re-reads the persisted
-    store. The response embeds the per-origin fleet report as its ``fanout`` summary.
+    store. The response embeds the per-worker fleet report as its ``fanout`` summary.
     A persisted replacement reaches the whole fleet, so there is no ``targets``.
 
     Authority-changing — the manifest governs ``api_tools`` + module loading — so it
@@ -464,7 +464,7 @@ async def update_manifest(manifest_text: str) -> Any:
 async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     """Re-probe every MCP server currently in the failed list and attach the ones now
     viable. Applied on this worker through the gate and broadcast to the fleet (all
-    workers, or only ``targets``); the response embeds the per-origin fleet report.
+    workers, or only ``targets``); the response embeds the per-worker fleet report.
     """
     # Run the heavy sync re-probe pass on a worker thread through the gate.
     return await broadcast(
@@ -485,7 +485,7 @@ async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
     """Detach a single MCP server's tools (by manifest title) without touching the
     other servers — the removal counterpart of ``reload_mcp``. Applied on this worker
     through the gate and broadcast to the fleet (all workers, or only ``targets``);
-    the response embeds the per-origin fleet report.
+    the response embeds the per-worker fleet report.
     """
     # Run the heavy sync detach on a worker thread through the gate.
     return await broadcast(

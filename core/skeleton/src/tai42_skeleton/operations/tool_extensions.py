@@ -148,7 +148,7 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
     validation all run BEFORE the pipeline (nothing persisted on a reject). The
     mutator then upserts the providing config's ``extensions`` entry, and
     ConfigService validates the whole document, persists, reloads locally, and
-    broadcasts the reload so every worker rebinds; the per-origin fleet report rides
+    broadcasts the reload so every worker rebinds; the per-worker fleet report rides
     the response as its ``fanout`` summary. The persist + local reload have already
     landed, so re-running the apply (or a ``reload_config``) is the recovery for a
     sibling that did not converge.

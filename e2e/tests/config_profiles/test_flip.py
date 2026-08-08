@@ -12,7 +12,7 @@ stack so the census dimension is real (≥2 HTTP workers + the backend worker on
   PLAN_1's sweep, surfaced by the probe);
 * ZERO stale-epoch client pools (the retire drained + detached every retired pool);
 * the settings epoch advanced past the pre-apply epoch;
-* MULTI-ORIGIN census: EVERY live census origin (both HTTP replicas + the backend worker)
+* MULTI-WORKER census: EVERY live census worker (both HTTP replicas + the backend worker)
   confirmed the reload ``applied`` — the fan-out names them, none non-applied.
 
 Budgeted at 300s per the measured reload cost (the ``test_file_config_race`` precedent);
@@ -83,17 +83,17 @@ async def test_hot_profile_flip_converges_and_fans_out(replicas_stack: TaiStack,
     assert _LEVEL_VAR in applied["hot"], f"the flipped level was not classified hot: {applied}"
     assert applied["refused"] == [], f"a clean hot apply refused a key: {applied}"
 
-    # MULTI-ORIGIN census: the fan-out is a real fleet report (≥2 HTTP replicas + backend on
-    # the bus), and EVERY live census origin confirmed the reload ``applied`` — none silently
+    # MULTI-WORKER census: the fan-out is a real fleet report (≥2 HTTP replicas + backend on
+    # the bus), and EVERY live census worker confirmed the reload ``applied`` — none silently
     # dropped. Mirrors the reload-fanout contract (``reload/test_fanout``).
     fanout = applied["fanout"]
     assert fanout.get("mode") == "fleet", f"the profile apply did not fan out to the fleet: {fanout}"
-    outcomes = {row["origin"]: row["outcome"] for row in fanout["results"]}
-    census = {origin.origin for origin in replicas_stack.census()}
+    outcomes = {row["name"]: row["outcome"] for row in fanout["results"]}
+    census = {worker.name for worker in replicas_stack.census()}
     assert census <= outcomes.keys(), (
-        f"a census origin was absent from the apply fan-out: census={census} fanout={fanout}"
+        f"a census worker was absent from the apply fan-out: census={census} fanout={fanout}"
     )
-    assert all(outcomes[origin] == "applied" for origin in census), f"an origin did not apply the reload: {fanout}"
+    assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply the reload: {fanout}"
 
     # Post-apply posture on replica A, off a fresh epoch.
     after = await _snapshot(replicas_stack)

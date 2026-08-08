@@ -11,7 +11,7 @@ detachable tool whose presence/absence is observable two ways, matched to worker
 
 * SERVE workers answer the HTTP ``e2e_worker_info`` probe, so their live view collapses
   to the harness's probe-computed ``state_digest`` — a targeted detach on one serve
-  origin moves ONLY that origin's digest.
+  worker moves ONLY that worker's digest.
 * the BACKEND worker answers no HTTP probe (the digest never observes it), so its live
   registry is read back through a REAL task it runs: ``run_tool_sync_task`` dispatches a
   tool by name INSIDE the backend worker, and a detached tool is one the backend can no
@@ -44,7 +44,7 @@ from tai42_e2e.booting import boot_stack
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import build_core_stack
 from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack
-from tai42_e2e.variants import BusOrigin
+from tai42_e2e.variants import BusWorker
 
 if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
@@ -97,9 +97,9 @@ def fleet_mcp_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> I
 # ---- census + fleet-op helpers ------------------------------------------
 
 
-async def _await_fleet(stack: TaiStack) -> tuple[list[BusOrigin], BusOrigin]:
+async def _await_fleet(stack: TaiStack) -> tuple[list[BusWorker], BusWorker]:
     """Poll the bus presence census until it shows the full expected fleet — the two
-    serve workers and the one backend runtime — and return ``(serve_origins, backend)``.
+    serve workers and the one backend runtime — and return ``(serve_workers, backend)``.
 
     The census is a point-in-time scan of the presence keys and is eventually
     consistent: a whole-fleet reload (:func:`_normalize`) momentarily churns every
@@ -107,10 +107,10 @@ async def _await_fleet(stack: TaiStack) -> tuple[list[BusOrigin], BusOrigin]:
     to the settled shape is the sanctioned discipline (the bus-outage recovery path
     polls the same census the same way)."""
 
-    async def probe() -> tuple[list[BusOrigin], BusOrigin] | None:
-        origins = stack.census()
-        serve = [origin for origin in origins if origin.kind == "serve"]
-        backend = [origin for origin in origins if origin.kind == "backend"]
+    async def probe() -> tuple[list[BusWorker], BusWorker] | None:
+        workers = stack.census()
+        serve = [worker for worker in workers if worker.kind == "serve"]
+        backend = [worker for worker in workers if worker.kind == "backend"]
         return (serve, backend[0]) if len(serve) == 2 and len(backend) == 1 else None
 
     return await wait_for_async(
@@ -189,7 +189,7 @@ async def test_fleet_op_reaches_backend_worker_under_load(
 
     A long-ish fixture task is started in the backend worker (observably in-flight via
     its ``started`` probe record, whose pid is NOT a serve worker's), then a whole-fleet
-    ``reload-config`` is fired. Despite the in-flight task, the backend origin confirms
+    ``reload-config`` is fired. Despite the in-flight task, the backend worker confirms
     ``applied`` in the fleet report — the black-box proof of under-load delivery. The
     apply deadline is sized above the task runtime so the report is not cut before the
     backend answers."""
@@ -197,7 +197,7 @@ async def test_fleet_op_reaches_backend_worker_under_load(
     await _normalize(stack)
 
     serve, backend = await _await_fleet(stack)
-    serve_pids = {origin.pid for origin in serve}
+    serve_pids = {worker.pid for worker in serve}
     key = uniq("c1_slow")
 
     async def run_slow() -> None:
@@ -224,8 +224,8 @@ async def test_fleet_op_reaches_backend_worker_under_load(
         resp = await _fleet_reload(stack.api(), None)
         assert resp.status_code == 200, resp.text
         result = resp.json()["data"]
-        outcomes = {r["origin"]: r["outcome"] for r in result["results"]}
-        assert outcomes.get(backend.origin) == "applied", f"the backend did not apply under load: {result}"
+        outcomes = {r["name"]: r["outcome"] for r in result["results"]}
+        assert outcomes.get(backend.name) == "applied", f"the backend did not apply under load: {result}"
     finally:
         # Drain the in-flight task. Its own SURVIVAL is not what this test asserts (delivery of
         # the op to the busy backend is) — a config reload reinitializes the backend
@@ -239,7 +239,7 @@ async def test_fleet_op_reaches_backend_worker_under_load(
 
 
 async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: TaiStack) -> None:
-    """A TARGETED ``deregister_mcp`` of ONE serve origin moves ONLY that worker's
+    """A TARGETED ``deregister_mcp`` of ONE serve worker moves ONLY that worker's
     digest; every other serve digest is byte-identical.
 
     The detach is the point: a targeted re-probe of unchanged config would leave the
@@ -255,14 +255,14 @@ async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: 
     base_target = baseline[target.pid]
     base_other = baseline[other.pid]
 
-    # Detach fleetmcp on the target serve origin only.
-    resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [target.origin])
+    # Detach fleetmcp on the target serve worker only.
+    resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [target.name])
     assert resp.status_code == 200, resp.text
     result = resp.json()["data"]
-    outcomes = {r["origin"]: r["outcome"] for r in result["results"]}
-    assert outcomes.get(target.origin) == "applied", f"the targeted serve origin did not apply: {result}"
-    # The report named ONLY the target — no other origin was delivered to.
-    assert set(outcomes) == {target.origin}, f"a targeted detach reached non-target origins: {result}"
+    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
+    assert outcomes.get(target.name) == "applied", f"the targeted serve worker did not apply: {result}"
+    # The report named ONLY the target — no other worker was delivered to.
+    assert set(outcomes) == {target.name}, f"a targeted detach reached non-target workers: {result}"
 
     # The target's digest moves off its own baseline; the other serve worker's digest
     # holds at its own baseline (each worker compared against itself — see
@@ -281,7 +281,7 @@ async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: 
 
 
 async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: TaiStack, infra: Infra) -> None:
-    """A TARGETED ``deregister_mcp`` of the BACKEND origin removes the detached tool
+    """A TARGETED ``deregister_mcp`` of the BACKEND worker removes the detached tool
     from the backend worker's live registry, read back through a REAL task the backend
     runs (the digest never observes backend workers). The serve workers, not targeted,
     keep serving the tool.
@@ -311,13 +311,13 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
     before = await _backend_dispatch(stack, _MCP_TOOL, {})
     assert not before.is_error, f"the backend could not dispatch {_MCP_TOOL} before the detach: {before}"
 
-    # Detach fleetmcp on the backend origin only.
-    resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [backend.origin])
+    # Detach fleetmcp on the backend worker only.
+    resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [backend.name])
     assert resp.status_code == 200, resp.text
     result = resp.json()["data"]
-    outcomes = {r["origin"]: r["outcome"] for r in result["results"]}
-    assert outcomes.get(backend.origin) == "applied", f"the backend origin did not apply the detach: {result}"
-    assert set(outcomes) == {backend.origin}, f"a backend-targeted detach reached other origins: {result}"
+    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
+    assert outcomes.get(backend.name) == "applied", f"the backend worker did not apply the detach: {result}"
+    assert set(outcomes) == {backend.name}, f"a backend-targeted detach reached other workers: {result}"
 
     # Task-execution readback: the backend can no longer dispatch the detached tool.
     async def backend_lost_tool() -> bool:

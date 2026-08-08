@@ -1,7 +1,8 @@
 """C9 — the worker-bus confirmed broadcast. A reload reaches every live worker (both
 HTTP replicas and the backend runtime) and each confirms ``applied``; a dispatch with a
 dead worker still on the presence census names it with a non-applied outcome — never a
-silent drop — and every survivor confirms once the corpse's presence key expires."""
+silent drop — and every survivor confirms once the corpse's presence row expires. Workers
+are named by their stable slot name on the census and in the fan-out report alike."""
 
 from __future__ import annotations
 
@@ -27,14 +28,14 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
         result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"reload_config returned no result map: {result!r}"
-    # A FleetResult (no ``workers`` key): reachable, one per-origin outcome each.
+    # A FleetResult (no ``workers`` key): reachable, one per-worker outcome each.
     assert data["op"] == "reload_config"
     assert data["reachable"] is True, f"the bus was unreachable: {data}"
-    outcomes = {r["origin"]: r["outcome"] for r in data["results"]}
+    outcomes = {r["name"]: r["outcome"] for r in data["results"]}
     # Every census worker (the backend worker + each HTTP worker) confirmed applied.
-    census = {origin.origin for origin in replicas_stack.census()}
+    census = {worker.name for worker in replicas_stack.census()}
     assert census <= outcomes.keys(), f"not every census worker was in the report: census={census} report={outcomes}"
-    assert all(outcomes[origin] == "applied" for origin in census), f"an origin did not apply: {data}"
+    assert all(outcomes[name] == "applied" for name in census), f"a worker did not apply: {data}"
 
     # B's subscription applied the op too (asynchronous via the admin route).
     async def b_has_marker() -> bool:
@@ -64,9 +65,9 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
 
-    # The backend worker's bus origin, matched by kind + pid off the presence census.
+    # The backend worker's bus slot name, matched by kind + pid off the presence census.
     dead_pid = stack.process("backend").pid
-    dead_origin = next(o.origin for o in stack.census() if o.kind == "backend" and o.pid == dead_pid)
+    dead_name = next(w.name for w in stack.census() if w.kind == "backend" and w.pid == dead_pid)
 
     # Kill the backend, then dispatch the reload while the corpse still sits on the census
     # (the generous TTL keeps it there across any session-swap re-open). The reload names
@@ -82,14 +83,15 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"reload_config returned no result map: {result!r}"
     # The dead worker is NAMED with a non-applied outcome (departed/missing), never a
-    # silently dropped origin the report pretends converged.
-    outcomes = {r["origin"]: r["outcome"] for r in data["results"]}
-    assert dead_origin in outcomes, f"the dead backend was not named in the report: {data}"
-    assert outcomes[dead_origin] != "applied", f"the dead backend was reported as applied: {data}"
+    # silently dropped worker the report pretends converged.
+    outcomes = {r["name"]: r["outcome"] for r in data["results"]}
+    assert dead_name in outcomes, f"the dead backend was not named in the report: {data}"
+    assert outcomes[dead_name] != "applied", f"the dead backend was reported as applied: {data}"
 
-    # Once its presence key expires, the surviving HTTP workers all confirm applied.
+    # Once its presence row expires (kill -9 = no graceful delete, so it lapses on the TTL),
+    # the surviving HTTP workers all confirm applied.
     async def census_dropped_backend() -> bool:
-        return not any(origin.pid == dead_pid for origin in stack.census())
+        return not any(worker.pid == dead_pid for worker in stack.census())
 
     await wait_for_async(census_dropped_backend, deadline=35.0, message="dead worker never left the census")
     async with stack.mcp(port=stack.port_a) as mcp:

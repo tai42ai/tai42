@@ -12,7 +12,7 @@ distinct pid reporting the SAME digest, DIFFERING from the pre-mutation baseline
 * out-of-band file edit  → all digests stay stale, then a fleet reload converges
                            EVERY worker onto the file's new state.
 * env write              → the resolved (``!ENV``) live view moves fleet-wide.
-* ``/api/fleet/workers`` → the census lists every worker origin.
+* ``/api/fleet/workers`` → the census lists every worker by name.
 
 Live-vs-persisted drift is folded into the mcp-mutating scenarios: the mutated entry
 is present in ``GET /api/manifest`` exactly as the persisted doc says. The extensions
@@ -70,18 +70,18 @@ async def _manifest_mcp_titles(stack: TaiStack, port: int | None = None) -> list
 # ---- census -------------------------------------------------------------
 
 
-async def test_fleet_workers_lists_every_worker_origin(fresh_stack: Callable[..., TaiStack]) -> None:
-    """``GET /api/fleet/workers`` lists every worker origin — the census door's
-    view is exactly the bus presence census the harness scans, one ``serve`` origin
+async def test_fleet_workers_lists_every_worker(fresh_stack: Callable[..., TaiStack]) -> None:
+    """``GET /api/fleet/workers`` lists every worker by name — the census door's
+    view is exactly the bus presence census the harness scans, one ``serve`` slot
     per uvicorn worker."""
     stack = fresh_stack(build_fleet_stack)
     workers = (await stack.api().get("/api/fleet/workers", retry_on_reloading=True))["workers"]
-    origins = {w["origin"] for w in workers}
-    assert origins == {origin.origin for origin in stack.census()}
+    names = {w["name"] for w in workers}
+    assert names == {worker.name for worker in stack.census()}
     assert all(w["kind"] == "serve" for w in workers), workers
     # Every worker carries a live pid; the multi-worker fleet lists more than one.
     assert all(isinstance(w["pid"], int) for w in workers), workers
-    assert len(origins) >= 2, f"a multi-worker fleet must list >1 origin: {workers}"
+    assert len(names) >= 2, f"a multi-worker fleet must list >1 worker: {workers}"
 
 
 # ---- tool-extensions ----------------------------------------------------
@@ -100,9 +100,9 @@ async def test_tool_extensions_apply_converges(fresh_stack: Callable[..., TaiSta
 
     result = await api.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]}, retry_on_reloading=True)
 
-    # The ApplyResult report shape: a mode-wrapped fleet fan-out, every origin applied.
+    # The ApplyResult report shape: a mode-wrapped fleet fan-out, every worker applied.
     fanout = assert_fleet_fanout(result)
-    assert fanout["results"], f"the apply reported no per-origin outcomes: {fanout}"
+    assert fanout["results"], f"the apply reported no per-worker outcomes: {fanout}"
     assert all(r["outcome"] == "applied" for r in fanout["results"]), fanout
 
     # The real proof: every worker's digest converged onto a NEW value.

@@ -197,7 +197,7 @@ async def reload_tool(kind: str, name: str, targets: list[str] | None = None) ->
 
     Applied on this worker and broadcast to the fleet (all workers, or only
     ``targets``); each worker re-reads the definition itself, so the op carries only
-    the kind and name. The response embeds the per-origin fleet report.
+    the kind and name. The response embeds the per-worker fleet report.
     """
     return await broadcast(
         {"op": "reload_tool", "kind": kind, "name": name},
@@ -217,7 +217,7 @@ async def remove_tool(kind: str, name: str, targets: list[str] | None = None) ->
     """Remove one app tool (e.g. kind "flow") from the live registry.
 
     Applied on this worker and broadcast to the fleet (all workers, or only
-    ``targets``); the response embeds the per-origin fleet report.
+    ``targets``); the response embeds the per-worker fleet report.
     """
     return await broadcast(
         {"op": "remove_tool", "kind": kind, "name": name},

@@ -179,7 +179,7 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     """Soft-restart: refresh env from the config manager, reset every settings cache,
     and re-initialize from the manifest — in-process, no pod restart. Applied on this
     worker (when it is a target) and broadcast to the fleet (all workers, or only
-    ``targets``); the response embeds the per-origin fleet report.
+    ``targets``); the response embeds the per-worker fleet report.
 
     Heavy (a full re-init); meant for env/config saves, not tool edits. A convergence
     op: its whole purpose is aligning siblings to persisted state, so a failed local
