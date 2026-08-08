@@ -310,15 +310,21 @@ jobs:
       - name: Fleet consistency
         run: uv run pytest tests/
 
+  # Each backend leg is split 3 ways by pytest-split using the committed
+  # per-test durations in e2e/.test_durations; unknown/new tests get the
+  # average duration. Refresh that file from CI junit data when the shards drift
+  # out of balance.
   e2e:
     needs: changes
     if: ${{ needs.changes.outputs.run_e2e == 'true' }}
+    name: e2e (${{ matrix.backend }}, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         backend: ${{ fromJSON(needs.changes.outputs.e2e_backends) }}
+        shard: [1, 2, 3]
     services:
       redis:
         image: redis:7-alpine
@@ -418,11 +424,13 @@ jobs:
         run: >-
           uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit.xml -o log_cli=true
           ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
+          --splits 3 --group ${{ matrix.shard }} --durations-path .test_durations --splitting-algorithm least_duration
       - name: Run the fixture identity/storage axis (default leg)
         # The second value on each of the identity and storage axes, so the plugin
         # switch itself is exercised rather than pinned to one provider. Only the
         # identity/storage-bearing suites — the other seams do not touch these axes.
-        if: matrix.backend == 'arq'
+        # An explicit-path invocation, so it runs on one shard only, not per shard.
+        if: matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_IDENTITY: fixture
@@ -436,7 +444,8 @@ jobs:
         # compose `storage` profile up here; the variant defaults (endpoint :9002,
         # user minio / secret miniosecret) match the compose service, so no coordinate
         # env is needed. Only the storage suite touches this axis.
-        if: matrix.backend == 'arq'
+        # An explicit-path invocation, so it runs on one shard only, not per shard.
+        if: matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_STORAGE: s3
@@ -447,7 +456,8 @@ jobs:
         # Fourth storage-axis value: the github provider against the in-process fake
         # GitHub REST stub (brought up by tests/storage/conftest; variant default base
         # :9099), so no external infra. Only the storage suite touches this axis.
-        if: matrix.backend == 'arq'
+        # An explicit-path invocation, so it runs on one shard only, not per shard.
+        if: matrix.backend == 'arq' && matrix.shard == 1
         working-directory: e2e
         env:
           TAI_E2E_STORAGE: github
@@ -456,7 +466,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-diagnostics-${{ matrix.backend }}
+          name: e2e-diagnostics-${{ matrix.backend }}-s${{ matrix.shard }}
           path: |
             e2e/junit.xml
             e2e/**/stack-*/

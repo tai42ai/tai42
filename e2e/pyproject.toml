@@ -130,6 +130,8 @@ tai42-e2e = "tai42_e2e.pytest_plugin"
 dev = [
     "ruff>=0.6",
     "pyright>=1.1.389",
+    # Splits the suite into balanced shards across the CI matrix's shard axis.
+    "pytest-split>=0.10",
     # The Studio reference/fixture plugin the browser-e2e studio_stack names in its
     # manifest (studio_plugins + reference_plugin.tools) and serves to the ``ui/``
     # suite. A boot prerequisite of the studio leg, not imported by harness code;
