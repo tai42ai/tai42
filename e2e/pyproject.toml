@@ -61,6 +61,7 @@ dependencies = [
     "tai42-channel-slack>=0.5,<0.6",
     "tai42-channel-twilio>=0.4,<0.5",
     "tai42-channel-whatsapp>=0.4,<0.5",
+    "tai42-channel-web>=0.1,<0.2",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=0.2,<0.3",
     # The shipped OAuth connector plugins the shipped-connectors stack boots.
@@ -195,6 +196,7 @@ tai42-channel-telegram = { workspace = true }
 tai42-channel-slack = { workspace = true }
 tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
+tai42-channel-web = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
 tai42-connector-google = { workspace = true }
 tai42-connector-atlassian = { workspace = true }
@@ -231,6 +233,7 @@ tai42-channel-telegram = { tier = "oss-public", catalog = true }
 tai42-channel-slack = { tier = "oss-public", catalog = true }
 tai42-channel-twilio = { tier = "oss-public", catalog = true }
 tai42-channel-whatsapp = { tier = "oss-public", catalog = true }
+tai42-channel-web = { tier = "oss-public", catalog = true }
 tai42-monitoring-langfuse = { tier = "oss-public", catalog = true }
 tai42-connector-google = { tier = "oss-public", catalog = true }
 tai42-connector-atlassian = { tier = "oss-public", catalog = true }

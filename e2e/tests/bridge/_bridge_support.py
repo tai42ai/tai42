@@ -3,8 +3,9 @@
 The bridge routes an inbound message — from an authed API caller or a registered channel
 adapter — to an agent turn whose answer is durably stored and delivered back. Every leg
 drives one seam of that path end to end over the live ``bridge_stack`` (access control ON,
-the redis conversations backend, the twilio + whatsapp channel plugins on their
-in-process stubs, the scripted LLM stub).
+the redis conversations backend, the twilio + whatsapp + web channel plugins — twilio and
+whatsapp on their in-process stubs, web on its own public doors — and the scripted LLM
+stub).
 
 Named ``_bridge_support`` (not ``_support``) so its module basename never collides with the
 channels suite's ``_support`` under pytest's prepend import mode.

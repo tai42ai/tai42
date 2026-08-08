@@ -38,6 +38,7 @@ def _record(message_id: str = "m1", door: str = "channel", **over) -> Conversati
         "channel": "twilio" if door == "channel" else None,
         "our_identity": "+15550001111" if door == "channel" else None,
         "callback_url": "https://cb.example/x" if door == "api" else None,
+        "inbound_text": f"ask {message_id}",
         "caller_principal": "alice" if door == "api" else None,
         "answer_status": "answered",
         "answer": "hello there",
@@ -134,10 +135,11 @@ async def test_claim_delivery_refuses_an_intake_record(monkeypatch):
 
 async def test_delete_record_removes_an_abandoned_intake_record(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
-    await store.create_record(_intake("m1"), intake_token="worker-1")
-    assert await store.delete_record("m1") is True
+    record = _intake("m1")
+    await store.create_record(record, intake_token="worker-1")
+    assert await store.delete_record(record) is True
     assert await store.get_record("m1") is None
-    assert await store.delete_record("m1") is False
+    assert await store.delete_record(record) is False
 
 
 async def test_a_shed_record_is_created_terminal_with_the_retention_ttl(monkeypatch):
@@ -416,9 +418,10 @@ async def test_a_member_whose_row_is_gone_is_unindexed(monkeypatch):
 async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
-    await store.create_record(_record("m1"))
+    record = _record("m1")
+    await store.create_record(record)
 
-    assert await store.delete_record("m1") is True
+    assert await store.delete_record(record) is True
     assert await store.pending_work() == []
     assert (
         await fake.zrange(ConversationsSettings().status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
@@ -462,7 +465,20 @@ async def test_prune_expired_terminal_indexes_drops_only_expired_members(monkeyp
             {f"{status.value}-expired": now - 10, f"{status.value}-live": now + 100_000},
         )
 
-    await store.prune_expired_terminal_indexes()
+    await store.prune_expired_terminal_indexes([])
 
     for status in (DeliveryStatus.DELIVERED, DeliveryStatus.SHED, DeliveryStatus.FAILED):
         assert await fake.zrange(settings.status_index_key(status.value), 0, -1) == [f"{status.value}-live"]
+
+
+async def test_a_record_must_carry_the_inbound_text_it_answers(monkeypatch):
+    # Every door records the message it accepted, so ``None`` could only ever mean a row
+    # written by an older build — silent tolerance of a shape nothing writes.
+    fake = FakeRecordRedis()
+    _store(monkeypatch, fake)
+    fields = _record().model_dump()
+    fields.pop("inbound_text")
+    with pytest.raises(ValueError, match="inbound_text"):
+        ConversationRecord.model_validate(fields)
+    with pytest.raises(ValueError, match="inbound_text"):
+        ConversationRecord.model_validate({**fields, "inbound_text": None})

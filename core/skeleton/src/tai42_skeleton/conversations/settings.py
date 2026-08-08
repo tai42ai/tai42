@@ -9,6 +9,9 @@ _DEFAULT_MAX_MESSAGE_CHARS: dict[str, int] = {
     "telegram": 4096,
     "slack": 40000,
     "whatsapp": 4096,
+    # The web chat page has no medium length cap; a large split bound keeps agent
+    # answers whole while max_outbound_chunks still caps a runaway fan-out.
+    "web": 8000,
 }
 
 
@@ -173,7 +176,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The six conversation keyspaces. Every literal key string lives ONLY here. A
+    # The eight conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary.
 
@@ -204,6 +207,22 @@ class ConversationsSettings(TaiBaseSettings):
         _require_qualifier_segment("channel", channel)
         _require_key_segment("outbound_message_id", outbound_message_id)
         return f"{self.prefix}:outbound:{channel}:{outbound_message_id}"
+
+    def thread_index_key(self, route_name: str, thread_id: str) -> str:
+        """Per-thread transcript index — the sorted set of one thread's ``message_id``s,
+        scored by ``created_at``, so a transcript read never walks the record keyspace. The
+        ``thread_id`` carries ``:`` of its own and so sits LAST."""
+        _require_qualifier_segment("route_name", route_name)
+        _require_key_segment("thread_id", thread_id)
+        return f"{self.prefix}:thread:{route_name}:{thread_id}"
+
+    def route_threads_key(self, route_name: str) -> str:
+        """Per-route thread index — the sorted set of the route's ``thread_id``s, scored by
+        the moment each thread was last active, so a listing reads the newest first. The
+        route name is checked exactly as :meth:`thread_index_key` checks it, so one name can
+        never key one of the two thread indexes and be refused by the other."""
+        _require_qualifier_segment("route_name", route_name)
+        return f"{self.prefix}:route_threads:{route_name}"
 
     def route_key(self, route_name: str) -> str:
         """Routing-row key for a route name (a ``:``-free slug)."""

@@ -291,9 +291,10 @@ def channel_stack(
     fake_slack: FakeSlack,
     fake_twilio: FakeTwilio,
 ) -> Iterator[TaiStack]:
-    """REPLICAS, no backend worker, all three channel plugins loaded — the
-    channel cross-worker loop / allowlist / notify / config-error home. Points
-    each plugin's outbound API base URL at that medium's in-process stub."""
+    """REPLICAS, no backend worker, all four channel plugins loaded (telegram, slack,
+    twilio, web) — the channel cross-worker loop / allowlist / notify / config-error
+    home. Points each vendor plugin's outbound API base URL at that medium's in-process
+    stub; web has no vendor, so its own public doors are the medium."""
     resource_kwargs = {
         "telegram_api_base_url": fake_telegram.api_base_url,
         "slack_api_base_url": fake_slack.api_base_url,
@@ -313,8 +314,9 @@ def bridge_stack(
     """The messaging-bridge profile, yielding ``(stack, root_token)``.
 
     REPLICAS + backend + metrics, access control ON, the redis conversations backend, the
-    memory checkpoint provider, the twilio + whatsapp channel plugins (outbound
-    pointed at their in-process stubs), and the ``tools_agent`` + ``deep_agent`` agents on
+    memory checkpoint provider, the twilio + whatsapp + web channel plugins (twilio/whatsapp
+    outbound pointed at their in-process stubs; web has no vendor — its public chat doors ARE
+    the medium), and the ``tools_agent`` + ``deep_agent`` agents on
     the scripted LLM stub. Seeded BEFORE boot with a root ``*`` key and a route table that
     pins the unauthenticated channel webhook doors + the readiness probes public and maps
     every other path to the ``e2e-all`` scope the root satisfies and tests mint against."""

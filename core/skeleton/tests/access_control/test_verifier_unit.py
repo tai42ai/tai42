@@ -544,9 +544,9 @@ async def test_spa_reserved_set_is_derived_not_static(monkeypatch):
     from types import SimpleNamespace
 
     fake_routes = [
-        SimpleNamespace(path="/newpage", methods=("GET",)),
-        SimpleNamespace(path="/api/agents", methods=("GET",)),  # /api excluded
-        SimpleNamespace(path="/webhook/{topic}", methods=("GET",)),  # templated excluded
+        SimpleNamespace(path="/newpage", methods=("GET",), mounted=False),
+        SimpleNamespace(path="/api/agents", methods=("GET",), mounted=False),  # /api excluded
+        SimpleNamespace(path="/webhook/{topic}", methods=("GET",), mounted=False),  # templated excluded
     ]
     monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
     settings = AccessControlSettings()
@@ -556,6 +556,23 @@ async def test_spa_reserved_set_is_derived_not_static(monkeypatch):
     assert await v.resolve_resource_ids("/newpage", method="GET") == []
     # A genuinely unmapped, unregistered path still reaches the shell.
     assert await v.resolve_resource_ids("/otherpage", method="GET") == [settings.public_resource_id]
+
+
+def test_mounted_transport_surfaces_are_not_in_the_derived_reserved_set(monkeypatch):
+    # A mounted transport path is concrete, non-/api and GET — the shape the derivation
+    # otherwise reserves — but the SPA shell never answers for it: its mount matches first
+    # and gates it on the credential. It is no part of the shell's reserved set.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        verifier_module,
+        "load_all_routes",
+        lambda: [
+            SimpleNamespace(path="/sse", methods=("GET",), mounted=True),
+            SimpleNamespace(path="/ready", methods=("GET",), mounted=False),
+        ],
+    )
+    assert verifier_module.registered_reserved_get_paths() == frozenset({"/ready"})
 
 
 async def test_reload_added_route_not_served_anonymously_after_reset(monkeypatch):
@@ -573,7 +590,9 @@ async def test_reload_added_route_not_served_anonymously_after_reset(monkeypatch
     assert await v.resolve_resource_ids("/status", method="GET") == [settings.public_resource_id]
 
     # The reload re-imports a router that registers an authed GET /status.
-    monkeypatch.setattr(verifier_module, "load_all_routes", lambda: [SimpleNamespace(path="/status", methods=("GET",))])
+    monkeypatch.setattr(
+        verifier_module, "load_all_routes", lambda: [SimpleNamespace(path="/status", methods=("GET",), mounted=False)]
+    )
 
     # Until the reset drops it the memo is stale, so /status still gets the anonymous shell.
     assert await v.resolve_resource_ids("/status", method="GET") == [settings.public_resource_id]
@@ -683,7 +702,7 @@ async def test_acknowledged_tier_scoped_to_acknowledged_not_all_gets(monkeypatch
     from types import SimpleNamespace
 
     # A newly registered concrete GET route that is deliberately NOT acknowledged.
-    fake_routes = [SimpleNamespace(path="/internal-probe", methods=("GET",))]
+    fake_routes = [SimpleNamespace(path="/internal-probe", methods=("GET",), mounted=False)]
     monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
     settings = AccessControlSettings()
     assert "/internal-probe" not in settings.acknowledged_public_routes
@@ -724,7 +743,7 @@ async def test_acknowledged_tier_reserved_prefix_never_public(monkeypatch):
     # acknowledge that same path — the reserved guard must still deny it.
     from types import SimpleNamespace
 
-    fake_routes = [SimpleNamespace(path="/control", methods=("GET",))]
+    fake_routes = [SimpleNamespace(path="/control", methods=("GET",), mounted=False)]
     monkeypatch.setattr(verifier_module, "load_all_routes", lambda: fake_routes)
     settings = AccessControlSettings(
         reserved_public_pin_prefixes=("/api/auth", "/control"),

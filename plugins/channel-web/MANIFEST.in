@@ -1,0 +1,2 @@
+prune tests
+recursive-include src/tai42_channel_web/public *

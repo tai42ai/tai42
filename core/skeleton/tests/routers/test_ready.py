@@ -328,16 +328,13 @@ async def test_wired_connections_omits_tool_runs_and_interactions_when_redis_uns
     assert "interactions" not in names
 
 
-async def test_wired_connections_gates_rate_limit_on_trigger_only(monkeypatch) -> None:
-    # The rate-limit readiness row rides the FULL enable disjunction, including the
-    # trigger door: with webhook + interactions-callback disabled and ONLY trigger
-    # enabled, a configured rate-limit Redis still contributes the rate_limit ping.
-    # (A regression dropping ``trigger_enabled`` from the disjunction would gate the
-    # row out here and fail this test.)
+async def test_wired_connections_gates_rate_limit_on_one_enabled_family(monkeypatch) -> None:
+    # The rate-limit readiness row rides the ENABLE posture, not any door list: with
+    # the default switched off and a SINGLE family switched back on, a configured
+    # rate-limit Redis still contributes the rate_limit ping.
     _quiet_stores(monkeypatch)
-    monkeypatch.setenv("TAI_RATE_LIMIT_WEBHOOK_ENABLED", "false")
-    monkeypatch.setenv("TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_ENABLED", "false")
-    monkeypatch.setenv("TAI_RATE_LIMIT_TRIGGER_ENABLED", "true")
+    monkeypatch.setenv("TAI_RATE_LIMIT_DEFAULT_ENABLED", "false")
+    monkeypatch.setenv("TAI_RATE_LIMIT_FAMILIES", '{"trigger": {"enabled": true}}')
     monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://rl")
     reset_all_settings()
     try:
@@ -348,6 +345,22 @@ async def test_wired_connections_gates_rate_limit_on_trigger_only(monkeypatch) -
 
     rate_limit = [(name, cls) for name, cls, _ in wired if name == "rate_limit"]
     assert rate_limit == [("rate_limit", RedisClient)]
+
+
+async def test_wired_connections_drops_rate_limit_when_every_family_is_off(monkeypatch) -> None:
+    # Every family disabled: the limiter charges nothing, so its counter store is not a
+    # wired dependency and readiness never 503s on a Redis it will never touch.
+    _quiet_stores(monkeypatch)
+    monkeypatch.setenv("TAI_RATE_LIMIT_DEFAULT_ENABLED", "false")
+    monkeypatch.setenv("TAI_RATE_LIMIT_REDIS_URL", "redis://rl")
+    reset_all_settings()
+    try:
+        names = [name for name, _, _ in health._wired_connections()]
+    finally:
+        monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+        reset_all_settings()
+
+    assert "rate_limit" not in names
 
 
 async def test_wired_connections_enumerates_identity_provider_generically(monkeypatch) -> None:

@@ -1,8 +1,8 @@
 """An in-memory fake of the redis surface the answer/record store uses.
 
 Covers the HASH + STRING commands the record store calls, the LIST commands the send
-ledger calls, the ZSET commands the per-status record index uses, plus the record Lua
-scripts (dispatched by marker comment, re-implemented here). Single-threaded async, so
+ledger calls, the ZSET commands the status and thread record indexes use, plus the record
+Lua scripts (dispatched by marker comment, re-implemented here). Single-threaded async, so
 each faked ``eval`` runs atomically.
 
 ``ttl_ms`` records the expiry each command applied, so a test can assert the retention
@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+
+from tai42_skeleton.conversations.settings import ConversationsSettings
 
 
 class FakeRecordRedis:
@@ -31,7 +33,17 @@ class FakeRecordRedis:
         write could produce (a corrupt or foreign row) in the record keyspace."""
         self._hashes[key] = dict(fields)
 
-    # -- sorted-set commands (the per-status record index) -------------------
+    def seed_route(self, route_name: str) -> None:
+        """Plant the ROUTING ROW for ``route_name`` — the key the record create checks
+        before it writes the thread indexes. Without it every create here would behave as
+        one landing after the route's delete and index nothing."""
+        self._strings[ConversationsSettings().route_key(route_name)] = "{}"
+
+    def drop_route(self, route_name: str) -> None:
+        """Remove the routing row, so a create lands as one racing the route's delete."""
+        self._strings.pop(ConversationsSettings().route_key(route_name), None)
+
+    # -- sorted-set commands (the status / thread record indexes) ------------
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
         target = self._zsets.setdefault(key, {})
         added = sum(1 for member in mapping if member not in target)
@@ -42,10 +54,42 @@ class FakeRecordRedis:
         target = self._zsets.get(key, {})
         return sum(1 for member in members if target.pop(member, None) is not None)
 
-    async def zrange(self, key: str, start: int, end: int) -> list[str]:
-        ordered = [m for m, _ in sorted(self._zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))]
+    def _ordered(self, key: str) -> list[str]:
+        return [m for m, _ in sorted(self._zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))]
+
+    def _window(self, ordered: list[str], key: str, start: int, end: int, withscores: bool) -> list:
         stop = len(ordered) if end == -1 else end + 1
-        return ordered[start:stop]
+        window = ordered[start:stop]
+        if withscores:
+            return [(member, self._zsets[key][member]) for member in window]
+        return window
+
+    async def zrange(self, key: str, start: int, end: int, withscores: bool = False) -> list:
+        return self._window(self._ordered(key), key, start, end, withscores)
+
+    async def zrevrange(self, key: str, start: int, end: int, withscores: bool = False) -> list:
+        return self._window(list(reversed(self._ordered(key))), key, start, end, withscores)
+
+    async def zrangebyscore(
+        self,
+        key: str,
+        minimum: str | float,
+        maximum: str | float,
+        start: int | None = None,
+        num: int | None = None,
+    ) -> list[str]:
+        low, high = float(minimum), float(maximum)
+        matched = [m for m in self._ordered(key) if low <= self._zsets[key][m] <= high]
+        if start is None and num is None:
+            return matched
+        offset = start or 0
+        return matched[offset : offset + num] if num is not None else matched[offset:]
+
+    async def zcard(self, key: str) -> int:
+        return len(self._zsets.get(key, {}))
+
+    async def exists(self, key: str) -> int:
+        return 1 if any(key in store for store in (self._strings, self._hashes, self._lists, self._zsets)) else 0
 
     async def zremrangebyscore(self, key: str, minimum: str | float, maximum: str | float) -> int:
         low, high = float(minimum), float(maximum)
@@ -72,7 +116,7 @@ class FakeRecordRedis:
 
     async def delete(self, key: str) -> int:
         self.ttl_ms.pop(key, None)
-        held = [store.pop(key, None) for store in (self._strings, self._hashes, self._lists)]
+        held = [store.pop(key, None) for store in (self._strings, self._hashes, self._lists, self._zsets)]
         return 1 if any(value is not None for value in held) else 0
 
     # -- string commands -----------------------------------------------------
@@ -131,6 +175,10 @@ class FakeRecordRedis:
         keys = [str(k) for k in keys_and_args[:numkeys]]
         key = keys[0]
         indexes = keys[1:]
+        # A script that touches the thread indexes carries them as the LAST two keys, after
+        # the status layout the reindex step reads; the others never look at these. The
+        # create carries the routing row one slot further out again.
+        threaded, thread_keys = keys[1:-2], keys[-2:]
         argv = [str(a) for a in keys_and_args[numkeys:]]
         if "conversations:dedupe:claim" in script:
             existing = self._strings.get(key)
@@ -141,6 +189,9 @@ class FakeRecordRedis:
         h = self._hashes.get(key)
         status = h.get("delivery_status") if h else None
         if "conversations:record:create" in script:
+            # The create carries the ROUTING ROW behind its two thread index keys, so the
+            # slicing the sibling scripts share shifts by one here.
+            created_threaded, created_thread_keys, route_row_key = keys[1:-3], keys[-3:-1], keys[-1]
             self._hashes[key] = {
                 "data": argv[0],
                 "delivery_status": argv[1],
@@ -153,7 +204,14 @@ class FakeRecordRedis:
             }
             if argv[5]:
                 self.ttl_ms[key] = int(argv[5])
-            self._reindex(indexes, argv[7], argv[8])
+            self._reindex(created_threaded, argv[7], argv[8])
+            # Written only while the route still routes, as the script's guard does: the
+            # indexes of a route whose row is gone are reclaimed already and nothing walks
+            # the name again, so re-creating them would strand the pair.
+            if await self.exists(route_row_key) == 0:
+                return 0
+            self._zsets.setdefault(created_thread_keys[0], {})[argv[7]] = float(argv[10])
+            self._zsets.setdefault(created_thread_keys[1], {})[argv[9]] = float(argv[10])
             return 1
         if "conversations:record:complete_turn" in script:
             if status is None:
@@ -161,7 +219,12 @@ class FakeRecordRedis:
             if status != "accepted":
                 return 0
             h.update(data=argv[0], delivery_status="pending_delivery", updated_at=argv[1], intake_claim="")  # type: ignore[union-attr]
-            self._reindex(indexes, argv[2], argv[3])
+            self._reindex(threaded, argv[2], argv[3])
+            # Re-stamped only while the thread's own index still holds members, as the
+            # script's guard does: a route delete reclaims both, and an unconditional
+            # stamp would resurrect the route index behind it.
+            if self._zsets.get(thread_keys[0]):
+                self._zsets.setdefault(thread_keys[1], {})[argv[4]] = float(argv[1])
             return 1
         if "conversations:record:complete_silent" in script:
             if status is None:
@@ -172,7 +235,9 @@ class FakeRecordRedis:
                 data=argv[0], delivery_status="silent", updated_at=argv[1], intake_claim="", claim=""
             )
             self.ttl_ms[key] = int(argv[2])
-            self._reindex(indexes, argv[3], argv[4])
+            self._reindex(threaded, argv[3], argv[4])
+            if self._zsets.get(thread_keys[0]):
+                self._zsets.setdefault(thread_keys[1], {})[argv[5]] = float(argv[1])
             return 1
         if "conversations:record:intake_claim" in script:
             now, lease, token = float(argv[0]), float(argv[1]), argv[2]
@@ -268,9 +333,31 @@ class FakeRecordRedis:
             return 1
         if "conversations:record:delete" in script:
             removed = await self.delete(key)
-            for index_key in indexes:
+            for index_key in (*threaded, thread_keys[0]):
                 self._zsets.get(index_key, {}).pop(argv[0], None)
+            if not self._zsets.get(thread_keys[0]):
+                self._zsets.get(thread_keys[1], {}).pop(argv[1], None)
             return removed
+        if "conversations:record:unindex" in script:
+            return sum(1 for index_key in indexes if self._zsets.get(index_key, {}).pop(argv[0], None) is not None)
+        if "conversations:thread:prune" in script:
+            # KEYS[1]=thread index, KEYS[2]=route thread index, KEYS[3..]=candidate record
+            # keys; ARGV[1]=thread_id, ARGV[2..]=the candidates, parallel to KEYS[3..]. The
+            # whole step mutates the maps directly, as the sibling branches do: server-side
+            # is where a script's writes happen, never back through the client commands.
+            # Called with NO candidate too, which is how a thread whose index already ran
+            # empty leaves the route index.
+            thread_index = self._zsets.get(keys[0], {})
+            removed = 0
+            for record_key, message_id in zip(keys[2:], argv[1:], strict=True):
+                if record_key not in self._hashes and thread_index.pop(message_id, None) is not None:
+                    removed += 1
+            remaining = len(thread_index)
+            if remaining == 0:
+                # Redis drops a sorted set that holds nothing, so neither does the fake.
+                self._zsets.pop(keys[0], None)
+                self._zsets.get(keys[1], {}).pop(argv[0], None)
+            return [removed, remaining]
         raise NotImplementedError(f"FakeRecordRedis.eval: unknown script {script[:60]!r}")
 
 

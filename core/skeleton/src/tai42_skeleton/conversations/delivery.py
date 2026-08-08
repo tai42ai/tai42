@@ -25,7 +25,7 @@ from tai42_contract.conversations import DeliveryReceipt
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.records import PRUNE_START, ConversationRecordStore, PruneCursor
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,10 @@ _DELIVERY_TASKS: set[asyncio.Task[None]] = set()
 
 # The periodic stalled-delivery sweep, held so the lifespan can cancel it at shutdown.
 _sweep_task: asyncio.Task[None] | None = None
+
+# Where the last index-prune pass stopped. Carried between passes so each one resumes the
+# walk instead of re-reading the head of the same indexes forever.
+_prune_cursor: PruneCursor = PRUNE_START
 
 
 def _store() -> ConversationRecordStore:
@@ -590,9 +594,16 @@ async def _redrive_lapsed_intakes() -> None:
 
 
 async def _prune_terminal_indexes() -> None:
-    """Drop the expired members of the terminal-status indexes that no listing reads, so
-    they cannot outgrow the retained keyspace they name."""
-    await _store().prune_expired_terminal_indexes()
+    """Drop the expired members of the terminal-status indexes that no listing reads, and
+    the reclaimable members of every route's thread indexes, so neither can outgrow the
+    retained keyspace it names.
+
+    Every LIVE route is handed to the pass: a thread index the pass is not given is walked
+    by nothing, so its members would grow forever. The pass is bounded, so it stops where
+    the budget runs out and the cursor it returns is what the next one resumes from."""
+    global _prune_cursor
+    routes = await get_conversations_manager().list_routes()
+    _prune_cursor = await _store().prune_expired_terminal_indexes(routes.keys(), _prune_cursor)
 
 
 async def _sweep_loop(interval_seconds: float) -> None:

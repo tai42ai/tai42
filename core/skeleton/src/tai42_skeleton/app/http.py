@@ -14,11 +14,24 @@ from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from tai42_skeleton.app.route_registry import route_registry
+from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
     from tai42_skeleton.app.server import TaiMCP
+
+
+def record_sub_mcp_mount(prefix: str) -> None:
+    """Record the sub-MCP router's served surface — everything BENEATH the mount prefix,
+    which is what a Starlette ``Mount`` serves — as a mounted, credential-gated one, so
+    the registry describes it instead of leaving its GETs to the Studio SPA catch-all
+    that also matches them (see :meth:`RouteRegistry.record_mounted`)."""
+    route_registry.record_mounted(
+        path=f"{prefix.rstrip('/')}/{{path:path}}",
+        methods=MOUNT_METHODS,
+        name="sub_mcp_mount",
+        summary="Sub-MCP app mount",
+    )
 
 
 class HttpSurface:
@@ -111,10 +124,9 @@ class HttpSurface:
         so the FastMCP lifespan is entered regardless of any middleware wrapping.
         """
         lifespan_app = app
-        app.mount(
-            self._app._mcp_sub_app_router.root_prefix,
-            self._app._mcp_sub_app_router,
-        )
+        prefix = self._app._mcp_sub_app_router.root_prefix
+        app.mount(prefix, self._app._mcp_sub_app_router)
+        record_sub_mcp_mount(prefix)
 
         for mw in self._middlewares.values():
             cls, args, kwargs = mw

@@ -642,16 +642,54 @@ def test_conversation_route_create_omits_the_server_minted_fields(spec: dict) ->
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/conversations/{route_name}/messages/{message_id}", "/api/conversations/messages/failed"],
+    [
+        "/api/conversations/{route_name}/messages/{message_id}",
+        "/api/conversations/messages/failed",
+        "/api/conversations/{route_name}/threads",
+    ],
 )
 def test_conversation_read_doors_document_the_caller_scope_refusal(
     spec: dict, api_routes: list[RouteMetadata], path: str
 ) -> None:
-    # Both read doors answer 403 to an authenticated-but-unauthorized reader rather
-    # than leaking a record, and document that status.
+    # Every read door answers 403 to an authenticated-but-unauthorized reader rather
+    # than leaking a record, and documents that status.
     (meta,) = [m for m in api_routes if m.path == path and "GET" in m.methods]
     assert 403 in meta.error_statuses
     assert "403" in spec["paths"][path]["get"]["responses"]
+
+
+def test_the_transcript_door_documents_no_403(spec: dict, api_routes: list[RouteMetadata]) -> None:
+    # The transcript is the one read door that must not tell "yours, refused" from "no such
+    # thread": a 403 on a guessable thread id would answer whether a given address has ever
+    # talked to a given route. Every refusal it makes is the uniform 404.
+    path = "/api/conversations/{route_name}/transcript"
+    (meta,) = [m for m in api_routes if m.path == path and "GET" in m.methods]
+    assert 403 not in meta.error_statuses
+    assert 404 in meta.error_statuses
+    assert "403" not in spec["paths"][path]["get"]["responses"]
+
+
+def test_the_thread_read_doors_document_their_query_parameters(spec: dict) -> None:
+    # Both doors parse their query at the HTTP edge, so nothing else tells a generated
+    # client what to send. Published with no parameters at all, a client calls the
+    # transcript door without the REQUIRED thread_id and is answered 400 every time.
+    threads = spec["paths"]["/api/conversations/{route_name}/threads"]["get"]
+    assert "requestBody" not in threads
+    params = {p["name"]: p for p in threads["parameters"]}
+    assert params["route_name"]["in"] == "path"
+    assert {name for name, p in params.items() if p["in"] == "query"} == {"page", "pageSize"}
+    assert params["page"]["required"] is False
+    assert params["pageSize"]["required"] is False
+
+    transcript = spec["paths"]["/api/conversations/{route_name}/transcript"]["get"]
+    assert "requestBody" not in transcript
+    read = {p["name"]: p for p in transcript["parameters"]}
+    assert {name for name, p in read.items() if p["in"] == "query"} == {"thread_id", "page", "pageSize", "order"}
+    # The one required query value: a client generated without it cannot call the door.
+    assert read["thread_id"]["required"] is True
+    assert read["thread_id"]["schema"]["type"] == "string"
+    assert read["order"]["required"] is False
+    assert read["order"]["schema"]["enum"] == ["asc", "desc"]
 
 
 def test_runs_export_documents_both_csv_and_json_download(spec: dict) -> None:

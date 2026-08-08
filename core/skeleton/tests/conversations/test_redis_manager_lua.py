@@ -86,6 +86,57 @@ async def test_delete_removes_the_row_and_unindexes_it_atomically(manager, lua_r
     assert await manager.delete_route("support") is False
 
 
+async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_count(manager, lua_redis):
+    # The refusal is only a guard if the count it decides on cannot move before the write
+    # it guards: reading the count a round trip earlier lets a first message open a thread
+    # in the window, and the flip lands on top of it. The script reads the stored door and
+    # the thread count in the SAME step as the SET.
+    from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefused
+
+    settings = ConversationsSettings()
+    await manager.put_route(_api_route())
+    await lua_redis.zadd(settings.route_threads_key("support"), {"bridge:support:alice/user-1": 1.0})
+
+    with pytest.raises(DoorFlipRefused) as refused:
+        await manager.put_route(
+            _api_route(door="channel", channel="twilio", our_identity="+15550001111", callback_url=None)
+        )
+
+    assert refused.value.from_door == "api"
+    assert refused.value.to_door == "channel"
+    assert refused.value.held == 1
+    # Nothing was written: the row still routes exactly as it did.
+    stored = await manager.get_route("support")
+    assert stored is not None
+    assert stored.door == "api"
+
+
+async def test_the_door_of_a_route_holding_no_thread_is_still_written(manager, lua_redis):
+    # The refusal is about orphaning threads, not about the door being immutable.
+    await manager.put_route(_api_route())
+
+    assert (
+        await manager.put_route(
+            _api_route(door="channel", channel="twilio", our_identity="+15550001111", callback_url=None)
+        )
+        is False
+    )
+    stored = await manager.get_route("support")
+    assert stored is not None
+    assert stored.door == "channel"
+
+
+async def test_a_route_holding_threads_is_still_editable_on_every_other_field(manager, lua_redis):
+    settings = ConversationsSettings()
+    await manager.put_route(_api_route())
+    await lua_redis.zadd(settings.route_threads_key("support"), {"bridge:support:alice/user-1": 1.0})
+
+    assert await manager.put_route(_api_route(target_name="other")) is False
+    stored = await manager.get_route("support")
+    assert stored is not None
+    assert stored.target_name == "other"
+
+
 async def test_list_reads_the_index_and_the_rows_in_lockstep(manager, lua_redis):
     await manager.put_route(_api_route("a"))
     await manager.put_route(_api_route("b"))

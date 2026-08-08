@@ -260,7 +260,9 @@ _GATED_FEATURES: list[GatedFeature] = [
         label="Rate limiting",
         configured=lambda: bool(RateLimitSettings().redis.redis_url),
         enabling_var=lambda: "TAI_RATE_LIMIT_REDIS_URL",
-        off_behavior="Pass-through — the three public-door families are unthrottled; one boot WARNING.",
+        off_behavior=(
+            "Pass-through — every public door (any route registered authed=False) is unthrottled; one boot WARNING."
+        ),
     ),
     GatedFeature(
         kind="marketplace_store",

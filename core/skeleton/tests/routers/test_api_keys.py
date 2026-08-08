@@ -1169,6 +1169,11 @@ async def test_probe_request_app_is_route_bearing(monkeypatch: pytest.MonkeyPatc
     catalog_paths = {entry["path"] for entry in catalog}
     assert {"/api/auth/routes", "/api/auth/public-routes", "/api/hooks/verifiers"} <= catalog_paths
     assert "/app" not in catalog_paths
+    # The transport route the same build MOUNTED is in the table, so it is catalogued —
+    # but it joins no metadata: no grant can open a mount, so the Roles page must not be
+    # offered tags or an action-class for it.
+    transport = next(entry for entry in catalog if entry["path"] == "/mcp")
+    assert (transport["tags"], transport["summary"], transport["action"]) == ([], "", None)
 
 
 # -- public route pins (/api/auth/public-routes) -----------------------------

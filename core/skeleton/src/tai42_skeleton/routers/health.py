@@ -85,8 +85,11 @@ def _wired_connections() -> list[tuple[str, type, ClientSettings]]:
     if inter.redis.redis_url:
         conns.append(("interactions", RedisClient, inter.redis))
 
+    # The limiter's coverage is derived from the route registry, so the readiness row
+    # rides the ENABLE posture alone: a configured counter store is a wired dependency
+    # unless every door family is switched off.
     rl = rate_limit_settings()
-    if (rl.webhook_enabled or rl.interactions_callback_enabled or rl.trigger_enabled) and rl.redis.redis_url:
+    if rl.any_family_enabled() and rl.redis.redis_url:
         conns.append(("rate_limit", RedisClient, rl.redis))
 
     hooks = HooksSettings()

@@ -33,6 +33,7 @@ jobs:
     outputs:
       core: ${{ steps.assemble.outputs.core }}
       check_matrix: ${{ steps.assemble.outputs.check_matrix }}
+      frontend_matrix: ${{ steps.assemble.outputs.frontend_matrix }}
       run_e2e: ${{ steps.assemble.outputs.run_e2e }}
       e2e_backends: ${{ steps.assemble.outputs.e2e_backends }}
       run_monitoring: ${{ steps.assemble.outputs.run_monitoring }}
@@ -56,6 +57,7 @@ jobs:
             channel-slack: [plugins/channel-slack/**]
             channel-telegram: [plugins/channel-telegram/**]
             channel-twilio: [plugins/channel-twilio/**]
+            channel-web: [plugins/channel-web/**]
             channel-whatsapp: [plugins/channel-whatsapp/**]
             config-k8s: [plugins/config-k8s/**]
             connector-atlassian: [plugins/connector-atlassian/**]
@@ -110,6 +112,7 @@ jobs:
           channel-slack|plugins/channel-slack|tai42-channel-slack|tai42_channel_slack||arq|cov
           channel-telegram|plugins/channel-telegram|tai42-channel-telegram|tai42_channel_telegram||arq|cov
           channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov
+          channel-web|plugins/channel-web|tai42-channel-web|tai42_channel_web||arq|cov
           channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
           config-k8s|plugins/config-k8s|tai42-config-k8s|tai42_config_k8s||arq|cov
           connector-atlassian|plugins/connector-atlassian|tai42-connector-atlassian|tai42_connector/atlassian||arq|cov
@@ -153,6 +156,23 @@ jobs:
           else
             backends='[]'
           fi
+          # Members carrying a self-contained pnpm toolchain, gated on the same
+          # per-member booleans as the python matrix.
+          # frontend table: name|dir|dist — dist is the committed bundle the
+          # freshness check diffs after a rebuild.
+          read -r -d '' FRONTEND <<'EOF' || true
+          accounts-postgres|plugins/accounts-postgres|src/tai42_accounts_postgres/studio
+          channel-web|plugins/channel-web|src/tai42_channel_web/public
+          EOF
+          frontends='[]'
+          while IFS='|' read -r name dir dist; do
+            [ -n "$name" ] || continue
+            changed=$(printf '%s' "$CHANGES_JSON" | jq -r --arg n "$name" '.[$n] // "false"')
+            if [ "$CORE" = "true" ] || [ "$changed" = "true" ]; then
+              frontends=$(jq -c --arg dir "$dir" --arg dist "$dist" \
+                '. + [{dir:$dir, dist:$dist}]' <<<"$frontends")
+            fi
+          done <<<"$FRONTEND"
           # The monitoring profile runs when its own paths (monitoring-langfuse,
           # core, or e2e) changed; the firefox+webkit browser widening runs when
           # the ui suite (e2e/ui) changed. A manual dispatch or the weekly schedule
@@ -167,6 +187,7 @@ jobs:
           fi
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
           echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
+          echo "frontend_matrix=$(jq -c '{include: .}' <<<"$frontends")" >> "$GITHUB_OUTPUT"
           echo "run_e2e=$run_e2e" >> "$GITHUB_OUTPUT"
           echo "e2e_backends=$backends" >> "$GITHUB_OUTPUT"
           echo "run_monitoring=$run_monitoring" >> "$GITHUB_OUTPUT"
@@ -238,10 +259,15 @@ jobs:
             exit 1
           }
 
-  accounts-postgres-studio:
+  # Frontend gate for members with their own pnpm workspace. The bundle is
+  # committed, so the rebuild-then-diff step is what keeps it from going stale.
+  plugin-frontend:
     needs: changes
-    if: ${{ needs.changes.outputs.core == 'true' || contains(fromJSON(needs.changes.outputs.check_matrix).include.*.package, 'tai42-accounts-postgres') }}
+    if: ${{ fromJSON(needs.changes.outputs.frontend_matrix).include[0] != null }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.frontend_matrix) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
@@ -251,25 +277,25 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: plugins/accounts-postgres/pnpm-lock.yaml
+          cache-dependency-path: ${{ matrix.dir }}/pnpm-lock.yaml
       - name: Install deps
-        working-directory: plugins/accounts-postgres
+        working-directory: ${{ matrix.dir }}
         run: pnpm install --frozen-lockfile
       - name: Typecheck
-        working-directory: plugins/accounts-postgres
+        working-directory: ${{ matrix.dir }}
         run: pnpm typecheck
       - name: Format check
-        working-directory: plugins/accounts-postgres
+        working-directory: ${{ matrix.dir }}
         run: pnpm run format:check
       - name: Test
-        working-directory: plugins/accounts-postgres
+        working-directory: ${{ matrix.dir }}
         run: pnpm test
-      - name: Build Studio bundle
-        working-directory: plugins/accounts-postgres
+      - name: Build bundle
+        working-directory: ${{ matrix.dir }}
         run: pnpm run build
       - name: Dist freshness
-        working-directory: plugins/accounts-postgres
-        run: git diff --exit-code src/tai42_accounts_postgres/studio/
+        working-directory: ${{ matrix.dir }}
+        run: git diff --exit-code ${{ matrix.dist }}/
 
   fleet:
     runs-on: ubuntu-latest
@@ -611,7 +637,7 @@ jobs:
   # Single required check. Fails if any needed job failed or was cancelled;
   # skipped members do not fail it.
   ci-ok:
-    needs: [changes, check, accounts-postgres-studio, fleet, e2e, ui-e2e]
+    needs: [changes, check, plugin-frontend, fleet, e2e, ui-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:

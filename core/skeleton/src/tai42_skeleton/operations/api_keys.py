@@ -309,7 +309,10 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
     from tai42_skeleton.app.route_registry import load_all_routes
 
     mappings = await management.get_all_route_mappings()
-    all_meta = load_all_routes()
+    # MOUNTED surfaces (the MCP transports, the sub-MCP mount) are dropped before the
+    # join: they carry no tags and no grant can ever open them, so they join nothing and
+    # must not turn the ``registered_paths`` drift check against their own live route.
+    all_meta = [meta for meta in load_all_routes() if not meta.mounted]
     meta_by_key = {(meta.path, frozenset(m for m in meta.methods if m != "HEAD")): meta for meta in all_meta}
     registered_paths = {meta.path for meta in all_meta}
     entries: list[dict[str, Any]] = []

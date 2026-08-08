@@ -185,8 +185,8 @@ def _bind_public_check(monkeypatch: pytest.MonkeyPatch, routes: list, prefixes=(
     )
 
 
-def _meta(path: str, methods: tuple[str, ...], authed: bool):
-    return SimpleNamespace(path=path, methods=methods, authed=authed)
+def _meta(path: str, methods: tuple[str, ...], authed: bool, mounted: bool = False):
+    return SimpleNamespace(path=path, methods=methods, authed=authed, mounted=mounted)
 
 
 async def test_check_always_public_routes_raises_on_authed_offender(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,6 +285,19 @@ async def test_spa_check_fails_on_authed_route_invisible_to_derivation(monkeypat
     _bind_spa_check(monkeypatch, [_meta("/secretpage", ("GET",), True)], derived=set())
     with pytest.raises(RuntimeError, match="/secretpage"):
         await check_spa_shell_public()
+
+
+async def test_spa_check_excludes_mounted_transport_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A MOUNTED surface is authed, templated and non-/api — the exact shape the audit
+    # refuses as invisible-to-the-derivation — but it is not the audit's subject: its mount
+    # matches first and answers behind its own credential gate, so the shell tier can never
+    # reach it. Refusing it here would halt every boot that mounts the sub-MCP router.
+    _bind_spa_check(
+        monkeypatch,
+        [_meta("/app/{path:path}", ("GET",), True, mounted=True), _meta("/sse", ("GET",), True, mounted=True)],
+        derived=set(),
+    )
+    await check_spa_shell_public()  # no raise
 
 
 async def test_spa_check_excludes_api_and_mcp_routes(monkeypatch: pytest.MonkeyPatch) -> None:

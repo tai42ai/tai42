@@ -1,0 +1,501 @@
+/*
+ * The chat page's own paint. Every COLOUR is a design-system token (`--tai-*`),
+ * so light and dark come from `tokens.css` alone and this sheet never writes a
+ * colour of its own; spacing, type and radii take tokens wherever the scale has a
+ * step, and the raw lengths left here are the geometry it does not cover (an 8 px
+ * light, a 46 rem reading column, the composer's 160 px growth cap).
+ *
+ * This bundle owns the WHOLE document — it is a standalone page, not a fragment
+ * injected into a host — so it carries the reset the shell would otherwise
+ * provide. That reset sits in the `base` layer the design system declares, which
+ * sorts before `tai-components`; the page's own rules stay UNLAYERED so they sort
+ * after every layer and can position a design-system surface without fighting it.
+ *
+ * Own class prefix `tcw-` throughout: `tai-*` is the design system's namespace and
+ * a page may consume those classes but never define one.
+ */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    /* The visual viewport drives the page height (see `useViewportFit`); the
+       document itself must not scroll — only the transcript does. */
+    height: 100%;
+    overflow: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--tai-color-bg);
+    color: var(--tai-color-text);
+    font-family: var(--tai-font-sans);
+    font-size: var(--tai-text-md);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* -- Frame ----------------------------------------------------------------- */
+
+.tcw-app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* `--tcw-vh` / `--tcw-vv-top` are written from `visualViewport` where the
+     browser has it; `100dvh` is the fallback for one that does not. */
+  height: var(--tcw-vh, 100dvh);
+  transform: translateY(var(--tcw-vv-top, 0px));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tcw-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-3) var(--tai-space-4);
+  padding-top: max(var(--tai-space-3), env(safe-area-inset-top));
+  border-bottom: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface);
+}
+
+.tcw-header-name {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-2);
+  min-width: 0;
+}
+
+.tcw-title {
+  margin: 0;
+  font-size: var(--tai-text-lg);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--tai-color-heading);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The connection light: muted while detached, accent while the stream is live. */
+.tcw-light {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--tai-radius-full);
+  background: var(--tai-color-border-strong);
+  transition: background var(--tai-motion-fast) ease;
+}
+
+.tcw-light--on {
+  background: var(--tai-color-ok-fill);
+}
+
+/* -- Transcript ------------------------------------------------------------ */
+
+.tcw-transcript-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.tcw-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--tai-space-4) var(--tai-space-4) var(--tai-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-1);
+  scrollbar-gutter: stable;
+}
+
+.tcw-transcript:focus-visible {
+  outline: 2px solid var(--tai-color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* One readable column, centred on a wide screen. */
+.tcw-group,
+.tcw-day,
+.tcw-row {
+  width: 100%;
+  max-width: 46rem;
+  margin-inline: auto;
+}
+
+.tcw-centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--tai-space-6) var(--tai-space-4);
+}
+
+.tcw-centered--grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.tcw-day {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-3);
+  margin: var(--tai-space-4) auto var(--tai-space-2);
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.tcw-day::before,
+.tcw-day::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--tai-color-border);
+}
+
+.tcw-time {
+  margin: var(--tai-space-3) 0 var(--tai-space-1);
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-xs);
+}
+
+.tcw-time--in {
+  text-align: right;
+}
+
+/* -- Bubbles --------------------------------------------------------------- */
+
+.tcw-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--tai-space-1);
+  animation: tcw-rise var(--tai-motion-base) ease-out;
+}
+
+.tcw-row--in {
+  align-items: flex-end;
+}
+
+.tcw-row--continued {
+  margin-top: 2px;
+}
+
+.tcw-row--start {
+  margin-top: var(--tai-space-2);
+}
+
+.tcw-bubble {
+  position: relative;
+  max-width: min(85%, 40rem);
+  padding: var(--tai-space-2) var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  background: var(--tai-color-surface);
+  border: 1px solid var(--tai-color-border);
+  color: var(--tai-color-text);
+}
+
+.tcw-row--in .tcw-bubble {
+  background: var(--tai-color-accent-tint);
+  border-color: transparent;
+  color: var(--tai-color-accent-on-tint);
+}
+
+.tcw-row--start.tcw-row--out .tcw-bubble {
+  border-start-start-radius: var(--tai-radius-sm);
+}
+
+.tcw-row--start.tcw-row--in .tcw-bubble {
+  border-start-end-radius: var(--tai-radius-sm);
+}
+
+.tcw-bubble--failed {
+  border-color: var(--tai-color-err-text);
+}
+
+/* A visitor's own text: plain, wrapped, with their line breaks kept. */
+.tcw-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tcw-prose {
+  overflow-wrap: anywhere;
+}
+
+.tcw-prose > *:first-child {
+  margin-top: 0;
+}
+
+.tcw-prose > *:last-child {
+  margin-bottom: 0;
+}
+
+.tcw-status {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+  color: var(--tai-color-text-muted);
+}
+
+.tcw-tick {
+  width: 12px;
+  height: 12px;
+}
+
+.tcw-send-error {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-2);
+  font-size: var(--tai-text-sm);
+  color: var(--tai-color-err-text);
+}
+
+/* -- Typing ---------------------------------------------------------------- */
+
+.tcw-bubble--typing {
+  padding: var(--tai-space-3);
+}
+
+.tcw-dots {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.tcw-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--tai-radius-full);
+  background: var(--tai-color-text-muted);
+  animation: tcw-blink 1.2s infinite ease-in-out;
+}
+
+.tcw-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.tcw-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes tcw-blink {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+@keyframes tcw-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* -- Questions ------------------------------------------------------------- */
+
+.tcw-question {
+  max-width: min(95%, 40rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  border: 1px solid var(--tai-color-border-strong);
+  background: var(--tai-color-surface-raised);
+  box-shadow: var(--tai-shadow-lift);
+}
+
+/* Focused only when a settling card takes focus off its own vanishing controls,
+   so the ring is on `:focus` rather than `:focus-visible`. */
+.tcw-question:focus {
+  outline: 2px solid var(--tai-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.tcw-question-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--tai-space-3);
+}
+
+.tcw-question-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--tai-space-2);
+}
+
+.tcw-question-actions .tai-input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.tcw-countdown {
+  margin: 0;
+  color: var(--tai-color-warn-text);
+  font-size: var(--tai-text-sm);
+}
+
+.tcw-question-error {
+  margin: 0;
+  color: var(--tai-color-err-text);
+  font-size: var(--tai-text-sm);
+}
+
+/* -- Floating affordances -------------------------------------------------- */
+
+/* Clicks fall through the wrapper to the transcript behind it; only the button
+   itself is a target. */
+.tcw-jump-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--tai-space-3);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: var(--tai-z-sticky);
+}
+
+.tcw-jump {
+  pointer-events: auto;
+  box-shadow: var(--tai-shadow-lift);
+}
+
+.tcw-pill {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-2);
+  margin: 0 auto var(--tai-space-2);
+  padding: var(--tai-space-1) var(--tai-space-3);
+  border-radius: var(--tai-radius-full);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface-raised);
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+}
+
+.tcw-pill--warn {
+  border-color: var(--tai-color-warn-text);
+  color: var(--tai-color-warn-text);
+}
+
+.tcw-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--tai-space-3);
+  margin: 0;
+  padding: var(--tai-space-2) var(--tai-space-4);
+  background: var(--tai-color-warn-tint);
+  color: var(--tai-color-warn-text);
+  font-size: var(--tai-text-sm);
+}
+
+.tcw-banner-action {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* -- Composer -------------------------------------------------------------- */
+
+.tcw-composer {
+  flex: none;
+  display: flex;
+  /* The remaining-characters count wraps onto its own row under the field. */
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--tai-space-2);
+  padding: var(--tai-space-3) var(--tai-space-4);
+  padding-bottom: max(var(--tai-space-3), env(safe-area-inset-bottom));
+  border-top: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface);
+}
+
+.tcw-count {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: right;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+}
+
+/* At the cap the field stops taking characters, so the count says so in the same
+   warn colour the question card's countdown uses. */
+.tcw-count--full {
+  color: var(--tai-color-warn-text);
+}
+
+.tcw-composer-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;
+  resize: none;
+  /* 16px keeps iOS Safari from zooming the page when the field takes focus. */
+  font-size: 1rem;
+}
+
+.tcw-send {
+  flex: none;
+  width: var(--tai-control-height);
+  padding: 0;
+  justify-content: center;
+}
+
+@media (pointer: coarse) {
+  .tcw-send {
+    width: var(--tai-control-height-coarse);
+  }
+}
+
+/* -- Motion ---------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .tcw-row {
+    animation: none;
+  }
+
+  .tcw-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  .tcw-light {
+    transition: none;
+  }
+}

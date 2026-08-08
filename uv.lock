@@ -19,6 +19,7 @@ members = [
     "tai42-channel-slack",
     "tai42-channel-telegram",
     "tai42-channel-twilio",
+    "tai42-channel-web",
     "tai42-channel-whatsapp",
     "tai42-config-k8s",
     "tai42-connector-atlassian",
@@ -5255,6 +5256,49 @@ dev = [
 ]
 
 [[package]]
+name = "tai42-channel-web"
+version = "0.1.0"
+source = { editable = "plugins/channel-web" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "starlette" },
+    { name = "tai42-contract" },
+    { name = "tai42-kit", extra = ["redis"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pyyaml" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "pydantic", specifier = ">=2.12" },
+    { name = "pydantic-settings", specifier = ">=2.11" },
+    { name = "starlette", specifier = ">=0.40" },
+    { name = "tai42-contract", editable = "core/contract" },
+    { name = "tai42-kit", extras = ["redis"], editable = "core/kit" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyright", specifier = ">=1.1.389" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=1.3" },
+    { name = "pytest-cov", specifier = ">=5" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
 name = "tai42-channel-whatsapp"
 version = "0.4.1"
 source = { editable = "plugins/channel-whatsapp" }
@@ -5491,6 +5535,7 @@ dependencies = [
     { name = "tai42-channel-slack" },
     { name = "tai42-channel-telegram" },
     { name = "tai42-channel-twilio" },
+    { name = "tai42-channel-web" },
     { name = "tai42-channel-whatsapp" },
     { name = "tai42-config-k8s", extra = ["k8s"] },
     { name = "tai42-connector-atlassian" },
@@ -5549,6 +5594,7 @@ requires-dist = [
     { name = "tai42-channel-slack", editable = "plugins/channel-slack" },
     { name = "tai42-channel-telegram", editable = "plugins/channel-telegram" },
     { name = "tai42-channel-twilio", editable = "plugins/channel-twilio" },
+    { name = "tai42-channel-web", editable = "plugins/channel-web" },
     { name = "tai42-channel-whatsapp", editable = "plugins/channel-whatsapp" },
     { name = "tai42-config-k8s", extras = ["k8s"], editable = "plugins/config-k8s" },
     { name = "tai42-connector-atlassian", editable = "plugins/connector-atlassian" },

@@ -22,6 +22,7 @@ import pytest
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.webchat import SESSION_COOKIE as _WEB_SESSION_COOKIE
 
 pytestmark = pytest.mark.backendless
 
@@ -33,6 +34,16 @@ _MARKETPLACE_CODE = "marketplace-not-configured"
 _TOOL_META_CODE = "tool-meta-not-configured"
 _CONNECTORS_CODE = "connectors-not-configured"
 _VERSIONING_CODE = "versioning-not-configured"
+# The web chat plugin carries its OWN store gate, so its refusal code is the plugin's
+# (``tai42_channel_web.routes``), not a skeleton ``<feature>-not-configured``.
+_WEB_STORE_OFF_CODE = "web_transcript_store_off"
+_WEB_PAGE_PATH = "/api/channels/web/chat/e2e-off-site"
+# The page door answers a browser, so it carries that code in a meta tag instead of a
+# JSON field (``tai42_channel_web.page.REFUSAL_CODE_META``).
+_WEB_REFUSAL_CODE_META = f'<meta name="tai42-refusal-code" content="{_WEB_STORE_OFF_CODE}">'
+# The prefix every bundle link in the served SHELL carries — absent from every refusal
+# page, which links nothing at all.
+_WEB_ASSET_URL_PREFIX = "/api/channels/web/assets/"
 
 # The gated features that render a ``state="off"`` row in GET /api/system/kinds
 # when unconfigured. NOTE the marketplace row's kind is ``marketplace_store`` (the
@@ -206,6 +217,43 @@ async def test_sse_stream_refuses_501_before_body(off_stack: TaiStack) -> None:
     assert resp.status_code == 501, resp.text
     body = resp.json()
     assert body.get("code") == _INTERACTIONS_CODE, resp.text
+
+
+async def test_web_chat_doors_refuse_501_when_the_transcript_store_is_off(off_stack: TaiStack) -> None:
+    # The web channel plugin carries its own store, and without one there is nowhere to
+    # register a visitor session — so every door refuses up front with the code the page
+    # recognises and stops reconnecting on. The asset door is the one exception: static
+    # bundle bytes need no store.
+    #
+    # The visitor-facing PAGE door is reached by navigating to it, so it refuses with an
+    # HTML page rather than the API doors' JSON envelope; the same machine-readable code
+    # rides a meta tag. It is asserted first, and separately, for that reason.
+    page = await _raw(off_stack, "GET", _WEB_PAGE_PATH)
+    assert page.status_code == 501, page.text
+    assert page.headers["content-type"].startswith("text/html"), page.headers["content-type"]
+    assert _WEB_REFUSAL_CODE_META in page.text, page.text[:800]
+    # And it is the refusal page, not the chat shell: serving the shell would boot a chat
+    # that can never open a session, so neither the identity-stamped root the bundle reads
+    # nor any link to the bundle may appear. A door that regressed to a 200 shell fails on
+    # the status above; one that kept the status and served the shell fails here.
+    assert "data-identity=" not in page.text, page.text[:800]
+    assert _WEB_ASSET_URL_PREFIX not in page.text, page.text[:800]
+    # A refused door hands back no session either: the page is the only minter, and it
+    # cannot mint one without the registration store.
+    assert _WEB_SESSION_COOKIE not in page.cookies
+
+    # The API doors the page's script calls answer the JSON envelope carrying the code.
+    for method, path in (
+        ("POST", "/api/channels/web/messages"),
+        ("GET", "/api/channels/web/stream?identity=e2e-off-site"),
+        ("POST", "/api/channels/web/questions/ghost/answer"),
+        ("POST", "/api/channels/web/session/rotate"),
+    ):
+        resp = await _raw(off_stack, method, path, json={} if method == "POST" else None)
+        assert resp.status_code == 501, f"{method} {path} -> {resp.status_code}; body: {resp.text}"
+        assert resp.headers["content-type"].startswith("application/json"), resp.headers["content-type"]
+        assert resp.json().get("code") == _WEB_STORE_OFF_CODE, resp.text
+        assert _WEB_SESSION_COOKIE not in resp.cookies
 
 
 # ---- marketplace registry proxies stay store-independent -----------------

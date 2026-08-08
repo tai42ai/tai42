@@ -538,6 +538,25 @@ TWILIO_DEFAULT_RECIPIENT = "+15550000100"
 TWILIO_ALLOWED_RECIPIENTS = ("+15550000200", "+15550000300")
 TWILIO_UNLISTED_RECIPIENT = "+15559990009"
 
+# The web channel carries NO recipient policy of its own: it has no operator default and
+# no allowlist, because a web "recipient" is not an operator-chosen address but the
+# visitor's own session — a delivery names ``"<web route identity>:<visitor session id>"``
+# and the cookie holding that id is the only credential that can read or answer it.
+WEB_IDENTITY = "e2e-web-site"
+
+# Concurrent SSE streams one visitor may hold on a web stack, pinned into the profile env
+# so the stream-cap leg drives a number the harness owns rather than the plugin's default.
+WEB_MAX_STREAMS_PER_VISITOR = 4
+
+# How often ONE web question's record may be put back after a refused or failed answer
+# forward. No leg drives a refused forward, so this only has to stay clear of an accidental
+# re-answer; pinned rather than inherited so the number the suite runs on is the harness's.
+WEB_MAX_ANSWER_RESTORES = 50
+
+# Bytes read from a web POST body before the door refuses with 413, pinned for the same
+# reason: the body-cap leg reads this back instead of restating the plugin's default.
+WEB_MAX_BODY_BYTES = 65536
+
 
 # The channel seams whose real leg swaps the recording stub for the live vendor:
 # each drops its ``CHANNEL_<X>_API_BASE_URL`` (the plugin default is the real vendor
@@ -620,6 +639,33 @@ def _twilio_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
     }
 
 
+def _web_channel_env(res: StackResources) -> dict[str, str]:
+    """The web channel's env — the same on every leg: it has no vendor, so there is no
+    stub base URL to point at and no real/mock split. Its own transcript store, the
+    plain-http cookie relaxation (the harness serves the chat page over ``http``, and a
+    ``Secure`` cookie is never stored there — every visitor would get a fresh session),
+    and the limiter windows for its own public door family.
+
+    ``/api/channels/web/*`` is a rate-limited PUBLIC family whose per-IP bucket collapses
+    every harness client into one 127.0.0.1 entry, and one visitor action is several
+    requests: a page load is the shell plus each bundle file it links, the stream-cap leg
+    opens the per-visitor maximum at once, and the specs sharing one stack land in one
+    window. The stock 120/min + 30/10s are not comfortably above that, so the windows are
+    pinned high exactly as the interactions-callback family's are — the limiter stays ON,
+    and no leg's determinism rests on the operator defaults. The per-visitor stream cap, the
+    answer-restore cap and the POST body cap are pinned so their legs read them back off this
+    env instead of restating the plugin's defaults."""
+    return {
+        "CHANNEL_WEB_REDIS_URL": res.redis_url,
+        "CHANNEL_WEB_SESSION_COOKIE_SECURE": "false",
+        "CHANNEL_WEB_MAX_STREAMS_PER_VISITOR": str(WEB_MAX_STREAMS_PER_VISITOR),
+        "CHANNEL_WEB_MAX_ANSWER_RESTORES": str(WEB_MAX_ANSWER_RESTORES),
+        "CHANNEL_WEB_MAX_BODY_BYTES": str(WEB_MAX_BODY_BYTES),
+        "TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB__LIMIT": "100000",
+        "TAI_RATE_LIMIT_FAMILIES__CHANNELS_WEB__BURST": "100000",
+    }
+
+
 def _require_stub(url: str | None, medium: str) -> str:
     """A MOCK medium needs its recording-stub base URL on resources (a REAL medium
     talks to the live vendor and needs none). A mock medium missing its stub is a
@@ -642,17 +688,18 @@ def _channel_env(res: StackResources, variants: Variants) -> dict[str, str]:
     Each of telegram / slack / twilio is independently mock-or-real (``TAI_E2E_REAL``):
     a real medium drops its stub base URL (plugin default = live vendor) and reads its
     credential + test recipient from the operator template. All-mock (default) is
-    byte-for-byte today's env."""
+    byte-for-byte today's env. web has no vendor at all, so it is always real."""
     switch = _switch()
     env = _base_env(res, variants)
     env.update(_telegram_channel_env(res, real=switch.is_real("telegram")))
     env.update(_slack_channel_env(res, real=switch.is_real("slack")))
     env.update(_twilio_channel_env(res, real=switch.is_real("twilio")))
+    env.update(_web_channel_env(res))
     # Channel-loop answers forward through the interactions callback door, whose per-IP
     # rate limiter buckets all loopback traffic together. Pin its windows high so the
     # shared 127.0.0.1 bucket never trips on test volume (the limiter stays ON).
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_LIMIT"] = "100000"
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_BURST"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     return env
 
 
@@ -674,15 +721,26 @@ def _channel_public_keys(switch: HarnessSettings) -> list[str]:
 def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS, NO backend worker — the channel-plugin cross-worker loop home.
 
-    Loads all three channel plugins so one stack exercises telegram + slack + twilio:
-    each registers its channel, its signed inbound door, and (telegram) its setWebhook
-    hook. Two replicas give the deterministic act-on-A / inbound-on-B addressing the loop
-    needs; ``run_backend=False`` makes the module honestly ``backendless``, so it runs on
-    the default backend leg only. Auth off. Carries ``ask_user`` and ``notify_user`` plus
-    the interactions callback door and the notifications read router."""
+    Loads four channel plugins so one stack exercises telegram + slack + twilio + web:
+    the first three each register a channel, a signed inbound door, and (telegram) a
+    setWebhook hook; web registers its channel and its PUBLIC chat doors, whose credential
+    is the visitor's session cookie. Two replicas give the deterministic act-on-A /
+    inbound-on-B addressing the loop needs; ``run_backend=False`` makes the module honestly
+    ``backendless``, so it runs on the default backend leg only. Auth off. Carries
+    ``ask_user`` and ``notify_user`` plus the interactions callback door and the
+    notifications read router.
+
+    No conversations backend here, so web's message door (which bridges through
+    ``conversations.accept``) has nothing to accept into: the web round trip through that
+    door is the bridge suite's, and this stack carries web's ask/answer half only."""
     manifest = {
         "default_routers": "none",
-        "channel_modules": ["tai42_channel_telegram", "tai42_channel_slack", "tai42_channel_twilio"],
+        "channel_modules": [
+            "tai42_channel_telegram",
+            "tai42_channel_slack",
+            "tai42_channel_twilio",
+            "tai42_channel_web",
+        ],
         "routers_modules": [
             "tai42_skeleton.routers.health",
             "tai42_skeleton.routers.tools",
@@ -794,7 +852,7 @@ def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
 
 
 def _bridge_channel_env(res: StackResources) -> dict[str, str]:
-    """The twilio + whatsapp ``CHANNEL_*`` env for the bridge profile: per-plugin
+    """The twilio + whatsapp + web ``CHANNEL_*`` env for the bridge profile: per-plugin
     credential, a random per-stack inbound secret, the API base URL pointed at that medium's
     recording stub, the correlation store on this stack's Redis DB, and the ask_user
     recipient policy (a default twilio recipient; an allowlisted whatsapp wa_id).
@@ -802,10 +860,11 @@ def _bridge_channel_env(res: StackResources) -> dict[str, str]:
     twilio / whatsapp are independently mock-or-real (``TAI_E2E_REAL``): a real medium
     drops its stub base URL (plugin default = live vendor) and reads its credential +
     test recipient from the operator template. All-mock (default) is byte-for-byte
-    today's env."""
+    today's env. web has no vendor at all, so it is always real."""
     switch = _switch()
     env = _bridge_twilio_env(res, real=switch.is_real("twilio"))
     env.update(_bridge_whatsapp_env(res, real=switch.is_real("whatsapp")))
+    env.update(_web_channel_env(res))
     return env
 
 
@@ -814,16 +873,17 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
 
     Carries the redis conversations backend (``CONVERSATIONS_REDIS_URL``), the memory
     checkpoint provider (conversation continuity lives in the serve worker that ran the
-    turn, so a spec pins its inbound fires to one replica), the twilio + whatsapp
-    channel plugins (outbound pointed at their in-process stubs), and the ``tools_agent`` +
-    ``deep_agent`` agents on the scripted LLM stub. Access control is ON so the API door
-    resolves a caller principal and the turn runs AS a route's bound execution key; the
-    ``bridge_stack`` fixture seeds the root key + the public-channel-door route table before
-    boot."""
+    turn, so a spec pins its inbound fires to one replica), the twilio + whatsapp + web
+    channel plugins (twilio/whatsapp outbound pointed at their in-process stubs; web has no
+    vendor — its public chat page, message door and SSE stream ARE the medium), and the
+    ``tools_agent`` + ``deep_agent`` agents on the scripted LLM stub. Access control is ON so
+    the API door resolves a caller principal and the turn runs AS a route's bound execution
+    key; the ``bridge_stack`` fixture seeds the root key + the public-channel-door route
+    table before boot."""
     manifest = {
         "default_routers": "none",
         "lifecycle_modules": [variants.identity.lifecycle_module],
-        "channel_modules": ["tai42_channel_twilio", "tai42_channel_whatsapp"],
+        "channel_modules": ["tai42_channel_twilio", "tai42_channel_whatsapp", "tai42_channel_web"],
         "routers_modules": [
             *_CORE_ROUTERS,
             "tai42_skeleton.routers.conversations",
@@ -864,8 +924,8 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     env["CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR"] = str(BRIDGE_PER_ADDRESS_TURNS_PER_HOUR)
     # Loopback callbacks share one 127.0.0.1 bucket; pin the limiter windows high so test
     # volume never trips it.
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_LIMIT"] = "100000"
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_BURST"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     switch = _switch()
     # A real inbound channel (twilio/whatsapp) mints the ask_user callback into its
     # outbound over the public origin instead of replica-B loopback; empty on all-mock.
@@ -986,8 +1046,8 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
         env["TAI_BRIDGE_CALLBACK_SECRET"] = res.bridge_callback_secret
     # Loopback callbacks share one 127.0.0.1 bucket; pin the limiter windows high so the
     # webhook loop + forged rejection + reconciliation volume never trips it.
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_LIMIT"] = "100000"
-    env["TAI_RATE_LIMIT_INTERACTIONS_CALLBACK_BURST"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
+    env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     return StackConfig(
         name="payments",
         topology=Topology.REPLICAS,
@@ -1080,8 +1140,8 @@ def build_auth_stack(res: StackResources, variants: Variants) -> StackConfig:
     env.update(variants.identity.auth_provider_env())
     # Pin BOTH rate-limit windows: exercise the 10-second burst window (L=10),
     # keep the per-minute window high enough that it can never trip first.
-    env["TAI_RATE_LIMIT_WEBHOOK_BURST"] = "10"
-    env["TAI_RATE_LIMIT_WEBHOOK_LIMIT"] = "1000"
+    env["TAI_RATE_LIMIT_FAMILIES__UNIVERSAL_WEBHOOK__BURST"] = "10"
+    env["TAI_RATE_LIMIT_FAMILIES__UNIVERSAL_WEBHOOK__LIMIT"] = "1000"
     # Small recent-runs / notifications windows so the owned-key completeness pins can
     # overflow the shared window with a handful of records within the suite timeout (the
     # per-identity index/feed must still return the addressed identity's own record).
@@ -2038,7 +2098,12 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
     before any body, ``/ready`` 200 with empty checks, ``GET /api/system/kinds`` an
     ``off`` row per feature, and exactly one rate-limit boot WARNING. Auth off; no
     backend, storage, or metrics — an absent provider is itself part of the OFF
-    surface the doctrine covers."""
+    surface the doctrine covers.
+
+    The web chat plugin is loaded here for its OWN store gate: its public doors carry a
+    plugin-owned store (``CHANNEL_WEB_REDIS_URL``, falling back to the shared default)
+    that this profile sets neither of, so the whole channel is switched off and every one
+    of its doors — the visitor-facing page included — refuses 501 with its own code."""
     manifest = {
         "default_routers": "all",
         # generate_uuid gives the tool-run submit door a real tool to name (the OFF
@@ -2046,6 +2111,7 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
         # to the mounted HTTP routers the doctrine is pinned against.
         "tools": [_toolbox_tools_entry()],
         "api_tools": {"enabled": False},
+        "channel_modules": ["tai42_channel_web"],
     }
     env = _base_env(res, variants)
     # Subtract the two anchors that would resolve a feature store, leaving every

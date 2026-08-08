@@ -310,6 +310,12 @@ entries:
     package: tai42-channel-whatsapp
     module: tai42_channel_whatsapp.register
     description: Deliver ask_user questions to a human on WhatsApp via the Meta Cloud API and bridge the reply back.
+  - name: web
+    kind: channel
+    group: chat
+    package: tai42-channel-web
+    module: tai42_channel_web.register
+    description: Deliver ask_user questions to a visitor in the public chat page and bridge the reply back.
 
   # -- Accounts providers ----------------------------------------------------
   - name: accounts-postgres
@@ -360,6 +366,7 @@ packages:
   tai42-channel-slack: plugins/channel-slack
   tai42-channel-twilio: plugins/channel-twilio
   tai42-channel-whatsapp: plugins/channel-whatsapp
+  tai42-channel-web: plugins/channel-web
   tai42-identity-redis: plugins/identity-redis
   tai42-accounts-postgres: plugins/accounts-postgres
   tai42-accounts-oidc: plugins/accounts-oidc

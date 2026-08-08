@@ -154,6 +154,66 @@ def get_message(
     emit_result(ctx_obj, data)
 
 
+@app.command("threads")
+@covers(("GET", "/api/conversations/{route_name}/threads"))
+def list_threads(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    page: Annotated[int, typer.Option("--page", help="Page number, from 1.")] = 1,
+    page_size: Annotated[int, typer.Option("--page-size", help="Threads per page (capped server-side).")] = 50,
+) -> None:
+    """List a route's conversation threads, newest activity first (admin only).
+
+    Example: ``tai conversations threads support-line --page 1``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/conversations/{route_name}/threads", params={"page": page, "pageSize": page_size})
+    emit_records(
+        ctx_obj,
+        data,
+        ["thread_id", "client_address", "last_activity_at", "message_count", "last_delivery_status"],
+        items_key="items",
+    )
+
+
+@app.command("transcript")
+@covers(("GET", "/api/conversations/{route_name}/transcript"))
+def get_transcript(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:support-line:+15550001111).")],
+    page: Annotated[int, typer.Option("--page", help="Page number, from 1.")] = 1,
+    page_size: Annotated[int, typer.Option("--page-size", help="Records per page (capped server-side).")] = 50,
+    order: Annotated[str, typer.Option("--order", help="Record order: 'asc' (oldest first) or 'desc'.")] = "asc",
+) -> None:
+    """Read one thread's transcript (caller-scoped: your own threads, or any as admin;
+    channel threads are admin-only, and any thread you cannot read reads as a plain 'not
+    found').
+
+    ``--order asc`` (the default) reads oldest first; ``--order desc`` reads newest first,
+    so page 1 always holds the latest messages — the order a live tail wants. The window
+    pages that order from its own end.
+
+    The thread id rides the query string, so an api-door id — which carries a
+    percent-encoded principal — reaches the door spelled exactly as the listing showed it.
+
+    Example: ``tai conversations transcript support-line bridge:support-line:+15550001111``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(
+            f"/api/conversations/{route_name}/transcript",
+            params={"thread_id": thread_id, "page": page, "pageSize": page_size, "order": order},
+        )
+    emit_records(
+        ctx_obj,
+        data,
+        ["created_at", "message_id", "inbound_text", "answer", "answer_status", "delivery_status"],
+        items_key="items",
+    )
+
+
 @app.command("failed")
 @covers(("GET", "/api/conversations/messages/failed"))
 def list_failed(ctx: typer.Context) -> None:

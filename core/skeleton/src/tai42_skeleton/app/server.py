@@ -3,6 +3,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
+import fastmcp
 from fastmcp import FastMCP
 from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.http import StarletteWithLifespan, create_sse_app
@@ -42,6 +43,7 @@ from tai42_skeleton.app.facets import (
 from tai42_skeleton.app.http import HttpSurface
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
 from tai42_skeleton.app.sessions import ReloadRejectionMiddleware, SessionRegistry, SessionTrackingMiddleware
 from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
 from tai42_skeleton.backend.registry import BackendHolder
@@ -102,6 +104,45 @@ async def _internal_error_handler(request: Request, exc: Exception) -> Response:
     return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
 
 
+def record_streamable_http_surface(path: str, *, stateless: bool) -> None:
+    """Record the streamable-http transport endpoint as a mounted, credential-gated
+    surface, so the registry describes it instead of leaving its GETs to the Studio SPA
+    catch-all (which matches every path and would charge MCP traffic to the public root
+    family and audit it unauthenticated).
+
+    A STATELESS deployment binds no GET on the endpoint — there is no session to stream
+    notifications from — so its GETs genuinely do fall through to the catch-all and stay
+    a public door. Statelessness alone decides the method set; naming the three methods
+    the protocol uses only under-claims anything else the endpoint answers, which stays
+    the catch-all's."""
+    methods = ["POST", "DELETE"] if stateless else ["GET", "POST", "DELETE"]
+    route_registry.record_mounted(
+        path=path,
+        methods=methods,
+        name="mcp_streamable_http",
+        summary="MCP streamable-http transport endpoint",
+    )
+
+
+def record_sse_surface(sse_path: str, message_path: str) -> None:
+    """Record the SSE transport's two surfaces as mounted, credential-gated ones (see
+    :func:`record_streamable_http_surface`): the ``GET`` event stream, and the message
+    endpoint, which is a Starlette ``Mount`` and therefore serves everything BENEATH its
+    prefix — the client posts to ``<prefix>/?session_id=...`` — never the bare prefix."""
+    route_registry.record_mounted(
+        path=sse_path,
+        methods=["GET"],
+        name="mcp_sse_stream",
+        summary="MCP SSE transport event stream",
+    )
+    route_registry.record_mounted(
+        path=f"{message_path.rstrip('/')}/{{path:path}}",
+        methods=MOUNT_METHODS,
+        name="mcp_sse_messages",
+        summary="MCP SSE transport message endpoint",
+    )
+
+
 class ServingCore:
     """The per-epoch serving surface: a FRESH FastMCP server plus the feature
     collaborators registered onto it.
@@ -154,8 +195,11 @@ class ServingCore:
         self._agent_binding = AgentBinding(app)
         self._backend_holder = BackendHolder()
         self._http_surface = HttpSurface(app)
-        # The public webhook doors' flood limiter, registered here so it is always on
-        # (tunable/disable via TAI_RATE_LIMIT_*), never left to a manifest opt-in.
+        # Every PUBLIC door (any route registered authed=False, wherever it comes from) is
+        # exposed by design; its flood limiter is registered on EVERY epoch's surface here,
+        # so it is always on and never left to a manifest opt-in an operator could forget.
+        # It derives its coverage from the route registry and no-ops for every authed or
+        # unregistered path; budgets are tunable per family via TAI_RATE_LIMIT_*.
         self._http_surface.middleware(RateLimitMiddleware)
 
         # Webhook-verifier + channel registries, reset each start() so a reload
@@ -445,6 +489,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             auth=self._fast_mcp.auth,
             middleware=self._base_middleware(middleware),
         )
+        record_sse_surface(actual_path, actual_message_path)
 
         # Install the uniform-500 handler on the base app's own ServerErrorMiddleware
         # so every adapter route answers the generic {"error", "error_id"} envelope
@@ -469,6 +514,17 @@ class TaiMCP(TaiMCPLifecycleMixin):
             stateless_http=stateless_http,
             transport=transport,
         )
+        # Record what THIS build actually mounted, resolving ``path``/``stateless_http``
+        # exactly as fastmcp just did (an omitted argument falls back to its process-wide
+        # setting), so the registry names the transport paths this deployment serves and
+        # no other.
+        if transport == "sse":
+            record_sse_surface(path if path is not None else fastmcp.settings.sse_path, fastmcp.settings.message_path)
+        else:
+            record_streamable_http_surface(
+                path if path is not None else fastmcp.settings.streamable_http_path,
+                stateless=stateless_http if stateless_http is not None else fastmcp.settings.stateless_http,
+            )
 
         # Install the uniform-500 handler on the base app's own ServerErrorMiddleware
         # so every adapter route answers the generic {"error", "error_id"} envelope

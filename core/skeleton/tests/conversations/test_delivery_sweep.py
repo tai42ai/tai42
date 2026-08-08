@@ -146,6 +146,7 @@ def _record(message_id: str, answer: str) -> ConversationRecord:
         client_address="+15550002222",
         channel="twilio",
         our_identity="+15550001111",
+        inbound_text=f"ask {message_id}",
         answer_status="answered",
         answer=answer,
         created_at=now,
@@ -568,6 +569,7 @@ def _api_record(message_id: str, answer: str) -> ConversationRecord:
         client_address="alice/user-7",
         caller_principal="alice",
         callback_url=_CALLBACK_URL,
+        inbound_text=f"ask {message_id}",
         answer_status="answered",
         answer=answer,
         created_at=now,
@@ -755,8 +757,9 @@ async def test_the_periodic_loop_runs_every_recovery_pass(monkeypatch):
     async def _intake_pass() -> None:
         ran.append("intake")
 
-    async def _prune_pass(self) -> None:
+    async def _prune_pass(self, route_names, cursor=records_module.PRUNE_START):
         ran.append("prune")
+        return cursor
 
     monkeypatch.setattr(delivery_module, "sweep_stalled_deliveries", _broken_delivery_pass)
     monkeypatch.setattr(turn_module, "redrive_accepted", _intake_pass)
@@ -773,6 +776,35 @@ async def test_the_periodic_loop_runs_every_recovery_pass(monkeypatch):
 
     # Every pass runs every tick, and a failing one does not skip the rest.
     assert ran[:6] == ["delivery", "intake", "prune", "delivery", "intake", "prune"]
+
+
+async def test_the_prune_pass_is_handed_every_live_route_and_the_last_cursor(monkeypatch):
+    """The pass reclaims the thread indexes of the routes it is HANDED and no others, so a
+    wiring that passed an empty list would stay green while both indexes grew forever. The
+    cursor it returns must come back to it, or every pass restarts at the head of the same
+    index and the members behind it are never reached."""
+    handed: list[tuple[list[str], records_module.PruneCursor]] = []
+    stops = [records_module.PruneCursor("beta", 4, 9), records_module.PRUNE_START]
+
+    async def _prune_pass(self, route_names, cursor=records_module.PRUNE_START):
+        handed.append((list(route_names), cursor))
+        return stops[len(handed) - 1]
+
+    class _Routes:
+        async def list_routes(self):
+            return {"alpha": object(), "beta": object()}
+
+    monkeypatch.setattr(delivery_module, "get_conversations_manager", _Routes)
+    monkeypatch.setattr(records_module.ConversationRecordStore, "prune_expired_terminal_indexes", _prune_pass)
+    monkeypatch.setattr(delivery_module, "_prune_cursor", records_module.PRUNE_START)
+
+    await delivery_module._prune_terminal_indexes()
+    await delivery_module._prune_terminal_indexes()
+
+    assert [routes for routes, _ in handed] == [["alpha", "beta"], ["alpha", "beta"]]
+    # The second pass resumes exactly where the first stopped.
+    assert [cursor for _, cursor in handed] == [records_module.PRUNE_START, records_module.PruneCursor("beta", 4, 9)]
+    assert delivery_module._prune_cursor == records_module.PRUNE_START
 
 
 async def test_starting_the_sweep_twice_cancels_the_first_task(monkeypatch):

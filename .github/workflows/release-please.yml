@@ -53,20 +53,30 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      # The accounts-postgres studio bundle embeds the project version in its
-      # studio-manifest.json, so a version bump to that member restales the
-      # committed bundle and reds the drift check on main. Rebuild it here, but
-      # only when this release PR actually bumps that member's pyproject.
-      - name: Detect whether this release PR bumps accounts-postgres
+      # The committed frontend bundles embed the project version in their
+      # manifests, so a version bump to such a member restales its bundle and
+      # reds the drift check on main. Rebuild only the members this release PR
+      # actually bumps.
+      - name: Detect which frontend-carrying members this release PR bumps
         id: detect
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
-          if git diff --name-only origin/main...HEAD | grep -qx 'plugins/accounts-postgres/pyproject.toml'; then
-            echo "accounts-postgres pyproject is in this release PR; will rebuild its studio bundle."
+          changed=$(git diff --name-only origin/main...HEAD)
+          dirs=''
+          for dir in plugins/accounts-postgres plugins/channel-web; do
+            if grep -qx "$dir/pyproject.toml" <<<"$changed"; then
+              echo "$dir pyproject is in this release PR; will rebuild its bundle."
+              dirs="$dirs $dir"
+            else
+              echo "$dir pyproject not in this release PR; skipping its bundle rebuild."
+            fi
+          done
+          dirs=${dirs# }
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          if [ -n "$dirs" ]; then
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
           else
-            echo "accounts-postgres pyproject not in this release PR; skipping studio rebuild."
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
           fi
       # Derive first-party tai42-* version ranges (member pyproject specifiers +
@@ -87,26 +97,27 @@ jobs:
         if: steps.detect.outputs.rebuild == 'true'
         with:
           node-version: 22
-      - name: Rebuild the accounts-postgres studio bundle at the release version
+      - name: Rebuild the bumped frontend bundles at the release version
         if: steps.detect.outputs.rebuild == 'true'
-        working-directory: plugins/accounts-postgres
+        env:
+          DIRS: ${{ steps.detect.outputs.dirs }}
         run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
+          set -euo pipefail
+          for dir in $DIRS; do
+            (cd "$dir" && pnpm install --frozen-lockfile && pnpm run build)
+          done
       - name: Commit refreshed lockfile and bundle
         env:
           BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
           REBUILD: ${{ steps.detect.outputs.rebuild }}
         run: |
           set -euo pipefail
-          # Stage the range-sync edits (member pyproject.toml + tai-plugin.yml) as
-          # well as the refreshed lock, so ranges, versions, and lock land as one
+          # Stage the range-sync edits (member pyproject.toml + tai-plugin.yml) and
+          # any rebuilt bundle (both live under these roots) as well as the
+          # refreshed lock, so ranges, versions, bundles, and lock land as one
           # commit on the release PR.
           git add -- core plugins e2e
           git add -- uv.lock
-          if [ "$REBUILD" = "true" ]; then
-            git add -- plugins/accounts-postgres/src/tai42_accounts_postgres/studio
-          fi
           if git diff --cached --quiet; then
             echo "Release artifacts already in sync; nothing to commit."
             exit 0
@@ -114,7 +125,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "$REBUILD" = "true" ]; then
-            git commit -m "chore: sync ranges, uv.lock and studio bundle for release"
+            git commit -m "chore: sync ranges, uv.lock and frontend bundles for release"
           else
             git commit -m "chore: sync ranges and uv.lock for release"
           fi

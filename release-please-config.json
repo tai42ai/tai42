@@ -171,6 +171,23 @@
         }
       ]
     },
+    "plugins/channel-web": {
+      "package-name": "tai42-channel-web",
+      "component": "tai42-channel-web",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_web/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
       "component": "tai42-channel-whatsapp",

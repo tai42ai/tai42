@@ -1,0 +1,243 @@
+"""The web channel's ask/answer half, driven through the plugin's own PUBLIC doors.
+
+``ask_user(channel="web", recipient="<identity>:<visitor id>")`` blocks a tool call on
+replica A; the web channel appends the question to that pair's transcript; the visitor's
+SSE door on replica B replays it; the visitor POSTs the answer to the public answer door on
+B, which forwards it to the interactions callback (also B-served); the blocked run resumes
+on A. No vendor and no stub sit in the middle — the doors under test ARE the medium, and
+the visitor's ``tai_web_session`` cookie is their whole credential.
+
+That cookie carries a SECRET token only: the conversation address it stands for is
+registered server-side and never sent to the client, so the fail-closed negatives here are
+a missing cookie, an unregistered token, and another visitor's registered session.
+
+The web message door (the other half of a web conversation) bridges through
+``conversations.accept``, which this backendless stack carries no backend for: that round
+trip is the bridge suite's ``test_l12_web_public_chat``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import Callable
+
+import pytest
+from _support import (
+    WebChannelCase,
+    await_true,
+    cancel_and_join,
+    count_correlation_keys,
+    find_pending,
+    is_pending,
+    post_callback,
+)
+
+from tai42_e2e.stack import TaiStack
+from tai42_e2e.webchat import SESSION_COOKIE, mint_unregistered_token
+
+pytestmark = pytest.mark.backendless
+
+
+def _stream_cap(stack: TaiStack) -> int:
+    """The per-visitor concurrent-SSE cap this stack CONFIGURES, read back off its own
+    ``CHANNEL_WEB_MAX_STREAMS_PER_VISITOR`` env — so re-tuning the profile moves the leg
+    with it instead of turning it red against a number restated here.
+
+    The cap is counted per process, and a REPLICAS stack boots each port as its own
+    ``--workers 1`` master, so the streams a spec drives against one port are the streams
+    that process holds."""
+    return int(stack.config.env["CHANNEL_WEB_MAX_STREAMS_PER_VISITOR"])
+
+
+@pytest.fixture
+async def web_case(channel_stack: TaiStack) -> WebChannelCase:
+    """A fresh page-minted visitor session per spec, so no spec reads another's
+    transcript."""
+    return await WebChannelCase.open(channel_stack)
+
+
+def _ask_over_web(case: WebChannelCase, question: str, **extra: object) -> asyncio.Task:
+    """Start a blocking ``ask_user`` over the web channel on replica A, addressed at this
+    case's visitor pair — web has no operator default recipient, so the address is always
+    the visitor's own registered session."""
+
+    async def ask() -> object:
+        async with case.stack.mcp(port=case.stack.port_a) as mcp:
+            result = await mcp.call_tool(
+                "ask_user",
+                {"question": question, "channel": case.name, "recipient": case.default_recipient, **extra},
+            )
+        return result.data
+
+    return asyncio.create_task(ask())
+
+
+async def _wait_question(case: WebChannelCase, question: str) -> dict:
+    """Wait until exactly one transcript question carrying ``question`` is written."""
+    records = await await_true(
+        lambda: case.sends_matching(question),
+        deadline=8.0,
+        message=f"web: no transcript entry carrying {question!r} was written",
+    )
+    assert len(records) == 1, f"web: expected exactly one transcript entry, saw {len(records)}"
+    return records[0]
+
+
+async def test_ask_over_web_replays_on_the_stream_and_the_answer_door_resolves_it(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    stack = case.stack
+    question = uniq("web_q")
+    answer = uniq("web_a")
+
+    baseline_keys = count_correlation_keys(stack, case.correlation_prefix)
+    ask_task = _ask_over_web(case, question)
+    try:
+        record = await _wait_question(case, question)
+        # A text question is answered by interaction id through this plugin's own door, so
+        # the frame carries the id and NOT the callback ticket.
+        case.assert_tier2_shape(record)
+        await await_true(
+            lambda: count_correlation_keys(stack, case.correlation_prefix) > baseline_keys,
+            deadline=5.0,
+            message="web: delivery reserved no pending-question record",
+        )
+
+        # The visitor's own door replays it: the page sees the question through the SSE
+        # backlog, not through the store behind it.
+        replayed = await case.web.frames()
+        questions = [data for event, data in replayed if event == "chat.question"]
+        assert [data["question"] for data in questions] == [question]
+        assert questions[0]["interaction_id"] == record["interaction_id"]
+
+        response = await case.web.answer(record["interaction_id"], answer)
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["status"] == "answered"
+
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    # The blocked run woke on A with the whole web pipe — deliver, replay, answer door,
+    # callback forward — in the middle.
+    assert resolved == answer
+    assert not await is_pending(stack, stack.port_a, question)
+    assert not await is_pending(stack, stack.port_b, question)
+    # The settled question is recorded for the page too, and the reservation is gone.
+    settled = await case.web.frames()
+    assert any(event == "chat.answered" and data["answer"] == answer for event, data in settled)
+    assert count_correlation_keys(stack, case.correlation_prefix) == baseline_keys
+
+
+async def test_answer_door_fails_closed_without_the_owning_session(
+    web_case: WebChannelCase, uniq: Callable[[str], str], channel_stack: TaiStack
+) -> None:
+    case = web_case
+    stack = case.stack
+    question = uniq("web_q")
+    answer = uniq("web_a")
+
+    # A SECOND registered visitor — a real session that simply owns another conversation.
+    other = await WebChannelCase.open(channel_stack)
+    assert other.web.visitor_id != case.web.visitor_id
+
+    ask_task = _ask_over_web(case, question)
+    try:
+        record = await _wait_question(case, question)
+        # Presence proof BEFORE the absence asserts: the question is pending on B.
+        await find_pending(stack, stack.port_b, question)
+        interaction_id = record["interaction_id"]
+
+        # No cookie at all: the door cannot derive an address, so it refuses with the code
+        # the page acts on (it reloads the chat URL to be minted a session).
+        no_session = await case.web.answer(interaction_id, answer, cookies={})
+        assert no_session.status_code == 401, no_session.text
+        assert no_session.json()["code"] == "session_missing"
+
+        # A well-formed token that was never REGISTERED: it passes the cookie's format gate
+        # and still resolves to no visitor, so it is the same "no session" refusal — it
+        # never becomes a fresh address of its own.
+        invented = await case.web.answer(interaction_id, answer, cookies={SESSION_COOKIE: mint_unregistered_token()})
+        assert invented.status_code == 401, invented.text
+        assert invented.json()["code"] == "session_missing"
+
+        # Another visitor's REGISTERED session: the question exists but is not this
+        # conversation's, and is reported as not found — never as "exists, but not yours".
+        foreign = await case.web.answer(interaction_id, answer, cookies=other.web.cookies)
+        assert foreign.status_code == 404, foreign.text
+
+        # A non-scalar answer is refused before the record is ever claimed: a web question
+        # is text / confirm / select, so its answer is one scalar.
+        non_scalar = await case.web.answer(interaction_id, {"answer": answer})
+        assert non_scalar.status_code == 422, non_scalar.text
+
+        assert await is_pending(stack, stack.port_a, question)
+        assert not ask_task.done()
+
+        # The owning session then resolves it — the success is the ordering sentinel.
+        good = await case.web.answer(interaction_id, answer)
+        assert good.status_code == 200, good.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    assert resolved == answer
+    # The refused answers appended nothing: still exactly one question in the transcript.
+    assert len(case.sends_matching(question)) == 1
+
+
+async def test_external_question_carries_the_ticket_and_a_late_web_answer_is_409(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    stack = case.stack
+    question = uniq("web_ext_q")
+    external_answer = uniq("web_ext_a")
+    late_answer = uniq("web_late_a")
+
+    # No ``link``: the channel owns delivery for every format, and for ``external`` it is
+    # the transcript frame's own ``callback_url`` the widget opens.
+    ask_task = _ask_over_web(case, question, answer_format="external")
+    try:
+        record = await _wait_question(case, question)
+        # ``external`` is the ONE format whose widget opens the ticket itself, so it is the
+        # one format the frame carries it for — and it resolves on replica B, the worker
+        # that never asked.
+        callback_url = case.tier1_callback_url(record)
+        assert callback_url.startswith(f"http://{stack.host}:{stack.port_b}")
+
+        # The visitor follows the link and answers OUT of band; the blocked run wakes.
+        forwarded = await post_callback(callback_url, json.dumps({"answer": external_answer}).encode())
+        assert forwarded.status_code == 200, forwarded.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+    # An external answer resolves as the callback door's own payload, not a bare string.
+    assert external_answer in json.dumps(resolved)
+
+    # The plugin's own pending record was never claimed, so the page can still POST an
+    # answer for it — the interactions door recorded SOMEONE ELSE's, so the door reports
+    # 409 and writes no ``chat.answered`` frame that would show a value never recorded.
+    late = await case.web.answer(record["interaction_id"], late_answer)
+    assert late.status_code == 409, late.text
+    replayed = await case.web.frames()
+    assert not any(event == "chat.answered" and data["answer"] == late_answer for event, data in replayed)
+
+
+async def test_stream_door_refuses_over_the_per_visitor_cap(web_case: WebChannelCase) -> None:
+    case = web_case
+    cap = _stream_cap(case.stack)
+
+    async with contextlib.AsyncExitStack() as held:
+        for _ in range(cap):
+            open_stream = await held.enter_async_context(case.web.hold_stream())
+            assert open_stream.status_code == 200, open_stream.text
+        # Each open stream pins a dedicated Redis connection, so the door refuses the next
+        # one outright rather than sending SSE headers it cannot serve. The refusal names
+        # WHICH ceiling it hit: this session's, not the process-wide total's.
+        async with case.web.hold_stream() as refused:
+            assert refused.status_code == 503, refused.text
+            assert "too many open chat streams for this session" in refused.json()["error"]

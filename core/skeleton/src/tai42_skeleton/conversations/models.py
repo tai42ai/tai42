@@ -71,6 +71,11 @@ class ConversationRecord(BaseModel):
     # then admin-only to read.
     caller_principal: str | None = None
 
+    # The inbound message this record answers, verbatim — nothing truncates or caps it
+    # here, so its size is whatever the door that read it admitted on its own body. Every
+    # door records one, so it is required.
+    inbound_text: str
+
     # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
     # channel-door ``silent``); set on every state carrying one.
     answer_status: AnswerStatus | None = None
@@ -129,7 +134,8 @@ class ConversationRecord(BaseModel):
         """The record as the CALLER-scoped read door returns it: the message, its outcome
         and where delivery stands. An allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
-        withheld — the turn ran as the ROUTE's key, not the caller's.
+        withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text`` is
+        published: it is the text this caller sent.
         """
         return self.model_dump(
             mode="json",
@@ -140,6 +146,7 @@ class ConversationRecord(BaseModel):
                 "thread_id",
                 "client_address",
                 "caller_principal",
+                "inbound_text",
                 "answer_status",
                 "answer",
                 "delivery_status",

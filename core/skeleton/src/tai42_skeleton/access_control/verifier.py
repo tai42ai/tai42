@@ -48,10 +48,17 @@ def registered_reserved_get_paths() -> frozenset[str]:
     skip it — deriving the set from the route registry means a newly registered route
     joins it automatically, with no static list to go stale. Templated catch-all/mount
     paths (``/{spa_path:path}``, ``/universal_webhook/{topic}``) are excluded: they are
-    not single concrete public URLs and the fallback matches concrete request paths."""
+    not single concrete public URLs and the fallback matches concrete request paths.
+    Mounted transport surfaces are excluded too — the mount serves them behind its own
+    credential gate, so the shell never answers for them."""
     paths: set[str] = set()
     for meta in load_all_routes():
         if "GET" not in meta.methods or "{" in meta.path:
+            continue
+        # A MOUNTED surface (an MCP transport, the sub-MCP mount) is served by the mount
+        # behind its own credential gate, never by the SPA shell this set guards, so it
+        # is not part of the derivation.
+        if meta.mounted:
             continue
         canonical = canonicalize_path(meta.path)
         if under_prefix(canonical, "/api") or under_prefix(canonical, "/mcp"):

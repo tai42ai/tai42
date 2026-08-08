@@ -57,10 +57,11 @@ routers_modules: []         # modules adding HTTP routers
   # when an accounts provider is installed.
   # - tai42_skeleton.routers.login
 middlewares_modules: []     # modules adding your own middlewares
-  # The app-level rate limiter that guards the two PUBLIC door families (the
-  # interactions callback and `universal_webhook/*`) is registered automatically —
-  # it is always on so an open door never ships without flood control. Tune or
-  # turn off each family via TAI_RATE_LIMIT_* env (both enabled by default).
+  # The app-level rate limiter is registered automatically — always on, so an open
+  # door never ships without flood control. Its coverage is DERIVED from the route
+  # registry: every route registered `authed=False` is throttled, a plugin's new
+  # public door included, with no list to keep in step. Tune or turn off a door
+  # family's budget via TAI_RATE_LIMIT_* env (every family enabled by default).
 extensions_modules: []      # modules registering tool extensions
   # The skeleton ships built-in tool extensions; opt one in by naming its module
   # here, then attach it to a tool via that tool's `extensions:` map (see the

@@ -118,6 +118,11 @@ def _build_index() -> None:
     # served router surface (so the index matches what is served); in a CLI/test process it
     # triggers the offline whole-package import.
     for meta in load_all_routes():
+        # A MOUNTED surface (an MCP transport, the sub-MCP mount) is not a gated handler
+        # route: it carries no feature tags and its credential gate is the mount's own,
+        # so indexing it would level-gate protocol traffic against a tag no role can hold.
+        if meta.mounted:
+            continue
         methods = _served_methods(meta)
         # Key/compile on the CANONICALIZED registered path so the index and the
         # canonicalized lookup in ``resolve_route_meta`` decide on the identical form —

@@ -162,6 +162,11 @@ async def check_spa_shell_public() -> None:
     for meta in route_registry.routes():
         if "GET" not in meta.methods:
             continue
+        # A MOUNTED surface (an MCP transport, the sub-MCP mount) is never served by the
+        # SPA shell — the mount matches first and answers behind its own credential gate
+        # — so it is outside this audit's subject: the handler GET surface.
+        if meta.mounted:
+            continue
         registered = meta.path
         # The control plane is excluded structurally: serve_spa 404s /api and /mcp, so the
         # shell tier never reaches them. The literal REGISTERED prefix decides (registered

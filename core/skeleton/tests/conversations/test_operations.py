@@ -3,32 +3,55 @@ compile + callback-secret mint), get/list (secret withheld), delete, and the slu
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from tai42_contract.conversations import ConversationRoute
 
-from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
+from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations.managers.base_conversations_manager import (
+    BaseConversationsManager,
+    DoorFlipRefused,
+)
+from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError
 
+from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
+
 
 class _DictManager(BaseConversationsManager):
     """A dict-backed routing-row store standing in for the redis manager (it is NOT the
-    in-memory 501 manager, so ``_require_backend`` admits it)."""
+    in-memory 501 manager, so ``_require_backend`` admits it).
 
-    def __init__(self) -> None:
+    It mirrors each row into the record store's redis, where the real manager keeps it:
+    the record create reads the routing row there to decide whether the route still routes,
+    and the real ``put_route`` refuses a door flip in the same step as the write, so this
+    stand-in owes the same refusal."""
+
+    def __init__(self, redis: FakeRecordRedis) -> None:
         super().__init__(ConversationsSettings())
         self.rows: dict[str, ConversationRoute] = {}
+        self._redis = redis
 
     async def put_route(self, route: ConversationRoute) -> bool:
+        existing = self.rows.get(route.route_name)
+        if existing is not None and existing.door != route.door:
+            held = await self._redis.zcard(self.settings.route_threads_key(route.route_name))
+            if held:
+                raise DoorFlipRefused(route.route_name, existing.door, route.door, held)
         created = route.route_name not in self.rows
         self.rows[route.route_name] = route
+        self._redis.seed_route(route.route_name)
         return created
 
     async def get_route(self, route_name: str) -> ConversationRoute | None:
         return self.rows.get(route_name)
 
     async def delete_route(self, route_name: str) -> bool:
+        self._redis.drop_route(route_name)
         return self.rows.pop(route_name, None) is not None
 
     async def list_routes(self) -> dict[str, ConversationRoute]:
@@ -62,11 +85,20 @@ class _FakeApp:
 
 
 @pytest.fixture
-def wired(monkeypatch):
+def record_redis(monkeypatch) -> FakeRecordRedis:
+    """The answer/record store's redis, behind the ops that reach the thread indexes."""
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    fake = FakeRecordRedis()
+    monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
+    return fake
+
+
+@pytest.fixture
+def wired(monkeypatch, record_redis):
     """Wire a dict-backed manager, a pass-role bind that returns a fingerprint, an agent
     registry holding ``triage`` and a tool registry holding ``echo-tool`` — the standard
     happy-path environment."""
-    manager = _DictManager()
+    manager = _DictManager(record_redis)
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
 
     async def _bindable(caller, execution_key):
@@ -385,6 +417,220 @@ async def test_delete_removes_then_404s(wired):
         await ops.delete_conversation_route("support")
 
 
+async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
+    # Neither thread index carries a TTL and the prune pass only walks LIVE routes, so a
+    # delete that left them behind stranded them in redis forever.
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    settings = ConversationsSettings()
+    now = time.time()
+    for index in range(2):
+        await ConversationRecordStore(settings).create_record(
+            ConversationRecord(
+                message_id=f"m{index}",
+                route_name="support",
+                door="api",
+                thread_id=f"bridge:support:alice/user-{index}",
+                client_address=f"alice/user-{index}",
+                caller_principal="alice",
+                callback_url="https://example.com/cb",
+                inbound_text="ask",
+                answer_status="answered",
+                answer="the answer",
+                delivery_status=DeliveryStatus.DELIVERED,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert settings.route_threads_key("support") in record_redis._zsets
+
+    assert (await ops.delete_conversation_route("support"))["removed"] is True
+
+    assert settings.route_threads_key("support") not in record_redis._zsets
+    for index in range(2):
+        assert settings.thread_index_key("support", f"bridge:support:alice/user-{index}") not in record_redis._zsets
+
+
+async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wired, record_redis, monkeypatch):
+    # The reclamation runs AFTER the routing row is gone, so a socket timeout, a SIGTERM or
+    # a redis blip mid-loop strands whatever it had not reached: nothing walks a name that
+    # no longer routes. A retry that answered 404 would leave those keys unnameable forever.
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+    settings = ConversationsSettings()
+    inner = record_redis.zrem
+    blown = False
+
+    async def _blows_up_once(key, *members):
+        nonlocal blown
+        if not blown:
+            blown = True
+            raise TimeoutError("redis socket timeout")
+        return await inner(key, *members)
+
+    monkeypatch.setattr(record_redis, "zrem", _blows_up_once)
+
+    with pytest.raises(TimeoutError):
+        await ops.delete_conversation_route("support")
+
+    # The routing row is already gone, so no message can open a thread on the name...
+    assert "support" not in wired.rows
+    # ...and the route's thread index survives, holding the work the run never reached.
+    assert settings.route_threads_key("support") in record_redis._zsets
+
+    result = await ops.delete_conversation_route("support")
+
+    # Not a 404: the retry re-ran the reclamation and says the row was not this call's to
+    # remove.
+    assert result == {"removed": False, "route_name": "support"}
+    assert settings.route_threads_key("support") not in record_redis._zsets
+    assert settings.thread_index_key("support", "bridge:support:alice/user-1") not in record_redis._zsets
+
+
+async def _seed_thread_on(route_name: str, *, door: str, thread_id: str) -> None:
+    """One delivered record on ``route_name``, so the route's thread index holds a thread."""
+    now = time.time()
+    await ConversationRecordStore(ConversationsSettings()).create_record(
+        ConversationRecord(
+            message_id=f"m-{thread_id}",
+            route_name=route_name,
+            door=door,  # type: ignore[arg-type]
+            thread_id=thread_id,
+            client_address="alice/user-1",
+            caller_principal="alice" if door == "api" else None,
+            callback_url="https://example.com/cb" if door == "api" else None,
+            channel="twilio" if door == "channel" else None,
+            our_identity="+15550001111" if door == "channel" else None,
+            inbound_text="ask",
+            answer_status="answered",
+            answer="the answer",
+            delivery_status=DeliveryStatus.DELIVERED,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+async def test_flipping_the_door_of_a_route_that_holds_threads_is_refused(wired, record_redis):
+    # The doors key their threads differently and the read doors authorize from that shape,
+    # so an api→channel flip 404s the owner out of a transcript they own while the
+    # single-message door still hands them the same records.
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+
+    with pytest.raises(BadRequestError, match="holds 1 thread"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="channel",
+            target_kind="agent",
+            target_name="triage",
+            execution_key="svc",
+            channel="twilio",
+            our_identity="+15550001111",
+        )
+    # Refused BEFORE any write: the row still routes exactly as it did.
+    assert wired.rows["support"].door == "api"
+
+
+async def test_a_thread_opened_during_the_edit_still_refuses_the_door_flip(wired, record_redis, monkeypatch):
+    # A count read a few awaits before the write is no guard at all: the edit resolves its
+    # target, compiles its exprs and binds its execution key in between, and a first message
+    # landing in that window opens the very thread the refusal exists to protect — after
+    # which the flip lands anyway, and the revert is refused too.
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+
+    async def _bind_while_a_first_message_lands(caller, execution_key):
+        await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+        return "fp-derived"
+
+    monkeypatch.setattr(ops, "assert_execution_key_bindable", _bind_while_a_first_message_lands)
+
+    with pytest.raises(BadRequestError, match="holds 1 thread"):
+        await ops.create_conversation_route(
+            route_name="support",
+            door="channel",
+            target_kind="agent",
+            target_name="triage",
+            execution_key="svc",
+            channel="twilio",
+            our_identity="+15550001111",
+        )
+    assert wired.rows["support"].door == "api"
+
+
+async def test_the_door_of_a_route_holding_no_thread_is_still_editable(wired, record_redis):
+    # The refusal is about orphaning threads, not about the door being immutable.
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    result = await ops.create_conversation_route(
+        route_name="support",
+        door="channel",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        channel="twilio",
+        our_identity="+15550001111",
+    )
+    assert result["created"] is False
+    assert wired.rows["support"].door == "channel"
+
+
+async def test_an_edit_that_keeps_the_door_is_untouched_by_the_guard(wired, record_redis):
+    await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+
+    result = await ops.create_conversation_route(
+        route_name="support",
+        door="api",
+        target_kind="agent",
+        target_name="triage",
+        execution_key="svc2",
+        callback_url="https://example.com/cb2",
+    )
+    assert result["created"] is False
+    assert wired.rows["support"].execution_key == "svc2"
+
+
 async def test_unclaimed_channel_identity_rejects_a_blank_identity(wired):
     # The identity guard canonicalizes before comparing; a value blank once trimmed keys no
     # route, so it is refused as a 400 rather than stored unresolvable.
@@ -399,3 +645,7 @@ async def test_operations_501_without_a_backend(monkeypatch):
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: InMemoryConversationsManager(ConversationsSettings()))
     with pytest.raises(NotSupportedError):
         await ops.list_conversation_routes()
+    with pytest.raises(NotSupportedError):
+        await ops.list_conversation_threads("support")
+    with pytest.raises(NotSupportedError):
+        await ops.get_conversation_thread("support", "bridge:support:+15550001111")

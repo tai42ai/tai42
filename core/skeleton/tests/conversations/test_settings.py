@@ -1,5 +1,5 @@
-"""The ``CONVERSATIONS_*`` settings: the four keyspace helpers, the configurable
-bounds and their defaults, and the backend-selection property."""
+"""The ``CONVERSATIONS_*`` settings: the keyspace helpers, the configurable bounds and
+their defaults, and the backend-selection property."""
 
 from __future__ import annotations
 
@@ -16,19 +16,23 @@ def test_default_bounds_match_the_design():
     assert s.delivery_grace_seconds == 3600
     assert s.inbound_dedupe_ttl_seconds >= 48 * 3600
     assert s.answer_retention_ttl_seconds == 30 * 86400
-    assert s.max_message_chars == {"twilio": 1600, "telegram": 4096, "slack": 40000, "whatsapp": 4096}
+    assert s.max_message_chars == {"twilio": 1600, "telegram": 4096, "slack": 40000, "whatsapp": 4096, "web": 8000}
 
 
 def test_keyspace_helpers_are_distinct_greppable_segments():
     s = ConversationsSettings()
-    # The FOUR keyspaces, each its own segment under the shared prefix; the provider /
-    # outbound id sits LAST so a ``:`` in it cannot bleed across segments.
+    # Each keyspace its own segment under the shared prefix; the provider / outbound id
+    # and the ``:``-bearing thread id sit LAST so nothing bleeds across a segment.
     assert s.dedupe_key("twilio", "SM:1") == "conversations:dedupe:twilio:SM:1"
     assert s.record_key("m-1") == "conversations:record:m-1"
     assert s.outbound_index_key("twilio", "OB:2") == "conversations:outbound:twilio:OB:2"
     assert s.route_key("support-line") == "conversations:route:support-line"
     assert s.route_names_key == "conversations:route_names"
     assert s.route_key_prefix == "conversations:route:"
+    assert s.thread_index_key("support-line", "bridge:support-line:+1555") == (
+        "conversations:thread:support-line:bridge:support-line:+1555"
+    )
+    assert s.route_threads_key("support-line") == "conversations:route_threads:support-line"
 
 
 def test_a_blank_provider_supplied_segment_is_refused():
@@ -46,6 +50,10 @@ def test_a_blank_provider_supplied_segment_is_refused():
             s.outbound_index_key("twilio", blank)
         with pytest.raises(ValueError, match="channel must be a non-blank string"):
             s.outbound_index_key(blank, "OB1")
+        with pytest.raises(ValueError, match="thread_id must be a non-blank string"):
+            s.thread_index_key("support-line", blank)
+        with pytest.raises(ValueError, match="route_name must be a non-blank string"):
+            s.route_threads_key(blank)
 
 
 def test_a_colon_in_the_channel_segment_is_refused():
@@ -57,6 +65,9 @@ def test_a_colon_in_the_channel_segment_is_refused():
     for builder in (s.dedupe_key, s.outbound_index_key):
         with pytest.raises(ValueError, match="channel must not contain ':'"):
             builder("a:b", "c")
+    # The route name precedes the thread id, which carries ``:`` of its own.
+    with pytest.raises(ValueError, match="route_name must not contain ':'"):
+        s.thread_index_key("a:b", "c")
 
 
 def test_the_delivery_backoff_schedule_spans_an_hour():

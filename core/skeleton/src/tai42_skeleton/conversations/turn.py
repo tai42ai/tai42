@@ -314,14 +314,16 @@ def _new_record(
     caller_principal: str | None,
     provider_message_id: str | None,
     delivery_status: DeliveryStatus,
+    inbound_text: str,
     answer_status: AnswerStatus | None = None,
     answer: str | None = None,
     error: str | None = None,
 ) -> ConversationRecord:
     """A freshly minted record for one accepted message, in the state its door commits it
-    to (``accepted``, ``pending_delivery`` or ``shed``). An api-door record MUST name the
-    authenticated caller its thread and rate bucket are keyed by; a channel-door record
-    names none."""
+    to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
+    verbatim, durable from here so the record reads as a turn of a conversation and not
+    only as its answer. An api-door record MUST name the authenticated caller its thread and
+    rate bucket are keyed by; a channel-door record names none."""
     if (route.door == "api") != bool(caller_principal and caller_principal.strip()):
         raise RuntimeError(
             f"conversations: a {route.door} record cannot carry caller_principal={caller_principal!r}; "
@@ -339,6 +341,7 @@ def _new_record(
         callback_url=route.callback_url,
         caller_principal=caller_principal,
         provider_message_id=provider_message_id,
+        inbound_text=inbound_text,
         delivery_status=delivery_status,
         answer_status=answer_status,
         answer=answer,
@@ -448,6 +451,7 @@ async def _shed_with_reply(
     message_id: str,
     thread_id: str,
     client_address: str,
+    text: str,
     provider_message_id: str,
 ) -> str:
     """Answer an over-limit address with its one paid slow-down reply, committed in the
@@ -463,6 +467,7 @@ async def _shed_with_reply(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_text=text,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -477,7 +482,7 @@ async def _shed_with_reply(
         await _resolve_stranded_intake(message_id)
         raise
     if owner != message_id:
-        await store.delete_record(message_id)
+        await store.delete_record(intake)
         return owner
     completed = _with_outcome(intake, "answered", _SLOW_DOWN_TEXT, None)
     outcome = await store.complete_turn(completed)
@@ -498,6 +503,7 @@ async def _shed_silently(
     message_id: str,
     thread_id: str,
     client_address: str,
+    text: str,
     provider_message_id: str,
 ) -> str:
     """Drop a message from an address already given its slow-down reply this window,
@@ -510,13 +516,14 @@ async def _shed_silently(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_text=text,
         delivery_status=DeliveryStatus.SHED,
         error=f"address {client_address!r} was over its rate cap after a prior slow-down reply",
     )
     await store.create_record(record)
     owner = await store.claim_inbound(channel, provider_message_id, message_id)
     if owner != message_id:
-        await store.delete_record(message_id)
+        await store.delete_record(record)
         return owner
     logger.warning(
         "conversations: address %r on route %r is over its rate cap; message dropped after a prior slow-down reply",
@@ -566,6 +573,7 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
             message_id=message_id,
             thread_id=thread_id,
             client_address=address,
+            text=text,
             provider_message_id=provider_message_id,
         )
     if admission is AddressAdmission.SHED_SILENT:
@@ -576,6 +584,7 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
             message_id=message_id,
             thread_id=thread_id,
             client_address=address,
+            text=text,
             provider_message_id=provider_message_id,
         )
 
@@ -617,6 +626,7 @@ async def _accept_for_turn(
         client_address=client_address,
         caller_principal=None,
         provider_message_id=provider_message_id,
+        inbound_text=text,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -636,7 +646,7 @@ async def _accept_for_turn(
         raise
     if owner != message_id:
         caps.release_thread_slot(thread_id)
-        await store.delete_record(message_id)
+        await store.delete_record(intake)
         return owner
 
     _schedule_turn(caps, route=route, intake=intake, text=text, intake_token=intake_token, deliver_on_completion=True)
@@ -693,6 +703,7 @@ async def submit_api_message(
         client_address=client_address,
         caller_principal=caller_principal,
         provider_message_id=None,
+        inbound_text=text,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -879,7 +890,7 @@ async def _arbitrate_stranded_intake(store: ConversationRecordStore, record: Con
     if await _owns_inbound_claim(store, record):
         await _fail_stranded_turn(store, record)
         return
-    await store.delete_record(record.message_id)
+    await store.delete_record(record)
     logger.warning(
         "conversations: intake record %s lost the inbound claim for %r on channel %r to another attempt and was "
         "discarded",

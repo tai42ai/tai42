@@ -440,13 +440,39 @@ def test_a_route_added_by_an_in_place_reload_is_dispatchable_without_a_restart()
     asyncio.run(run())
 
 
+def test_a_mounted_surface_is_absent_from_the_route_index():
+    """A mounted surface (an MCP transport, the sub-MCP mount) must never resolve to a
+    gated route: it carries no feature tags, so indexing it would level-gate protocol
+    traffic against a tag no role can hold, while its own credential gate is the mount's."""
+    route_registry.record_mounted(
+        path="/app/{path:path}", methods=["GET", "POST"], name="sub_mcp_mount", summary="Sub-MCP app mount"
+    )
+    reset_route_index()
+    try:
+        assert resolve_route_meta("/app/alpha", "POST") is None
+        # The GET still lands where it always did — on the public SPA catch-all that
+        # textually covers it — never on the mount's own record.
+        get_meta = resolve_route_meta("/app/alpha", "GET")
+        assert get_meta is not None
+        assert not get_meta.mounted
+    finally:
+        route_registry._routes.pop(("/app/{path:path}", ("GET", "POST")), None)
+        reset_route_index()
+
+
 def test_every_registered_route_resolves_back_to_itself_from_its_own_template():
     """The route pin denies a synthesized path that resolves elsewhere, so every served
     route must resolve back to itself once instantiated — else the pin denies a legitimate
-    dispatch. Filled with a single segment and a multi-segment (``:path``) value."""
+    dispatch. Filled with a single segment and a multi-segment (``:path``) value.
+
+    Mounted surfaces (the MCP transports, the sub-MCP mount) are outside the subject: they
+    are served by their mount behind its own credential gate and are deliberately absent
+    from the resolver's index, so nothing pins a path against them."""
     param = re.compile(r"\{([^}:]+)(?::([^}]+))?\}")
     shadowed = []
     for meta in load_all_routes():
+        if meta.mounted:
+            continue
         for method in meta.methods:
             for filler in ("seg", "seg/two"):
                 concrete = param.sub(lambda m, fill=filler: fill if m.group(2) == "path" else "seg", meta.path)

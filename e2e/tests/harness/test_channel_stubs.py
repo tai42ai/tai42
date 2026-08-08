@@ -1,7 +1,7 @@
 """Harness self-tests for the channel-provider stubs and the ``channel_modules``
 manifest key: each stub records the plugin's outbound call and mints the id the real
 provider would, answers a loud 500 on any unscripted path, and resets; the channel
-profile carries its three medium plugins, the auth profile carries the deliver-only
+profile carries its four medium plugins, the auth profile carries the deliver-only
 stub_channel, and a bare profile omits the key entirely."""
 
 from __future__ import annotations
@@ -104,12 +104,13 @@ def _sentinel() -> StackResources:
 
 def test_channel_modules_render_per_profile() -> None:
     variants = resolve_variants(HarnessSettings())
-    # The channel profile carries its three medium plugins.
+    # The channel profile carries its four medium plugins.
     channel = build_channel_stack(_sentinel(), variants)
     assert channel.manifest["channel_modules"] == [
         "tai42_channel_telegram",
         "tai42_channel_slack",
         "tai42_channel_twilio",
+        "tai42_channel_web",
     ]
     # The auth profile carries the deliver-only stub channel: its channel-delivered
     # ask_user pin needs a registered channel, but no real medium plugin.

@@ -11,6 +11,16 @@ the operator and Studio drive over the routing table.
   ``execution_key`` is a pass-role decision the operation takes before any write.
 - ``DELETE /api/conversations/{route_name}`` (AUTHED) — delete a route by name; an
   unknown name is a loud 404.
+- ``GET /api/conversations/{route_name}/threads`` (AUTHED, admin) — the route's threads,
+  newest activity first, paged by ``?page=``/``?pageSize=``.
+- ``GET /api/conversations/{route_name}/transcript?thread_id=`` (AUTHED) — one thread's
+  transcript, caller-scoped, paged the same way and ordered by ``?order=asc|desc``. The
+  thread id is a query value because it holds a percent-encoded principal that no path
+  spelling round-trips.
+
+Both thread doors parse their query at the edge here, and both declare the query they take
+as an operation ``request_model``, so the emitted spec publishes their ``in: query``
+parameters and a generated client sends the REQUIRED ``thread_id``.
 
 Thin adapters over ``tai42_skeleton.operations.conversations`` — no routing logic here.
 The POST body is structurally validated at the edge (a strict 400 surface); the operation
@@ -44,7 +54,9 @@ from tai42_skeleton.operations.conversations import create_conversation_route as
 from tai42_skeleton.operations.conversations import delete_conversation_route as _delete_conversation_route_op
 from tai42_skeleton.operations.conversations import get_conversation_message as _get_conversation_message_op
 from tai42_skeleton.operations.conversations import get_conversation_route as _get_conversation_route_op
+from tai42_skeleton.operations.conversations import get_conversation_thread as _get_conversation_thread_op
 from tai42_skeleton.operations.conversations import list_conversation_routes as _list_conversation_routes_op
+from tai42_skeleton.operations.conversations import list_conversation_threads as _list_conversation_threads_op
 from tai42_skeleton.operations.conversations import list_failed_conversations as _list_failed_conversations_op
 from tai42_skeleton.operations.errors import NotSupportedError
 
@@ -126,6 +138,52 @@ get_conversation_message = register_operation_route(
     operation_metadata_of(_get_conversation_message_op),
     path="/api/conversations/{route_name}/messages/{message_id}",
     method="GET",
+    action="read",
+)
+
+
+async def _extract_paging(request: Request) -> dict:
+    """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments (a
+    GET reads its parameters from the query string, never a body). A non-integer is a loud
+    400 here; the operation range-checks the pair and caps the size."""
+    page = request.query_params.get("page", "1")
+    page_size = request.query_params.get("pageSize", "50")
+    try:
+        return {"page": int(page), "page_size": int(page_size)}
+    except ValueError as exc:
+        raise BadRequestError(f"page and pageSize must be integers: page={page!r} pageSize={page_size!r}") from exc
+
+
+async def _extract_transcript_query(request: Request) -> dict:
+    """The transcript door's ``?thread_id=`` and ``?order=`` on top of the shared window.
+
+    The thread id rides the QUERY, not the path: it carries the api door's percent-encoded
+    ``{principal}/{end user}`` address, which no path spelling round-trips — sent raw the
+    server decodes it before routing, sent already-encoded the access-control path
+    canonicalizer reads it as a doubly-encoded byte. A query value is decoded exactly once,
+    by the query parser, whatever it holds. A missing one is a loud 400 here; a blank or
+    unknown-order one is the operation's own 400."""
+    thread_id = request.query_params.get("thread_id")
+    if thread_id is None:
+        raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/transcript?thread_id=...")
+    return {**await _extract_paging(request), "thread_id": thread_id, "order": request.query_params.get("order", "asc")}
+
+
+list_conversation_threads = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_conversation_threads_op),
+    path="/api/conversations/{route_name}/threads",
+    method="GET",
+    context_extractor=_extract_paging,
+    action="read",
+)
+
+get_conversation_thread = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_conversation_thread_op),
+    path="/api/conversations/{route_name}/transcript",
+    method="GET",
+    context_extractor=_extract_transcript_query,
     action="read",
 )
 

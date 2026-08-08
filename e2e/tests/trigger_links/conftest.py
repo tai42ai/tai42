@@ -72,8 +72,8 @@ def build_trigger_links_stack(res: StackResources, variants: Variants) -> StackC
     # The trigger family is default-ON at 60/min + 10/10s PER CLIENT IP; the whole
     # suite fires from one localhost bucket, so raise both windows well above the
     # suite's fire volume (the limiter stays ON, exactly as production runs it).
-    env["TAI_RATE_LIMIT_TRIGGER_LIMIT"] = "10000"
-    env["TAI_RATE_LIMIT_TRIGGER_BURST"] = "10000"
+    env["TAI_RATE_LIMIT_FAMILIES__TRIGGER__LIMIT"] = "10000"
+    env["TAI_RATE_LIMIT_FAMILIES__TRIGGER__BURST"] = "10000"
     return replace(base, name="trigger-links", manifest=manifest, env=env)
 
 

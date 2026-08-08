@@ -239,6 +239,52 @@ def test_missing_tags_is_rejected_loudly() -> None:
         )
 
 
+# -- Surface version ----------------------------------------------------------
+
+
+def test_version_moves_on_every_record() -> None:
+    # A consumer that derives a table from the registry (the rate limiter's public-door
+    # coverage) memoizes against this number: it must move on EVERY record, including a
+    # reload re-recording the same metadata, or that consumer keeps matching requests
+    # against the previous deployment's doors.
+    registry = RouteRegistry()
+    start = registry.version
+    for _ in range(2):
+        registry.record(
+            path="/api/thing",
+            methods=["GET"],
+            name=None,
+            handler=_plain,
+            summary="Thing",
+            tags=["t"],
+            authed=True,
+            action="read",
+            request_model=None,
+            response_model=None,
+        )
+    assert registry.version == start + 2
+
+
+def test_version_does_not_move_on_a_refused_record() -> None:
+    # The bump rides the recorded route, not the attempt: a refused registration leaves
+    # the surface unchanged and must not invalidate a consumer's table.
+    registry = RouteRegistry()
+    start = registry.version
+    with pytest.raises(ValueError, match="summary"):
+        registry.record(
+            path="/api/x",
+            methods=["GET"],
+            name=None,
+            handler=_plain,
+            summary="",
+            tags=["t"],
+            authed=True,
+            request_model=None,
+            response_model=None,
+        )
+    assert registry.version == start
+
+
 def test_load_api_routes_returns_only_api_paths() -> None:
     routes = load_api_routes()
     assert routes

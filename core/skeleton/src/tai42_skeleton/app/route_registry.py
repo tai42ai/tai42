@@ -13,7 +13,11 @@ consumers read the registry through the shared enumeration primitive
   command.
 
 The registry is populated purely by importing the router modules — no database,
-Redis, or booted server — so the spec emits OFFLINE.
+Redis, or booted server — so the spec emits OFFLINE. The one exception is
+:meth:`RouteRegistry.record_mounted`, which the serving app calls as it mounts each
+MCP transport and the sub-MCP router: those paths are served by a mounted ASGI app
+rather than a handler, so they exist only in a process that mounted them and are
+marked ``mounted`` for the consumers that describe the handler surface alone.
 
 Each route DECLARES its behavioral OpenAPI metadata (``reload_gated``,
 ``reads_body``, ``error_statuses``, ``success_status``) through
@@ -70,6 +74,12 @@ _FENCED_ROUTE_ACTIONS: frozenset[str] = frozenset(("fenced", "secret"))
 
 _READ_METHODS: frozenset[str] = frozenset(("GET", "HEAD", "OPTIONS"))
 _WRITE_METHODS: frozenset[str] = frozenset(("POST", "PUT", "PATCH", "DELETE"))
+
+# Every method a Starlette ``Mount`` claims beneath its prefix: a mount dispatches on
+# the path alone, so the mounted app answers each of them (with its own 404/405) and no
+# handler route that also matches the path ever sees them. ``HEAD`` is left out because
+# every consumer derives it from ``GET``.
+MOUNT_METHODS: list[str] = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 
 def method_to_action(method: str) -> Literal["read", "write"]:
@@ -148,6 +158,13 @@ class RouteMetadata:
     success_media_types: dict[str, tuple[str, ...]]
     action: RouteAction
     destructive: bool = False
+    # A surface served by a MOUNTED ASGI app (an MCP transport, the sub-MCP mount),
+    # recorded by :meth:`RouteRegistry.record_mounted` so the registry describes the
+    # WHOLE served surface. It is not a handler route: it carries no feature tags and
+    # its credential gate is the mount's own, so every consumer that describes the
+    # HANDLER surface skips it and only the ones asking "is this path served, and is it
+    # credential-gated?" (the rate limiter) read it.
+    mounted: bool = False
 
 
 def _handler_source(func: Callable[..., object]) -> str:
@@ -242,6 +259,15 @@ class RouteRegistry:
 
     def __init__(self) -> None:
         self._routes: dict[tuple[str, tuple[str, ...]], RouteMetadata] = {}
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        """Bumped by every :meth:`record`, so a consumer that derives a table from the
+        registry (the rate limiter's public-door coverage) can memoize against it and
+        rebuild when a reload re-records the surface. A re-import that records the
+        SAME metadata still bumps it — a rebuild is idempotent, a stale table is not."""
+        return self._version
 
     def record(
         self,
@@ -307,6 +333,53 @@ class RouteRegistry:
             action=resolved_action,
             destructive=destructive,
         )
+        self._version += 1
+
+    def record_mounted(self, *, path: str, methods: list[str], name: str, summary: str) -> None:
+        """Record one path TEMPLATE served by a mounted ASGI app — an MCP transport
+        route, the sub-MCP mount — as it is mounted, so the registry describes the whole
+        served surface instead of leaving these paths to whichever handler route happens
+        to also match them (the Studio SPA catch-all matches every GET).
+
+        Always ``authed=True``: a mount serves protocol traffic behind its own credential
+        gate, never a declared public door, so the flood limiter passes it through
+        untouched rather than charging it to the public catch-all's family. It carries no
+        feature tags, no models and no declared OpenAPI metadata — it self-describes
+        nothing — and its ``mounted`` flag keeps it out of the handler-surface consumers
+        (the per-tag role gate, the SPA-shell reserved derivation and its boot audit, the
+        route listing the Roles page joins). The action-class is derived from the methods
+        for completeness; no gate enforces it.
+
+        A mounted record states what is mounted NOW, so re-mounting (every epoch rebuilds
+        the serving app) replaces EVERY mounted record for the path — keyed on the path
+        alone, unlike a handler registration — and bumps the version. Keying it on the
+        method set as well would accumulate: an epoch that mounts a narrower set would
+        leave the previous epoch's wider record standing beside the new one, still
+        claiming methods this deployment no longer serves.
+        """
+        method_key = tuple(sorted(m.upper() for m in methods))
+        for stale in [key for key, meta in self._routes.items() if key[0] == path and meta.mounted]:
+            del self._routes[stale]
+        self._routes[path, method_key] = RouteMetadata(
+            path=path,
+            methods=method_key,
+            name=name,
+            summary=summary,
+            description="",
+            tags=(),
+            authed=True,
+            request_model=None,
+            response_model=None,
+            reload_gated=False,
+            reads_body=False,
+            error_statuses=(),
+            success_status=200,
+            additional_success_statuses=(),
+            success_media_types={},
+            action=derive_route_action(method_key),
+            mounted=True,
+        )
+        self._version += 1
 
     def routes(self) -> list[RouteMetadata]:
         """Every recorded route, ordered by path then methods for a stable spec."""

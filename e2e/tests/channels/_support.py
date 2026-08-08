@@ -1,13 +1,19 @@
 """Per-medium adapters + shared helpers for the channel cross-worker specs.
 
-One ``channel_stack`` (REPLICAS, no backend, all three channel plugins loaded)
-serves telegram + slack + twilio. Every spec parametrizes over the three via the
-``channel_case`` fixture (in ``conftest.py``), which binds a :class:`ChannelCase`
-to its recording stub and the live stack. The case owns everything
-medium-specific: the recipient policy, how the plugin's one outbound send is read
-back, how a GENUINELY-signed inbound is synthesized (so the plugin's real
-signature verification runs, never a bypass), and the plugin's correlation-key
-prefix.
+One ``channel_stack`` (REPLICAS, no backend, the channel plugins loaded) serves
+telegram + slack + twilio + web. The vendor-backed three parametrize every shared
+spec via the ``channel_case`` fixture (in ``conftest.py``), which binds a
+:class:`ChannelCase` to its recording stub and the live stack. The case owns
+everything medium-specific: the recipient policy, how the plugin's one outbound
+send is read back, how a GENUINELY-signed inbound is synthesized (so the plugin's
+real signature verification runs, never a bypass), and the plugin's
+correlation-key prefix.
+
+:class:`WebChannelCase` is the fourth case and is NOT in that parametrization: web
+has no vendor, no operator recipient policy and no signed inbound door, so the
+shared specs' allowlist/signature/notify assertions describe machinery it does not
+have. It is driven by ``test_web_public_chat`` instead, through the plugin's own
+public doors — see that class for the hook-by-hook account of what does not apply.
 
 This module is imported by both ``conftest.py`` (for the fixtures) and the spec
 modules (``from _support import ...``); the test dir carries no package
@@ -21,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from typing import cast
 
 import redis as redis_lib
 from fastmcp.client.client import CallToolResult
@@ -29,6 +36,7 @@ from tai42_e2e import manifests
 from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio, SignedInbound
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+from tai42_e2e.webchat import WebChatClient
 
 # ---- MCP + interactions observation helpers -----------------------------
 
@@ -372,10 +380,99 @@ class TwilioCase(ChannelCase):
         return SignedInbound(headers=headers, body=inbound.body)
 
 
+class WebChannelCase(ChannelCase):
+    """The web channel, driven through the plugin's OWN public doors — there is no vendor
+    and so no recording stub: the transcript stream the plugin writes is the delivered
+    message. The visitor holds one credential, the secret token in their
+    ``tai_web_session`` cookie; the conversation address that token is registered against
+    stays server-side. ``web`` is the door client the spec drives (page, stream, answer).
+
+    A case is built by :meth:`open`, not by the constructor: the session must be minted AND
+    registered by the real chat page before any door will resolve it.
+
+    These base hooks describe a vendor the web channel does not have and stay unimplemented
+    (the base raises loudly if a spec reaches for one):
+
+    * ``allowlist_env`` / ``unlisted_recipient`` — web has no operator recipient policy. A
+      web address is a visitor's own registered session, not an operator-chosen
+      destination, so there is nothing to allowlist.
+    * ``secret_env`` / ``build_reply`` / ``assert_inbound_forwarded`` — there is no signed
+      inbound door. An answer is POSTed to the public answer door under the session cookie,
+      and the fail-closed negatives are a missing cookie and an unregistered token (both
+      401) and another visitor's registered session (404), not a bad signature.
+    * ``outbound_recipient`` — a transcript entry names no recipient: the pair
+      ``(identity, visitor id)`` IS the stream key it was written to, so reading it back
+      off the entry could only restate the key the read used.
+    * ``assert_notify_plain`` — ``notify_user`` CAN address this channel: the door sets no
+      ``sender_identity``, and the channel then reads the transcript pair out of a
+      composite ``"<identity>:<visitor id>"`` recipient (``tai42_channel_web.channel``).
+      The hook stays unimplemented because it belongs to the shared notify spec, which
+      parametrizes the vendor-backed three, and because a web notification lands as a plain
+      transcript entry with no reply-correlation affordance to assert absent. Web notifies
+      are exercised where they happen — the bridge's answer delivery.
+    """
+
+    name = "web"
+    correlation_prefix = "channel:web:question:"
+
+    web: WebChatClient
+
+    @classmethod
+    async def open(cls, stack: TaiStack) -> WebChannelCase:
+        """Open a fresh visitor session through the real chat page, so the cookie token is
+        REGISTERED (an unregistered one addresses nothing), and bind the case to the
+        visitor id behind it — the address a web ask names and the transcript key a census
+        reads. Each case gets a conversation of its own, so no spec reads another's."""
+        case = cls(stack, None)
+        web, page = await WebChatClient.open_page(
+            f"http://{stack.host}:{stack.port_b}",
+            manifests.WEB_IDENTITY,
+            store_url=stack.resources.redis_url,
+        )
+        assert page.status_code == 200, page.text
+        case.web = web
+        case.default_recipient = web.recipient
+        return case
+
+    def sends_matching(self, text: str) -> list[dict]:
+        """The transcript entries carrying ``text``, each flattened to its event name plus
+        the frame payload the page renders. Read straight off the live store (as
+        ``count_correlation_keys`` does) — the web channel's delivery IS this write."""
+        host, port = self.stack.infra.settings.redis_host_port
+        client = redis_lib.Redis(host=host, port=port, db=self.stack.resources.redis_idx, decode_responses=True)
+        try:
+            # redis-py types every command as the sync/async union; this client is sync.
+            entries = cast(list[tuple[str, dict[str, str]]], client.xrange(self.web.transcript_key))
+        finally:
+            client.close()
+        return [
+            {"event": fields["event"], **json.loads(fields["data"])}
+            for _entry_id, fields in entries
+            if text in fields["data"]
+        ]
+
+    def assert_tier2_shape(self, record: dict) -> None:
+        # The web reply affordance is the question's own interaction id: the page answers
+        # by POSTing it back to the answer door, so the entry must carry it and the format
+        # the widget renders. The callback ticket is a bearer credential and stays
+        # server-side for every format that answers by id.
+        assert record["event"] == "chat.question"
+        assert record["interaction_id"]
+        assert record["answer_format"] in {"text", "select"}
+        assert "callback_url" not in record, f"a {record['answer_format']!r} question leaked its callback ticket"
+
+    def tier1_callback_url(self, record: dict) -> str:
+        """The ticket an ``external`` question carries — the ONE format whose widget opens
+        the callback itself, and so the one format the frame carries it for."""
+        assert record["answer_format"] == "external", record
+        return record["callback_url"]
+
+
 CASE_CLASSES: dict[str, type[ChannelCase]] = {
     "telegram": TelegramCase,
     "slack": SlackCase,
     "twilio": TwilioCase,
+    "web": WebChannelCase,
 }
 
 

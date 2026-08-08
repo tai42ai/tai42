@@ -14,17 +14,28 @@ with a loud 501 (``NotSupportedError``).
 from __future__ import annotations
 
 import secrets
-from typing import Any
+from typing import Any, Literal, get_args
+from urllib.parse import quote
 
+from pydantic import BaseModel, Field
 from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate
 from tai42_kit.utils.data import get_compiled_jq
 
+from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
-from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
+from tai42_skeleton.conversations.managers.base_conversations_manager import (
+    BaseConversationsManager,
+    DoorFlipRefused,
+)
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations._authority import assert_execution_key_bindable, require_admin, resolve_caller
+from tai42_skeleton.operations._authority import (
+    Caller,
+    assert_execution_key_bindable,
+    require_admin,
+    resolve_caller,
+)
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError
 
 # Surfaced before a create does any bind work it would then have to discard.
@@ -77,6 +88,25 @@ def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
             get_compiled_jq(expr)
         except Exception as exc:
             raise BadRequestError(f"invalid {field}: {exc}") from exc
+
+
+def _door_flip_refusal(refused: DoorFlipRefused) -> BadRequestError:
+    """The operator-facing refusal for an edit that would change the ``door`` of a route
+    that already HOLDS threads.
+
+    The two doors key their threads differently — an api thread names its owning caller
+    principal in its own id, a channel thread names the medium's address — and the read
+    doors authorize from that shape plus the route's current ``door``. Flipping it therefore
+    404s the owner out of a transcript they own, and hands the single-message door a
+    different answer from the transcript door about the same thread. The threads cannot be
+    re-keyed, so the flip is refused rather than half-applied — and refused by the write
+    itself, so a first message opening a thread cannot slip in behind a separate check."""
+    return BadRequestError(
+        f"conversation route {refused.route_name!r} holds {refused.held} thread(s) opened on its "
+        f"{refused.from_door!r} door and cannot be changed to {refused.to_door!r}: delete the route "
+        "(which reclaims its threads) and create it again under the new door, or create the new door "
+        "under a different route_name"
+    )
 
 
 async def _unclaimed_channel_identity(
@@ -160,7 +190,10 @@ async def create_conversation_route(
     bound the turn at fire. A tool target's ``payload_expr``/``reply_expr`` jq programs, when
     given, are compiled here so an invalid one is refused at create, not at first message. A
     ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
-    on that channel. An ``api`` row's ``callback_secret`` is minted here and returned ONCE.
+    on that channel. An edit that would change the ``door`` of a route already HOLDING
+    threads is refused: the two doors key their threads differently and the read doors
+    authorize from that shape, so the flip would lock owners out of their own transcripts.
+    An ``api`` row's ``callback_secret`` is minted here and returned ONCE.
     Returns ``{"created", "route_name", "route", "callback_secret"}``.
     """
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a
@@ -203,7 +236,10 @@ async def create_conversation_route(
         callback_secret=callback_secret,
         execution_key_fingerprint=execution_key_fingerprint,
     )
-    created = await manager.put_route(route)
+    try:
+        created = await manager.put_route(route)
+    except DoorFlipRefused as refused:
+        raise _door_flip_refusal(refused) from refused
     return {
         "created": created,
         "route_name": route.route_name,
@@ -243,6 +279,229 @@ async def get_conversation_message(route_name: str, message_id: str) -> dict[str
     return record.caller_view()
 
 
+#: The largest page either thread read door serves. A larger ``page_size`` is capped to it —
+#: valid data, not an error — so one read can never ask for an unbounded slice.
+MAX_THREAD_PAGE_SIZE = 200
+
+#: The highest page number either thread read door serves. A page past it names a rank the
+#: index cannot be sliced at, which the backend answers with an error of its own; it is a
+#: malformed window and is refused as one here.
+MAX_THREAD_PAGE = 1_000_000
+
+#: The transcript orders the door serves: ``asc`` is the transcript order (oldest first),
+#: ``desc`` the live-tail order, where page 1 always holds the newest messages.
+TranscriptOrder = Literal["asc", "desc"]
+TRANSCRIPT_ORDERS = get_args(TranscriptOrder)
+
+
+class ThreadWindowQuery(BaseModel):
+    """The ``?page=``/``?pageSize=`` window the route thread listing takes.
+
+    Spec metadata only: a GET carries no body and the door parses its own query at the HTTP
+    edge, so this model is what the emitted OpenAPI publishes as the door's ``in: query``
+    parameters — and therefore what a generated client sends. Its field names are the QUERY
+    keys, not the operation's Python parameter names."""
+
+    page: int = Field(default=1, ge=1, description="1-based page number, newest activity first.")
+    page_size: int = Field(
+        default=50,
+        ge=1,
+        alias="pageSize",
+        description=f"Items per page. A larger value is capped to {MAX_THREAD_PAGE_SIZE}, never refused.",
+    )
+
+
+class TranscriptQuery(ThreadWindowQuery):
+    """The transcript door's query on top of the shared window. ``thread_id`` is REQUIRED —
+    a client generated without it calls the door with no thread to read and is answered
+    400."""
+
+    page: int = Field(default=1, ge=1, description="1-based page number, in the requested ``order``.")
+    thread_id: str = Field(description="The thread to read, as the send door returned it.")
+    order: TranscriptOrder = Field(
+        default="asc",
+        description="``asc`` reads the transcript oldest first; ``desc`` is the live-tail order.",
+    )
+
+
+def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
+    """The ``(offset, limit)`` a page/pageSize pair names. Both must be at least 1 and
+    ``page`` at most :data:`MAX_THREAD_PAGE`; a page size above the cap is capped, never
+    refused."""
+    if page < 1 or page_size < 1:
+        raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
+    if page > MAX_THREAD_PAGE:
+        raise BadRequestError(f"page must be <= {MAX_THREAD_PAGE}, got page={page}")
+    limit = min(page_size, MAX_THREAD_PAGE_SIZE)
+    return (page - 1) * limit, limit
+
+
+def _next_page(page: int, limit: int, total: int) -> int | None:
+    """The next page number, or ``None`` on the last page. Read from the INDEXED total, not
+    the returned count: a page shortened by rows that expired under it is not the end."""
+    return page + 1 if page * limit < total else None
+
+
+async def _require_route(manager: BaseConversationsManager, route_name: str) -> ConversationRoute:
+    """The route a thread read is against. Refuses a read on a route that does not exist, so
+    an unknown route is a loud 404 and not an empty listing. Called only once the reader is
+    authorized: existence is a fact the answer discloses."""
+    route = await manager.get_route(route_name)
+    if route is None:
+        raise NotFoundError(f"conversation route not found: {route_name!r}")
+    return route
+
+
+def _thread_not_found(thread_id: str) -> NotFoundError:
+    """The ONE answer the transcript door gives for every thread the caller may not read —
+    absent, expired, another principal's, or a channel thread. A caller that could tell
+    those apart could probe whether a given address has ever talked to a given route."""
+    return NotFoundError(f"conversation thread not found: {thread_id!r}")
+
+
+def _caller_owns_thread(route: ConversationRoute, thread_id: str, caller: Caller) -> bool:
+    """Whether ``caller`` owns ``thread_id`` — decided from the thread's IDENTITY alone, so
+    it is decided before any record is read and cannot vary with the page asked for.
+
+    A bridge thread id is ``bridge:{route_name}:{client_address}``, and on the api door the
+    address is ``{percent-encoded caller principal}/{external user id}``. So an api-door
+    thread names its owner in its own id, and the caller's own principal encoded the same
+    way is the only prefix that can match. A ``channel`` route's addresses are the medium's,
+    attested by the provider and owned by nobody who can call this door, so its threads are
+    admin-only by construction — the route's door is checked too, and not just the address
+    shape, so a channel address spelled like an api one still cannot be claimed."""
+    if route.door != "api" or caller.caller_id is None:
+        return False
+    prefix = f"{BRIDGE_THREAD_PREFIX}{route.route_name}:"
+    if not thread_id.startswith(prefix):
+        return False
+    return thread_id[len(prefix) :].startswith(f"{quote(caller.caller_id, safe='')}/")
+
+
+@operation(
+    summary="List a conversation route's threads",
+    tags=["conversations"],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    request_model=ThreadWindowQuery,
+)
+async def list_conversation_threads(route_name: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+    """The threads of ``route_name``, newest activity first, one page at a time.
+
+    Admin-only — a thread listing spans every caller and address on the route, so it is not
+    caller-scoped. Each item carries ``thread_id``, ``client_address``, ``message_count``
+    and ``last_delivery_status`` summarized from the thread's newest readable record, plus
+    ``last_activity_at`` — the route index's own score, which is what this listing SORTS by,
+    so the moment shown and the position it is shown in always agree. That score is stamped
+    when a record is created and again when its turn completes; a later delivery transition
+    on the same record moves the record's ``updated_at`` but not the thread's activity.
+
+    Authorization is decided BEFORE the route is looked up, so a non-admin is refused the
+    same way whether the name routes or not — a 404-here/403-there pair would answer which
+    route names exist to a caller with no business knowing. An unknown route is a loud 404
+    to an admin; a ``page`` or ``page_size`` below 1, or a ``page`` above the served
+    maximum, is a 400. Returns ``{"items", "total", "page", "page_size", "next_page"}``,
+    where ``total`` counts the route's indexed threads.
+    """
+    _validate_route_name(route_name)
+    manager = _require_backend()
+    require_admin(await resolve_caller())
+    await _require_route(manager, route_name)
+    offset, limit = _page_bounds(page, page_size)
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    listed = await ConversationRecordStore(ConversationsSettings()).list_route_threads(
+        route_name, offset=offset, limit=limit
+    )
+    items = [
+        {
+            "thread_id": thread.thread_id,
+            "client_address": thread.client_address,
+            "last_activity_at": thread.last_activity_at,
+            "message_count": thread.message_count,
+            "last_delivery_status": thread.last_delivery_status.value,
+        }
+        for thread in listed.threads
+    ]
+    return {
+        "items": items,
+        "total": listed.total,
+        "page": page,
+        "page_size": limit,
+        "next_page": _next_page(page, limit, listed.total),
+    }
+
+
+@operation(
+    summary="Read a conversation thread's transcript",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    request_model=TranscriptQuery,
+)
+async def get_conversation_thread(
+    route_name: str, thread_id: str, page: int = 1, page_size: int = 50, order: str = "asc"
+) -> dict[str, Any]:
+    """One thread's records under ``route_name``, one page at a time — caller-scoped.
+
+    ``order`` picks the direction: ``asc`` (the default) reads the transcript oldest first,
+    ``desc`` reads it newest first, which is the order a live tail wants because page 1 then
+    always holds the latest messages. ``page``/``page_size`` window that order from its own
+    end, so page 1 of ``desc`` is the newest page and never the oldest.
+
+    The reader is authorized from the thread's IDENTITY, BEFORE any record is read, so no
+    page can disclose what page 1 would not: an admin reads whole records of any thread, and
+    a non-admin reads the caller-safe projection of an api-door thread its own principal
+    keys. Everything else — an unknown thread, a thread the index no longer holds, another
+    principal's, any channel thread, and a ``route_name`` that does not route at all —
+    answers ONE uniform 404 to a non-admin, so the door cannot be used to probe whether an
+    address has ever talked to a route, or which route names exist. An unknown
+    ``route_name`` is its own 404 only to an admin. A ``page`` or ``page_size`` below 1, a
+    ``page`` above the served maximum, a blank ``thread_id`` or an unknown ``order`` is a
+    400 — the caller's own input, which discloses nothing.
+
+    A thread the index still holds but whose rows have expired under the retention TTL is
+    NOT that 404: it reads as an empty page carrying the indexed ``total``, until the prune
+    pass reclaims the members and the thread becomes unknown.
+
+    Returns ``{"items", "total", "page", "page_size", "next_page", "order"}``, where
+    ``total`` counts the thread's indexed records.
+    """
+    _validate_route_name(route_name)
+    if not thread_id.strip():
+        raise BadRequestError("thread_id must be a non-blank thread identifier")
+    if order not in TRANSCRIPT_ORDERS:
+        raise BadRequestError(f"order must be one of {list(TRANSCRIPT_ORDERS)}, got {order!r}")
+    offset, limit = _page_bounds(page, page_size)
+    manager = _require_backend()
+    caller = await resolve_caller()
+    if caller.is_admin:
+        # An admin may know which names route, so the unknown route keeps its own 404.
+        await _require_route(manager, route_name)
+    else:
+        # One answer for "no such route" and "not your thread": the reader is authorized
+        # from the thread id alone, so the route's existence never reaches the answer.
+        route = await manager.get_route(route_name)
+        if route is None or not _caller_owns_thread(route, thread_id, caller):
+            raise _thread_not_found(thread_id)
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    transcript = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
+        route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc"
+    )
+    if transcript.total == 0:
+        raise _thread_not_found(thread_id)
+    view = (lambda record: record.view()) if caller.is_admin else (lambda record: record.caller_view())
+    return {
+        "items": [view(record) for record in transcript.records],
+        "total": transcript.total,
+        "page": page,
+        "page_size": limit,
+        "next_page": _next_page(page, limit, transcript.total),
+        "order": order,
+    }
+
+
 @operation(
     summary="List failed conversation deliveries",
     tags=["conversations"],
@@ -268,11 +527,33 @@ async def list_failed_conversations() -> dict[str, Any]:
     errors=[BadRequestError, NotFoundError, NotSupportedError],
 )
 async def delete_conversation_route(route_name: str) -> dict[str, Any]:
-    """Delete a conversation route by name. An unknown name is a loud 404; a name that
-    is not a valid slug is a 400. Returns ``{"removed", "route_name"}``."""
+    """Delete a conversation route by name, along with the thread indexes it owned.
+
+    Those indexes carry no TTL and the prune pass only walks LIVE routes, so a delete that
+    left them behind would strand them unreachable forever; the answer records they name
+    keep their own retention TTL and are not touched.
+
+    The reclamation is RETRYABLE, because it can be interrupted (a socket timeout, a
+    SIGTERM, a Redis blip) after the routing row is already gone: a name whose route index
+    survives is one whose reclamation is still owed, so this door re-runs it and answers
+    ``removed=false`` rather than the 404 that would leave those keys unnameable forever.
+    Only a name that neither routes nor owes reclamation is the loud 404. A name that is not
+    a valid slug is a 400. Returns ``{"removed", "route_name"}``, where ``removed`` says
+    whether THIS call removed the routing row.
+    """
     _validate_route_name(route_name)
     manager = _require_backend()
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    store = ConversationRecordStore(ConversationsSettings())
     removed = await manager.delete_route(route_name)
-    if not removed:
+    if not removed and await store.count_route_threads(route_name) == 0:
         raise NotFoundError(f"conversation route not found: {route_name!r}")
-    return {"removed": True, "route_name": route_name}
+    # After the routing row, never before: no further message can open a thread on a name
+    # that no longer routes. A turn already IN FLIGHT still completes behind this, which is
+    # why the create writes the thread indexes only while the row stands and the completion
+    # write re-stamps the route index only while the thread's own index still holds
+    # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
+    await store.drop_route_threads(route_name)
+    return {"removed": removed, "route_name": route_name}
