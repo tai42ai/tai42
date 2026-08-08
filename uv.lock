@@ -4859,7 +4859,7 @@ wheels = [
 
 [[package]]
 name = "tai42-accounts-oidc"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "plugins/accounts-oidc" }
 dependencies = [
     { name = "tai42-contract" },
@@ -4891,7 +4891,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "1.0.1"
+version = "1.0.2"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -4925,7 +4925,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "0.3.7"
+version = "0.4.0"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5085,7 +5085,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.4.7"
+version = "0.4.8"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5140,7 +5140,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5183,7 +5183,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5226,7 +5226,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5269,7 +5269,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5312,7 +5312,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5355,7 +5355,7 @@ dev = [
 
 [[package]]
 name = "tai42-config-k8s"
-version = "0.2.8"
+version = "0.3.0"
 source = { editable = "plugins/config-k8s" }
 dependencies = [
     { name = "pyaml-env" },
@@ -5465,7 +5465,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5516,7 +5516,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "1.0.2"
+version = "1.1.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5703,7 +5703,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5932,7 +5932,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
