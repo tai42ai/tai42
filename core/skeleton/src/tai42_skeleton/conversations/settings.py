@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
@@ -128,6 +131,10 @@ class ConversationsSettings(TaiBaseSettings):
     # an intake/pending/provisional record carries no expiry until then.
     answer_retention_ttl_seconds: int = Field(default=30 * 86400, gt=0)
 
+    # Seconds a minted pair code (and its open-pointer) stays live before it expires
+    # unredeemed. The raw code exists only in flight; only its sha256 is ever stored.
+    pair_code_ttl_seconds: int = Field(default=900, gt=0)
+
     @field_validator("max_message_chars")
     @classmethod
     def _split_caps_are_positive(cls, value: dict[str, int]) -> dict[str, int]:
@@ -176,9 +183,12 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The eight conversation keyspaces. Every literal key string lives ONLY here. A
+    # The twelve conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
-    # ``:``-free, so no provider value can bleed across a segment boundary.
+    # ``:``-free, so no provider value can bleed across a segment boundary — the sole
+    # exception is ``open_code_key``, whose variable part is a single opaque ``sha256``
+    # terminal segment folding charset-unconstrained inputs into a hash, so it carries no
+    # qualifier guard.
 
     def dedupe_key(self, channel: str, provider_message_id: str) -> str:
         """Inbound-dedupe marker key, channel-qualified (a provider message id is unique
@@ -237,3 +247,59 @@ class ConversationsSettings(TaiBaseSettings):
         """The set index of every stored route name, kept in lockstep with the per-route
         keys by the create/delete scripts."""
         return f"{self.prefix}:route_names"
+
+    # -- Person-linking keyspaces --------------------------------------------
+
+    def person_key(self, person_id: str) -> str:
+        """Person-row key (JSON), keyed by the person's uuid4 ``person_id`` (terminal)."""
+        _require_key_segment("person_id", person_id)
+        return f"{self.prefix}:person:{person_id}"
+
+    @property
+    def person_key_prefix(self) -> str:
+        """The person-row key prefix the merge/detach scripts build a row key from in-script
+        (a survivor id chosen server-side is not known to the caller)."""
+        return f"{self.prefix}:person:"
+
+    def person_index_key(self, target_kind: str, target_name: str) -> str:
+        """Per-target person index — a HASH ``door_address_key`` → ``person_id``. The
+        ``target_name`` is charset-unconstrained and so sits TERMINAL; ``target_kind`` is a
+        constrained qualifier checked ``:``-free."""
+        _require_qualifier_segment("target_kind", target_kind)
+        _require_key_segment("target_name", target_name)
+        return f"{self.prefix}:person_index:{target_kind}:{target_name}"
+
+    @property
+    def person_index_key_prefix(self) -> str:
+        """The person-index key prefix the merge/detach scripts build the index key from
+        in-script, once they read the target off the row (``<prefix>:person_index:``, then
+        ``<target_kind>:<target_name>`` exactly as :meth:`person_index_key` renders it)."""
+        return f"{self.prefix}:person_index:"
+
+    def pair_code_key(self, code_hash: str) -> str:
+        """Single-use pair-code record key, keyed by ``sha256(code)`` (hex, terminal). The
+        raw code is never a key nor a value anywhere — only its hash is."""
+        _require_key_segment("code_hash", code_hash)
+        return f"{self.prefix}:pair_code:{code_hash}"
+
+    @property
+    def pair_code_key_prefix(self) -> str:
+        """The pair-code record key prefix the mint script builds the previously open code's
+        key from in-script (it holds only that code's sha256, via the open-code pointer)."""
+        return f"{self.prefix}:pair_code:"
+
+    def open_code_key(self, target_kind: str, target_name: str, door_address_key: str) -> str:
+        """Open-pair-code pointer key for ONE minting conversation → the sha256 of the
+        currently open code. Its variable part is a SINGLE opaque terminal segment — the
+        sha256 of the deterministic JSON array ``[target_kind, target_name,
+        door_address_key]`` — because ``target_name`` and the address folded into
+        ``door_address_key`` are charset-unconstrained (may carry ``:``) and so can never be
+        raw non-terminal segments; the hash removes all delimiter ambiguity while keeping an
+        ordinary per-key TTL (a per-target HASH could not expire its fields)."""
+        _require_key_segment("target_kind", target_kind)
+        _require_key_segment("target_name", target_name)
+        _require_key_segment("door_address_key", door_address_key)
+        opaque = hashlib.sha256(
+            json.dumps([target_kind, target_name, door_address_key], separators=(",", ":")).encode()
+        ).hexdigest()
+        return f"{self.prefix}:open_code:{opaque}"

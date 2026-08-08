@@ -10,11 +10,12 @@ skeleton's, reached through its ``AppConversations`` facet.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
@@ -210,6 +211,131 @@ class ConversationRoute(ConversationRouteCreate):
     )
 
 
+class PersonAddress(BaseModel):
+    """One reachable endpoint of a :class:`Person` on a single target — one channel address
+    (or api caller address) the platform folds into that person's identity.
+
+    A ``channel``-door address carries the registry ``channel`` name plus the
+    ``our_identity`` the medium is texted at; an ``api``-door address carries ``None`` for
+    both — the api caller address is the composed ``caller/end-user`` string, which has no
+    channel identity. ``routes`` is EVERY route name this address has written under on the
+    target (ordered, deduped): one address can legally reach one target through several
+    routes (N api routes; a channel identity re-routed under a new route name), and the
+    aggregated person-thread read enumerates the person's routes straight off these rows, so
+    a scalar here would silently drop legs. ``address`` is the canonical form the bridge
+    already keys threads by. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    door: ConversationDoor
+    routes: list[str] = Field(min_length=1)
+    channel: str | None = None
+    our_identity: str | None = None
+    address: str = Field(min_length=1)
+    linked_at: datetime
+
+    @field_validator("routes")
+    @classmethod
+    def _routes_non_blank_and_unique(cls, value: list[str]) -> list[str]:
+        if any(not route.strip() for route in value):
+            raise ValueError("every route name must be non-blank")
+        if len(set(value)) != len(value):
+            raise ValueError(f"route names must be unique, got {value!r}")
+        return value
+
+    @model_validator(mode="after")
+    def _channel_identity_matches_door(self) -> PersonAddress:
+        if self.door == "channel":
+            if not (self.channel and self.channel.strip()):
+                raise ValueError("a channel-door address requires a non-blank channel")
+            if not (self.our_identity and self.our_identity.strip()):
+                raise ValueError("a channel-door address requires a non-blank our_identity")
+        elif self.channel is not None or self.our_identity is not None:
+            raise ValueError("an api-door address carries no channel/our_identity")
+        return self
+
+    @field_validator("linked_at")
+    @classmethod
+    def _ensure_tz_aware(cls, value: datetime) -> datetime:
+        # The stored form is compared lexically to pick a merge survivor, so it must
+        # carry a UTC offset (a naive value sorts before every ``+00:00`` and corrupts
+        # the survivor rule); reject a naive datetime and normalize any aware value to
+        # UTC (same strictness as InteractionRequest/ChannelDelivery).
+        if value.tzinfo is None:
+            raise ValueError("linked_at must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
+
+    @field_serializer("linked_at")
+    def _serialize_linked_at(self, value: datetime) -> str:
+        # A single canonical ISO-8601 form for the stored timestamp — see
+        # :meth:`Person._serialize_created_at` for why the format is pinned.
+        return value.isoformat()
+
+
+class Person(BaseModel):
+    """A single identity on one target: the one-or-more :class:`PersonAddress` rows the
+    platform treats as the same person for a ``(target_kind, target_name)`` pair.
+
+    A provisional person carries exactly ONE address — its first contact. Explicit pair-code
+    redemption merges two persons into one (the union of their addresses); persons never
+    cross targets. There is NO greeted flag: the row's existence is itself the first-contact
+    marker, so a caller learns a first contact from whether it created the row. Runtime state
+    that lives only in the deployment's Redis — deliberately NOT a backup section, the same
+    family as a conversation record. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    person_id: str = Field(min_length=1)
+    target_kind: ConversationTargetKind
+    target_name: str = Field(min_length=1)
+    created_at: datetime
+    addresses: list[PersonAddress] = Field(min_length=1)
+
+    @field_validator("created_at")
+    @classmethod
+    def _ensure_tz_aware(cls, value: datetime) -> datetime:
+        # The stored form is compared lexically to pick a merge survivor, so it must
+        # carry a UTC offset (a naive value sorts before every ``+00:00`` and corrupts
+        # the survivor rule); reject a naive datetime and normalize any aware value to
+        # UTC (same strictness as InteractionRequest/ChannelDelivery).
+        if value.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        # The stored form is compared lexically to pick a merge survivor (earliest first),
+        # so every timestamp must serialize to ONE canonical, chronologically-sortable
+        # string. ``isoformat`` on a tz-aware UTC value is that form; the default pydantic
+        # serializer's trailing ``Z`` would not compare equal to a hand-built ``+00:00``.
+        return value.isoformat()
+
+
+class PairCodeInvalidError(Exception):
+    """A submitted pair code did not resolve to a live single-use record. Deliberately
+    UNIFORM across unknown / expired / already-redeemed: the three are indistinguishable to
+    the caller (no oracle), so a redeem reply never reveals whether a code ever existed."""
+
+
+class NotLinkedError(Exception):
+    """An unlink was asked of an address that is not part of a multi-address person — it is
+    already its own provisional person, so there is nothing to detach."""
+
+
+class MultichannelDisabledError(Exception):
+    """A pairing operation was attempted against a target whose multichannel support is off.
+    The pairing tool refuses with this; the ``/link`` and ``/unlink`` commands instead pass
+    through as ordinary text on such a target."""
+
+
+class CrossTargetMergeError(Exception):
+    """A merge was attempted across two different targets. Persons are per-target and can
+    never span targets; a NAMED type so a pairing turn scopes it distinctly from an
+    infrastructure fault."""
+
+
 __all__ = [
     "ROUTE_NAME_RE",
     "AnswerStatus",
@@ -220,5 +346,11 @@ __all__ = [
     "ConversationRoute",
     "ConversationRouteCreate",
     "ConversationTargetKind",
+    "CrossTargetMergeError",
     "DeliveryReceipt",
+    "MultichannelDisabledError",
+    "NotLinkedError",
+    "PairCodeInvalidError",
+    "Person",
+    "PersonAddress",
 ]

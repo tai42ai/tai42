@@ -33,6 +33,33 @@ def test_keyspace_helpers_are_distinct_greppable_segments():
         "conversations:thread:support-line:bridge:support-line:+1555"
     )
     assert s.route_threads_key("support-line") == "conversations:route_threads:support-line"
+    # Person-linking keyspaces: the uuid4/hex ids sit LAST; the charset-unconstrained
+    # target_name sits TERMINAL under a ``:``-free target_kind.
+    assert s.person_key("p-1") == "conversations:person:p-1"
+    assert s.person_key_prefix == "conversations:person:"
+    assert s.person_index_key("agent", "my:agent") == "conversations:person_index:agent:my:agent"
+    assert s.person_index_key_prefix == "conversations:person_index:"
+    assert s.pair_code_key("abc123") == "conversations:pair_code:abc123"
+    assert s.pair_code_key_prefix == "conversations:pair_code:"
+    # open_code_key folds its inputs into ONE opaque sha256 terminal segment (deterministic).
+    open_key = s.open_code_key("agent", "my:agent", '["twilio","+1","+2"]')
+    assert open_key.startswith("conversations:open_code:")
+    assert len(open_key.removeprefix("conversations:open_code:")) == 64
+    assert s.open_code_key("agent", "my:agent", '["twilio","+1","+2"]') == open_key
+
+
+def test_new_keyspace_blank_segments_are_refused():
+    import pytest
+
+    s = ConversationsSettings()
+    with pytest.raises(ValueError, match="person_id must be a non-blank string"):
+        s.person_key("  ")
+    with pytest.raises(ValueError, match="target_name must be a non-blank string"):
+        s.person_index_key("agent", "")
+    with pytest.raises(ValueError, match="target_kind must not contain ':'"):
+        s.person_index_key("ag:ent", "concierge")
+    with pytest.raises(ValueError, match="code_hash must be a non-blank string"):
+        s.pair_code_key("")
 
 
 def test_a_blank_provider_supplied_segment_is_refused():

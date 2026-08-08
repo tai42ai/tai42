@@ -11,6 +11,8 @@ TTL lands only on a terminal record.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -27,6 +29,18 @@ class FakeRecordRedis:
         # The live expiry (in milliseconds) each key carries, so a test can assert the
         # retention TTL lands only on a terminal transition.
         self.ttl_ms: dict[str, int] = {}
+
+    def advance(self, seconds: float) -> None:
+        """Age every keyed TTL by ``seconds`` and evict what has expired — the reaper Redis
+        runs on its own. ``ttl_ms`` holds the remaining lifetime, so a test that never calls
+        this sees the applied TTL unchanged (the record suite asserts it directly)."""
+        elapsed = int(seconds * 1000)
+        for key in list(self.ttl_ms):
+            self.ttl_ms[key] -= elapsed
+            if self.ttl_ms[key] <= 0:
+                self.ttl_ms.pop(key, None)
+                for store in (self._strings, self._hashes, self._lists, self._zsets):
+                    store.pop(key, None)
 
     def seed_hash(self, key: str, fields: dict[str, str]) -> None:
         """Plant a raw hash under ``key`` — the seam a test uses to put a row no store
@@ -121,7 +135,14 @@ class FakeRecordRedis:
 
     # -- string commands -----------------------------------------------------
     async def get(self, key: str) -> str | None:
-        return self._strings.get(key)
+        # Captures the value THEN yields (as a real single-server redis does: each command runs
+        # to completion server-side, so two concurrent readers both observe pre-write state).
+        # This makes a non-atomic check-then-act genuinely interleave — the read ops
+        # (``get``/``hget``) yield, while the atomic burn ``getdel`` never does, so the
+        # single-use pair-code redeem stays exclusive.
+        value = self._strings.get(key)
+        await asyncio.sleep(0)
+        return value
 
     async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False) -> bool | None:
         if nx and key in self._strings:
@@ -131,12 +152,30 @@ class FakeRecordRedis:
             self.ttl_ms[key] = ex * 1000
         return True
 
+    async def getdel(self, key: str) -> str | None:
+        # The atomic single-use burn — no yield inside, so two concurrent redeems admit
+        # exactly one winner.
+        self.ttl_ms.pop(key, None)
+        return self._strings.pop(key, None)
+
     # -- hash commands -------------------------------------------------------
     async def hgetall(self, key: str) -> dict[str, str]:
         return dict(self._hashes.get(key, {}))
 
     async def hget(self, key: str, field: str) -> str | None:
-        return self._hashes.get(key, {}).get(field)
+        # Reads THEN yields, exactly like ``get``: a hypothetical NON-atomic ensure that HGETs
+        # the index and only then HSETs would have both racers observe the same empty index and
+        # double-create, so the race test catches it. The real ensure runs as ONE atomic
+        # ``eval`` (which never routes through this method), so it stays a single create.
+        value = self._hashes.get(key, {}).get(field)
+        await asyncio.sleep(0)
+        return value
+
+    async def hset(self, key: str, field: str, value: str) -> int:
+        target = self._hashes.setdefault(key, {})
+        is_new = field not in target
+        target[field] = value
+        return 1 if is_new else 0
 
     async def hincrby(self, key: str, field: str, amount: int) -> int:
         target = self._hashes.setdefault(key, {})
@@ -186,6 +225,144 @@ class FakeRecordRedis:
                 return existing
             self._strings[key] = argv[0]
             return argv[0]
+        if "conversations:person:lookup" in script:
+            person_id = self._hashes.get(key, {}).get(argv[0])
+            if person_id is None:
+                return ["miss"]
+            raw = self._strings.get(argv[1] + person_id)
+            if raw is None:
+                return ["torn", person_id]
+            return ["hit", raw]
+        if "conversations:person:ensure" in script:
+            index_key = key
+            dak, prefix, new_id, new_json = argv[0], argv[1], argv[2], argv[3]
+            door, channel, our_identity, address = argv[4], argv[5], argv[6], argv[7]
+            routes = json.loads(argv[8])
+            existing = self._hashes.get(index_key, {}).get(dak)
+            if existing is None:
+                self._hashes.setdefault(index_key, {})[dak] = new_id
+                self._strings[prefix + new_id] = new_json
+                return ["created", new_json]
+            row_key = prefix + existing
+            raw = self._strings.get(row_key)
+            if raw is None:
+                return ["torn", existing]
+            person = json.loads(raw)
+            for addr in person["addresses"]:
+                match = addr["door"] == door
+                if match and door == "channel":
+                    match = (
+                        addr["channel"] == channel
+                        and addr["our_identity"] == our_identity
+                        and addr["address"] == address
+                    )
+                elif match:
+                    match = addr["address"] == address
+                if match:
+                    changed = False
+                    for want in routes:
+                        if want not in addr["routes"]:
+                            addr["routes"].append(want)
+                            changed = True
+                    if changed:
+                        raw = json.dumps(person)
+                        self._strings[row_key] = raw
+                    break
+            return ["existing", raw]
+        if "conversations:person:merge" in script:
+            key_a, key_b = keys[0], keys[1]
+            raw_a = self._strings.get(key_a)
+            if raw_a is None:
+                return ["unknown", key_a]
+            if key_a == key_b:
+                return ["ok", raw_a]
+            raw_b = self._strings.get(key_b)
+            if raw_b is None:
+                return ["unknown", key_b]
+            a, b = json.loads(raw_a), json.loads(raw_b)
+            if a["target_kind"] != b["target_kind"] or a["target_name"] != b["target_name"]:
+                return ["cross_target"]
+            if a["created_at"] < b["created_at"]:
+                survivor_is_a = True
+            elif b["created_at"] < a["created_at"]:
+                survivor_is_a = False
+            else:
+                survivor_is_a = a["person_id"] < b["person_id"]
+            survivor, absorbed, survivor_key, absorbed_key = (
+                (a, b, key_a, key_b) if survivor_is_a else (b, a, key_b, key_a)
+            )
+            for addr in absorbed["addresses"]:
+                for have in survivor["addresses"]:
+                    dup = have["door"] == addr["door"] and have["address"] == addr["address"]
+                    if dup and addr["door"] == "channel":
+                        dup = have["channel"] == addr["channel"] and have["our_identity"] == addr["our_identity"]
+                    if dup:
+                        return ["duplicate_address", addr["address"]]
+                survivor["addresses"].append(addr)
+            index_key = argv[0] + survivor["target_kind"] + ":" + survivor["target_name"]
+            index = self._hashes.get(index_key, {})
+            for field, val in list(index.items()):
+                if val == absorbed["person_id"]:
+                    index[field] = survivor["person_id"]
+            encoded = json.dumps(survivor)
+            self._strings[survivor_key] = encoded
+            self._strings.pop(absorbed_key, None)
+            return ["ok", encoded]
+        if "conversations:person:detach" in script:
+            row_key, new_row_key = keys[0], keys[1]
+            index_prefix, dak, new_id, new_created_at = argv[0], argv[1], argv[2], argv[3]
+            door, channel, our_identity, address = argv[4], argv[5], argv[6], argv[7]
+            raw = self._strings.get(row_key)
+            if raw is None:
+                return ["unknown", row_key]
+            person = json.loads(raw)
+            if len(person["addresses"]) <= 1:
+                return ["not_linked"]
+            found = None
+            for i, addr in enumerate(person["addresses"]):
+                match = addr["door"] == door
+                if match and door == "channel":
+                    match = (
+                        addr["channel"] == channel
+                        and addr["our_identity"] == our_identity
+                        and addr["address"] == address
+                    )
+                elif match:
+                    match = addr["address"] == address
+                if match:
+                    found = i
+                    break
+            if found is None:
+                return ["not_member"]
+            removed = person["addresses"].pop(found)
+            self._strings[row_key] = json.dumps(person)
+            fresh = {
+                "person_id": new_id,
+                "target_kind": person["target_kind"],
+                "target_name": person["target_name"],
+                "created_at": new_created_at,
+                "addresses": [removed],
+            }
+            fresh_json = json.dumps(fresh)
+            self._strings[new_row_key] = fresh_json
+            index_key = index_prefix + person["target_kind"] + ":" + person["target_name"]
+            self._hashes.setdefault(index_key, {})[dak] = new_id
+            return ["ok", fresh_json]
+        if "conversations:pair_code:mint" in script:
+            open_key, new_code_key = keys[0], keys[1]
+            new_hash, record_json, ttl, code_prefix = argv[0], argv[1], int(argv[2]), argv[3]
+            if new_code_key in self._strings:
+                return 0
+            open_hash = self._strings.get(open_key)
+            if open_hash is not None:
+                stale_key = code_prefix + open_hash
+                self._strings.pop(stale_key, None)
+                self.ttl_ms.pop(stale_key, None)
+            self._strings[new_code_key] = record_json
+            self.ttl_ms[new_code_key] = ttl * 1000
+            self._strings[open_key] = new_hash
+            self.ttl_ms[open_key] = ttl * 1000
+            return 1
         h = self._hashes.get(key)
         status = h.get("delivery_status") if h else None
         if "conversations:record:create" in script:
