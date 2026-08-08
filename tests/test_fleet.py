@@ -206,7 +206,7 @@ HARNESS_API = {
     ],
     "tai42_e2e.settings": ["HarnessSettings"],
     "tai42_e2e.variants": [
-        "Variants", "resolve_variants", "BusOrigin", "bus_census", "BACKENDS",
+        "Variants", "resolve_variants", "BusWorker", "bus_census", "BACKENDS",
         "IDENTITIES", "STORAGES", "short_presence_ttl_env",
     ],
     "tai42_e2e.waiting": ["wait_for", "wait_for_async", "WaitTimeout", "align_to_window"],

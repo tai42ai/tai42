@@ -57,7 +57,12 @@ class _RecordingRedis:
 def _frame(reply_to: str | None) -> dict[str, Any]:
     # A foreign publisher (different name+generation than the handling bus), so the
     # op is applied rather than echo-skipped.
-    frame: dict[str, Any] = {"op": "recycle", "name": "serve-other", "generation": 1, "op_id": "op-x"}
+    frame: dict[str, Any] = {
+        "payload": {"op": "recycle"},
+        "name": "serve-other",
+        "generation": 1,
+        "op_id": "op-x",
+    }
     if reply_to is not None:
         frame["reply_to"] = reply_to
     return {"data": json.dumps(frame)}

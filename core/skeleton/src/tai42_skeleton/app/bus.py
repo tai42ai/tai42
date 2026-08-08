@@ -93,9 +93,12 @@ from tai42_skeleton.utils.redis_typing import eval_script
 
 logger = logging.getLogger(__name__)
 
-# Wire fields that address/route an op rather than describe it; stripped before the
-# op payload is handed to the subscriber callback.
-_TRANSPORT_KEYS = frozenset({"name", "generation", "op_id", "reply_to", "targets"})
+# The reserved envelope key the op payload rides under on a control-channel frame. The
+# transport fields (name/generation/op_id/reply_to/targets) and the op payload occupy
+# disjoint namespaces, so an op field can never collide with a route field — an op that
+# carries its own ``name`` (a preset/tool name) is never clobbered by the transport
+# identity ``name``.
+_OP_PAYLOAD_KEY = "payload"
 
 # How long one idle pub/sub poll blocks in the subscribe loop; bounds the latency
 # of noticing a cancellation and of the next presence refresh.
@@ -576,13 +579,18 @@ class WorkerBus:
             pubsub = r.pubsub()
             try:
                 await pubsub.subscribe(reply_channel)
+                # The op payload is NESTED under its own reserved envelope key, never
+                # flattened alongside the transport fields: an op legitimately carries
+                # its own ``name`` (a preset/tool name), and flattening would let the
+                # transport identity ``name`` clobber it. Envelope and payload occupy
+                # disjoint namespaces so no op field can ever collide with a route field.
                 wire = {
-                    **op,
                     "name": identity.name,
                     "generation": identity.generation,
                     "op_id": op_id,
                     "reply_to": reply_channel,
                     "targets": targets,
+                    _OP_PAYLOAD_KEY: op,
                 }
                 await r.publish(self._settings.channel, json.dumps(wire))
                 collected = await self._collect(r, pubsub, expected, gaps, op_id, op_name)
@@ -1227,14 +1235,19 @@ class WorkerBus:
         # the publisher's empty expected set (no silent sibling apply).
         if targets is not None and identity.name not in targets:
             return
+        # The op payload rides nested under its reserved envelope key; a frame that is
+        # missing it (or carries a non-object there) is malformed and discarded rather
+        # than half-applied.
+        op_payload = frame.get(_OP_PAYLOAD_KEY)
+        if not isinstance(op_payload, dict):
+            logger.warning("worker bus: discarding op frame with no object payload: %r", frame)
+            return
         reply_to = frame.get("reply_to")
         op_id = frame.get("op_id")
         responder = {"name": identity.name, "generation": identity.generation, "op_id": op_id}
 
         if reply_to:
             await self._reply(r, reply_to, {**responder, "phase": "received"})
-
-        op_payload = {k: v for k, v in frame.items() if k not in _TRANSPORT_KEYS}
         applied = False
         outcome_value = OpOutcome.applied.value
         try:

@@ -444,7 +444,7 @@ async def test_echo_skip_is_keyed_on_name_and_generation() -> None:
         applied.append(op)
 
     def frame(name: str, generation: int) -> dict:
-        return {"data": json.dumps({"op": "reload_config", "name": name, "generation": generation})}
+        return {"data": json.dumps({"payload": {"op": "reload_config"}, "name": name, "generation": generation})}
 
     # Own (name, generation): echo-skipped.
     await bus._handle_op(None, record, frame("serve-1", 3))

@@ -22,6 +22,7 @@ from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -181,6 +182,7 @@ def env(monkeypatch):
     fake = FakeRecordRedis()
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(ledger_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
     # Stub the execution-identity authorization seam so the bridge is tested in isolation.
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
 

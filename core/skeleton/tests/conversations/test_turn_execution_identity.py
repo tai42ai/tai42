@@ -31,6 +31,7 @@ from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -165,6 +166,7 @@ def store(monkeypatch) -> ConversationRecordStore:
     fake = FakeRecordRedis()
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(ledger_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
     return ConversationRecordStore(ConversationsSettings())
 
 
