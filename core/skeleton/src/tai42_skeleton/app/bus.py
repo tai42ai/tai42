@@ -140,6 +140,17 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _beat_age_seconds(beat_at: str) -> float | None:
+    """Seconds since a presence row's last worker-stamped beat, for a gap row's
+    cosmetic detail only — never a freshness gate (that reads the raw PTTL). ``None``
+    when the stamp does not parse."""
+    try:
+        then = datetime.fromisoformat(beat_at)
+        return (datetime.now(UTC) - then).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
 class SlotLostError(Exception):
     """This process's slot claim was lost — a compare-token renew missed (token
     mismatch or absent claim key), so the slot already belongs to a new holder.
@@ -153,15 +164,25 @@ class SlotLostError(Exception):
 class OpOutcome(StrEnum):
     """Per-worker outcome of a fleet op.
 
-    ``applied`` / ``failed`` are terminal WIRE replies from a subscriber;
+    ``applied`` / ``failed`` are terminal WIRE replies from a subscriber.
     ``missing`` / ``departed`` / ``timed_out`` are publisher-COMPUTED from the
-    presence census (a silent worker never sends them)."""
+    presence census (a silent worker never sends them). ``resyncing`` /
+    ``recycling`` / ``stale`` are the gap outcomes for a row that fails the ready+
+    fresh gate: it is not an expected worker, so instead of being dropped it is
+    landed as its own actual condition — ``resyncing`` (the worker wrote that state
+    and converges on its resync), ``recycling`` (departing, converging by
+    old-life-gone + fresh capacity), or ``stale`` (a quiet row past the freshness
+    bound — reconnecting or dead, carrying no convergence promise). A decayed row is
+    ``stale`` regardless of its written state."""
 
     applied = "applied"
     failed = "failed"
     missing = "missing"
     departed = "departed"
     timed_out = "timed_out"
+    resyncing = "resyncing"
+    recycling = "recycling"
+    stale = "stale"
 
 
 class WorkerKind(StrEnum):
@@ -296,8 +317,10 @@ class WorkerResult(BaseModel):
 class FleetResult(BaseModel):
     """The awaited result of one :meth:`WorkerBus.publish`.
 
-    Two honest shapes. Reachable (``reachable=True``): ``results`` holds one
-    :class:`WorkerResult` per expected worker (the synthesized self entry included).
+    Two honest shapes. Reachable (``reachable=True``): ``results`` holds, per worker,
+    the expected workers' verdicts (the synthesized self entry included) AND the gap
+    rows (``resyncing`` / ``recycling`` / ``stale``) for rows that failed the ready+
+    fresh gate — each carried as its actual condition rather than dropped.
     Bus-unreachable (``reachable=False``): the transport failed before any worker
     could reply, so there is NO worker list — only ``error``. ``local_only`` marks
     the result of the no-op :meth:`WorkerBus.local` variant."""
@@ -445,6 +468,13 @@ class WorkerBus:
         return cls(BusSettings(), kind=kind, local=True)
 
     @property
+    def heartbeat_ttl(self) -> float:
+        """This bus's presence-key TTL, the freshness cadence :func:`presence_fresh`
+        gates against — the ONE bound a stale check reads, so no consumer hardcodes a
+        threshold of its own."""
+        return self._settings.heartbeat_ttl
+
+    @property
     def identity(self) -> WorkerIdentity:
         """This process's bus identity. Raises before the slot is claimed (a real bus
         pre-subscribe), or in a fork child of an unclaimed member parent (a poisoned
@@ -538,7 +568,7 @@ class WorkerBus:
         identity = self.identity
         async with client_ctx(RedisClient, self._settings.redis) as conn:
             r: Any = conn
-            expected = await self._expected_workers(r, targets)
+            expected, gaps = await self._classify_workers(r, targets)
             # ``r.pubsub()`` is a non-I/O constructor, bound BEFORE the try so pubsub is
             # never unbound in the finally. A raising subscribe still reaches the finally,
             # which unsubscribes then ALWAYS closes the pub/sub (the aclose runs even if
@@ -555,7 +585,7 @@ class WorkerBus:
                     "targets": targets,
                 }
                 await r.publish(self._settings.channel, json.dumps(wire))
-                collected = await self._collect(r, pubsub, expected, op_id, op_name)
+                collected = await self._collect(r, pubsub, expected, gaps, op_id, op_name)
             finally:
                 try:
                     await pubsub.unsubscribe(reply_channel)
@@ -563,38 +593,77 @@ class WorkerBus:
                     await pubsub.aclose()
         return list(collected.values())
 
-    async def _expected_workers(self, r: Any, targets: list[str] | None) -> dict[str, int | None]:
-        """The expected worker set for one op, keyed name → generation.
+    async def _classify_workers(
+        self, r: Any, targets: list[str] | None
+    ) -> tuple[dict[str, int | None], dict[str, WorkerResult]]:
+        """Split the live fleet into the EXPECTED set (keyed name → generation, awaited
+        for a reply) and the GAP set (keyed name → its actual-condition result).
 
-        Whole-fleet: the READY rows that pass the freshness gate (:func:`presence_fresh`
-        on their captured PTTL), minus self — a row that is resyncing/recycling or
-        past the freshness bound is excluded from the expected set. Targeted: EVERY
-        named target minus self, so a target absent from
-        the census stays expected and is reported ``departed`` at the cut (its
-        generation is ``None`` — presence-based verdict only)."""
+        A gap row fails the ready+fresh gate, so it is not an expected worker; rather
+        than being dropped it is landed as its own condition (``resyncing`` /
+        ``recycling`` / ``stale``). Whole-fleet: expected = the READY rows past the
+        freshness gate, minus self; every other row is a gap. Targeted: each named
+        target minus self — a ready+fresh target is expected, a target present-but-gap
+        carries its gap outcome, and a target absent from the census stays expected with
+        generation ``None`` so it is reported ``departed`` at the cut."""
         rows = await self._scan_workers(r)
         by_name = {row.name: row for row in rows}
         self_name = self.identity.name
-        if targets is None:
-            return {
-                name: row.generation
-                for name, row in by_name.items()
-                if name != self_name
-                and row.state == WorkerState.ready
-                and presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl)
-            }
-        # Targets are NOT re-validated here (the caller validated); an absent target
-        # is reported as departed at the cut, never raised.
         expected: dict[str, int | None] = {}
+        gaps: dict[str, WorkerResult] = {}
+        if targets is None:
+            for name, row in by_name.items():
+                if name == self_name:
+                    continue
+                if self._is_ready_fresh(row):
+                    expected[name] = row.generation
+                else:
+                    gaps[name] = self._gap_result(row)
+            return expected, gaps
+        # Targets are NOT re-validated here (the caller validated); an absent target is
+        # reported as departed at the cut, a present-but-gap target as its gap outcome.
         for name in targets:
             if name == self_name:
                 continue
             row = by_name.get(name)
-            expected[name] = row.generation if row is not None else None
-        return expected
+            if row is None:
+                expected[name] = None
+            elif self._is_ready_fresh(row):
+                expected[name] = row.generation
+            else:
+                gaps[name] = self._gap_result(row)
+        return expected, gaps
+
+    def _is_ready_fresh(self, row: WorkerRow) -> bool:
+        """The ready+fresh gate: a row is an expected worker only when it advertises
+        ``ready`` AND its captured PTTL clears the freshness bound."""
+        return row.state == WorkerState.ready and presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl)
+
+    def _gap_result(self, row: WorkerRow) -> WorkerResult:
+        """Classify a gap row (one that fails the ready+fresh gate) as its actual
+        condition. A decayed row is ``stale`` regardless of its written state — a worker
+        that died mid-resync/mid-recycle carries no convergence promise; a fresh
+        resyncing/recycling row keeps its written state as the outcome."""
+        if not presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl):
+            outcome = OpOutcome.stale
+        elif row.state == WorkerState.resyncing:
+            outcome = OpOutcome.resyncing
+        elif row.state == WorkerState.recycling:
+            outcome = OpOutcome.recycling
+        else:
+            outcome = OpOutcome.stale
+        age = _beat_age_seconds(row.beat_at)
+        detail = f"state={row.state.value}" + (f", last beat {age:.0f}s ago" if age is not None else "")
+        return WorkerResult(name=row.name, outcome=outcome, detail=detail)
 
     async def _collect(
-        self, r: Any, pubsub: Any, expected: dict[str, int | None], op_id: str, op_name: str
+        self,
+        r: Any,
+        pubsub: Any,
+        expected: dict[str, int | None],
+        gaps: dict[str, WorkerResult],
+        op_id: str,
+        op_name: str,
     ) -> dict[str, WorkerResult]:
         terminal: dict[str, WorkerResult] = {}
         acked: set[str] = set()
@@ -666,8 +735,12 @@ class WorkerBus:
         for name in expected:
             verdict = terminal.get(name)
             if verdict is None:
-                verdict = await self._computed_verdict(r, name, name in acked, transport_error)
+                verdict = await self._computed_verdict(r, name, expected[name], name in acked, transport_error)
             results[name] = verdict
+        # Gap rows (failing the ready+fresh gate) were never expected to reply; land
+        # each as its own actual condition (resyncing/recycling/stale) rather than
+        # dropping it. Disjoint from ``expected`` by construction.
+        results.update(gaps)
         return results
 
     def _terminal_result(self, name: str, frame: dict[str, Any]) -> WorkerResult:
@@ -675,11 +748,26 @@ class WorkerBus:
         outcome = OpOutcome.failed if raw == OpOutcome.failed.value else OpOutcome.applied
         return WorkerResult(name=name, outcome=outcome, payload=frame.get("payload"), error=frame.get("error"))
 
-    async def _computed_verdict(self, r: Any, name: str, acked: bool, transport_error: str | None) -> WorkerResult:
-        """Classify a worker that holds no terminal reply, re-checking presence."""
-        alive = await self._presence_alive(r, name)
+    async def _computed_verdict(
+        self, r: Any, name: str, expected_gen: int | None, acked: bool, transport_error: str | None
+    ) -> WorkerResult:
+        """Classify a worker that holds no terminal reply, re-checking presence.
+
+        Generation-aware: when the presence key now shows a generation GREATER than the
+        one expected at publish, the target's life ended and a replacement took its slot
+        mid-apply — ``departed`` (the reply gate already discarded the stale life's
+        replies). An absent key is ``departed``; a still-live same-life key is
+        ``timed_out`` (acked) or ``missing`` (never acked)."""
+        status, current_gen = await self._recheck_presence(r, name)
+        if status == "alive" and expected_gen is not None and current_gen is not None and current_gen > expected_gen:
+            return WorkerResult(
+                name=name,
+                outcome=OpOutcome.departed,
+                detail=f"replaced by generation {current_gen} mid-apply",
+            )
+        absent = status == "absent"
         if acked:
-            if alive is False:
+            if absent:
                 return WorkerResult(
                     name=name,
                     outcome=OpOutcome.departed,
@@ -689,7 +777,7 @@ class WorkerBus:
             if transport_error is not None:
                 detail = f"{detail} (reply collection transport error: {transport_error})"
             return WorkerResult(name=name, outcome=OpOutcome.timed_out, detail=detail)
-        if alive is False:
+        if absent:
             return WorkerResult(
                 name=name,
                 outcome=OpOutcome.departed,
@@ -700,14 +788,27 @@ class WorkerBus:
             detail = f"{detail} (reply collection transport error: {transport_error})"
         return WorkerResult(name=name, outcome=OpOutcome.missing, detail=detail)
 
-    async def _presence_alive(self, r: Any, name: str) -> bool | None:
-        """True/False for a live/expired presence key; ``None`` when the check itself
-        could not reach Redis (the caller degrades to a loud missing/timed_out)."""
+    async def _recheck_presence(self, r: Any, name: str) -> tuple[str, int | None]:
+        """Re-read a worker's presence key at the report cut, returning ``("absent",
+        None)`` when the key is gone, ``("alive", generation)`` when it is present (the
+        generation parsed from the value, ``None`` if the value does not parse), or
+        ``("unreachable", None)`` when the check itself could not reach Redis (the caller
+        degrades to a loud missing/timed_out). The generation lets the verdict see a
+        replacement that took the slot mid-apply."""
         try:
-            return bool(await r.exists(self._settings.presence_key(name)))
+            raw = await r.get(self._settings.presence_key(name))
         except _TRANSPORT_ERRORS:
             logger.error("worker bus: presence re-check for %s failed", name, exc_info=True)
-            return None
+            return ("unreachable", None)
+        if raw is None:
+            return ("absent", None)
+        try:
+            text = raw.decode() if isinstance(raw, bytes) else raw
+            generation = int(json.loads(text)["generation"])
+        except (ValueError, TypeError, KeyError):
+            logger.warning("worker bus: presence value for %s is unparseable at the report cut", name, exc_info=True)
+            return ("alive", None)
+        return ("alive", generation)
 
     def _self_result(self, local: LocalApplyResult) -> WorkerResult:
         return WorkerResult(
@@ -774,7 +875,9 @@ class WorkerBus:
             beat_at=_utcnow_iso(),
             state=WorkerState.ready,
             last_op=None,
-            pttl_ms=None,
+            # The lone busless worker is this live process — always fresh, so it clears
+            # the same freshness predicate every other row is judged by (never stale).
+            pttl_ms=int(self._settings.heartbeat_ttl * 1000),
         )
 
     async def validate_targets(self, targets: list[str] | None) -> None:

@@ -66,6 +66,12 @@ class FakeBus:
         return self._identity
 
     @property
+    def heartbeat_ttl(self) -> float:
+        """The freshness cadence the server-computed ``stale`` flag gates against — the
+        same ``ttl`` the census rows are fresh/decayed against."""
+        return self.ttl
+
+    @property
     def rows(self) -> list[WorkerRow]:
         """The census rows (self + remotes); mutate a row's ``pttl_ms`` to drive the
         freshness gate."""

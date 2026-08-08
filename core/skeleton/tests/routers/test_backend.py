@@ -114,6 +114,40 @@ async def test_workers_no_backend_still_lists(install):
     assert [w["name"] for w in _json(resp)["data"]["workers"]] == ["serve-solo"]
 
 
+async def test_workers_reports_server_computed_stale_flag(install):
+    # ``stale`` is computed server-side from the SAME freshness predicate the ready+fresh expected set uses
+    # — a fresh row is stale=False, a row whose captured PTTL has decayed is stale=True.
+    # The client never hardcodes a threshold; it reads the flag.
+    bus = install(bus=FakeBus(origin="serve-a", remotes=["backend-b"]))
+    # Decay the remote row's captured PTTL below the freshness bound (ttl=15 → bound=5s).
+    bus.rows[1].pttl_ms = 1000
+    resp = await router.list_workers(_req())
+    assert resp.status_code == 200
+    by_name = {w["name"]: w for w in _json(resp)["data"]["workers"]}
+    assert by_name["serve-a"]["stale"] is False
+    assert by_name["backend-b"]["stale"] is True
+    # The row carries the full identity/timestamp fields plus generation and state.
+    assert by_name["serve-a"]["generation"] == 1
+    assert by_name["serve-a"]["state"] == "ready"
+    assert by_name["serve-a"]["last_op"] is None
+
+
+async def test_busless_worker_reports_not_stale(install, monkeypatch):
+    # A GENUINELY busless bus (WorkerBus.local, not FakeBus) synthesizes its one live row
+    # fresh — its captured PTTL clears the freshness bound — so the listing reports
+    # stale=False for the lone worker. Regression: reverting _local_row's pttl_ms to None
+    # makes presence_fresh(None) False and the busless worker falsely report stale=True.
+    from tai42_skeleton.app.bus import WorkerBus
+
+    install()
+    monkeypatch.setattr(instance.app, "_bus", WorkerBus.local())
+    resp = await router.list_workers(_req())
+    assert resp.status_code == 200
+    workers = _json(resp)["data"]["workers"]
+    assert len(workers) == 1
+    assert workers[0]["stale"] is False
+
+
 async def test_workers_census_failure_propagates(install):
     class _BrokenBus(FakeBus):
         async def census(self):

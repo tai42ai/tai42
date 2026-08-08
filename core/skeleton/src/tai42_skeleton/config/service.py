@@ -8,7 +8,7 @@ Every manifest / env mutation crosses one pipeline so no writer can forget a ste
 read-modify-write through the config manager's transaction), :meth:`apply_replace`
 (a whole-document replace), and :meth:`apply_env_change` (an env override) — and
 each returns a structured :class:`ApplyResult` carrying the persisted document
-(where applicable), the local reload result, and the awaited per-origin fleet
+(where applicable), the local reload result, and the awaited per-worker fleet
 report.
 
 Validation runs on the RESOLVED projection of the change (``!ENV`` markers
@@ -32,7 +32,7 @@ plaintext secret never reaches the store.
 The broadcast tail is the whole fleet, always: ``publish({"op": "reload_config"},
 targets=None, local=<local reload result>)`` — a persisted change reaches every
 worker, and each subscriber re-reads the persisted store itself. An unconfirmed
-origin is a loud ERROR log and an explicit entry in the report, but the call still
+worker is a loud ERROR log and an explicit entry in the report, but the call still
 succeeds because persist + local reload landed; recovery is the fleet-reload door.
 Once the persist has committed the contract is structural: EVERY subsequent failure
 surfaces as a :class:`~tai42_skeleton.operations._broadcast.FleetBroadcastError`
@@ -61,7 +61,7 @@ from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app.boot_rules import check_backend_needs_bus
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerBus
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerBus, WorkerIdentity
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
@@ -137,9 +137,9 @@ class ApplyResult:
     ``document`` is the persisted PRESERVED-view manifest (``!ENV`` markers intact)
     for :meth:`ConfigService.apply_change` / :meth:`ConfigService.apply_replace`, and
     ``None`` for :meth:`ConfigService.apply_env_change` (no manifest document changed).
-    ``local`` is this worker's local reload result. ``fleet`` is the awaited per-origin
+    ``local`` is this worker's local reload result. ``fleet`` is the awaited per-worker
     broadcast report, which carries the two honest failure shapes itself — a reachable
-    bus with an unconfirmed origin named in ``fleet.results`` (``fleet.ok`` is then
+    bus with an unconfirmed worker named in ``fleet.results`` (``fleet.ok`` is then
     ``False``), or a bus-unreachable result (``fleet.reachable`` is ``False`` with only
     ``fleet.error``). Both are returned successes: persist + local reload landed, and
     recovery is a fleet reload.
@@ -165,20 +165,17 @@ class ProfileApplyOutcome:
 
     ``hot`` is the hot-class diff key NAMES (names only — never values). ``recycle`` is
     the fleet recycle report (``None`` when the diff carried no recycle-class key, so no
-    recycle rolled). ``origin_kinds`` maps each live origin name to its worker kind (the
-    extra-census seam that supplies ``recycle[].kind``). ``self_origin`` is the applying
-    worker's own origin. ``serve_affecting`` is whether the applier must self-exit (arm
-    the post-response graceful exit). ``fleet`` is the reload broadcast report;
-    ``census`` is the pre-apply fleet snapshot the swapped-in epoch was built against.
+    recycle rolled), each row carrying its own kind. ``self_identity`` is the applying
+    worker's own identity (name + generation) — the source for the self-deferred row's
+    ``generation_before``. ``serve_affecting`` is whether the applier must self-exit (arm
+    the post-response graceful exit). ``fleet`` is the reload broadcast report.
     """
 
     hot: list[str]
     recycle: RecycleReport | None
-    origin_kinds: dict[str, str]
-    self_origin: str
+    self_identity: WorkerIdentity
     serve_affecting: bool
     fleet: FleetResult
-    census: frozenset[str]
 
 
 async def _release_llm_pools() -> None:
@@ -410,7 +407,7 @@ class ConfigService:
 
         1. ``_validate_replace`` (X-band payload refusal + dangling ``!ENV`` + backend-
            needs-bus); diff the proposed env against the stored env; refuse a recycle-
-           class diff the deployment shape cannot carry; capture the pre-apply census.
+           class diff the deployment shape cannot carry; read the applier's own identity.
         2. Snapshot the current stored env as the reserved ``@previous`` version.
         3. ``build_and_swap_epoch(profile_env, drain_tolerate_driver=driven)`` holding the
            reload gate — ``driven`` excuses THIS door's own still-admitted request from
@@ -448,16 +445,10 @@ class ConfigService:
         # so a non-empty recycle diff here is always on a supported shape.)
         serve_affecting = bool(recycle_diff_keys)
 
-        # STEP 1c — pre-apply census, taken from the pipeline's own bus (the process
-        # ``WorkerBus`` in production — the same object :func:`capture_census_snapshot`
-        # reads). ONE snapshot supplies both the pre-apply census the swapped-in epoch is
-        # built against AND the origin->kind map the response's ``recycle[].kind`` needs
-        # (design seam 1: neither the recycle report nor the name-only census carries kind).
+        # STEP 1c — the applying worker's own identity (name + generation), the source
+        # for the self-deferred row's ``generation_before`` and the recycle exclusion.
         bus = cast("WorkerBus", self._bus)
-        origins = await bus.census()
-        census = frozenset(origin.name for origin in origins)
-        origin_kinds = {origin.name: origin.kind.value for origin in origins}
-        self_origin = bus.identity.name
+        self_identity = bus.identity
 
         # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
         # BEFORE the swap. A later failed build leaves it harmlessly reflecting the
@@ -479,9 +470,7 @@ class ConfigService:
             # AppLifecycle._reload_config performs before ITS build_and_swap_epoch; the
             # profile-apply path missed it, so an apply following any LLM run 500'd.
             await release_llm_pools()
-            new_epoch = await build_and_swap(profile_env, drain_tolerate_driver=driven)
-        # The pre-apply census rides the new generation for the fanout diff.
-        new_epoch.census = census
+            await build_and_swap(profile_env, drain_tolerate_driver=driven)
 
         # STEP 4 — env-write-LAST: persist the proposed env as the WHOLE stored map only
         # after the build succeeded. A failed build never reaches this line.
@@ -495,7 +484,8 @@ class ConfigService:
         if recycle_diff_keys:
             recycle_report = await orchestrate(
                 bus,
-                excluded_origin=self_origin,
+                excluded_name=self_identity.name,
+                applier_generation=self_identity.generation,
                 target_kinds=CENSUS_TARGET_KINDS,
                 applier_self_deferred=serve_affecting,
                 step_timeout=_recycle_step_timeout(),
@@ -504,11 +494,9 @@ class ConfigService:
         return ProfileApplyOutcome(
             hot=hot,
             recycle=recycle_report,
-            origin_kinds=origin_kinds,
-            self_origin=self_origin,
+            self_identity=self_identity,
             serve_affecting=serve_affecting,
             fleet=fleet,
-            census=census,
         )
 
     async def _broadcast_profile_reload(self) -> FleetResult:
@@ -705,10 +693,10 @@ class ConfigService:
         other than the transport-unreachable shape the bus already folds into a
         returned report (e.g. a redis ``ResponseError``, or a malformed presence key
         the census cannot parse) is caught here and re-raised as a
-        ``FleetBroadcastError`` carrying the honest bus-unreachable report (no origin
+        ``FleetBroadcastError`` carrying the honest bus-unreachable report (no worker
         list, only the error) — the same shape the bus returns for a transport
         failure — so a raw broadcast error can never escape the committed persist. An
-        unconfirmed origin on the happy path is a loud ERROR log and an explicit
+        unconfirmed worker on the happy path is a loud ERROR log and an explicit
         report entry, but the call returns successfully."""
         op_name = "reload_config"
         local_failure: Exception | None = None
@@ -726,7 +714,7 @@ class ConfigService:
         except Exception as broadcast_error:
             # The persist already committed, so a raw broadcast failure must not escape
             # the post-persist contract. Surface it as a FleetBroadcastError carrying
-            # the honest bus-unreachable report (no origin list, only the error) — the
+            # the honest bus-unreachable report (no worker list, only the error) — the
             # same shape WorkerBus.publish returns for a transport failure — so every
             # caller treats the change as landed-but-propagation-failed and restores or
             # converges rather than half-writing. A local reload that ALSO failed is
@@ -737,7 +725,7 @@ class ConfigService:
             report = FleetResult(op=op_name, reachable=False, error=error)
             raise FleetBroadcastError(op_name, report, broadcast_error) from broadcast_error
 
-        # The report rides the response, but an unconfirmed origin is also a loud,
+        # The report rides the response, but an unconfirmed worker is also a loud,
         # visible failure — never a silently stale sibling.
         log_non_convergence(report)
         if local_failure is not None:

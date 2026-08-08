@@ -279,8 +279,9 @@ def diff_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help="P
 @covers(("POST", "/api/config/profiles/{name}/apply"))
 def apply_profile(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Profile name.")]) -> None:
     """Apply a profile — replace the stored env with its band, reload, and recycle the
-    fleet. Prints the ``{hot, recycle, refused, fanout}`` report (names + origins only,
-    never env values). DESTRUCTIVE: it replaces the whole stored env band.
+    fleet. Prints the ``{hot, recycle, refused, fanout}`` report plus the per-kind
+    ``fresh`` list (names + worker identities only, never env values). DESTRUCTIVE: it
+    replaces the whole stored env band.
 
     Example: ``tai config profile apply staging``
     """

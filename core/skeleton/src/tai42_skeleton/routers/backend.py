@@ -7,7 +7,7 @@
 
 ``list_workers`` carries no try/except: a presence-store failure must surface as a
 500, never an empty ``[]``. The reload door applies locally then broadcasts and
-embeds the per-origin fleet report; a failed LOCAL apply re-surfaces as a 500 with
+embeds the per-worker fleet report; a failed LOCAL apply re-surfaces as a 500 with
 the report attached, while a sibling that fails/goes missing is reported in the
 embedded fleet report (and logged), never raised.
 

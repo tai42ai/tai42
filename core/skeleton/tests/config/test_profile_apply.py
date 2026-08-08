@@ -25,9 +25,9 @@ import pytest
 import tai42_skeleton.app.bus_settings  # noqa: F401
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetResult, WorkerKind, WorkerRow, WorkerState
+from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
-from tai42_skeleton.app.recycle import RecycleReport
+from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, FreshLife, RecycleReport, RecycleRow
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
 from tests._fakes.bus import FakeBus
@@ -71,13 +71,23 @@ def _orchestrate_spy(
     seen: dict[str, Any] = {}
 
     async def spy(
-        bus: Any, *, excluded_origin: str, target_kinds: Any, applier_self_deferred: bool, step_timeout: float
+        bus: Any,
+        *,
+        excluded_name: str,
+        applier_generation: int,
+        target_kinds: Any,
+        applier_self_deferred: bool,
+        step_timeout: float,
     ) -> RecycleReport:
-        seen["excluded_origin"] = excluded_origin
+        seen["excluded_name"] = excluded_name
+        seen["applier_generation"] = applier_generation
         seen["target_kinds"] = list(target_kinds)
         seen["applier_self_deferred"] = applier_self_deferred
         seen["step_timeout"] = step_timeout
-        out = report or RecycleReport(recycled=["serve-b"], replacements=["serve-c"])
+        out = report or RecycleReport(
+            rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)],
+            fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
+        )
         return out
 
     return spy, seen
@@ -243,11 +253,12 @@ async def test_recycle_class_diff_orchestrates_and_flags_serve_affecting(monkeyp
     # TAI_BUS_NAMESPACE is recycle-class → a recycle rolls, excluding the applier, and
     # the conservative default treats it as serve-affecting.
     assert outcome.serve_affecting is True
-    assert seen["excluded_origin"] == "serve-applier"
+    assert seen["excluded_name"] == "serve-applier"
+    assert seen["applier_generation"] == 1
     assert seen["applier_self_deferred"] is True
     assert [k.value for k in seen["target_kinds"]] == ["backend", "serve"]
     assert outcome.recycle is not None
-    assert outcome.recycle.recycled == ["serve-b"]
+    assert [row.name for row in outcome.recycle.rows] == ["serve-b"]
     assert store.env == {"TAI_BUS_NAMESPACE": "new"}
 
 
@@ -316,7 +327,7 @@ async def test_apply_report_carries_names_never_values(monkeypatch: pytest.Monke
     material = json.dumps(
         {
             "hot": outcome.hot,
-            "origin_kinds": outcome.origin_kinds,
+            "self_identity": outcome.self_identity.model_dump(),
             "recycle": outcome.recycle.model_dump() if outcome.recycle else None,
         }
     )
@@ -326,28 +337,46 @@ async def test_apply_report_carries_names_never_values(monkeypatch: pytest.Monke
 
 
 # ---------------------------------------------------------------------------
-# Response shape — refused==[] on success, applier line status==SELF_DEFERRED
+# Response shape — refused==[] on success, applier line status==SELF_DEFERRED,
+# recycle rows carry {name, kind, status, generation_before}, per-kind fresh list
 # ---------------------------------------------------------------------------
+
+
+def _identity(name: str, generation: int) -> WorkerIdentity:
+    return WorkerIdentity(name=name, kind=WorkerKind.serve, pid=1, generation=generation)
 
 
 def test_profile_apply_response_shape() -> None:
     outcome = ProfileApplyOutcome(
         hot=["HOT_A", "HOT_B"],
-        recycle=RecycleReport(recycled=["serve-b"], timeouts=["backend-z"], replacements=["serve-c"]),
-        origin_kinds={"serve-b": "serve", "backend-z": "backend"},
-        self_origin="serve-applier",
+        recycle=RecycleReport(
+            rows=[
+                RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED),
+                RecycleRow(name="backend-z", kind="backend", generation_before=4, status=TIMED_OUT),
+            ],
+            fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
+        ),
+        self_identity=_identity("serve-applier", 7),
         serve_affecting=True,
         fleet=FleetResult(op="reload_config", results=[]),
-        census=frozenset({"serve-applier"}),
     )
     response = profile_apply_response(outcome)
     assert response["hot"] == ["HOT_A", "HOT_B"]
     assert response["refused"] == []  # empty on success BY CONSTRUCTION
-    assert {"origin": "serve-b", "kind": "serve", "status": "recycled"} in response["recycle"]
-    assert {"origin": "backend-z", "kind": "backend", "status": "timed-out"} in response["recycle"]
-    # The applier's OWN line — always kind "serve", the one shared self-deferred literal.
+    # Recycle rows carry the pre-apply identity + terminal status; no generation_after.
+    assert {"name": "serve-b", "kind": "serve", "status": "recycled", "generation_before": 1} in response["recycle"]
+    assert {"name": "backend-z", "kind": "backend", "status": "timed-out", "generation_before": 4} in response[
+        "recycle"
+    ]
+    # The per-kind fresh list surfaces the new lives — informational, never a successor.
+    assert response["fresh"] == [{"name": "serve-b", "kind": "serve", "generation": 2}]
+    # The applier's OWN line — always kind "serve", carrying its own current generation.
     applier = [entry for entry in response["recycle"] if entry["status"] == SELF_DEFERRED]
-    assert applier == [{"origin": "serve-applier", "kind": "serve", "status": SELF_DEFERRED}]
+    assert applier == [{"name": "serve-applier", "kind": "serve", "status": SELF_DEFERRED, "generation_before": 7}]
+    # No generation_after / names-only replacements anywhere in the surfaced report.
+    blob = json.dumps(response)
+    assert "generation_after" not in blob
+    assert "replacements" not in blob
     assert "fanout" in response
 
 
@@ -355,32 +384,39 @@ def test_profile_apply_response_omits_applier_when_not_serve_affecting() -> None
     outcome = ProfileApplyOutcome(
         hot=["HOT_A"],
         recycle=None,
-        origin_kinds={},
-        self_origin="serve-applier",
+        self_identity=_identity("serve-applier", 1),
         serve_affecting=False,
         fleet=FleetResult(op="reload_config", results=[]),
-        census=frozenset(),
     )
     response = profile_apply_response(outcome)
     assert response["recycle"] == []  # no applier line, no siblings
+    assert response["fresh"] == []
     assert response["refused"] == []
 
 
-def test_origin_kind_map_covers_fleet() -> None:
-    """A serve/backend census populates the name->kind map the response reads."""
+def test_recycle_rows_carry_their_own_kind() -> None:
+    """The recycle report rows carry kind natively (from the orchestrator's per-kind
+    roll), so the response reads kind straight off the row — no separate name->kind map."""
     now = "2026-01-01T00:00:00+00:00"
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
-    origins = [
-        WorkerRow(
-            name="backend-1",
-            kind=WorkerKind.backend,
-            pid=9,
-            generation=1,
-            joined_at=now,
-            beat_at=now,
-            state=WorkerState.ready,
-        )
-    ]
-    # Sanity: a census row carries a kind the response's recycle[].kind is filled from.
-    assert origins[0].kind is WorkerKind.backend
-    assert bus.identity.kind is WorkerKind.serve
+    row = WorkerRow(
+        name="backend-1",
+        kind=WorkerKind.backend,
+        pid=9,
+        generation=1,
+        joined_at=now,
+        beat_at=now,
+        state=WorkerState.ready,
+    )
+    outcome = ProfileApplyOutcome(
+        hot=[],
+        recycle=RecycleReport(
+            rows=[RecycleRow(name=row.name, kind=row.kind.value, generation_before=row.generation, status=RECYCLED)],
+            fresh=[],
+        ),
+        self_identity=bus.identity,
+        serve_affecting=False,
+        fleet=FleetResult(op="reload_config", results=[]),
+    )
+    (entry,) = profile_apply_response(outcome)["recycle"]
+    assert entry == {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1}

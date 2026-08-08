@@ -25,7 +25,6 @@ from tai42_skeleton.app.epoch import (
     Epoch,
     EpochAdmissionApp,
     build_and_swap_epoch,
-    capture_census_snapshot,
     current_epoch,
     current_epoch_or_none,
     mark_current_request_drain_exempt,
@@ -610,26 +609,6 @@ def test_epoch_handlers_dedup_and_preserve_order() -> None:
     # Each handler once, startup order preserved (presets before sub-MCP), the
     # reload-only handler appended after.
     assert handlers == [schema_gate, seed_roles, rehydrate_presets, rehydrate_sub_mcp, reset_reserved_paths]
-
-
-# -- census snapshot -----------------------------------------------------------
-
-
-async def test_capture_census_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Origin:
-        def __init__(self, origin: str) -> None:
-            self.name = origin
-
-    class _Bus:
-        async def census(self):
-            return [_Origin("serve-a"), _Origin("backend-b")]
-
-    class _App:
-        bus = _Bus()
-
-    monkeypatch.setattr("tai42_skeleton.app.instance.app", _App())
-    snapshot = await capture_census_snapshot()
-    assert snapshot == frozenset({"serve-a", "backend-b"})
 
 
 # -- accessors -----------------------------------------------------------------

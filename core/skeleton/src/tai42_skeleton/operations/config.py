@@ -481,8 +481,12 @@ async def apply_profile(name: str) -> OperationResponse:
     for recycle-class diffs. NO request body.
 
     The response is the dedicated ``profileApplyResponse``
-    ``{hot, recycle:[{origin, kind, status}], refused:[] on success, fanout}`` — NAMES +
-    origins only, never env values. A refusal (X-band key, dangling ``!ENV``, a recycle-
+    ``{hot, recycle:[{name, kind, status, generation_before}], fresh:[{name, kind,
+    generation}], refused:[] on success, fanout}`` — key names + worker identities only,
+    never env values. ``recycle`` is one line per recycled/timed-out sibling (plus the
+    applier's own deferred self-exit line when it must self-exit); ``fresh`` is the
+    per-kind new ready lives observed since the pre-apply snapshot, capacity evidence never
+    claimed as any target's successor. A refusal (X-band key, dangling ``!ENV``, a recycle-
     class diff the deployment shape cannot carry) aborts upfront with a loud 400 naming
     the key, before anything is snapshotted, built, or persisted. When the diff carries
     serve-affecting recycle keys the applier's OWN recycle is armed as a post-response

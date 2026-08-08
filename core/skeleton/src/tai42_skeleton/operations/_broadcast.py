@@ -5,7 +5,7 @@ of the fleet applies its change locally, then broadcasts it over the app's worke
 bus (``instance.app.bus``). :func:`broadcast` is that shared step: it enforces the
 two invariants every publisher shares — targets are validated against the presence
 census BEFORE any local side effect, and the worker applies locally only when it is
-itself a target — then awaits the confirmed broadcast and returns the per-origin
+itself a target — then awaits the confirmed broadcast and returns the per-worker
 fleet report.
 
 Failure discipline splits the callers into two disciplines, selected by
@@ -43,8 +43,8 @@ def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
     """Summarize a pipeline broadcast for a mutation response's ``fanout`` field.
 
     A single-worker deployment reaches no sibling, so the fan-out collapses to a
-    human note; a reachable multi-worker broadcast returns the per-origin report, and
-    an unreachable bus returns its error shape. The publisher's own origin is excluded
+    human note; a reachable multi-worker broadcast returns the per-worker report, and
+    an unreachable bus returns its error shape. The publisher's own worker is excluded
     when deciding local-only, so a lone worker never reports a fan-out.
     """
     if not fleet.reachable:
@@ -65,28 +65,42 @@ def apply_response(result: ApplyResult) -> dict[str, Any]:
 def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     """The DEDICATED profile-apply response — NOT :func:`apply_response`.
 
-    ``{hot, recycle, refused, fanout}``: ``hot`` are the hot-class diff key NAMES;
-    ``recycle`` is one ``{origin, kind, status}`` line per recycled / timed-out sibling
-    (status ``"recycled"`` / ``"timed-out"``) plus, when the applier itself must self-exit,
-    the applier's own deferred line ``{origin: <self>, kind: "serve", status:
-    SELF_DEFERRED}`` (the one shared ``"self-deferred"`` literal). ``refused`` is ``[]`` on
-    success BY CONSTRUCTION — any refusal aborts the pipeline upfront, before a response is
-    ever built. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
-    report enumerates key names + worker origins, never env VALUES."""
+    ``{hot, recycle, fresh, refused, fanout}``: ``hot`` are the hot-class diff key NAMES;
+    ``recycle`` is one ``{name, kind, status, generation_before}`` line per recycled /
+    timed-out sibling plus, when the applier itself must self-exit, the applier's own
+    deferred line ``{name: <self>, kind: "serve", status: SELF_DEFERRED,
+    generation_before: <self generation>}`` (the one shared ``"self-deferred"`` literal).
+    ``fresh`` is the per-kind list of NEW READY lives observed since the pre-apply
+    snapshot (``{name, kind, generation}``) — capacity evidence, never a claimed
+    successor and never a post-recycle generation. ``refused`` is ``[]`` on success BY
+    CONSTRUCTION — any refusal aborts the pipeline upfront, before a response is ever
+    built. ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
+    report enumerates key names + worker identities, never env VALUES."""
     entries: list[dict[str, Any]] = []
+    fresh: list[dict[str, Any]] = []
     recycle = outcome.recycle
     if recycle is not None:
-        for origin in recycle.recycled:
-            entries.append({"origin": origin, "kind": outcome.origin_kinds.get(origin, ""), "status": "recycled"})
-        for origin in recycle.timeouts:
-            entries.append({"origin": origin, "kind": outcome.origin_kinds.get(origin, ""), "status": "timed-out"})
+        for row in recycle.rows:
+            entries.append(
+                {"name": row.name, "kind": row.kind, "status": row.status, "generation_before": row.generation_before}
+            )
+        fresh = [{"name": life.name, "kind": life.kind, "generation": life.generation} for life in recycle.fresh]
     if outcome.serve_affecting:
         # The applier's own recycle is a post-response self-exit it cannot confirm — a
-        # serve worker, always reported deferred with the one shared literal.
-        entries.append({"origin": outcome.self_origin, "kind": "serve", "status": SELF_DEFERRED})
+        # serve worker carrying its own current generation, reported deferred with the
+        # one shared literal.
+        entries.append(
+            {
+                "name": outcome.self_identity.name,
+                "kind": "serve",
+                "status": SELF_DEFERRED,
+                "generation_before": outcome.self_identity.generation,
+            }
+        )
     return {
         "hot": list(outcome.hot),
         "recycle": entries,
+        "fresh": fresh,
         "refused": [],
         "fanout": fleet_fanout(outcome.fleet),
     }
@@ -106,14 +120,17 @@ class FleetBroadcastError(RuntimeError):
 
 def log_non_convergence(report: FleetResult) -> None:
     """Loudly ERROR-log a reachable-but-non-converged fleet report: an unconfirmed
-    origin is a visible failure, never a silently stale sibling. A bus-unreachable
+    worker is a visible failure, never a silently stale sibling. A bus-unreachable
     report is already logged inside :meth:`WorkerBus.publish`, and a fully converged
     report logs nothing — so this is a no-op unless the bus was reached yet some
-    origin did not confirm ``applied``. Shared by every publisher (``broadcast`` and
-    the store-backed helpers that publish directly) so the message stays identical."""
+    worker did not confirm ``applied``. Shared by every publisher (``broadcast`` and
+    the store-backed helpers that publish directly) so the message stays identical.
+
+    Each unconfirmed entry carries the worker name, its outcome, and the verdict detail
+    — the detail names the superseding generation for a worker replaced mid-apply."""
     if not (report.reachable and not report.ok):
         return
-    unconfirmed = [(r.name, r.outcome.value) for r in report.results if r.outcome != OpOutcome.applied]
+    unconfirmed = [(r.name, r.outcome.value, r.detail) for r in report.results if r.outcome != OpOutcome.applied]
     logger.error("worker bus: op %r did not fully converge — unconfirmed workers: %s", report.op, unconfirmed)
 
 
@@ -157,7 +174,7 @@ async def broadcast(
             local = LocalApplyResult(outcome=OpOutcome.applied, payload=result)
 
     report = await bus.publish(op, targets, local)
-    # The report is embedded in the response, but an unconfirmed origin is also a
+    # The report is embedded in the response, but an unconfirmed worker is also a
     # loud, visible failure — never a silently stale sibling.
     log_non_convergence(report)
     if local_failure is not None:

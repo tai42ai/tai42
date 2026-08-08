@@ -13,7 +13,7 @@ sentinel, the prometheus objects, and the route registry (a dedup-once metadata 
 These are the intentional exemptions — process-global by design, not cleanup targets.
 What an epoch owns is the serving handle the dispatch slot points at, its fresh
 FastMCP + feature collaborators (the ``ServingCore``), the per-epoch in-flight
-accounting, the periodic loops that must retire with it, and the pre-apply census.
+accounting, and the periodic loops that must retire with it.
 """
 
 from __future__ import annotations
@@ -60,10 +60,6 @@ class Epoch:
     # streamable-http session-manager task group) open. Retiring the generation
     # ``aclose()``s it, terminating this generation's transports.
     supervisor: SubAppLifespan | None = None
-    # The pre-apply fleet census this generation was built against, captured by the
-    # apply caller and stored here for the fanout diff — never used by the
-    # build itself.
-    census: frozenset[str] | None = None
     _in_flight: int = 0
     _idle: asyncio.Event = field(default_factory=asyncio.Event)
     _periodic_cancels: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
@@ -330,18 +326,6 @@ async def clear_epoch() -> None:
     _current = None
     _serving_slot = None
     _loaded_env_keys = set()
-
-
-async def capture_census_snapshot() -> frozenset[str]:
-    """Capture the pre-apply fleet census as the set of live worker origins.
-
-    The apply flow captures this BEFORE the local swap and diffs it into the fanout
-    report: a worker present pre-apply but absent from the expected set reports
-    ``departed`` rather than silence. Reads through the one persistent process bus."""
-    from tai42_skeleton.app import instance
-
-    origins = await instance.app.bus.census()
-    return frozenset(o.name for o in origins)
 
 
 @register_settings_reset

@@ -352,16 +352,14 @@ def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOu
 
 
 def _apply_outcome(*, serve_affecting: bool) -> ProfileApplyOutcome:
-    from tai42_skeleton.app.bus import FleetResult
+    from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
 
     return ProfileApplyOutcome(
         hot=["A"],
         recycle=None,
-        origin_kinds={},
-        self_origin="serve-applier",
+        self_identity=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
         serve_affecting=serve_affecting,
         fleet=FleetResult(op="reload_config", results=[]),
-        census=frozenset(),
     )
 
 
