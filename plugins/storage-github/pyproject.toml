@@ -25,9 +25,9 @@ classifiers = [
 dependencies = [
     # The pure interface contract the backend registers through — Storage,
     # ObjectStat, assert_not_root, and the tai42_app handle.
-    "tai42-contract>=1.0,<2",
+    "tai42-contract>=1.1,<2",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=1.1,<2",
+    "tai42-kit>=1.2,<2",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
