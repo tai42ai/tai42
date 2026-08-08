@@ -40,7 +40,14 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   forbidOnly: !!process.env.CI,
-  timeout: 60_000,
+  // Per-test budget. Reload-heavy specs (env writes, connector ops, secret ops, fleet
+  // convergence) drive several MULTIWORKER reload cycles, each awaiting a sibling's reload
+  // reply up to the bus apply_timeout (30s) and 5-15s in practice under CI contention; a spec
+  // with a handful of them legitimately sums past the old 60s ceiling on a slow CI runner and
+  // times the WHOLE test out (a rotating tail: a different reload-heavy spec trips it each run).
+  // 120s gives that accumulation room without hiding a genuine hang (a real stall still fails,
+  // just later). Local single-worker runs finish these in a fraction of the budget.
+  timeout: 120_000,
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   use: {

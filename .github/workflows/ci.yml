@@ -476,7 +476,7 @@ jobs:
     needs: [changes, e2e]
     if: ${{ !cancelled() && needs.changes.outputs.run_e2e == 'true' && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     services:
       redis:
         image: redis:7-alpine
