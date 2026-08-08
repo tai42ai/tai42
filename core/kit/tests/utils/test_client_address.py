@@ -5,22 +5,11 @@ believe, and the normalisation that keeps one client to one identity."""
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
-from tai42_skeleton.utils import client_address as ca
-
-
-def _conn(peer: str | None, xff: str | None = None) -> Any:
-    """A minimal ``HTTPConnection`` stand-in exposing the ``.client`` and ``.headers``
-    the resolver reads."""
-    headers: dict[str, str] = {}
-    if xff is not None:
-        headers["x-forwarded-for"] = xff
-    client = SimpleNamespace(host=peer) if peer is not None else None
-    return SimpleNamespace(client=client, headers=headers)
+from tai42_kit.settings import reset_all_settings
+from tai42_kit.utils import client_address as ca
 
 
 def _resolve(peer: str | None, xff: str = "", proxies: list[str] | None = None, hops: int = 0) -> str:
@@ -204,6 +193,22 @@ def test_a_host_bearing_cidr_is_accepted_as_its_network():
     assert [str(n) for n in ca.parse_trusted_networks(["10.0.0.7/8"])] == ["10.0.0.0/8"]
 
 
+# -- the deployment trust statement reads its env ----------------------------
+
+
+def test_client_trust_settings_reads_the_proxy_roster_env(monkeypatch):
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["10.0.0.1", "192.168.0.0/16", "2001:db8::/32"]')
+    assert ca.ClientTrustSettings().trusted_proxies == ["10.0.0.1", "192.168.0.0/16", "2001:db8::/32"]
+
+
+def test_a_nonsense_trusted_proxy_is_refused_where_it_is_configured(monkeypatch):
+    # A typo'd roster entry would otherwise trust nothing and bucket every client behind
+    # the proxy together, discovered only under a flood. It fails at configuration time.
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["10.0.0.0/8", "not-a-network"]')
+    with pytest.raises(ValueError, match="neither an IP address nor a CIDR block"):
+        ca.ClientTrustSettings()
+
+
 # -- normalisation -----------------------------------------------------------
 
 
@@ -257,12 +262,10 @@ def test_bucket_unparseable_keeps_the_raw_string():
 
 def test_client_bucket_reads_the_configured_trust(monkeypatch):
     monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["10.0.0.0/8"]')
-    from tai42_kit.settings import reset_all_settings
-
     reset_all_settings()
     try:
-        assert ca.client_bucket(_conn("10.0.0.1", xff="2001:db8:abcd:1234::9")) == "2001:db8:abcd:1234::"
-        assert ca.client_address(_conn("10.0.0.1", xff="203.0.113.5")) == "203.0.113.5"
+        assert ca.client_bucket("10.0.0.1", "2001:db8:abcd:1234::9") == "2001:db8:abcd:1234::"
+        assert ca.client_address("10.0.0.1", "203.0.113.5") == "203.0.113.5"
     finally:
         monkeypatch.delenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", raising=False)
         reset_all_settings()
@@ -270,10 +273,8 @@ def test_client_bucket_reads_the_configured_trust(monkeypatch):
 
 def test_client_bucket_of_an_untrusted_peer_is_the_peer(monkeypatch):
     monkeypatch.delenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", raising=False)
-    from tai42_kit.settings import reset_all_settings
-
     reset_all_settings()
     try:
-        assert ca.client_bucket(_conn("198.51.100.9", xff="1.2.3.4")) == "198.51.100.9"
+        assert ca.client_bucket("198.51.100.9", "1.2.3.4") == "198.51.100.9"
     finally:
         reset_all_settings()

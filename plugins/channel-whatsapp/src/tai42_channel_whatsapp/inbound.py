@@ -456,6 +456,9 @@ async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: st
             channel="whatsapp",
             our_identity=phone_number_id,
             client_address=wa_id,
+            # The provider attests the wa_id, so it is both the conversation identity and
+            # the party the turn cap holds accountable.
+            cap_key=wa_id,
             text=text,
             provider_message_id=wamid,
         )

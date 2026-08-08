@@ -286,6 +286,17 @@ async def test_bridge_client_address_is_numeric_chat_id_even_with_username(http_
     assert conversations.accept_calls[0].client_address == "424242"
 
 
+async def test_bridge_cap_key_is_the_attested_chat_id(http_recorder, fake_redis, conversations):
+    # A provider channel attests the address, so the accountable turn-cap key it passes
+    # is that same attested chat id — no behavior change from keying on the address.
+    response = await inbound(make_inbound_request(_text_update(chat_id=555), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.cap_key == "555"
+    assert call.cap_key == call.client_address
+
+
 async def test_signature_failure_short_circuits_before_bridge(http_recorder, fake_redis, conversations):
     # Transport auth is first on every path: a bridge-shaped message with a bad
     # secret denies (401) and never reaches accept().

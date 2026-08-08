@@ -315,6 +315,8 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "channel": "twilio",
             "our_identity": _TWILIO,
             "client_address": _HUMAN,
+            # The provider attests the From number, so it is also the accountable cap key.
+            "cap_key": _HUMAN,
             "text": "ship it",
             "provider_message_id": "SM777",
         }

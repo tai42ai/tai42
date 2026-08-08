@@ -31,6 +31,7 @@ from tai42_channel_web.routes import AnswerForwardError
 from tai42_channel_web.store import QuestionRecord, reserve_question, resolve_session, transcript_order
 from tests.conftest import (
     CALLBACK,
+    CLIENT_HOST,
     ENTRY_ASSET,
     IDENTITY,
     ORIGIN,
@@ -563,6 +564,32 @@ async def test_messages_bridges_and_appends_inbound(web_env, stub_app, registere
     # The inbound entry is appended only after accept, reusing the turn id.
     payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
     assert payload == {"id": "turn-42", "direction": "in", "text": "ship it", "ts": payload["ts"]}
+
+
+async def test_the_turn_cap_keys_on_the_network_bucket_not_the_resettable_visitor_id(
+    web_env, stub_app, fake_redis: FakeRedis
+):
+    # The rotate-reset attack: the platform mints the visitor id on an unauthenticated
+    # door and the visitor rotates it at will, so a cap keyed on the visitor id would
+    # reset every message. Two sessions minted from the SAME network client must share
+    # ONE accountable cap key — the request's network bucket — so the cap bounds them.
+    _SECOND_TOKEN = "MZ3n-visitor_session-token-9876543210"
+    _SECOND_VISITOR = "vis-9876543210cd"
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    register(fake_redis, _SECOND_TOKEN, _SECOND_VISITOR, IDENTITY)
+    handler = _handler(stub_app, _MESSAGES)
+
+    await handler(build_request(json_body={"identity": IDENTITY, "text": "one"}, token=SESSION_TOKEN))
+    await handler(build_request(json_body={"identity": IDENTITY, "text": "two"}, token=_SECOND_TOKEN))
+
+    first, second = stub_app.conversations.accept_calls
+    # Two distinct conversations (two minted visitor ids)...
+    assert first["client_address"] == VISITOR_ID
+    assert second["client_address"] == _SECOND_VISITOR
+    assert first["client_address"] != second["client_address"]
+    # ...but ONE accountable cap key: the network bucket, never the resettable id.
+    assert first["cap_key"] == second["cap_key"] == CLIENT_HOST
+    assert first["cap_key"] != first["client_address"]
 
 
 async def test_the_reply_message_id_is_the_id_on_the_visitor_own_sse_frame(

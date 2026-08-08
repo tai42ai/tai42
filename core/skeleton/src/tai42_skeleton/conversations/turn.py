@@ -84,10 +84,11 @@ def _api_client_address(caller_principal: str, address: str) -> str:
     return f"{quote(caller_principal, safe='')}/{address}"
 
 
-def _channel_bucket_key(route_name: str, address: str) -> str:
-    """The channel door's rate-bucket key. The provider-attested address is the accountable
-    party there, and the route scopes it so two routes never share a budget."""
-    return f"{route_name}|{address}"
+def _channel_bucket_key(route_name: str, cap_key: str) -> str:
+    """The channel door's rate-bucket key. ``cap_key`` is the party the door named as
+    accountable — a provider-attested address, or a self-minting door's network client
+    bucket — and the route scopes it so two routes never share a budget."""
+    return f"{route_name}|{cap_key}"
 
 
 def _api_bucket_key(route_name: str, caller_principal: str) -> str:
@@ -536,7 +537,9 @@ async def _shed_silently(
 # -- the channel door: accept ------------------------------------------------
 
 
-async def accept(channel: str, our_identity: str, client_address: str, text: str, provider_message_id: str) -> str:
+async def accept(
+    channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its
     ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
 
@@ -544,6 +547,11 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
     ``message_id`` and starts no second turn. Every gate that can refuse runs before any
     state is written, so a refusal leaves the pair unclaimed. The turn runs in the
     background; the caller gets the id immediately.
+
+    ``client_address`` is the conversation identity (thread and transcript); ``cap_key``
+    is the accountable party the per-address turn cap buckets on, which the door composes.
+    Both are canonicalized and a blank ``cap_key`` is refused, so a door that omits the
+    accountable key fails loudly rather than silently sharing one bucket.
 
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
     any state is written — there is nothing to run a turn on — for the channel adapter to
@@ -554,6 +562,7 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
         )
     channel_identity = canonical_address(our_identity)
     address = canonical_address(client_address)
+    cap_bucket = canonical_address(cap_key)
     route = await _resolve_channel_route(channel, channel_identity)
     thread_id = _thread_id(route.route_name, address)
     store = _store()
@@ -564,7 +573,7 @@ async def accept(channel: str, our_identity: str, client_address: str, text: str
         return owner
 
     message_id = str(uuid4())
-    admission = get_turn_caps().admit_address(_channel_bucket_key(route.route_name, address))
+    admission = get_turn_caps().admit_address(_channel_bucket_key(route.route_name, cap_bucket))
     if admission is AddressAdmission.SHED_WITH_REPLY:
         return await _shed_with_reply(
             store,

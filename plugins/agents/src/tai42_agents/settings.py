@@ -27,6 +27,12 @@ class AgentsLimitsSettings(TaiBaseSettings):
     # oldest entry is evicted past this. Must be positive.
     embedding_dims_cache_size: int = Field(default=64, gt=0)
 
+    # Default LangGraph ``recursion_limit`` applied when a run pins none. Caps the
+    # super-steps one turn's top-level graph may take (a tools-agent cycle is 2
+    # super-steps), bounding paid model calls on a runaway loop. A caller-supplied
+    # limit wins. Bounds the top-level graph only. Must be positive.
+    default_recursion_limit: int = Field(default=50, gt=0)
+
 
 @settings_cache
 def agents_limits_settings() -> AgentsLimitsSettings:

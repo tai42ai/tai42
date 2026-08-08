@@ -223,7 +223,7 @@ async def test_accept_channel_happy_path(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", " +15550002222 ", "hi", "PID1")
     await _settle()
 
     assert agent.calls == [("hi", "bridge:line:+15550002222")]  # canonical address, reserved thread ns
@@ -245,9 +245,9 @@ async def test_accept_is_idempotent_on_provider_message_id(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
-    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi again", "PID1")
+    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi again", "PID1")
     await _settle()
 
     assert first == second
@@ -258,7 +258,7 @@ async def test_no_matching_route_raises_loudly(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()))
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
     with pytest.raises(turn_module.ConversationRouteResolutionError):
-        await turn_module.accept("twilio", "+19999999999", "+15550002222", "hi", "PID9")
+        await turn_module.accept("twilio", "+19999999999", "+15550002222", "+15550002222", "hi", "PID9")
 
 
 async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
@@ -271,7 +271,7 @@ async def test_denied_turn_delivers_an_error_outcome(env, monkeypatch):
 
     monkeypatch.setattr(turn_module, "authorize_execution_agent_run", _deny)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -293,7 +293,7 @@ async def test_tool_target_delivers_its_string_reply(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     tools = _wire_tool(monkeypatch, lambda kw: f"tool saw {kw['message']} from {kw['sender']}")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", " +15550002222 ", " +15550002222 ", "hi", "PID1")
     await _settle()
 
     # The default kwargs are exactly {message, sender} — canonical address for the sender —
@@ -315,7 +315,7 @@ async def test_tool_target_none_or_blank_reply_is_silent(env, monkeypatch, reply
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: reply)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -334,7 +334,7 @@ async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "run it", "PID1")
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"flow_graph_kwargs": {"text": "run it", "from": "+15550002222"}}
@@ -346,7 +346,7 @@ async def test_tool_target_reply_expr_over_an_envelope_dict(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"result": {"reply": "from the envelope"}})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -361,7 +361,7 @@ async def test_tool_target_reply_expr_yielding_null_is_silent(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"result": {}})  # .reply // null -> null
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -376,7 +376,7 @@ async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     _wire_tool(monkeypatch, lambda kw: {"unexpected": "dict"})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -395,7 +395,7 @@ async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
 
     _wire_tool(monkeypatch, _boom)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -412,7 +412,7 @@ async def test_tool_target_payload_expr_multi_emit_is_an_error(env, monkeypatch)
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     assert tools.calls == []  # the tool never ran
@@ -428,7 +428,7 @@ async def test_tool_target_payload_expr_non_object_is_an_error(env, monkeypatch)
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     assert tools.calls == []  # the mapping failed before the tool ran
@@ -444,7 +444,7 @@ async def test_tool_target_reply_expr_multi_emit_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"a": "one", "b": "two"})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -459,7 +459,7 @@ async def test_tool_target_reply_expr_non_string_is_an_error(env, monkeypatch):
     _wire(monkeypatch, FakeManager(route), channel)
     _wire_tool(monkeypatch, lambda kw: {"count": 42})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -480,7 +480,7 @@ async def test_tool_target_denied_dispatch_is_an_error(env, monkeypatch):
 
     monkeypatch.setattr(turn_module, "bind_execution_identity", _deny_bind)
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -499,7 +499,21 @@ async def test_blank_inbound_text_is_refused_before_any_state(env, monkeypatch):
 
     for blank in ("", "   ", "\t\n"):
         with pytest.raises(BlankInboundTextError):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", blank, "PID1")
+            await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", blank, "PID1")
+    await _settle()
+
+    assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
+
+
+async def test_a_blank_accountable_cap_key_is_refused_loudly(env, monkeypatch):
+    # A door that omits the accountable key must fail at the seam, never fall back to
+    # sharing one bucket — a blank cap_key raises rather than resolving.
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="non-blank"):
+            await turn_module.accept("twilio", "+15550001111", "+15550002222", blank, "hi", "PID1")
     await _settle()
 
     assert await _store().list_by_status(frozenset(DeliveryStatus)) == []
@@ -511,7 +525,7 @@ async def test_tool_target_dispatch_is_offloaded_off_the_event_loop(env, monkeyp
     _wire(monkeypatch, FakeManager(_tool_channel_route()), FakeChannel())
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     assert tools.calls[0]["offload_sync"] is True
@@ -525,7 +539,7 @@ async def test_tool_target_payload_expr_reads_our_identity_and_channel(env, monk
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     assert tools.calls[0]["arguments"] == {"oid": "+15550001111", "ch": "twilio"}
@@ -791,7 +805,7 @@ async def test_an_api_caller_cannot_drain_a_channel_addresss_bucket(env, monkeyp
         await turn_module.submit_api_message("support", "+15550002222", "again", "alice", 0)
 
     # The real phone user is untouched: it is admitted and answered.
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hello", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hello", "PID1")
     await _settle()
     record = await _store().get_record(message_id)
     assert record is not None
@@ -811,22 +825,51 @@ async def test_two_routes_sharing_an_address_have_independent_buckets(env, monke
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID1")
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await _settle()
     # The address is now over its cap ON THAT ROUTE: the next message buys a slow-down reply.
-    shed = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+    shed = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     await _settle()
     shed_record = await store.get_record(shed)
     assert shed_record is not None
     assert shed_record.answer == turn_module._SLOW_DOWN_TEXT
 
     # The same address on the other route still gets its own turn.
-    admitted = await turn_module.accept("twilio", "+15550009999", "+15550002222", "three", "PID3")
+    admitted = await turn_module.accept("twilio", "+15550009999", "+15550002222", "+15550002222", "three", "PID3")
     await _settle()
     record = await store.get_record(admitted)
     assert record is not None
     assert record.answer == "echo: three"
     assert record.thread_id == "bridge:line-b:+15550002222"
+
+
+async def test_two_addresses_sharing_a_cap_key_share_one_turn_bucket(env, monkeypatch):
+    # The bridge half of the web rotate-reset defense: two DIFFERENT conversation
+    # identities that name the SAME accountable cap key share ONE turn bucket, so a
+    # second identity minted under that key cannot buy itself a fresh budget.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+
+    first = await turn_module.accept("twilio", "+15550001111", "visitor-A", "net-bucket", "one", "PID1")
+    await _settle()
+    first_record = await store.get_record(first)
+    assert first_record is not None
+    assert first_record.answer == "echo: one"
+
+    # A DIFFERENT identity under the SAME cap key is already over the shared cap: it sheds.
+    shed = await turn_module.accept("twilio", "+15550001111", "visitor-B", "net-bucket", "two", "PID2")
+    await _settle()
+    shed_record = await store.get_record(shed)
+    assert shed_record is not None
+    assert shed_record.answer == turn_module._SLOW_DOWN_TEXT
+    # ...and the two really are distinct conversations.
+    assert first_record.client_address == "visitor-A"
+    assert shed_record.client_address == "visitor-B"
 
 
 async def test_two_api_routes_give_a_caller_independent_buckets(env, monkeypatch):
@@ -885,7 +928,7 @@ async def test_record_delivery_status_confirms_provisional(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     # Let the turn + channel send run, but not the (1h) grace confirm.
     for _ in range(50):
         record = await _store().get_record(message_id)
@@ -1142,9 +1185,9 @@ async def test_two_messages_from_one_address_remember_via_the_thread_id(env, mon
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID-A")
+    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID-A")
     await _settle()
-    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID-B")
+    second = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID-B")
     await _settle()
 
     # Both turns ran on the one reserved thread id, so the agent's per-thread memory
@@ -1168,7 +1211,7 @@ async def test_a_long_answer_is_split_into_ordered_channel_sends(env, monkeypatc
     long_text = "x" * 4000
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _fixed_answer_agent(long_text)})
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID-L")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-L")
     await _settle()
 
     record = await _store().get_record(message_id)
@@ -1362,12 +1405,12 @@ async def test_thread_overflow_writes_no_state_so_the_provider_retry_succeeds(en
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID1")
+    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await asyncio.wait_for(agent.entered.wait(), 2)
 
     # The thread's only slot is taken, so the next message is refused LOUDLY...
     with pytest.raises(caps_module.ThreadQueueOverflowError):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     # ...with ZERO state written: the dedupe pair is unclaimed, so the refusal is
     # honestly retriable.
     assert await store.get_inbound_owner("twilio", "PID2") is None
@@ -1378,7 +1421,7 @@ async def test_thread_overflow_writes_no_state_so_the_provider_retry_succeeds(en
 
     # The retry after the thread drains is a genuinely fresh attempt, not a dedupe hit
     # on a message that never ran.
-    retry = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+    retry = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     await _settle()
 
     assert retry != first
@@ -1406,7 +1449,9 @@ async def test_a_failed_persist_leaves_the_inbound_pair_unclaimed(env, monkeypat
     # One accept per admission verdict: admitted, shed with a paid reply, shed silently.
     for provider_message_id in ("PID1", "PID2", "PID3"):
         with pytest.raises(RuntimeError, match="redis is down"):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", provider_message_id)
+            await turn_module.accept(
+                "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", provider_message_id
+            )
         assert await store.get_inbound_owner("twilio", provider_message_id) is None
     # The admitted attempt also gave its FIFO reservation back rather than leaking it.
     assert caps_module.get_turn_caps()._thread_waiters == {}
@@ -1436,7 +1481,7 @@ async def test_an_indeterminate_inbound_claim_is_resolved_not_left_at_intake(env
     monkeypatch.setattr(records_module.ConversationRecordStore, "claim_inbound", _claim_then_lose_the_reply)
 
     with pytest.raises(TimeoutError):
-        await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID-lost")
+        await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID-lost")
     await _settle()
 
     owner = await store.get_inbound_owner("twilio", "PID-lost")
@@ -1506,7 +1551,7 @@ async def test_a_settings_reload_mid_accept_does_not_leak_the_reserved_slot(env,
 
     monkeypatch.setattr(records_module.ConversationRecordStore, "create_record", _reload_then_create)
 
-    await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     assert agent.calls == [("hi", "bridge:line:+15550002222")]
@@ -1572,7 +1617,7 @@ async def test_a_boot_redrive_leaves_a_live_peers_in_flight_turn_alone(env, monk
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await asyncio.wait_for(agent.entered.wait(), 2)
 
     await turn_module.redrive_accepted()
@@ -1606,7 +1651,7 @@ async def test_a_running_turn_refreshes_its_intake_lease_past_the_original_expir
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await asyncio.wait_for(agent.entered.wait(), 2)
     at_accept = await _intake_lease(env, message_id)
 
@@ -1642,10 +1687,10 @@ async def test_a_turn_queued_behind_the_caps_keeps_its_intake_lease_live(env, mo
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    running = await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID1")
+    running = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await asyncio.wait_for(agent.entered.wait(), 2)
     # Same address, so the second message queues behind the first on the thread's FIFO.
-    queued = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+    queued = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     assert agent.calls == ["one"]
 
     # Past the lease the accept wrote: only a heartbeat can still be holding it.
@@ -1706,7 +1751,7 @@ async def test_a_turn_task_that_dies_resolves_its_own_record_without_waiting_for
     monkeypatch.setattr(turn_module, "_complete_turn", _die)
     store = _store()
 
-    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
 
     record = await store.get_record(message_id)
@@ -1785,11 +1830,11 @@ async def test_rate_shed_records_the_paid_reply_and_the_silent_drop(env, monkeyp
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    admitted = await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID1")
+    admitted = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await _settle()
-    replied = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+    replied = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     await _settle()
-    dropped = await turn_module.accept("twilio", "+15550001111", "+15550002222", "three", "PID3")
+    dropped = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "three", "PID3")
     await _settle()
 
     # Only the admitted message bought a turn.
@@ -1828,7 +1873,7 @@ async def test_a_blank_provider_message_id_is_refused_with_nothing_written(env, 
 
     for blank in ("", "   "):
         with pytest.raises(ValueError, match="provider_message_id must be a non-blank string"):
-            await turn_module.accept("twilio", "+15550001111", "+15550002222", "hi", blank)
+            await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", blank)
     await _settle()
 
     assert agent.calls == []
@@ -1848,7 +1893,7 @@ async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monk
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
     store = _store()
 
-    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "one", "PID1")
+    first = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
     await _settle()
 
     async def _claim_lost_after_a_sweep(self, channel_name, provider_message_id, message_id):
@@ -1857,7 +1902,7 @@ async def test_a_shed_reply_is_not_deliverable_until_it_owns_its_claim(env, monk
         return first
 
     monkeypatch.setattr(ConversationRecordStore, "claim_inbound", _claim_lost_after_a_sweep)
-    owner = await turn_module.accept("twilio", "+15550001111", "+15550002222", "two", "PID2")
+    owner = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "two", "PID2")
     await _settle()
 
     assert owner == first

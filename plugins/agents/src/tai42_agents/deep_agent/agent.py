@@ -272,9 +272,9 @@ class DeepAgent(Agent):
         pinned, :func:`init_langgraph_config` mints a fresh isolated one.
 
         ``recursion_limit`` bounds the TOP-LEVEL graph ONLY: each task-tool subagent
-        runs its own graph with its own limit (the LangGraph default of 25 unless
-        set), so the effective step budget is MULTIPLICATIVE across nesting depth,
-        not a total-spend ceiling.
+        runs its own graph bound by deepagents at 9999, so the effective step budget
+        is MULTIPLICATIVE across nesting depth, not a total-spend ceiling. The
+        settings default bounds only the top level.
         """
         return init_langgraph_config(
             config=build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
@@ -462,8 +462,8 @@ class DeepAgent(Agent):
 
         Wraps :meth:`_resolve_and_build` with the run config from :meth:`_run_config`,
         the same one the invoke face uses. The recursion cap bounds the TOP-LEVEL
-        graph ONLY: each task-tool subagent runs its own graph with its own limit, so
-        the effective step budget is MULTIPLICATIVE across nesting depth.
+        graph ONLY: each task-tool subagent runs its own graph bound by deepagents at
+        9999, so the effective step budget is MULTIPLICATIVE across nesting depth.
         """
         agent = await self._resolve_and_build(
             tools=tools,

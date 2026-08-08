@@ -314,14 +314,16 @@ widget opens one. The channel sends plain text only (no media, no templates).
   refreshed TTL; the durable record of a turn lives in the conversation bridge.
 - Every transcript frame is `json.dumps`'d, so a newline or `data:` sequence in a
   message body cannot inject an extra SSE frame.
-- Flood control is **not** this plugin's, and the plugin reads no client address
-  anywhere. Abuse control on these public doors belongs to the platform's public-door
-  rate limiter, which throttles the whole `/api/channels/web/*` family per caller
-  ahead of them, and to the operator's ingress. What the plugin bounds is the one
-  resource it owns: an open SSE stream pins a dedicated store connection for its
-  whole life, so the stream door caps concurrent streams per visitor and per process
-  (a loud `503` over either). Behind those, the conversation bridge's per-address
-  turn caps bound the LLM spend of one session.
+- Flood control is **not** this plugin's. Abuse control on these public doors belongs
+  to the platform's public-door rate limiter, which throttles the whole
+  `/api/channels/web/*` family per caller ahead of them, and to the operator's ingress.
+  What the plugin bounds is the one resource it owns: an open SSE stream pins a
+  dedicated store connection for its whole life, so the stream door caps concurrent
+  streams per visitor and per process (a loud `503` over either). Behind those, the
+  conversation bridge's per-address turn cap bounds LLM spend — and because a visitor
+  mints and rotates their own visitor id, the messages door keys that cap on the
+  request's network client bucket (the same value the public-door limiter derives), not
+  on the resettable visitor id.
 - An answer forward the callback door refuses restores the question so the visitor
   can re-answer, but only `MAX_ANSWER_RESTORES` times: each forward spends a slot of
   that door's own rate limit, which is keyed on this server's egress IP and shared

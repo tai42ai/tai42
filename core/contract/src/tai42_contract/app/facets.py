@@ -224,6 +224,7 @@ class AppConversations(Protocol):
         channel: str,
         our_identity: str,
         client_address: str,
+        cap_key: str,
         text: str,
         provider_message_id: str,
     ) -> str:
@@ -234,6 +235,13 @@ class AppConversations(Protocol):
         turn runs as that route's execution key and answers back over the same channel.
         Idempotent on ``(channel, provider_message_id)`` — a redelivery returns the
         existing ``message_id`` and starts no second turn. Raises when no route matches.
+
+        ``client_address`` is the conversation identity (its thread and transcript).
+        ``cap_key`` is the party the per-address turn cap holds accountable, which the
+        door composes: a provider channel passes its attested address (the two match),
+        a door that mints its own visitor id passes a key the platform does NOT mint —
+        its network client bucket — so the cap bounds spend the visitor cannot reset.
+        Required and non-blank; a door that omits it is refused, never defaulted.
         """
         ...
 

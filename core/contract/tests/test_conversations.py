@@ -296,6 +296,7 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "channel",
         "our_identity",
         "client_address",
+        "cap_key",
         "text",
         "provider_message_id",
     ]

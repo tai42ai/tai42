@@ -136,6 +136,9 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
             channel="telegram",
             our_identity=our_identity,
             client_address=str(chat_id),
+            # The provider attests the chat id, so it is both the conversation identity
+            # and the party the turn cap holds accountable.
+            cap_key=str(chat_id),
             text=text,
             provider_message_id=str(update_id),
         )

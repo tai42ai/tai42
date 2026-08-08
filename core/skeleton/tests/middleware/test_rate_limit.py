@@ -531,19 +531,6 @@ def test_unknown_override_field_is_refused(monkeypatch):
         RateLimitSettings()
 
 
-def test_a_nonsense_trusted_proxy_is_refused_where_it_is_configured(monkeypatch):
-    # A typo'd roster entry would otherwise trust nothing and bucket every client behind
-    # the proxy together, discovered only under a flood. It fails at configuration time.
-    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["10.0.0.0/8", "not-a-network"]')
-    with pytest.raises(ValueError, match="neither an IP address nor a CIDR block"):
-        RateLimitSettings()
-
-
-def test_a_trusted_proxy_roster_of_addresses_and_blocks_is_accepted(monkeypatch):
-    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["10.0.0.1", "192.168.0.0/16", "2001:db8::/32"]')
-    assert RateLimitSettings().trusted_proxies == ["10.0.0.1", "192.168.0.0/16", "2001:db8::/32"]
-
-
 def test_redis_url_still_reads_its_own_env(monkeypatch):
     # The nested-delimiter config the family overrides need must not disturb the
     # composed redis connection group.
@@ -624,7 +611,7 @@ def test_rate_limit_config_owns_the_public_door_budgets():
     from tai42_skeleton.interactions.settings import InteractionsSettings
 
     rate_fields = set(RateLimitSettings.model_fields)
-    for field in ("default_limit", "default_burst", "default_enabled", "families", "trusted_proxies", "trusted_hops"):
+    for field in ("default_limit", "default_burst", "default_enabled", "families"):
         assert field in rate_fields
 
     interactions_fields = set(InteractionsSettings.model_fields)
@@ -679,6 +666,35 @@ def test_boot_warning_silent_when_redis_configured(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=log.name):
         rate_limit.warn_if_rate_limiting_off(log)
     assert not [r for r in caplog.records if "rate limiting: OFF" in r.getMessage()]
+
+
+def test_boot_validates_trusted_proxy_roster_even_with_no_redis(monkeypatch):
+    # The trusted-proxy roster is validated at boot UNCONDITIONALLY — a malformed
+    # TAI_RATE_LIMIT_TRUSTED_PROXIES is refused even on a Redis-less deployment, where
+    # the limiter is OFF. A typo must not sit silent until Redis is configured and then
+    # collapse every client into one shared bucket.
+    monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.setattr(rate_limit, "_RATE_LIMIT_OFF_WARNED", False)
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["not-an-ip"]')
+    log = logging.getLogger("test.rate_limit_roster")
+    with pytest.raises(ValueError, match="neither an IP address nor a CIDR block"):
+        rate_limit.warn_if_rate_limiting_off(log)
+
+
+def test_boot_validates_trusted_proxy_roster_on_reload_after_first_boot(monkeypatch):
+    # The roster validator fires on EVERY call, not just the process's first boot. With
+    # the once-per-process OFF guard already tripped (a reload after the first Redis-less
+    # boot), a malformed TAI_RATE_LIMIT_TRUSTED_PROXIES must STILL be refused. Guarding
+    # the validation behind the OFF dedup would let a typo introduced on a later reload
+    # sit silent until Redis is configured and then collapse every client into one bucket.
+    monkeypatch.delenv("TAI_RATE_LIMIT_REDIS_URL", raising=False)
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.setattr(rate_limit, "_RATE_LIMIT_OFF_WARNED", True)
+    monkeypatch.setenv("TAI_RATE_LIMIT_TRUSTED_PROXIES", '["not-an-ip"]')
+    log = logging.getLogger("test.rate_limit_roster_reload")
+    with pytest.raises(ValueError, match="neither an IP address nor a CIDR block"):
+        rate_limit.warn_if_rate_limiting_off(log)
 
 
 def test_boot_warns_when_the_limiter_is_on_but_no_proxy_trust_is_declared(monkeypatch, caplog):

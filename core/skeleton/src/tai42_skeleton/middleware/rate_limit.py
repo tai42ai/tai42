@@ -23,10 +23,9 @@ tunes a door, it never decides whether the door is covered.
 Keying and window semantics: a fixed-window Redis counter per client bucket,
 INCR + EXPIRE issued in one pipeline (a pipeline cannot branch on INCR's result;
 re-setting the TTL every hit is harmless), key TTL = 2x the window. The client
-bucket comes from the shared resolver
-(:mod:`tai42_skeleton.utils.client_address`), which believes ``X-Forwarded-For``
-only under a declared proxy-trust statement and collapses an IPv6 client to its
-/64.
+bucket comes from the shared resolver (:mod:`tai42_kit.utils.client_address`), which
+believes ``X-Forwarded-For`` only under a declared proxy-trust statement and
+collapses an IPv6 client to its /64.
 
 This layer bounds REQUESTS per family. What a request then buys is the door's own
 business: a channel whose doors mint conversation addresses charges a per-client
@@ -53,12 +52,17 @@ from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.utils.client_address import (
+    XFF_HEADER,
+    ClientTrustSettings,
+    client_bucket,
+    warn_if_proxy_trust_undeclared,
+)
 
 from tai42_skeleton.app.route_registry import load_all_routes, route_registry
 from tai42_skeleton.middleware.audit_log import UNAUTHENTICATED, emit_audit_line
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.settings.rate_limit import RateLimitSettings, rate_limit_settings
-from tai42_skeleton.utils.client_address import client_bucket, warn_if_proxy_trust_undeclared
 
 logger = logging.getLogger(__name__)
 
@@ -92,23 +96,31 @@ _RATE_LIMIT_OFF_WARNING = (
 
 
 def warn_if_rate_limiting_off(log: logging.Logger) -> None:
-    """Emit the once-per-process rate-limiting-OFF warning when no Redis backs the
-    limiter (every public door then passes through), and state the proxy-trust
-    posture. A no-op after the first warning and when Redis IS configured, so a
+    """Validate the trusted-proxy roster and report the limiter's boot posture.
+
+    Constructing ``ClientTrustSettings`` first — before any dedup guard — runs its
+    roster validator on every call, so a malformed ``TAI_RATE_LIMIT_TRUSTED_PROXIES``
+    is refused at every boot/reload, Redis-less deployments included. When no Redis
+    backs the limiter, emits the once-per-process rate-limiting-OFF warning (every
+    public door then passes through); otherwise states the proxy-trust posture. The OFF
+    warning is a no-op after its first firing and when Redis IS configured, so a
     Redis-less deployment warns exactly once across boots/reloads and a configured
     deployment never warns. WARNING, not a boot refusal — public doors merely go
     unthrottled (R2)."""
     global _RATE_LIMIT_OFF_WARNED
-    if _RATE_LIMIT_OFF_WARNED:
-        return
-    # Read fresh (not the cached singleton) so the warning reflects the live env at
-    # this boot/reload, matching the presence gate ``_door`` folds on.
+    # Read both fresh (not the cached singletons) so they reflect the live env at this
+    # boot/reload, and before the once-per-process OFF guard so the roster validator
+    # fires on every call: ``RateLimitSettings`` matches the presence gate ``_door``
+    # folds on, and constructing ``ClientTrustSettings`` runs its roster validator — a
+    # malformed roster is refused at every boot, Redis-less deployments included.
     settings = RateLimitSettings()
+    trust = ClientTrustSettings()
     if not settings.redis.redis_url:
-        _RATE_LIMIT_OFF_WARNED = True
-        log.warning(_RATE_LIMIT_OFF_WARNING)
+        if not _RATE_LIMIT_OFF_WARNED:
+            _RATE_LIMIT_OFF_WARNED = True
+            log.warning(_RATE_LIMIT_OFF_WARNING)
         return
-    warn_if_proxy_trust_undeclared(log, settings.trusted_proxies, settings.trusted_hops)
+    warn_if_proxy_trust_undeclared(log, trust.trusted_proxies, trust.trusted_hops)
 
 
 def family_of(path: str) -> str:
@@ -272,7 +284,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        bucket = client_bucket(conn)
+        bucket = client_bucket(conn.client.host if conn.client else None, conn.headers.get(XFF_HEADER, ""))
         async with client_ctx(RedisClient, settings.redis) as r:
             retry_after = await _retry_after(r, settings.key_prefix, door.family, bucket, budget.limit, budget.burst)
         if retry_after is not None:

@@ -26,6 +26,10 @@ identifier is dropped, and a ``[v6]:port`` / ``v4:port`` entry (some managed loa
 balancers append the source port) reduces to its address. :func:`bucket_of`
 additionally collapses an IPv6 address to its /64, since a single host routinely
 holds a whole /64.
+
+The resolver reads two primitives — the socket peer and the raw ``X-Forwarded-For``
+header — so every caller (the app rate limiter, a channel door) resolves one
+deployment's trust statement one way, none importing another's HTTP layer.
 """
 
 from __future__ import annotations
@@ -36,7 +40,10 @@ import time
 from collections.abc import Sequence
 from functools import lru_cache
 
-from starlette.requests import HTTPConnection
+from pydantic import Field, field_validator
+from pydantic_settings import SettingsConfigDict
+
+from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +54,9 @@ IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 # transport). One shared bucket, but never caller-written text.
 UNKNOWN_CLIENT = "unknown"
 
-_XFF_HEADER = "x-forwarded-for"
+# The forwarded-for header name, lower-cased for case-insensitive header lookup. The
+# single source every consumer reads the raw chain from.
+XFF_HEADER = "x-forwarded-for"
 
 # Longest textual IPv6 address; a rejected entry is logged truncated to it so a
 # multi-kilobyte header cannot bloat the trail.
@@ -256,22 +265,51 @@ def bucket_of(address: str) -> str:
     return str(ip)
 
 
-def client_address(conn: HTTPConnection) -> str:
-    """The client address behind ``conn``, resolved against the deployment's declared
+class ClientTrustSettings(TaiBaseSettings):
+    """The deployment's proxy-trust statement for :func:`resolve_client_address`.
+
+    The env prefix is ``TAI_RATE_LIMIT_`` because the statement is one deployment
+    fact read by both the app rate limiter and the channel doors' turn caps — one
+    posture, one place, so the accountable client is resolved the same way for every
+    consumer."""
+
+    model_config = SettingsConfigDict(env_prefix="TAI_RATE_LIMIT_")
+
+    # Reverse proxies whose X-Forwarded-For may be trusted for the client-address
+    # resolution — single addresses, CIDR blocks, or both. Empty (default) = trust no
+    # proxy: the direct peer is the client and the header is never read.
+    trusted_proxies: list[str] = Field(default_factory=list)
+
+    # The number of proxies known to sit in front of this deployment. Set it when the
+    # proxy's own address moves (a managed load balancer renumbers): the resolver then
+    # skips exactly this many right-most hops instead of matching addresses. A
+    # positive value WINS over ``trusted_proxies``, which is then not consulted.
+    trusted_hops: int = Field(default=0, ge=0)
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, value: list[str]) -> list[str]:
+        """Refuse a roster entry that is neither an address nor a CIDR block here,
+        where the operator can see it — an unparseable entry would otherwise silently
+        trust nothing and bucket every client behind the proxy together."""
+        parse_trusted_networks(value)
+        return value
+
+
+@settings_cache
+def client_trust_settings() -> ClientTrustSettings:
+    return ClientTrustSettings()
+
+
+def client_address(peer: str | None, forwarded_for: str) -> str:
+    """The client address behind a request, resolved against the deployment's declared
     proxy trust. The single entry point: every consumer that needs to know who a
-    request is from calls THIS, so one deployment's trust statement is read one way."""
-    from tai42_skeleton.settings.rate_limit import rate_limit_settings
-
-    settings = rate_limit_settings()
-    peer = conn.client.host if conn.client else None
-    return resolve_client_address(
-        peer,
-        conn.headers.get(_XFF_HEADER, ""),
-        settings.trusted_proxies,
-        settings.trusted_hops,
-    )
+    request is from calls THIS with the socket peer and the raw ``X-Forwarded-For``,
+    so one deployment's trust statement is read one way."""
+    settings = client_trust_settings()
+    return resolve_client_address(peer, forwarded_for, settings.trusted_proxies, settings.trusted_hops)
 
 
-def client_bucket(conn: HTTPConnection) -> str:
+def client_bucket(peer: str | None, forwarded_for: str) -> str:
     """:func:`client_address` collapsed to its rate-limit bucket key."""
-    return bucket_of(client_address(conn))
+    return bucket_of(client_address(peer, forwarded_for))

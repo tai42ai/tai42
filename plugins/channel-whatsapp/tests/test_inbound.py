@@ -304,6 +304,8 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "channel": "whatsapp",
             "our_identity": PHONE_NUMBER_ID,
             "client_address": WA_ID,
+            # The provider attests the wa_id, so it is also the accountable cap key.
+            "cap_key": WA_ID,
             "text": "ship it",
             "provider_message_id": _WAMID,
         }
@@ -358,6 +360,7 @@ async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_red
             "channel": "whatsapp",
             "our_identity": PHONE_NUMBER_ID,
             "client_address": WA_ID,
+            "cap_key": WA_ID,
             "text": "late reply",
             "provider_message_id": _WAMID,
         }
@@ -823,6 +826,7 @@ async def test_stale_tap_restores_pending_and_bridges_title(
             "channel": "whatsapp",
             "our_identity": PHONE_NUMBER_ID,
             "client_address": WA_ID,
+            "cap_key": WA_ID,
             "text": "stale choice",
             "provider_message_id": _WAMID,
         }

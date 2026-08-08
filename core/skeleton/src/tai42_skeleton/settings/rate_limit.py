@@ -3,8 +3,10 @@
 The limiter's COVERAGE is not configured here: it is derived from the route
 registry, so every route registered ``authed=False`` is throttled and a new public
 door is protected the moment it registers. What this config holds is the BUDGET —
-a per-minute limit, a 10-second burst window, and an enable switch — plus the
-proxy-trust statement the client-address resolver reads.
+a per-minute limit, a 10-second burst window, and an enable switch. The proxy-trust
+statement the client-address resolver reads is a deployment-wide fact owned by
+:mod:`tai42_kit.utils.client_address` (env ``TAI_RATE_LIMIT_TRUSTED_*``), read here
+through that resolver, not declared on this config.
 
 Budgets resolve in one order, most specific first: a ``families`` override for the
 door family, else the ``default_*`` budget every derived family starts from. A
@@ -20,8 +22,6 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
-
-from tai42_skeleton.utils.client_address import parse_trusted_networks
 
 
 class FamilyBudget(BaseModel):
@@ -114,26 +114,6 @@ class RateLimitSettings(TaiBaseSettings):
     # (``TAI_RATE_LIMIT_FAMILIES__TRIGGER__LIMIT=10``). An entry for a family no route
     # declares is inert — it can never open a door, only tune one.
     families: dict[str, FamilyOverride] = Field(default_factory=dict)
-
-    # Reverse proxies whose X-Forwarded-For may be trusted for the client-address
-    # resolution — single addresses, CIDR blocks, or both. Empty (default) = trust no
-    # proxy: the direct peer is the client and the header is never read.
-    trusted_proxies: list[str] = Field(default_factory=list)
-
-    # The number of proxies known to sit in front of this deployment. Set it when the
-    # proxy's own address moves (a managed load balancer renumbers): the limiter then
-    # skips exactly this many right-most hops instead of matching addresses. A
-    # positive value WINS over ``trusted_proxies``, which is then not consulted.
-    trusted_hops: int = Field(default=0, ge=0)
-
-    @field_validator("trusted_proxies")
-    @classmethod
-    def _validate_trusted_proxies(cls, value: list[str]) -> list[str]:
-        """Refuse a roster entry that is neither an address nor a CIDR block here,
-        where the operator can see it — an unparseable entry would otherwise silently
-        trust nothing and bucket every client behind the proxy together."""
-        parse_trusted_networks(value)
-        return value
 
     @field_validator("families")
     @classmethod

@@ -70,6 +70,10 @@ async def test_uncorrelated_routed_message_reaches_accept_with_bridge_args(fake_
     assert call.channel == "slack"
     assert call.our_identity == TEST_BOT_USER_ID
     assert call.client_address == "C0OUTSIDE"
+    # The provider attests the channel id, so the accountable turn-cap key is that same
+    # attested address — no separate keying.
+    assert call.cap_key == "C0OUTSIDE"
+    assert call.cap_key == call.client_address
     assert call.text == "how do I reset my password?"
     assert call.provider_message_id == "Ev001"
     assert _DEDUPE_KEY in fake_redis.store  # processed: retries ack as duplicate

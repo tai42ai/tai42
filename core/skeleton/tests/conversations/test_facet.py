@@ -21,8 +21,10 @@ class _FakeApp:
         self.accepted: list[tuple] = []
         self.receipts: list[tuple] = []
 
-    async def _conversation_accept(self, channel, our_identity, client_address, text, provider_message_id) -> str:
-        self.accepted.append((channel, our_identity, client_address, text, provider_message_id))
+    async def _conversation_accept(
+        self, channel, our_identity, client_address, cap_key, text, provider_message_id
+    ) -> str:
+        self.accepted.append((channel, our_identity, client_address, cap_key, text, provider_message_id))
         return "mid-1"
 
     async def _conversation_record_delivery_status(self, channel, provider_message_id, status) -> None:
@@ -39,9 +41,9 @@ def test_the_facet_satisfies_the_contract_protocol():
 async def test_channel_side_accept_forwards_to_the_core():
     app = _FakeApp()
     facet: AppConversations = ConversationsFacet(app)  # type: ignore[arg-type]
-    message_id = await facet.accept("twilio", "+15550001111", "+15550002222", "hi", "PID1")
+    message_id = await facet.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     assert message_id == "mid-1"
-    assert app.accepted == [("twilio", "+15550001111", "+15550002222", "hi", "PID1")]
+    assert app.accepted == [("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")]
 
 
 async def test_channel_side_record_delivery_status_forwards_to_the_core():

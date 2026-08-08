@@ -247,6 +247,9 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
             channel="slack",
             our_identity=our_identity,
             client_address=channel,
+            # The provider attests the channel id, so it is both the conversation identity
+            # and the party the turn cap holds accountable.
+            cap_key=channel,
             text=text,
             provider_message_id=event_id,
         )

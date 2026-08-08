@@ -98,13 +98,14 @@ class _StubConversations:
         self.status_error: Exception | None = None
 
     async def accept(
-        self, channel: str, our_identity: str, client_address: str, text: str, provider_message_id: str
+        self, channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
     ) -> str:
         self.accept_calls.append(
             {
                 "channel": channel,
                 "our_identity": our_identity,
                 "client_address": client_address,
+                "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
             }

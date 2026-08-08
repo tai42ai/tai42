@@ -40,8 +40,11 @@ page could do differently for.
 Flood control on these doors is NOT this plugin's: the platform's public-door limiter
 bounds requests per caller ahead of them, and the operator's ingress bounds what
 reaches the platform. What the plugin bounds is the one resource it owns — the
-dedicated store connection an open SSE stream pins (``stream.py``) — and it reads no
-client address to do it.
+dedicated store connection an open SSE stream pins (``stream.py``). The one client
+address it reads is on the messages door: the visitor id keys the conversation, but a
+visitor mints and rotates that id freely, so the accountable turn cap is keyed on the
+request's network client bucket instead — the same value the public-door limiter
+derives — never on the resettable visitor id.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.clients.impl.http import HttpxClient
+from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
 from tai42_channel_web.page import (
     HTML_CONTENT_TYPE,
@@ -584,6 +588,11 @@ async def web_messages(request: Request) -> Response:
     if not _serves(registration, body.identity):
         return _error(_SESSION_MISSING, 401, _SESSION_MISSING_CODE)
     address = registration.visitor_id
+    # The conversation identity is the minted visitor id, which the platform mints on
+    # unauthenticated doors and a visitor can rotate at will — so it cannot bound spend.
+    # The turn cap keys instead on the accountable NETWORK bucket, the same value the
+    # public-door rate limiter derives for this request.
+    cap_key = client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))
 
     async with transcript_order(body.identity, address):
         try:
@@ -591,6 +600,7 @@ async def web_messages(request: Request) -> Response:
                 channel="web",
                 our_identity=body.identity,
                 client_address=address,
+                cap_key=cap_key,
                 text=body.text,
                 provider_message_id=_provider_message_id(body.identity, address, body.client_message_id),
             )

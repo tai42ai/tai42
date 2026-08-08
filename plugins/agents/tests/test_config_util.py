@@ -16,9 +16,12 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
 from tai42_contract.app import tai42_app
+from tai42_kit.settings import reset_all_settings
 
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents.settings import AgentsLimitsSettings, agents_limits_settings
 from tests.conftest import RecordingMonitoringWriter
 
 CALLBACKS = ["callback-a", "callback-b"]
@@ -86,6 +89,41 @@ def test_top_level_recursion_limit_is_preserved() -> None:
 
     result = init_langgraph_config({"recursion_limit": 12})
     assert result["recursion_limit"] == 12
+
+
+def test_default_recursion_limit_setting_is_fifty() -> None:
+    # The package's safe default step ceiling — positive, never unlimited.
+    assert AgentsLimitsSettings().default_recursion_limit == 50
+
+
+def test_default_recursion_limit_applied_when_run_pins_none() -> None:
+    # A run that pins no ``recursion_limit`` gets the settings default onto the
+    # effective config the graph is invoked with, so no run is uncapped.
+    result = init_langgraph_config()
+    assert result["recursion_limit"] == agents_limits_settings().default_recursion_limit
+    assert result["recursion_limit"] == 50
+
+
+def test_caller_recursion_limit_wins_over_default() -> None:
+    # A caller-supplied limit is left untouched; the default only fills a gap.
+    result = init_langgraph_config(build_run_config(None, recursion_limit=7))
+    assert result["recursion_limit"] == 7
+    # ``0`` is a real pinned value the caller chose, not an unset gap to fill.
+    assert init_langgraph_config({"recursion_limit": 0})["recursion_limit"] == 0
+
+
+def test_default_recursion_limit_env_override_flows_into_effective_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``TAI_AGENTS_DEFAULT_RECURSION_LIMIT`` overrides the fill-in default and the
+    # override reaches the effective config the graph runs with.
+    monkeypatch.setenv("TAI_AGENTS_DEFAULT_RECURSION_LIMIT", "3")
+    reset_all_settings()
+    try:
+        assert init_langgraph_config()["recursion_limit"] == 3
+    finally:
+        monkeypatch.delenv("TAI_AGENTS_DEFAULT_RECURSION_LIMIT", raising=False)
+        reset_all_settings()
 
 
 def test_input_config_is_not_mutated() -> None:

@@ -23,6 +23,8 @@ from opentelemetry.context import Context
 from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import TraceContext
 
+from tai42_agents.settings import agents_limits_settings
+
 
 def build_run_config(
     langgraph_config: dict[str, Any] | None,
@@ -61,6 +63,14 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> dict[str, Any
 
     if "thread_id" not in configurable:
         configurable["thread_id"] = session_id
+
+    # A run that pins no step bound gets the settings default, so the top-level
+    # graph honors a positive ceiling; a caller-supplied ``recursion_limit`` (0
+    # included) is left to win. This bounds the top-level graph only — each
+    # deep-agent task-tool subagent runs its own graph under deepagents' own bound
+    # (9999).
+    if "recursion_limit" not in new_config:
+        new_config["recursion_limit"] = agents_limits_settings().default_recursion_limit
 
     trace_id = configurable.get("monitoring_trace_id", str(uuid.uuid4()).replace("-", ""))
     parent_span_id = configurable.get("monitoring_parent_span_id")

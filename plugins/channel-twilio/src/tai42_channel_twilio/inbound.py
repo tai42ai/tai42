@@ -257,6 +257,9 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
             channel="twilio",
             our_identity=form.get("To", ""),
             client_address=form.get("From", ""),
+            # The provider attests the From number, so it is both the conversation identity
+            # and the party the turn cap holds accountable.
+            cap_key=form.get("From", ""),
             text=form.get("Body", ""),
             provider_message_id=message_sid,
         )
