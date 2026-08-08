@@ -82,8 +82,36 @@ export async function postConfig(
   await expect(async () => {
     res = await request.post(url, { headers: apiHeaders(key), data });
     expect(res.status(), await res.text()).not.toBe(503);
-  }).toPass({ timeout: 20_000 });
+    // A reload-gated write can race a fanned-out reload; the gate frees only once the
+    // in-flight reload completes, which on a MULTIWORKER stack can exceed 20s (epoch
+    // build + swap). Give the retry window room for a full reload cycle.
+  }).toPass({ timeout: 45_000 });
   return res;
+}
+
+/**
+ * Wait until the fleet's reload gates are FREE, so a reload-heavy spec (a profile apply /
+ * env write / mcp-config save) leaves the stack QUIESCENT and does not cascade a mid-reload
+ * `503`/`500`/element-not-found into the next serial spec (workers:1).
+ *
+ * Polls the reload-gated door with an EMPTY target set — a verified no-op that reloads
+ * NOBODY (empty fan-out, env untouched) yet still returns the reload gate's retriable
+ * `503` while a worker is mid-reload — and requires several CONSECUTIVE `200`s so the
+ * round-robin across the workers behind the one MULTIWORKER port covers every worker.
+ */
+export async function waitForReloadSettle(request: APIRequestContext, key: string = API_KEY): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let settled = 0;
+  while (settled < 4) {
+    if (Date.now() > deadline) throw new Error('fleet reload gates never settled within 60s');
+    const res = await request.post('/api/config/reload', { headers: apiHeaders(key), data: { targets: [] } });
+    if (res.status() === 503) {
+      settled = 0;
+      continue;
+    }
+    expect(res.status(), await res.text()).toBe(200);
+    settled += 1;
+  }
 }
 
 /**

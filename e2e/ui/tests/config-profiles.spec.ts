@@ -25,7 +25,7 @@
  * (`data-testid=apply-report`) with its Hot-swapped section, not a fleet alert.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, postConfig, seedCredential, uniq } from './helpers';
+import { apiHeaders, postConfig, seedCredential, uniq, waitForReloadSettle } from './helpers';
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';
@@ -86,6 +86,9 @@ test.afterEach(async ({ request }) => {
   }
   createdProfiles.clear();
   createdEnvKeys.clear();
+  // Leave the stack QUIESCENT: the env-write cleanups above fan a reload out to the fleet, so
+  // wait for every worker's reload gate to free before the next serial spec runs.
+  await waitForReloadSettle(request);
 });
 
 test('create, edit, and diff a profile — diff masks secrets and surfaces the recycle callout', async ({
@@ -113,12 +116,13 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await createDialog.getByRole('textbox', { name: `Value of variable ${secretKey}` }).fill(secretVal);
   await createDialog.getByRole('checkbox', { name: 'Secret' }).check();
 
-  // Row 2 — the recycle-class key (drives the diff's recycle callout). The create dialog
-  // pre-fills a row for every registered setting, so a row for RECYCLE_KEY already exists
-  // (its resolved default); adding a second one via "Add variable" would name-collide and
-  // split/disable the value-input locator. Set the EXISTING row's value directly — its value
-  // aria-label resolves to that single fillable input.
-  await createDialog.getByRole('textbox', { name: `Value of variable ${RECYCLE_KEY}` }).fill('5.0');
+  // Row 2 — the recycle-class key (drives the diff's recycle callout). Fill the new row's
+  // VALUE via its unique unnamed-row label (`Value of new variable N`) BEFORE naming it, so
+  // the locator never collides with a `Value of variable <key>` input (the value persists
+  // across the rename); then set the name.
+  await createDialog.getByRole('button', { name: 'Add variable' }).click();
+  await createDialog.getByRole('textbox', { name: /^Value of new variable/ }).fill('5.0');
+  await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(RECYCLE_KEY);
 
   await createDialog.getByRole('button', { name: 'Create profile' }).click();
   const row = page.getByTestId(`profile-row-${name}`);
@@ -183,6 +187,8 @@ test('apply a hot-only profile then revert via @previous — round-trips the sto
   await expect(applyDialog.getByRole('heading', { name: 'Hot-swapped' })).toBeVisible();
   await expect(applyDialog.getByText(/did not converge|was not reached/)).toHaveCount(0);
   await applyDialog.getByRole('button', { name: 'Close' }).click();
+  // The apply fanned a reload across the fleet; wait for every gate to free before driving on.
+  await waitForReloadSettle(request);
 
   // The stored band now carries the marker at its value (apply added it).
   await expect.poll(async () => (await storedEnv(request))[marker]).toBe(markerVal);
@@ -192,6 +198,7 @@ test('apply a hot-only profile then revert via @previous — round-trips the sto
   await page.getByRole('button', { name: 'Revert last apply' }).click();
   await applyInDialog(page, 'Revert last apply');
   await page.getByRole('dialog', { name: 'Revert last apply' }).getByRole('button', { name: 'Close' }).click();
+  await waitForReloadSettle(request);
 
   await expect.poll(async () => (await storedEnv(request))[marker]).toBeUndefined();
   // The full band is back to the pre-apply snapshot.

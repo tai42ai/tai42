@@ -20,7 +20,7 @@
  *    (asserted through the API) and the masked chip.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, postConfig, seedCredential, uniq } from './helpers';
+import { apiHeaders, postConfig, seedCredential, uniq, waitForReloadSettle } from './helpers';
 
 /** The env-map key on the seeded MCP entry whose value is the secret reference. */
 const ENV_ENTRY = 'REFVAL';
@@ -48,10 +48,17 @@ async function preservedMcp(request: APIRequestContext): Promise<unknown[]> {
 
 /** Seed one MCP entry referencing `key` from its `config.env.REFVAL` leaf. */
 async function seedEntry(request: APIRequestContext, title: string, key: string): Promise<void> {
+  // The caller seeds the referenced env key just before this — that env write fanned a
+  // reload out to the fleet. Drain it FIRST so this mcp-config POST lands on a free reload
+  // gate instead of racing the in-flight reload into a (retriable, but slow) 503 storm.
+  await waitForReloadSettle(request);
   const res = await postConfig(request, '/api/mcp-config', {
     mcp: [{ title, config: { command: '/bin/true', env: { [ENV_ENTRY]: envMarker(key) } } }],
   });
   expect(res.status(), await res.text()).toBe(200);
+  // The seed fanned a reload out; wait for the fleet to settle so the subsequent page load /
+  // field read does not race a mid-reload worker.
+  await waitForReloadSettle(request);
 }
 
 /** Open the MCP tab of the Manifest page and wait for the seeded entry's field. */
@@ -93,6 +100,9 @@ test.afterEach(async ({ request }) => {
     await postConfig(request, '/api/config/env', { [key]: '' });
   }
   createdEnvKeys.clear();
+  // Leave the stack QUIESCENT for the next serial spec: the restore + env cleanups above
+  // fan reloads out to the fleet.
+  await waitForReloadSettle(request);
 });
 
 test('an existing !ENV secret reference renders a masked, revealable chip', async ({ page, request }) => {
@@ -135,29 +145,57 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
   const field = page.getByTestId(`mcp-secret-0-${ENV_ENTRY}`);
   await field.getByRole('button', { name: 'Change reference' }).click();
   await field.getByRole('button', { name: 'Paste new secret' }).click();
-  await field.getByLabel(ENV_ENTRY).fill(uniq('pasted-secret'));
+  // Target the paste input by its textbox role + exact name: `getByLabel(ENV_ENTRY)` also
+  // matches the row's `role=group` wrapper (`aria-label="REFVAL source"`, a substring hit).
+  await field.getByRole('textbox', { name: ENV_ENTRY, exact: true }).fill(uniq('pasted-secret'));
+  // "Use secret" fires the combined store-then-mark op (`POST /api/mcp-config/secret-env`),
+  // which writes the generated env key then fans a reload out. Await that op's own 200 so the
+  // key-count assertion below reads the store AFTER the write landed, not mid-op.
+  const secretEnvOk = page.waitForResponse(
+    (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
+  );
   await field.getByRole('button', { name: 'Use secret' }).click();
+  const secretEnvRes = await secretEnvOk;
+  expect(secretEnvRes.status(), await secretEnvRes.text()).toBe(200);
+  // Drain the op's reload so GET /api/config/env answers 200 (not a mid-reload 503) below.
+  await waitForReloadSettle(request);
 
-  // The combined op generated exactly one new env key; the pre-existing key is intact.
+  // The combined op generated exactly one new env key AND left the pre-existing key intact
+  // (`write_env` MERGES under a lock, so `keyPre` is never dropped by the op). Assert BOTH on
+  // the SAME read: a GET that lands mid-swap can transiently expose a reduced band (the new key
+  // present before `keyPre` re-surfaces), so a one-condition poll could pass on that inconsistent
+  // instant — require the whole consistent band before reading `generated` off it.
   let generated = '';
   await expect
-    .poll(async () => {
-      const keys = Object.keys(await storedEnv(request)).filter(
-        (k) => !before.has(k) && k !== 'TAI_ENV_SECRET_KEYS',
-      );
-      if (keys.length === 1) generated = keys[0] ?? '';
-      return keys.length;
-    })
-    .toBe(1);
+    .poll(
+      async () => {
+        const env = await storedEnv(request);
+        const keys = Object.keys(env).filter((k) => !before.has(k) && k !== 'TAI_ENV_SECRET_KEYS');
+        if (keys.length === 1) generated = keys[0] ?? '';
+        return { newKeys: keys.length, prePresent: env[keyPre] !== undefined };
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual({ newKeys: 1, prePresent: true });
   createdEnvKeys.add(generated);
-  expect((await storedEnv(request))[keyPre]).toBeDefined();
 
   // Drop the entry (and thus the generated reference), then save: the sweep deletes
   // the session-generated key (ACCEPT) but never the pre-existing one (DECLINE — it
   // was orphaned by the paste yet this editor did not generate it).
   await page.getByRole('button', { name: 'Remove server 1' }).click();
   await saveMcpConfig(page);
+  // The save fanned a reload out; settle the fleet before asserting the swept store state.
+  await waitForReloadSettle(request);
 
-  await expect.poll(async () => (await storedEnv(request))[generated]).toBeUndefined();
-  expect((await storedEnv(request))[keyPre]).toBeDefined();
+  // The sweep dropped the session-generated key but kept the pre-existing one — assert BOTH on
+  // the SAME read so a mid-swap GET cannot satisfy either half on an inconsistent instant.
+  await expect
+    .poll(
+      async () => {
+        const env = await storedEnv(request);
+        return { generatedGone: env[generated] === undefined, prePresent: env[keyPre] !== undefined };
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual({ generatedGone: true, prePresent: true });
 });
