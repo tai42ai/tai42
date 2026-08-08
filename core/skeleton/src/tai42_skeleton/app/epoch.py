@@ -233,6 +233,16 @@ def epoch_under_construction_or_none() -> Epoch | None:
     return _building_epoch if _building_epoch is not None else _current
 
 
+def is_epoch_rebuild_in_progress() -> bool:
+    """True only while ``build_and_swap_epoch`` is populating a NEW generation — i.e. during
+    a RELOAD, and never at cold boot or steady serving. (``_building_epoch`` is set only for
+    the span of the build; cold boot installs its core through ``install_boot_core`` without
+    it.) Lets a build-time step (the MCP viability probe) pick a short reload budget over the
+    generous cold-boot one, so an unreachable server can't stall a live reload. Read safely
+    from the off-loop build worker: it is a GIL-atomic reference read of a process global."""
+    return _building_epoch is not None
+
+
 def install_boot_core(core: ServingCore) -> Epoch:
     """Establish the boot serving generation's core, called once by ``app_context``
     before ``start()`` runs — so ``start()`` and the epoch handlers register into this
@@ -363,7 +373,21 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops(budget)
     if not tolerate_driver:
-        await old._drain_in_flight(budget)
+        # The in-flight HTTP drain waits for the generation's admitted requests to finish,
+        # but the Studio shell holds a long-lived interactions-inbox SSE (``GET
+        # /api/interactions/stream``) open — a request that never completes — so this drain
+        # always burns the FULL budget and then abandons it. Blocking a bus-driven
+        # (fleet-sibling) retire on that stalls the sibling's reload ack and, under a
+        # reload-heavy load, fleet-reload convergence — even though the fresh epoch already
+        # serves new traffic. Defer the drain to the background (as the door-driven path
+        # already defers its own): the retire — and the fleet's convergence — no longer waits
+        # on a never-draining stream, while the old generation's in-flight requests still get
+        # the budget to finish (or are abandoned at it, exactly as before) off the hot path.
+        # Only this HTTP drain moves; the FastMCP session-manager close below stays
+        # synchronous, so bus-driven D13a session termination is unchanged.
+        drain_task = asyncio.create_task(old._drain_in_flight(budget), name=f"tai-epoch-{old.number}-deferred-drain")
+        _deferred_retire_tasks.add(drain_task)
+        drain_task.add_done_callback(_deferred_retire_tasks.discard)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 

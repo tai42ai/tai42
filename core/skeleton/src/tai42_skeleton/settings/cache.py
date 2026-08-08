@@ -27,5 +27,10 @@ def mcp_probe_timeout() -> float:
 
 
 @settings_cache
+def mcp_reload_probe_timeout() -> float:
+    return CoreSettings().mcp_reload_probe_timeout
+
+
+@settings_cache
 def app_args_settings() -> AppArgsSettings:
     return AppArgsSettings()

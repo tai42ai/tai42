@@ -386,6 +386,55 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
     assert app_state["app"].name == "new-app"
 
 
+async def test_bus_driven_retire_defers_in_flight_drain_but_closes_lifespan_synchronously() -> None:
+    """A bus-driven (fleet-sibling) retire must NOT block on the in-flight HTTP drain: the
+    Studio shell holds a never-completing interactions-inbox SSE open, so a synchronous drain
+    would burn the full budget and stall the sibling's reload ack — and, under load, fleet-
+    reload convergence. The drain is DEFERRED to a background task (``build_and_swap`` returns
+    well under the budget) WHILE the FastMCP session-manager close stays SYNCHRONOUS, so
+    bus-driven D13a session termination is unchanged. Non-vacuous: reverting the deferral to a
+    synchronous ``_drain_in_flight`` makes ``build_and_swap`` self-wait the full ~5s budget."""
+    import asyncio
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    closed: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+    boot.admit()  # a never-releasing in-flight request (e.g. the interactions inbox SSE)
+    loop = asyncio.get_running_loop()
+    try:
+        start = loop.time()
+        await build_and_swap_epoch(
+            {"TAI_EPOCH_BUS": "v"},
+            rebuild=lambda: None,
+            build_serving_app=_serve("new-app"),
+            drain_deadline=5.0,  # LARGE budget: a SYNCHRONOUS drain would burn all of it
+            drain_tolerate_driver=False,  # BUS-driven (fleet sibling), not door-driven
+        )
+        # Returned WELL under the budget: the never-draining in-flight request did NOT block the
+        # retire (drain deferred). A revert to a synchronous drain would self-wait ~5s here.
+        assert loop.time() - start < 1.0, "bus-driven retire blocked on the in-flight drain"
+        # D13a intact: the session-manager close ran SYNCHRONOUSLY for a bus-driven retire.
+        assert closed == ["closed"], "bus-driven retire did not close the old lifespan synchronously"
+        # The drain was handed to a background task, not dropped.
+        assert any("deferred-drain" in t.get_name() for t in epoch_mod._deferred_retire_tasks), (
+            "the deferred in-flight drain task was not registered"
+        )
+    finally:
+        drains = [t for t in epoch_mod._deferred_retire_tasks if "deferred-drain" in t.get_name()]
+        for t in drains:
+            t.cancel()
+        boot.release()
+        if drains:
+            await asyncio.gather(*drains, return_exceptions=True)
+        os.environ.pop("TAI_EPOCH_BUS", None)
+
+
 # -- stale-settings sweep ------------------------------------------------------
 
 

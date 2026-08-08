@@ -19,9 +19,18 @@ class CoreSettings(TaiBaseSettings):
     backend: str | None = Field(default=None, json_schema_extra={"reload": "recycle"})
     template: str | None = Field(default=None, json_schema_extra={"reload": "recycle"})
     # Max seconds to spend on a single MCP server viability check (connect +
-    # list_tools) during startup or reload. A server that exceeds this is
-    # skipped and recorded instead of blocking the whole server.
+    # list_tools) at COLD BOOT. A server that exceeds this is skipped and
+    # recorded instead of blocking the whole server.
     mcp_probe_timeout: float = 15.0
+    # The same viability check budget during a RELOAD (an epoch rebuild), kept
+    # SHORT and separate from the generous cold-boot value: a reload runs while
+    # the fleet is live and holds the reload gate, so an unreachable MCP server
+    # blocking the probe for the full boot budget would stall every reload-gated
+    # write and fleet-reload convergence. A server that overruns this shorter
+    # budget is recorded unavailable (its tools bind a moment later via the
+    # lifespan re-probe task / the ``reload_failed_mcps`` door) rather than
+    # gating the whole reload — degraded-but-live, never a stalled fleet.
+    mcp_reload_probe_timeout: float = Field(default=3.0, gt=0)
     # The failed-MCP re-probe backoff bounds. The lifespan-owned re-probe task
     # sleeps ``initial`` seconds between passes, doubling up to ``max`` after a
     # pass where every probed server stayed down, and resetting to ``initial``

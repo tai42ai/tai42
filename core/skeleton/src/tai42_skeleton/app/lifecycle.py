@@ -25,7 +25,7 @@ from tai42_kit.llm.store.store_registry import store_registry
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
 from tai42_skeleton.app.bus import OriginKind, WorkerBus, make_origin
 from tai42_skeleton.app.bus_settings import bus_settings
-from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none
+from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none, is_epoch_rebuild_in_progress
 from tai42_skeleton.app.graceful_exit import graceful_exit_for
 from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.kind_status import collect_kind_status, warn_if_noop_monitoring
@@ -40,7 +40,7 @@ from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.registry import operation_registry
-from tai42_skeleton.settings.cache import mcp_probe_timeout
+from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 from tai42_skeleton.settings.settings import CoreSettings
 from tai42_skeleton.tools import ToolRegistry
 
@@ -1179,18 +1179,18 @@ class TaiMCPLifecycleMixin(ABC):
         for uri in {str(c.uri) for c in components if isinstance(c, Resource)}:
             provider.remove_resource(uri)
 
-    async def _probe_mcp(self, config: TaiMCPConfig) -> list["mcp.types.Tool"]:
-        """Connect to one MCP server and list its tools, bounded by
-        ``mcp_probe_timeout``. Raises on failure/timeout; callers decide
-        whether to skip-and-record or surface the error. The probe runs through
-        the pooled ``FastMCPClient`` (one-shot, off-pool) so no raw fastmcp
-        ``Client`` is opened by the app."""
+    async def _probe_mcp(self, config: TaiMCPConfig, timeout: float | None = None) -> list["mcp.types.Tool"]:
+        """Connect to one MCP server and list its tools, bounded by ``timeout``
+        (defaults to the cold-boot ``mcp_probe_timeout``). Raises on
+        failure/timeout; callers decide whether to skip-and-record or surface the
+        error. The probe runs through the pooled ``FastMCPClient`` (one-shot,
+        off-pool) so no raw fastmcp ``Client`` is opened by the app."""
 
         async def _do() -> list["mcp.types.Tool"]:
             async with self.clients.client_ctx(FastMCPClient, fresh=True, config=config.model_dump()) as client:
                 return await client.list_tools()
 
-        return await asyncio.wait_for(_do(), timeout=mcp_probe_timeout())
+        return await asyncio.wait_for(_do(), timeout=timeout if timeout is not None else mcp_probe_timeout())
 
     async def _load_mcps(
         self,
@@ -1206,9 +1206,16 @@ class TaiMCPLifecycleMixin(ABC):
         if manifest is None or not manifest.mcp:
             return [], []
 
+        # A RELOAD holds the reload gate while the fleet is live, so an unreachable server
+        # must not block the probe for the generous cold-boot budget — it would stall every
+        # reload-gated write and fleet-reload convergence. Use the short reload budget for a
+        # rebuild (the re-probe task / ``reload_failed_mcps`` door binds a laggard a moment
+        # later); keep the full budget only for the one-time cold boot.
+        timeout = mcp_reload_probe_timeout() if is_epoch_rebuild_in_progress() else mcp_probe_timeout()
+
         async def run_one(config: TaiMCPConfig):
             try:
-                tools = await self._probe_mcp(config)
+                tools = await self._probe_mcp(config, timeout=timeout)
                 return config, tools, None
             except Exception as e:
                 return config, None, type(e).__name__

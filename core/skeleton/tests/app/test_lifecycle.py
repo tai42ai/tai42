@@ -819,6 +819,39 @@ def test_load_mcps_early_returns_without_mcp():
     assert asyncio.run(m._load_mcps()) == ([], [])
 
 
+def test_load_mcps_uses_short_reload_budget_during_a_rebuild(monkeypatch):
+    # A RELOAD (epoch rebuild) probes with the SHORT budget, so an unreachable server can't
+    # stall the reload gate / fleet convergence for the full cold-boot budget.
+    from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
+
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    probe = AsyncMock(return_value=[])
+    monkeypatch.setattr(m, "_probe_mcp", probe)
+    monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
+    asyncio.run(m._load_mcps())
+    call = probe.await_args
+    assert call is not None  # the probe WAS awaited
+    assert call.kwargs["timeout"] == mcp_reload_probe_timeout()
+    assert mcp_reload_probe_timeout() < mcp_probe_timeout()  # short reload budget vs cold-boot
+
+
+def test_load_mcps_uses_full_budget_at_cold_boot(monkeypatch):
+    # Cold boot (no rebuild in progress) keeps the generous budget: it is one-time and may
+    # legitimately wait for a server still coming up.
+    from tai42_skeleton.settings.cache import mcp_probe_timeout
+
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    probe = AsyncMock(return_value=[])
+    monkeypatch.setattr(m, "_probe_mcp", probe)
+    monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: False)
+    asyncio.run(m._load_mcps())
+    call = probe.await_args
+    assert call is not None  # the probe WAS awaited
+    assert call.kwargs["timeout"] == mcp_probe_timeout()
+
+
 def test_start_imports_lifecycle_router_and_middleware_modules():
     # The lifecycle/routers/middlewares module loops each import their listed
     # packages (pointed at a neutral fixture package here).
