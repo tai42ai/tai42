@@ -57,6 +57,7 @@ fleet census or a fleet reload).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -95,6 +96,15 @@ _TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     RedisTimeoutError,
     ClientDisconnectedError,
 )
+
+# Reply-collection resilience. A transient transport blip on the collector's reply
+# pub/sub (Redis closing an idle connection under heavy epoch churn) must NOT abandon
+# the still-pending sibling replies — the reload applied, so abandoning would report a
+# FALSE non-convergence. On such a blip the collector re-subscribes and resumes within
+# the apply deadline, bounded by this many attempts (a redis genuinely down then reports
+# unconfirmed loudly rather than busy-looping) with a short pause between attempts.
+_REPLY_RECONNECT_LIMIT = 3
+_REPLY_RECONNECT_BACKOFF = 0.1
 
 
 class OpOutcome(StrEnum):
@@ -349,10 +359,21 @@ class WorkerBus:
             try:
                 wire = {**op, "origin": self._origin.origin, "reply_to": reply_channel, "targets": targets}
                 await r.publish(self._settings.channel, json.dumps(wire))
-                collected = await self._collect(r, pubsub, expected, op_name)
+                collected = await self._collect(r, pubsub, expected, op_name, reply_channel)
             finally:
-                await pubsub.unsubscribe(reply_channel)
-                await pubsub.aclose()
+                # Best-effort teardown: ``_collect`` may have re-subscribed on a fresh
+                # pub/sub after a mid-collection blip, leaving THIS one dead — tearing a
+                # dead connection down must not raise a transport error out of a broadcast
+                # that already collected its results (``publish`` would mis-report it as
+                # bus-unreachable). The reconnected pub/sub cleans itself up in ``_collect``.
+                try:
+                    await pubsub.unsubscribe(reply_channel)
+                except Exception:
+                    logger.debug("worker bus: reply pub/sub unsubscribe teardown failed (ignored)", exc_info=True)
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    logger.debug("worker bus: reply pub/sub aclose teardown failed (ignored)", exc_info=True)
         return list(collected.values())
 
     async def _expected_origins(self, r: Any, targets: list[str] | None) -> set[str]:
@@ -363,7 +384,9 @@ class WorkerBus:
         # is reported as departed at the cut, never raised.
         return set(targets) - {self._origin.origin}
 
-    async def _collect(self, r: Any, pubsub: Any, expected: set[str], op_name: str) -> dict[str, OriginResult]:
+    async def _collect(
+        self, r: Any, pubsub: Any, expected: set[str], op_name: str, reply_channel: str
+    ) -> dict[str, OriginResult]:
         terminal: dict[str, OriginResult] = {}
         acked: set[str] = set()
         loop = asyncio.get_running_loop()
@@ -372,41 +395,75 @@ class WorkerBus:
         apply_deadline = start + self._settings.apply_timeout
         ack_checked = False
         transport_error: str | None = None
+        # The pub/sub the loop currently reads from — swapped for a fresh, re-subscribed
+        # one after a transient blip. Any reconnected pub/sub is closed in the finally;
+        # the ORIGINAL is owned (and torn down) by ``_broadcast``.
+        ps = pubsub
+        reconnects = 0
 
         # Early exit counts TERMINAL wire replies only; a provisional missing/departed
         # never enables it, so an in-flight ``applied`` can never be cut off early.
-        while expected - terminal.keys():
-            now = loop.time()
-            if now >= apply_deadline:
-                break
-            if not ack_checked and now >= ack_deadline:
-                # Provisional verdicts at the ack deadline are diagnostic only; the
-                # finalize pass below re-checks presence, so they never block a
-                # later terminal reply. Marking the pass done is what matters here.
-                ack_checked = True
-            next_deadline = apply_deadline if ack_checked else ack_deadline
-            timeout = max(0.01, next_deadline - now)
-            try:
-                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
-            except _TRANSPORT_ERRORS as exc:
-                # A blip mid-collection is reported loudly on the affected origins
-                # (below), never silently dropped.
-                transport_error = f"{type(exc).__name__}: {exc}"
-                logger.error("worker bus: reply collection for %r hit a transport error", op_name, exc_info=True)
-                break
-            if msg is None:
-                continue
-            frame = _decode(msg["data"])
-            if frame is None:
-                continue
-            origin = frame.get("origin")
-            if origin not in expected:
-                continue
-            phase = frame.get("phase")
-            if phase == "received":
-                acked.add(origin)
-            elif phase == "terminal":
-                _merge_terminal(terminal, origin, self._terminal_result(origin, frame))
+        try:
+            while expected - terminal.keys():
+                now = loop.time()
+                if now >= apply_deadline:
+                    break
+                if not ack_checked and now >= ack_deadline:
+                    # Provisional verdicts at the ack deadline are diagnostic only; the
+                    # finalize pass below re-checks presence, so they never block a
+                    # later terminal reply. Marking the pass done is what matters here.
+                    ack_checked = True
+                next_deadline = apply_deadline if ack_checked else ack_deadline
+                timeout = max(0.01, next_deadline - now)
+                try:
+                    msg = await ps.get_message(ignore_subscribe_messages=True, timeout=timeout)
+                except _TRANSPORT_ERRORS as exc:
+                    # A transient blip must not abandon the still-pending replies — the
+                    # reload applied, so abandoning reports a FALSE non-convergence. Note
+                    # it, then re-subscribe on a fresh pub/sub and RESUME within the apply
+                    # deadline; give up (report unconfirmed loudly) only once the deadline
+                    # passes or reconnects are exhausted or the reconnect itself fails.
+                    transport_error = f"{type(exc).__name__}: {exc}"
+                    if reconnects >= _REPLY_RECONNECT_LIMIT or loop.time() >= apply_deadline:
+                        logger.error(
+                            "worker bus: reply collection %r hit a transport error; abandoning after %d reconnect(s)",
+                            op_name,
+                            reconnects,
+                            exc_info=True,
+                        )
+                        break
+                    reconnects += 1
+                    logger.warning(
+                        "worker bus: reply collection %r hit a transport error; re-subscribing (%d/%d) and resuming",
+                        op_name,
+                        reconnects,
+                        _REPLY_RECONNECT_LIMIT,
+                        exc_info=True,
+                    )
+                    fresh = await self._resubscribe_replies(r, ps, reply_channel, apply_deadline, loop)
+                    if fresh is None:
+                        break
+                    ps = fresh
+                    continue
+                if msg is None:
+                    continue
+                frame = _decode(msg["data"])
+                if frame is None:
+                    continue
+                origin = frame.get("origin")
+                if origin not in expected:
+                    continue
+                phase = frame.get("phase")
+                if phase == "received":
+                    acked.add(origin)
+                elif phase == "terminal":
+                    _merge_terminal(terminal, origin, self._terminal_result(origin, frame))
+        finally:
+            # Close only a pub/sub THIS method opened on reconnect; the original is
+            # ``_broadcast``'s to tear down.
+            if ps is not pubsub:
+                with contextlib.suppress(Exception):
+                    await ps.aclose()
 
         results: dict[str, OriginResult] = {}
         for origin in expected:
@@ -415,6 +472,42 @@ class WorkerBus:
                 verdict = await self._computed_verdict(r, origin, origin in acked, transport_error)
             results[origin] = verdict
         return results
+
+    async def _resubscribe_replies(
+        self, r: Any, dead_ps: Any, reply_channel: str, apply_deadline: float, loop: asyncio.AbstractEventLoop
+    ) -> Any | None:
+        """Drop a pub/sub that hit a transient transport error and open a fresh one on the
+        SAME client, re-subscribed to ``reply_channel``, so collection resumes for replies
+        still arriving before the apply deadline. Returns the new pub/sub, or ``None`` when
+        the reconnect itself cannot reach Redis (the caller then abandons and reports
+        unconfirmed loudly — a genuinely-departed origin is never masked as converged).
+
+        Pub/sub is not durable: a reply PUBLISHED during the brief gap between the drop and
+        the re-subscribe is not buffered and is lost. That is acceptable and bounded — the
+        apply-deadline sweep with its presence recheck still classifies a silent origin
+        loudly (``timed_out``/``missing``/``departed``), so a gap-lost reply degrades to a
+        computed verdict, NEVER a false ``applied``. This recovers the common case (the blip
+        with the reply still pending, or arriving after the re-subscribe) without the
+        protocol cost of a durable reply queue. The command connection is untouched by a
+        pub/sub-socket close, so re-opening on ``r`` reuses the live pooled client."""
+        with contextlib.suppress(Exception):
+            await dead_ps.aclose()
+        backoff = min(_REPLY_RECONNECT_BACKOFF, max(0.0, apply_deadline - loop.time()))
+        if backoff:
+            await asyncio.sleep(backoff)
+        ps = None
+        try:
+            ps = r.pubsub()
+            await ps.subscribe(reply_channel)
+        except _TRANSPORT_ERRORS:
+            logger.error("worker bus: reply-listener re-subscribe failed — Redis unreachable", exc_info=True)
+            # A fresh pub/sub whose subscribe failed must still be closed, or its
+            # lazily-acquired connection leaks until the broadcast's client teardown.
+            if ps is not None:
+                with contextlib.suppress(Exception):
+                    await ps.aclose()
+            return None
+        return ps
 
     def _terminal_result(self, origin: str, frame: dict[str, Any]) -> OriginResult:
         raw = frame.get("outcome")

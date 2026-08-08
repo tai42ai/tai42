@@ -642,6 +642,111 @@ async def test_bus_unreachable_shape_on_wrapped_disconnect(
     assert "ClientDisconnectedError" in result.error  # the wrapped type, not the raw driver error
 
 
+# -- reply-collection resilience: a transient blip must not false-report non-convergence --
+
+
+class _FakeReplyPubSub:
+    """A minimal pub/sub double for driving ``_collect`` directly: its first
+    ``get_message`` can raise a transport error (the mid-collection blip), then it serves
+    a scripted sequence of wire frames (``None`` models an idle poll)."""
+
+    def __init__(self, frames: list[dict | None], *, fail_first: bool = False) -> None:
+        self._frames = list(frames)
+        self._fail_first = fail_first
+        self.subscribed: list[str] = []
+        self.closed = False
+        self.calls = 0
+
+    async def subscribe(self, channel: str) -> None:
+        self.subscribed.append(channel)
+
+    async def unsubscribe(self, channel: str | None = None) -> None:
+        return None
+
+    async def get_message(self, ignore_subscribe_messages: bool = True, timeout: float | None = None) -> dict | None:
+        self.calls += 1
+        if self._fail_first and self.calls == 1:
+            raise RedisConnectionError("Connection closed by server.")
+        if self._frames:
+            frame = self._frames.pop(0)
+            return None if frame is None else {"type": "message", "data": json.dumps(frame)}
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FakeReplyConn:
+    """A command-connection double for ``_collect``: hands out the reconnect pub/sub and
+    answers the presence recheck as alive (never consulted once the terminal is caught)."""
+
+    def __init__(self, reconnect_pubsub: _FakeReplyPubSub, *, presence: int = 1) -> None:
+        self._reconnect_pubsub = reconnect_pubsub
+        self._presence = presence
+        self.pubsub_calls = 0
+
+    def pubsub(self) -> _FakeReplyPubSub:
+        self.pubsub_calls += 1
+        return self._reconnect_pubsub
+
+    async def exists(self, _key: str) -> int:
+        return self._presence
+
+
+async def test_collect_reconnects_and_still_collects_after_a_transport_blip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport blip mid-collection must be RECOVERED: ``_collect`` re-subscribes on a
+    fresh pub/sub and still collects the sibling's terminal reply → ``applied`` (converged),
+    never a computed ``missing``/``timed_out``. This pins the system-fleet:43 false negative:
+    under Redis connection churn ``get_message`` raised and the old handler just ``break``ed,
+    abandoning the still-pending replies and reporting a FALSE non-convergence.
+
+    NON-VACUITY: with the old ``break``, the sibling holds no terminal, so the finalize
+    sweep computes ``missing`` (acked=False, presence alive) — the ``applied`` assertion
+    below fails. It passes only because the loop re-subscribed and resumed."""
+    monkeypatch.setattr(bus_module, "_REPLY_RECONNECT_BACKOFF", 0.0)
+    bus = make_bus()
+    sibling = "serve-sibling"
+    terminal = {"origin": sibling, "phase": "terminal", "outcome": OpOutcome.applied.value}
+
+    # The original pub/sub drops on its first read and yields nothing (a reply buffered on
+    # that connection is lost with it). The reconnect pub/sub then delivers the sibling's
+    # terminal that was still arriving.
+    original = _FakeReplyPubSub([], fail_first=True)
+    reconnect = _FakeReplyPubSub([terminal, None])
+    conn = _FakeReplyConn(reconnect)
+
+    results = await bus._collect(conn, original, {sibling}, "reload_config", "tai:reply:abc")
+
+    assert results[sibling].outcome == OpOutcome.applied  # converged, NOT unconfirmed
+    assert conn.pubsub_calls == 1  # re-subscribed exactly once
+    assert original.closed  # the dropped pub/sub was torn down
+    assert reconnect.subscribed == ["tai:reply:abc"]  # re-subscribed to the SAME reply channel
+
+
+async def test_collect_after_a_blip_still_reports_a_genuinely_silent_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovering the blip must NOT paper over a real non-convergence: when the sibling
+    never sends a terminal, the post-deadline sweep still classifies it loudly (here
+    ``departed`` — its presence key expired), never a fabricated ``applied``. Proves the
+    reconnect resumes collection (``pubsub_calls == 1``) yet a genuinely-absent origin is
+    still reported unconfirmed."""
+    monkeypatch.setattr(bus_module, "_REPLY_RECONNECT_BACKOFF", 0.0)
+    bus = make_bus(apply_timeout=0.1)
+    sibling = "serve-gone"
+
+    original = _FakeReplyPubSub([], fail_first=True)
+    reconnect = _FakeReplyPubSub([None, None, None, None])  # re-subscribes fine, but no reply ever comes
+    conn = _FakeReplyConn(reconnect, presence=0)  # presence key expired → departed
+
+    results = await bus._collect(conn, original, {sibling}, "reload_config", "tai:reply:xyz")
+
+    assert results[sibling].outcome == OpOutcome.departed  # loud non-convergence, not masked
+    assert conn.pubsub_calls == 1  # it DID reconnect (the blip was recovered)
+
+
 # -- validate_targets ---------------------------------------------------------
 
 
