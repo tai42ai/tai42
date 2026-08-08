@@ -1,5 +1,6 @@
 """``WhatsAppChannel.deliver`` and ``.notify`` — outbound JSON payload, tier
-split, reservation ordering, the correlation-free notify path, and sender_identity."""
+split, reservation ordering, the correlation-free notify path, sender_identity,
+and the transient/hard classification a failed send raises."""
 
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from tai42_channel_whatsapp.client import (
     send_image,
     send_interactive_buttons,
     send_interactive_list,
+    send_message,
     send_template,
 )
 from tai42_channel_whatsapp.correlation import PendingQuestionExistsError
@@ -743,3 +745,93 @@ async def test_template_known_contact_keys_on_send_from_number(fake_redis: FakeR
 async def test_channel_advertises_media_and_template_capabilities():
     assert WhatsAppChannel.supports_media_notifications is True
     assert WhatsAppChannel.supports_template_notifications is True
+
+
+# --- Send-failure classification (the caller's retry decision) ----------------
+
+
+@pytest.mark.parametrize(
+    ("queued", "retryable", "retry_after"),
+    [
+        pytest.param(httpx.ConnectError("boom"), True, None, id="transport"),
+        pytest.param(response(500, json={"error": {"code": 1}}), True, None, id="500"),
+        pytest.param(response(503, text="<html>down</html>"), True, None, id="503-html"),
+        pytest.param(
+            response(503, text="<html>down</html>", headers={"Retry-After": "7"}), True, 7.0, id="503-seconds"
+        ),
+        pytest.param(
+            response(429, json={"error": {"code": 130429}}, headers={"Retry-After": "7"}), True, 7.0, id="429-seconds"
+        ),
+        pytest.param(
+            response(429, json={"error": {"code": 130429}}, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+            True,
+            None,
+            id="429-http-date",
+        ),
+        pytest.param(response(429, json={"error": {"code": 130429}}), True, None, id="429-no-header"),
+        pytest.param(response(400, json={"error": {"code": 80007, "message": "rate limit"}}), True, None, id="80007"),
+        pytest.param(
+            response(400, json={"error": {"code": 131030, "message": "not in allowed list"}}), False, None, id="131030"
+        ),
+        pytest.param(
+            response(400, json={"error": {"code": 131047, "message": "re-engagement"}}), False, None, id="131047"
+        ),
+        pytest.param(response(401, json={"error": {"code": 190, "message": "expired"}}), False, None, id="401"),
+        pytest.param(response(400, text="<html>nope</html>"), False, None, id="unparseable-4xx"),
+        pytest.param(response(200, json={"messages": []}), False, None, id="accepted-without-id"),
+    ],
+)
+async def test_send_failure_carries_its_retry_classification(
+    queued: httpx.Response | Exception, retryable: bool, retry_after: float | None, fake_httpx: FakeHttpx
+):
+    # The send seam classifies once; the central caller owns the retry loop.
+    fake_httpx.responses.append(queued)
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await send_message(PHONE_NUMBER_ID, ALLOWED_A, "hi")
+
+    assert excinfo.value.retryable is retryable
+    assert excinfo.value.retry_after == retry_after
+
+
+async def test_non_dict_json_body_uses_raw_text_and_stays_non_retryable(fake_httpx: FakeHttpx):
+    # A body that is valid JSON but NOT an object (a bare string or array) has no
+    # ``error`` map — the raw response text carries the detail (never a bare
+    # code=None message=None), and a 400 without a rate-limit code stays non-retryable.
+    fake_httpx.responses.append(response(400, json=["oops", 1]))
+
+    with pytest.raises(ChannelDeliveryError, match="HTTP 400") as excinfo:
+        await send_message(PHONE_NUMBER_ID, ALLOWED_A, "hi")
+
+    assert "oops" in str(excinfo.value)  # the raw JSON body text
+    assert "code=None" not in str(excinfo.value)
+    assert excinfo.value.retryable is False
+
+
+async def test_non_dict_error_value_uses_raw_text_and_stays_non_retryable(fake_httpx: FakeHttpx):
+    # An object body whose ``error`` is NOT a map (a bare string or null) has no
+    # ``error.code``/``error.message`` to read — the raw response text carries the
+    # detail (a ``ChannelDeliveryError``, never an AttributeError leaking out of
+    # ``_error_detail``), and a 400 without a rate-limit code stays non-retryable.
+    fake_httpx.responses.append(response(400, json={"error": "forbidden"}))
+
+    with pytest.raises(ChannelDeliveryError, match="HTTP 400") as excinfo:
+        await send_message(PHONE_NUMBER_ID, ALLOWED_A, "hi")
+
+    assert "forbidden" in str(excinfo.value)  # the raw JSON body text
+    assert "code=None" not in str(excinfo.value)
+    assert excinfo.value.retryable is False
+
+
+async def test_missing_access_token_is_not_retryable(fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.settings import reset_all_settings
+
+    # A config fault: no fresh attempt can fix it.
+    monkeypatch.delenv("CHANNEL_WHATSAPP_ACCESS_TOKEN")
+    reset_all_settings()
+
+    with pytest.raises(ChannelDeliveryError) as excinfo:
+        await send_message(PHONE_NUMBER_ID, ALLOWED_A, "hi")
+
+    assert excinfo.value.retryable is False
+    assert not fake_httpx.calls

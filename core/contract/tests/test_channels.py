@@ -41,6 +41,25 @@ def test_delivery_error_is_a_distinct_exception_type():
         raise ChannelDeliveryError("send rejected")
 
 
+def test_delivery_error_defaults_to_non_retryable():
+    from tai42_contract.channels import ChannelDeliveryError
+
+    # An unclassified failure — the message-only form — is never blind-retried.
+    error = ChannelDeliveryError("send rejected")
+    assert str(error) == "send rejected"
+    assert error.retryable is False
+    assert error.retry_after is None
+
+
+def test_delivery_error_carries_the_transient_classification():
+    from tai42_contract.channels import ChannelDeliveryError
+
+    error = ChannelDeliveryError("throttled", retryable=True, retry_after=7.5)
+    assert str(error) == "throttled"
+    assert error.retryable is True
+    assert error.retry_after == 7.5
+
+
 def test_channel_protocol_is_runtime_checkable_and_shaped():
     from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification
 

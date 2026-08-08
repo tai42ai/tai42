@@ -173,13 +173,13 @@ async def test_prune_decrements_then_cleans_up_last(fake_redis):
     await store.add(fake_redis, _request("i1", "g", store), idle_ttl=100)
     await store.add(fake_redis, _request("i2", "g", store), idle_ttl=100)
 
-    assert await store.prune_pending(fake_redis, "i1", "g") is True
+    assert await store.prune_pending(fake_redis, "i1", "g") == "pruned"
     assert fake_redis._strings[store.count_key("g")] == "1"
     assert "g" in fake_redis._zsets[store.pending_key]
     assert "i1" not in fake_redis._zsets[store.open_key]
     assert await _removed_events(fake_redis, store) == ["i1"]
 
-    assert await store.prune_pending(fake_redis, "i2", "g") is True
+    assert await store.prune_pending(fake_redis, "i2", "g") == "pruned"
     assert store.count_key("g") not in fake_redis._strings
     assert "g" not in fake_redis._zsets.get(store.pending_key, {})
     assert await store.count_open(fake_redis) == 0
@@ -190,14 +190,14 @@ async def test_prune_noop_on_answered(fake_redis):
     await store.add(fake_redis, _request("i1", "g", store), idle_ttl=100)
     await store.record_answer(fake_redis, _response("i1"), "g", reply_ttl=60)
 
-    assert await store.prune_pending(fake_redis, "i1", "g") is False
+    assert await store.prune_pending(fake_redis, "i1", "g") == "answered"
     # No removed event was emitted for an answered interaction.
     assert await _removed_events(fake_redis, store) == []
 
 
 async def test_prune_noop_on_missing(fake_redis):
     store = InteractionStore("t:")
-    assert await store.prune_pending(fake_redis, "ghost", "g") is False
+    assert await store.prune_pending(fake_redis, "ghost", "g") == "gone"
 
 
 async def test_record_answer_count_watch_detects_concurrent_add(fake_redis):
@@ -274,7 +274,7 @@ async def test_sibling_pending_survives_at_zero_via_prune_pending(fake_redis):
     await store.add(fake_redis, _request("i2", "g", store, budget=60), idle_ttl=100000)
     fake_redis.advance(120)
 
-    assert await store.prune_pending(fake_redis, "i1", "g") is True
+    assert await store.prune_pending(fake_redis, "i1", "g") == "pruned"
     assert fake_redis._strings[store.count_key("g")] == "1"
     assert "g" in fake_redis._zsets[store.pending_key]
     assert "i2" in fake_redis._zsets[store.open_key]
@@ -302,7 +302,7 @@ async def test_group_revive_after_purge_keeps_consistent_count(fake_redis):
     assert "g" in fake_redis._zsets[store.pending_key]
 
     # Pruning the stale q1 must NOT drop g — q2 is still open.
-    assert await store.prune_pending(fake_redis, "i1", "g") is True
+    assert await store.prune_pending(fake_redis, "i1", "g") == "pruned"
     assert "g" in fake_redis._zsets[store.pending_key]
     assert "i2" in fake_redis._zsets[store.open_key]
     assert fake_redis._strings[store.count_key("g")] == "1"
@@ -324,7 +324,7 @@ async def test_reserve_open_slot_atomic_cap_refuses_burst(fake_redis):
     assert await store.count_open(fake_redis) == limit
 
 
-async def test_prune_retries_on_watch_conflict_and_returns_false(fake_redis):
+async def test_prune_retries_on_watch_conflict_and_returns_answered(fake_redis):
     store = InteractionStore("t:")
     await store.add(fake_redis, _request("i1", "g", store), idle_ttl=100)
 
@@ -356,7 +356,7 @@ async def test_prune_retries_on_watch_conflict_and_returns_false(fake_redis):
 
     fake_redis.pipeline = lambda: _AnswerThenConflict(real_pipeline())
 
-    # The retry reads ``answered`` and returns False cleanly — no WatchError escapes.
-    assert await store.prune_pending(fake_redis, "i1", "g") is False
+    # The retry reads ``answered`` and returns "answered" cleanly — no WatchError escapes.
+    assert await store.prune_pending(fake_redis, "i1", "g") == "answered"
     assert state["raised"] is True
     assert await _removed_events(fake_redis, store) == []
