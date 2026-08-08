@@ -761,8 +761,15 @@ async def test_the_periodic_loop_runs_every_recovery_pass(monkeypatch):
         ran.append("prune")
         return cursor
 
+    class _Routes:
+        async def list_routes(self):
+            return {"alpha": object()}
+
     monkeypatch.setattr(delivery_module, "sweep_stalled_deliveries", _broken_delivery_pass)
     monkeypatch.setattr(turn_module, "redrive_accepted", _intake_pass)
+    # The prune pass lists live routes first; stub the manager so it never reaches a real
+    # redis and the pass is what runs, not a swallowed connection error.
+    monkeypatch.setattr(delivery_module, "get_conversations_manager", _Routes)
     monkeypatch.setattr(records_module.ConversationRecordStore, "prune_expired_terminal_indexes", _prune_pass)
 
     loop = asyncio.create_task(delivery_module._sweep_loop(0.01))
