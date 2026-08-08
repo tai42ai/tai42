@@ -28,6 +28,7 @@ from tai42_skeleton.app.epoch import (
     capture_census_snapshot,
     current_epoch,
     current_epoch_or_none,
+    mark_current_request_drain_exempt,
 )
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
@@ -291,6 +292,162 @@ async def test_drain_in_flight_bounded_by_budget() -> None:
     assert ep.in_flight == 1
 
 
+async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
+    """A stream that exempted itself from its generation's in-flight drain (the interactions
+    inbox SSE — it never completes on its own) does not hold the generation in-flight, so a
+    bus-driven retire reads it idle and returns promptly, and the session-manager close still
+    fires SYNCHRONOUSLY (D13a). (This test admits then exempts, so the epoch is idle by the
+    retire — it pins that the exemption RELEASED the slot; it does NOT by itself distinguish a
+    synchronous drain from a deferred one. That ordering — a NON-exempt request is WAITED for
+    before ``aclose`` — is pinned by ``test_a_non_exempt_in_flight_request_is_drained_before_aclose``.)"""
+    import asyncio
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    closed: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+    boot.admit()  # the SSE request, admitted on this generation
+    token = epoch_mod._admission.set(epoch_mod._AdmissionState(epoch=boot))
+    try:
+        state = epoch_mod._admission.get()
+        epoch_mod.mark_current_request_drain_exempt()
+    finally:
+        epoch_mod._admission.reset(token)
+    # Exempting released the request's in-flight slot, so the generation reads idle to the drain.
+    assert state is not None
+    assert state.drain_exempt is True
+    assert boot.in_flight == 0
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await build_and_swap_epoch(
+        {"K": "v"},
+        rebuild=lambda: None,
+        build_serving_app=_serve("new-app"),
+        drain_deadline=5.0,
+        drain_tolerate_driver=False,  # bus-driven (fleet sibling)
+    )
+    # The retire read the generation idle (the exempt slot was released) and returned promptly;
+    # a still-counted in-flight request would instead be WAITED for (next test). D13a fired sync.
+    assert loop.time() - start < 1.0, "the drain-exempt stream stalled the retire"
+    assert closed == ["closed"], "the retire did not close the old lifespan synchronously"
+
+
+async def test_a_non_exempt_in_flight_request_is_drained_before_aclose() -> None:
+    """A NORMAL in-flight request (an MCP tool call / a sync REST tool run) is NOT exempt: the
+    bus-driven retire DRAINS it — waits for it to finish — BEFORE ``aclose``ing the lifespan, so
+    its transport is never severed mid-response. Proven by ``aclose`` running only AFTER it
+    releases (the F6 "in-flight sync tool run completes on the old epoch" contract)."""
+    import asyncio
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    order: list[str] = []
+
+    class _FakeSupervisor:
+        async def aclose(self) -> None:
+            order.append("aclose")
+
+    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
+    boot.admit()  # a normal request, in flight and NOT exempt
+
+    async def _finish_shortly() -> None:
+        await asyncio.sleep(0.2)
+        order.append("released")
+        boot.release()
+
+    finisher = asyncio.create_task(_finish_shortly())
+    await build_and_swap_epoch(
+        {"K": "v"},
+        rebuild=lambda: None,
+        build_serving_app=_serve("new-app"),
+        drain_deadline=5.0,
+        drain_tolerate_driver=False,
+    )
+    await finisher
+    assert order == ["released", "aclose"], f"a non-exempt request was not drained before aclose: {order}"
+
+
+async def test_admission_wrapper_releases_an_exempt_stream_exactly_once() -> None:
+    """The admission wrapper must NOT release an exempt stream's slot a second time at request
+    end (the exemption already released it): a double release would drop the count below the
+    real in-flight work and let a retire force-close under it."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    boot.admit()  # request A: a normal request still in flight
+
+    async def _sse_app(scope, receive, send) -> None:
+        epoch_mod.mark_current_request_drain_exempt()  # request B (the SSE) exempts itself
+
+    await EpochAdmissionApp(_sse_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
+    # B released its slot exactly once; the wrapper did NOT release again, so A's slot survives.
+    assert boot.in_flight == 1
+    boot.release()  # cleanup A
+
+
+async def test_exemption_takes_effect_through_a_real_streaming_response() -> None:
+    """PIN the fix against the REAL production path. The other exemption tests hand-set the
+    ``_admission`` ContextVar or call the exempt in the wrapper's own frame — but in production
+    the exempt call runs INSIDE a ``StreamingResponse`` body, which Starlette iterates in a
+    CHILD task (uvicorn's ASGI spec_version 2.3 branch). The whole fix therefore rests on (a) the
+    admission ContextVar propagating INTO that child task and (b) the shared ``_AdmissionState``
+    mutation flowing back to the wrapper's frame. A future Starlette/uvicorn/middleware change
+    that ran the body in a context the mark could not reach would silently no-op the exemption
+    and every hand-set test would still pass — this one would fail. It drives a REAL
+    ``StreamingResponse`` through ``EpochAdmissionApp`` and asserts the generation reads IDLE
+    (drain returns at once) while the stream is STILL open."""
+    import asyncio
+    import contextlib
+
+    from starlette.responses import StreamingResponse
+
+    ep = Epoch(number=current_client_epoch())
+    exempted = asyncio.Event()
+    unblock = asyncio.Event()
+
+    async def _body():
+        yield b"data: backlog\n\n"  # a first (backlog) frame
+        # Commit to the never-completing tail: exempt from the retire drain. THIS is the call
+        # whose ContextVar reach + shared-object write-back the test pins on the real path.
+        mark_current_request_drain_exempt()
+        exempted.set()
+        await unblock.wait()  # the infinite tail — held open while the assertions run
+        yield b": keepalive\n\n"
+
+    async def _app(scope, receive, send) -> None:
+        await StreamingResponse(_body(), media_type="text/event-stream")(scope, receive, send)
+
+    async def _receive():
+        await asyncio.Event().wait()  # never disconnects; cancelled when the body finishes
+        return {"type": "http.disconnect"}
+
+    async def _send(_message) -> None:
+        return None
+
+    scope = {"type": "http", "method": "GET", "path": "/api/interactions/stream", "http_version": "1.1", "headers": []}
+    served = asyncio.create_task(EpochAdmissionApp(_app, ep)(scope, _receive, _send))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(exempted.wait(), timeout=3.0)
+        # The stream is STILL open (blocked on ``unblock``) yet the generation reads IDLE — the
+        # exempt reached the epoch THROUGH THE REAL CHILD-TASK PATH. A no-op exempt (ContextVar
+        # not propagating) would leave ``in_flight == 1`` and this would fail.
+        assert ep.in_flight == 0, "the exemption did not reach the epoch through the real streaming path"
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await ep._drain_in_flight(5.0)  # returns at once (idle), not after the 5s budget
+        assert loop.time() - t0 < 1.0, "the retire drain waited on the exempt stream"
+    finally:
+        unblock.set()
+        served.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await served
+
+
 async def test_cancel_periodic_loops_bounded_by_budget() -> None:
     """A periodic loop whose cancel-await WEDGES (e.g. an outbound-HTTP poll blocking on
     its client close during the cancellation unwind) must NOT hang the synchronous retire
@@ -384,55 +541,6 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
     # The retired generation's serving lifespan was closed (its transports terminated).
     assert closed == ["closed"]
     assert app_state["app"].name == "new-app"
-
-
-async def test_bus_driven_retire_defers_in_flight_drain_but_closes_lifespan_synchronously() -> None:
-    """A bus-driven (fleet-sibling) retire must NOT block on the in-flight HTTP drain: the
-    Studio shell holds a never-completing interactions-inbox SSE open, so a synchronous drain
-    would burn the full budget and stall the sibling's reload ack — and, under load, fleet-
-    reload convergence. The drain is DEFERRED to a background task (``build_and_swap`` returns
-    well under the budget) WHILE the FastMCP session-manager close stays SYNCHRONOUS, so
-    bus-driven D13a session termination is unchanged. Non-vacuous: reverting the deferral to a
-    synchronous ``_drain_in_flight`` makes ``build_and_swap`` self-wait the full ~5s budget."""
-    import asyncio
-
-    _install_boot("boot-app")
-    boot = current_epoch()
-    closed: list[str] = []
-
-    class _FakeSupervisor:
-        async def aclose(self) -> None:
-            closed.append("closed")
-
-    boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
-    boot.admit()  # a never-releasing in-flight request (e.g. the interactions inbox SSE)
-    loop = asyncio.get_running_loop()
-    try:
-        start = loop.time()
-        await build_and_swap_epoch(
-            {"TAI_EPOCH_BUS": "v"},
-            rebuild=lambda: None,
-            build_serving_app=_serve("new-app"),
-            drain_deadline=5.0,  # LARGE budget: a SYNCHRONOUS drain would burn all of it
-            drain_tolerate_driver=False,  # BUS-driven (fleet sibling), not door-driven
-        )
-        # Returned WELL under the budget: the never-draining in-flight request did NOT block the
-        # retire (drain deferred). A revert to a synchronous drain would self-wait ~5s here.
-        assert loop.time() - start < 1.0, "bus-driven retire blocked on the in-flight drain"
-        # D13a intact: the session-manager close ran SYNCHRONOUSLY for a bus-driven retire.
-        assert closed == ["closed"], "bus-driven retire did not close the old lifespan synchronously"
-        # The drain was handed to a background task, not dropped.
-        assert any("deferred-drain" in t.get_name() for t in epoch_mod._deferred_retire_tasks), (
-            "the deferred in-flight drain task was not registered"
-        )
-    finally:
-        drains = [t for t in epoch_mod._deferred_retire_tasks if "deferred-drain" in t.get_name()]
-        for t in drains:
-            t.cancel()
-        boot.release()
-        if drains:
-            await asyncio.gather(*drains, return_exceptions=True)
-        os.environ.pop("TAI_EPOCH_BUS", None)
 
 
 # -- stale-settings sweep ------------------------------------------------------

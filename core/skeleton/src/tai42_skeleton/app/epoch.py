@@ -135,6 +135,22 @@ class Epoch:
                 logger.exception("epoch %d retire: a periodic-loop cancel failed", self.number)
 
 
+@dataclass
+class _AdmissionState:
+    """The per-request admission record the serving epoch counts. A MUTABLE object shared
+    between the admission wrapper and the request's own coroutine tree: a long-lived stream
+    handler flips ``drain_exempt`` (mutation is visible even when the stream body runs in a
+    child task, unlike a ``ContextVar`` set that would not propagate back to the wrapper)."""
+
+    epoch: Epoch
+    drain_exempt: bool = False
+
+
+# The admission record of the request in flight on THIS coroutine tree (``None`` off a served
+# request). A handler resolves it to exempt its own long-lived stream from the retire drain.
+_admission: ContextVar[_AdmissionState | None] = ContextVar("admission", default=None)
+
+
 class EpochAdmissionApp:
     """ASGI wrapper that counts every request against the epoch that served it.
 
@@ -153,6 +169,12 @@ class EpochAdmissionApp:
             await self._app(scope, receive, send)
             return
         self._epoch.admit()
+        # Publish this request's admission record so a long-lived stream handler can exempt
+        # itself from the retire drain (see ``mark_current_request_drain_exempt``). The record
+        # is a shared object, so its ``drain_exempt`` flip is seen HERE even if the stream body
+        # runs in a child task; we read the flag off the local ``state`` (not the ContextVar).
+        state = _AdmissionState(epoch=self._epoch)
+        admission_token = _admission.set(state)
         # Mark this request's context as reload-driving: if it calls a reload door, the
         # retire excuses THIS still-admitted request rather than self-waiting on it.
         token = _reload_driven_by_request.set(True)
@@ -160,7 +182,38 @@ class EpochAdmissionApp:
             await self._app(scope, receive, send)
         finally:
             _reload_driven_by_request.reset(token)
-            self._epoch.release()
+            _admission.reset(admission_token)
+            # A drain-exempt stream already released its slot when it committed to the tail
+            # (see the helper); releasing again here would drop the count below the real
+            # in-flight work and let a retire force-close under it.
+            if not state.drain_exempt:
+                self._epoch.release()
+
+
+def mark_current_request_drain_exempt() -> None:
+    """Exempt the CURRENT request from its generation's in-flight RETIRE DRAIN.
+
+    Called by a handler that has committed to a LONG-LIVED stream which never completes on its
+    own — the interactions inbox SSE (``GET /api/interactions/stream``) the Studio shell holds
+    open. That stream is a PLAIN Starlette route on its own redis connection; the retire's
+    ``supervisor.aclose()`` closes only the FastMCP session-manager (the MCP transports), so it
+    does NOT sever this stream — it keeps running on the retired generation until the client
+    disconnects. An infinite stream can therefore never "drain", so a retire that WAITED on it
+    would burn the whole drain budget and, on a fleet sibling, delay the reload ack past the
+    fleet-convergence window. The retire must not wait on it.
+
+    Releases this request's in-flight slot NOW so ``_drain_in_flight`` no longer waits on it,
+    and records the exemption so the admission wrapper does not release it a SECOND time at
+    request end. A no-op off a served request or if already exempt. Only a genuinely
+    long-lived stream calls this; every real / short request stays counted, so a retire STILL
+    drains in-flight work (an MCP tool call, a sync REST tool run) BEFORE the ``aclose``. The
+    exempted stream's own generation is held (uncounted) until the client disconnects — a
+    bounded per-open-connection retention, not a leak of the in-flight counter."""
+    state = _admission.get()
+    if state is None or state.drain_exempt:
+        return
+    state.drain_exempt = True
+    state.epoch.release()
 
 
 # -- process serving generation ------------------------------------------------
@@ -373,21 +426,16 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     budget = _drain_budget(deadline)
     await old._cancel_periodic_loops(budget)
     if not tolerate_driver:
-        # The in-flight HTTP drain waits for the generation's admitted requests to finish,
-        # but the Studio shell holds a long-lived interactions-inbox SSE (``GET
-        # /api/interactions/stream``) open — a request that never completes — so this drain
-        # always burns the FULL budget and then abandons it. Blocking a bus-driven
-        # (fleet-sibling) retire on that stalls the sibling's reload ack and, under a
-        # reload-heavy load, fleet-reload convergence — even though the fresh epoch already
-        # serves new traffic. Defer the drain to the background (as the door-driven path
-        # already defers its own): the retire — and the fleet's convergence — no longer waits
-        # on a never-draining stream, while the old generation's in-flight requests still get
-        # the budget to finish (or are abandoned at it, exactly as before) off the hot path.
-        # Only this HTTP drain moves; the FastMCP session-manager close below stays
-        # synchronous, so bus-driven D13a session termination is unchanged.
-        drain_task = asyncio.create_task(old._drain_in_flight(budget), name=f"tai-epoch-{old.number}-deferred-drain")
-        _deferred_retire_tasks.add(drain_task)
-        drain_task.add_done_callback(_deferred_retire_tasks.discard)
+        # Drain this generation's in-flight requests SYNCHRONOUSLY before the session-manager
+        # ``aclose`` below, so a real request (an MCP tool call, a sync REST tool run) finishes
+        # on the old epoch and is never severed mid-response. A long-lived stream that never
+        # completes — the interactions-inbox SSE the Studio shell holds — would otherwise burn
+        # the FULL budget here (stalling a fleet-sibling's reload ack and fleet convergence), so
+        # such a stream EXEMPTS itself from this drain (``mark_current_request_drain_exempt``):
+        # it is a plain Starlette route ``aclose`` does NOT sever and can never drain, and it
+        # self-terminates on client disconnect, so waiting on it is pointless. The drain thus
+        # waits only on real in-flight work, never on the SSE.
+        await old._drain_in_flight(budget)
 
     from tai42_skeleton.operations.tool_runs import drain_supervisors
 

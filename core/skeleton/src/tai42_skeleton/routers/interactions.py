@@ -57,6 +57,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
+from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.interactions.settings import (
@@ -278,6 +279,15 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
             visible.add(req.interaction_id)
         yield _frame(ADD_EVENT, _add_data(req))
     yield _frame("interaction.backlog_done", {})
+
+    # The finite backlog is delivered; what follows is the NEVER-completing live tail. Exempt
+    # this request from its serving generation's retire drain now: this is a plain Starlette
+    # route on its own redis connection — a reload's ``aclose`` closes only the FastMCP
+    # session-manager, so it does NOT sever this stream; the tail can never drain, so a retire
+    # that waited on it would burn its whole budget and, on a fleet sibling, stall fleet-reload
+    # convergence. The stream self-terminates on client disconnect. Only this long-lived stream
+    # opts out; real requests stay counted and are drained normally.
+    mark_current_request_drain_exempt()
 
     # The tail blocks ~15s per iteration; a dedicated fresh connection keeps it
     # off the shared pool the answer door needs. The socket read timeout is
