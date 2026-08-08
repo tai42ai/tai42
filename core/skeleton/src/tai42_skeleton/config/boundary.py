@@ -81,6 +81,15 @@ def excluded_env_var_names() -> frozenset[str]:
     )
 
 
+def registered_env_var_names() -> frozenset[str]:
+    """Every registered field's non-empty ``env_var``, across ALL reload classes.
+
+    Reflects only IMPORTED settings classes. Used to keep a GENERATED secret key from
+    SHADOWING any registered settings env var (C9c) — not just the X band, which covers
+    only the ``excluded`` subset."""
+    return frozenset(field.env_var for info in registered_settings() for field in info.fields if field.env_var)
+
+
 def reload_class_by_env_var() -> dict[str, str]:
     """Map each registered field's ``env_var`` to its resolved ``reload_class``.
 
@@ -150,6 +159,43 @@ def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) 
         raise ValueError(
             "Refusing an env write that CHANGES key-material keys — rotate these out of band "
             f"through their own key-rotation path, never through a profile: {', '.join(offenders)}."
+        )
+
+
+# Per-database admin (migrator) identity, both-or-neither per NAME. Mirrors the kit db
+# registry's env layout (``db/registry.py`` ``TAI_DATABASE_<NAME>_PG_ADMIN_USER`` /
+# ``_PG_ADMIN_PASSWORD``): group 1 is the (uppercased) database name, group 2 the half.
+_ADMIN_PAIR_RE = re.compile(r"^TAI_DATABASE_(.+)_PG_ADMIN_(USER|PASSWORD)$")
+
+
+def refuse_incomplete_admin_pair(effective_env: Mapping[str, str]) -> None:
+    """Refuse a half-set per-database admin (migrator) identity (README D8/D14).
+
+    ``TAI_DATABASE_<NAME>_PG_ADMIN_USER`` / ``_PG_ADMIN_PASSWORD`` are both-or-neither per
+    database name: both set is the admin identity, neither set migrates the runtime identity,
+    exactly one set silently pairs one admin field with a runtime one. The kit db registry
+    raises :class:`~tai42_kit.db.registry.AdminIdentityIncompleteError` only at migration
+    time (``admin_database_settings``), so a profile / env write is caught FIRST at the
+    validate step, naming the incomplete pair. Checked against the RESULTING effective env (a
+    key present with a non-empty value counts as set — the store never persists empties, so
+    this matches what a reload materializes and the registry then loads). Raises
+    :class:`ValueError` naming both vars per incomplete database — the ops layer maps it to a
+    400."""
+    halves: dict[str, set[str]] = {}
+    for key, value in effective_env.items():
+        match = _ADMIN_PAIR_RE.match(key)
+        if match and value != "":
+            halves.setdefault(match.group(1), set()).add(match.group(2))
+    incomplete = sorted(name for name, present in halves.items() if len(present) == 1)
+    if incomplete:
+        pairs = "; ".join(
+            f"database {name!r}: set BOTH TAI_DATABASE_{name}_PG_ADMIN_USER and "
+            f"TAI_DATABASE_{name}_PG_ADMIN_PASSWORD, or neither"
+            for name in incomplete
+        )
+        raise ValueError(
+            "Refusing an env write with a half-set admin (migrator) identity — the admin "
+            f"user/password are both-or-neither per database: {pairs}."
         )
 
 

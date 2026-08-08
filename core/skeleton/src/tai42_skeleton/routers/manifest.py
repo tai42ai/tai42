@@ -95,14 +95,20 @@ async def _extract_failed_query(request: Request) -> dict[str, Any]:
 
 async def _extract_secret_env(request: Request) -> dict[str, Any]:
     """The combined secret-env body → the operation's flat kwargs. Preserves the door's
-    hand-authored 400s (a missing/mistyped field would otherwise answer 422): ``value``,
-    ``key_hint``, and ``manifest_pointer`` are all required strings."""
+    hand-authored 400s (a mistyped field would otherwise answer 422): ``value`` and
+    ``manifest_pointer`` are required; the env KEY is EITHER an explicit ``key`` OR a
+    ``key_hint`` (exactly one — the op enforces the choice and refuses a colliding key)."""
     body = await _json_object(request)
     try:
         model = SetMcpSecretEnv.model_validate(body)
     except ValidationError as exc:
         raise BadRequestError(f"invalid secret-env body: {exc}") from exc
-    return {"value": model.value, "key_hint": model.key_hint, "manifest_pointer": model.manifest_pointer}
+    return {
+        "value": model.value,
+        "key": model.key,
+        "key_hint": model.key_hint,
+        "manifest_pointer": model.manifest_pointer,
+    }
 
 
 async def _extract_manifest_replace(request: Request) -> dict[str, Any]:

@@ -106,6 +106,9 @@ test.afterEach(async ({ request }) => {
 });
 
 test('an existing !ENV secret reference renders a masked, revealable chip', async ({ page, request }) => {
+  // Reload-gated seed + settle legs; on the busy full-suite stack these approach the 60s
+  // default, so budget past it (see the sibling paste test).
+  test.setTimeout(120_000);
   const keyPre = uniq('E2E_MCP_REF').toUpperCase();
   createdEnvKeys.add(keyPre);
   // The referenced key must exist or the save-time dangling-!ENV validator refuses it.
@@ -129,6 +132,10 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
   page,
   request,
 }) => {
+  // Several reload-gated legs (env seed, mcp-config seed, the combined secret-env op, the
+  // save-time sweep), each followed by a fleet reload-settle. On a busy shared stack (the
+  // full serial suite) their cumulative settle time exceeds the 60s default — budget for it.
+  test.setTimeout(120_000);
   const keyPre = uniq('E2E_MCP_PRE').toUpperCase();
   createdEnvKeys.add(keyPre);
   const seedEnv = await postConfig(request, '/api/config/env', { [keyPre]: uniq('secret') });

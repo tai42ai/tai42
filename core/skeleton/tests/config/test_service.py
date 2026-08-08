@@ -17,6 +17,7 @@ its failure discipline:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 from typing import TYPE_CHECKING, Any, cast
@@ -31,12 +32,12 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, OriginResult
 from tai42_skeleton.config.secret_seal import ResolvedSecretError
-from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.config.service import ConfigService, OrphanEnvWriteError
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, apply_response
 from tests._fakes.bus import FakeBus
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -448,6 +449,19 @@ def _secret_marker_mutator(var: str) -> Callable[[dict[str, Any]], None]:
     return mutator
 
 
+def _prepare(
+    changes: dict[str, str], mutator: Callable[[dict[str, Any]], None]
+) -> Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]]:
+    """Wrap fixed ``(changes, mutator)`` as the async ``prepare`` callback
+    :meth:`ConfigService.apply_env_and_change` now takes — the real op derives these from the
+    lock-held stored-env read; a test not exercising derivation returns them verbatim."""
+
+    async def _p(_stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+        return changes, mutator
+
+    return _p
+
+
 async def test_apply_env_and_change_writes_env_and_mutates_manifest_consistently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,7 +469,7 @@ async def test_apply_env_and_change_writes_env_and_mutates_manifest_consistently
     store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
     service, admin, _bus = _service(store)
 
-    result = await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+    result = await service.apply_env_and_change(_prepare({"GH": "the-secret"}, _secret_marker_mutator("GH")))
 
     # Env write + manifest mutate both landed, consistently.
     assert store.env == {"EXISTING": "1", "GH": "the-secret"}
@@ -466,9 +480,13 @@ async def test_apply_env_and_change_writes_env_and_mutates_manifest_consistently
     assert result.document is not None
 
 
-async def test_apply_env_and_change_manifest_failure_rolls_env_back_no_orphan(
+async def test_apply_env_and_change_manifest_failure_leaves_orphan_no_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # C9a partial-failure contract (PLAN_3:257-264): env-FIRST/manifest-SECOND; a manifest
+    # persist failure AFTER the env write does NOT roll the env back — the env write STANDS as
+    # an inert, re-runnable orphan — and the op raises loudly (OrphanEnvWriteError) NAMING the
+    # orphan env key AND the manifest pointer, stating the env write stands / re-run.
     _no_bus(monkeypatch)
 
     class FailingMutateStore(FakeConfigStore):
@@ -478,13 +496,24 @@ async def test_apply_env_and_change_manifest_failure_rolls_env_back_no_orphan(
     store = FailingMutateStore(manifest={"mcp": []}, env={"EXISTING": "1"})
     service, admin, _bus = _service(store)
 
-    with pytest.raises(RuntimeError, match="manifest persist boom"):
-        await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+    with pytest.raises(OrphanEnvWriteError) as excinfo:
+        await service.apply_env_and_change(
+            _prepare({"GH": "the-secret"}, _secret_marker_mutator("GH")),
+            manifest_pointer="mcp/0/config/headers/Authorization",
+        )
 
-    # The env write landed first, then the manifest persist failed → the env is ROLLED BACK
-    # to its pre-write snapshot, so no orphan secret lingers and nothing reloaded.
-    assert store.env == {"EXISTING": "1"}
-    assert "GH" not in store.env
+    message = str(excinfo.value)
+    assert "GH" in message  # names the now-orphan env key
+    assert "mcp/0/config/headers/Authorization" in message  # names the manifest pointer
+    assert "stands" in message.lower()  # env write stands
+    assert "re-run" in message.lower()  # re-runnable
+    # The original persist failure is chained, not swallowed.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+    # NO rollback: the env write STANDS — the orphan key REMAINS in the store (a single
+    # write_env, no compensating replace_env), and nothing persisted / reloaded.
+    assert store.env == {"EXISTING": "1", "GH": "the-secret"}
+    assert store.env_writes == [{"GH": "the-secret"}]  # only the write_env; no rollback restore
     assert store.persisted == []
     assert admin.calls == 0
 
@@ -497,7 +526,7 @@ async def test_apply_env_and_change_k8s_409_replay_writes_env_once(monkeypatch: 
     store = RetryingConfigStore(manifest={"mcp": []}, env={})
     service, _admin, _bus = _service(store)
 
-    await service.apply_env_and_change({"GH": "the-secret"}, _secret_marker_mutator("GH"))
+    await service.apply_env_and_change(_prepare({"GH": "the-secret"}, _secret_marker_mutator("GH")))
 
     assert store.env_writes == [{"GH": "the-secret"}]  # single env write despite the manifest replay
     assert store.env == {"GH": "the-secret"}
@@ -512,7 +541,9 @@ async def test_apply_env_and_change_refuses_x_band_env_key_before_any_write(
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="TAI_RUN_MODE"):
-        await service.apply_env_and_change({"GH": "the-secret", "TAI_RUN_MODE": "spoof"}, _secret_marker_mutator("GH"))
+        await service.apply_env_and_change(
+            _prepare({"GH": "the-secret", "TAI_RUN_MODE": "spoof"}, _secret_marker_mutator("GH"))
+        )
 
     # X-band refused up front — neither store was touched.
     assert store.env == {"EXISTING": "1"}
@@ -530,10 +561,57 @@ async def test_apply_env_and_change_refuses_dangling_marker_before_any_write(
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="MISSING"):
-        await service.apply_env_and_change({"OTHER": "v"}, _secret_marker_mutator("MISSING"))
+        await service.apply_env_and_change(_prepare({"OTHER": "v"}, _secret_marker_mutator("MISSING")))
 
     assert store.env_writes == []
     assert store.persisted == []
+
+
+def _marks_appending_prepare(
+    key: str,
+) -> Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]]:
+    """A ``prepare`` that mirrors the C9d read→append→write hazard: it reads the stored marks,
+    YIELDS (``await asyncio.sleep(0)``) to force a concurrent op to try to interleave, THEN
+    appends its own key. Under the env-write lock the yield cannot let the other op read stale
+    marks; without it, both would read the same marks and the second write would lose the first."""
+
+    async def _p(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+        existing = [m for m in stored.get("TAI_ENV_SECRET_KEYS", "").split(",") if m]
+        await asyncio.sleep(0)  # the interleave point the lock must cover
+        marks = list(dict.fromkeys([*existing, key]))
+        changes = {key: f"secret-{key}", "TAI_ENV_SECRET_KEYS": ",".join(marks)}
+        return changes, _secret_marker_mutator(key)
+
+    return _p
+
+
+async def test_apply_env_and_change_lock_serializes_concurrent_marks_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # C9d: two concurrent combined ops each APPEND their secret mark. Each prepare reads the
+    # stored marks, YIELDS to force interleave, then appends — so without serialization both
+    # read the same marks and the second write clobbers the first (a lost append). The
+    # process-wide (CLASS-level) env-write lock must serialize the read→write span so BOTH
+    # marks survive. Two separate ConfigService instances (as ``from_app`` builds per call)
+    # over ONE shared store prove the lock is shared across instances, not per-instance.
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service_a, admin_a, _bus_a = _service(store)
+    service_b, admin_b, _bus_b = _service(store)
+
+    await asyncio.gather(
+        service_a.apply_env_and_change(_marks_appending_prepare("KEY_A")),
+        service_b.apply_env_and_change(_marks_appending_prepare("KEY_B")),
+    )
+
+    marks = store.env["TAI_ENV_SECRET_KEYS"].split(",")
+    assert "KEY_A" in marks, f"KEY_A's mark was lost to the concurrent append: {marks}"
+    assert "KEY_B" in marks, f"KEY_B's mark was lost to the concurrent append: {marks}"
+    # Both secret values landed too, and each op ran its own reload (lock released before it).
+    assert store.env["KEY_A"] == "secret-KEY_A"
+    assert store.env["KEY_B"] == "secret-KEY_B"
+    assert admin_a.calls == 1
+    assert admin_b.calls == 1
 
 
 # ---------------------------------------------------------------------------

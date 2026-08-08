@@ -254,6 +254,37 @@ async def test_skip_import_preserves_conversation_secret_and_token(
     assert ac["errors"] == [], ac
 
 
+async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[..., TaiStack]) -> None:
+    """A crafted backup whose env section carries a deployment X-band key (``TAI_SUPERVISED``)
+    is REFUSED loudly: backup env restore rides ``apply_env_change`` (``backup/sections.py``),
+    so PLAN_3 C6's shared boundary validator fires there with no backup-specific code. The
+    section report carries the error naming the offending key, and nothing lands — the X-band
+    value never reaches the store, nor does the sibling key in the same (atomically refused)
+    section (validate-before-write)."""
+    target = fresh_stack(build_backup_source_stack)
+    api = target.api()
+    before = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
+    assert "TAI_SUPERVISED" not in before
+
+    document = {
+        "version": 1,
+        "sections": {"env": {"E2E_BACKUP_OK": "harmless", "TAI_SUPERVISED": "spoofed-shape"}},
+        "errors": {},
+    }
+    result = await api.post(
+        "/api/backup/import", json={"document": document, "sections": ["env"]}, retry_on_reloading=True
+    )
+    assert result["ok"] is False, f"an X-band backup env import must not report ok: {result}"
+    errors = result["sections"]["env"]["errors"]
+    assert errors, f"the env section report carried no error: {result}"
+    assert any("TAI_SUPERVISED" in str(err) for err in errors), f"the refusal did not name the X-band key: {errors}"
+
+    # Nothing landed — the whole section was refused before any write.
+    after = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
+    assert "TAI_SUPERVISED" not in after, f"the X-band value leaked into the stored env: {after}"
+    assert after.get("E2E_BACKUP_OK") != "harmless", f"a refused section still wrote a sibling key: {after}"
+
+
 async def test_corrupted_manifest_import_reports_error_and_persists_nothing(
     fresh_stack: Callable[..., TaiStack],
 ) -> None:

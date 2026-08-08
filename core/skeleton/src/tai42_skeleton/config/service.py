@@ -47,14 +47,17 @@ committed persist never escapes as a raw broadcast fault.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import os
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 from pyaml_env import parse_config
+from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
+from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app.boot_rules import check_backend_needs_bus
@@ -65,6 +68,7 @@ from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.boundary import (
     refuse_dangling_env_markers,
+    refuse_incomplete_admin_pair,
     refuse_key_material,
     refuse_x_band,
     reload_class_by_env_var,
@@ -79,6 +83,19 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterator
 
     from ruamel.yaml.comments import CommentedMap
+
+
+class OrphanEnvWriteError(RuntimeError):
+    """A combined env+manifest op (C9a) whose manifest persist FAILED after the env
+    write already landed.
+
+    Env-first/manifest-second ordering: on a manifest-persist failure there is NO
+    rollback — the env write STANDS as an inert, re-runnable orphan (rolling it back
+    could leave a still-referenced marker resolving silently to ``"N/A"``). The message
+    NAMES the orphan env key(s) and the manifest pointer they now reference no persisted
+    marker at, and states the env write stands / re-run to complete. A ``RuntimeError``
+    (not a ``ValueError``) so the op layer does not fold it into a 400 — a partial
+    failure is loud, not a client input error."""
 
 
 class _ManifestStore(Protocol):
@@ -164,6 +181,18 @@ class ProfileApplyOutcome:
     census: frozenset[str]
 
 
+async def _release_llm_pools() -> None:
+    """Close the loop-bound langgraph checkpoint + store resource pools so a following
+    ``build_and_swap_epoch`` can reset settings: its resource-registry reset REFUSES to
+    drop a per-loop registry still holding live resources on a running loop. The default
+    ``release_llm_pools`` seam of :meth:`ConfigService.apply_replace_env`, mirroring
+    :meth:`AppLifecycle._reload_config` (the other ``build_and_swap_epoch`` caller). Must
+    run on the serving loop that owns the registries (the apply holds the reload gate on
+    that loop)."""
+    await checkpoint_registry().close_all()
+    await store_registry().close_all()
+
+
 class ConfigService:
     """The one pipeline every manifest / env mutation crosses.
 
@@ -171,10 +200,37 @@ class ConfigService:
     with the config manager, the reload seam, and the worker bus for testing.
     """
 
+    # Process-wide C9 env-write lock (C9d). ``from_app`` builds a FRESH ConfigService per
+    # call, so this is CLASS-level (not per-instance) — otherwise concurrent combined-op
+    # calls would each hold their own lock and never serialize. It serializes the combined
+    # op's READ→derive→WRITE span so the secret-marks append (and the generated-key
+    # collision check) cannot race op-vs-op — the lost-append the provider's per-call lock
+    # cannot close (``read_env`` sits OUTSIDE that lock). Lazily bound to the running serving
+    # loop and rebound on a loop swap (mirrors :class:`ReloadGate`), so it is correct across
+    # the process's single serving loop and across per-test loops. It is HELD strictly before
+    # ``_reload_and_broadcast`` (which acquires ``reload_gate``) and released first, so the
+    # two locks never nest — no deadlock.
+    _env_write_lock: ClassVar[asyncio.Lock | None] = None
+    _env_write_loop: ClassVar[asyncio.AbstractEventLoop | None] = None
+
     def __init__(self, config_manager: _ManifestStore, admin: _ReloadAdmin, bus: _FleetPublisher) -> None:
         self._config_manager = config_manager
         self._admin = admin
         self._bus = bus
+
+    @classmethod
+    def _env_lock(cls) -> asyncio.Lock:
+        """The process-wide C9 env-write lock bound to the running serving loop, created on
+        first use and rebound only if the running loop differs from the bound one (a loop
+        swap — there is never a second live loop in the same process). Mirrors
+        :meth:`ReloadGate._serving_lock`, keeping the singleton correct across loops rather
+        than raising the cross-loop ``RuntimeError`` a bare module-level ``asyncio.Lock``
+        would across test loops."""
+        loop = asyncio.get_running_loop()
+        if cls._env_write_lock is None or cls._env_write_loop is not loop:
+            cls._env_write_lock = asyncio.Lock()
+            cls._env_write_loop = loop
+        return cls._env_write_lock
 
     @classmethod
     def from_app(cls) -> ConfigService:
@@ -236,64 +292,103 @@ class ConfigService:
         return await self._reload_and_broadcast(document=None)
 
     async def apply_env_and_change(
-        self, changes: dict[str, str], mutator: Callable[[dict[str, Any]], None]
+        self,
+        prepare: Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]],
+        *,
+        manifest_pointer: str | None = None,
     ) -> ApplyResult:
         """Combined env-write + manifest-mutate as ONE consistent unit (C9).
 
         The ``set_mcp_secret_env`` door writes a secret VALUE to the env store and a
         matching ``!ENV ${KEY}`` MARKER into the manifest; the two must stay consistent.
-        VALIDATE runs on the MUTATED manifest resolved against the POST-change effective
-        env (so the marker the mutator writes resolves against the value the env write
-        supplies, an X-band env key in the payload is refused, and no marker is left
-        dangling), BEFORE anything persists.
+        ``prepare`` receives the CURRENT stored env (read once under the C9d lock) and
+        returns ``(changes, mutator)`` — it derives the generated/explicit key, the
+        appended secret marks, and the marker-writing mutator FROM that snapshot. Running
+        it inside the lock is what makes the read→derive→write span atomic (C9d).
 
-        Ordering keeps env + manifest consistent:
+        Ordering keeps env + manifest consistent, all under the C9d env-write lock so
+        concurrent combined ops cannot interleave their read→write (a lost secret-marks
+        append, or two ops minting the same generated key):
 
+        0. Acquire the process-wide env-write lock, read the stored env ONCE, and call
+           ``prepare(stored)`` to build the changes + mutator against that snapshot.
         1. Build the candidate mutated manifest and validate it against the effective
            env — a failure raises before any write.
-        2. Snapshot the stored env, then write the env FIRST. Env-first (not
-           manifest-first) guarantees there is never a persisted ``!ENV`` marker
-           referencing an env key that is not yet stored (a marker that would silently
-           resolve to ``"N/A"``); the reverse ordering would.
+        2. Write the env FIRST. Env-first (not manifest-first) guarantees there is never
+           a persisted ``!ENV`` marker referencing an env key that is not yet stored (a
+           marker that would silently resolve to ``"N/A"``); the reverse ordering would.
         3. Persist the manifest with the PURE ``mutator`` — it only edits the passed
            document, so the k8s optimistic-concurrency REPLAY (re-read + re-run on a
            409) is side-effect-free and never double-writes the env, which is not
-           inside the replayed span. A manifest-persist failure ROLLS BACK the env to
-           its pre-write snapshot (no orphan secret lingers) and re-raises — nothing
-           landed.
-        4. Locally reload and broadcast to the whole fleet.
+           inside the replayed span. C9a partial-failure contract: a manifest-persist
+           failure (retries exhausted) performs **NO rollback** — the env write STANDS
+           (inert, re-runnable orphan) — and raises :class:`OrphanEnvWriteError` naming
+           the orphan env key(s) and the manifest pointer. Rolling the env back would
+           risk leaving a still-referenced marker resolving silently to ``"N/A"``;
+           re-running the op completes the manifest write against the standing env.
+        4. RELEASE the env-write lock, THEN locally reload and broadcast to the whole
+           fleet. The reload acquires ``reload_gate``; the env-write lock is released
+           first so the two never nest (no deadlock) — the read→write span is entirely
+           before the reload gate.
+
+        ``manifest_pointer`` is the caller's target pointer, named in the orphan report
+        when it is known (``set_mcp_secret_env`` supplies it).
         """
-        # STEP 1 — validate the combined change against the post-change effective env
-        # (mutated manifest, X-band payload, dangling markers, backend-needs-bus). The
-        # candidate is built OUTSIDE the store so the effective-env-dependent checks run
-        # BEFORE anything persists (the k8s transaction cannot resolve markers against the
-        # not-yet-live env, so validation cannot move inside it).
-        candidate = copy.deepcopy(self._read_preserved_manifest())
-        mutator(candidate)
-        self._validate_env_and_manifest(changes, candidate)
+        # STEP 0-3 run under the C9d env-write lock: the stored read, the caller's derive,
+        # and both persists are one atomic span so a concurrent combined op cannot read the
+        # same marks/keys and clobber this op's write. The reload tail (STEP 4) is OUTSIDE
+        # the lock so ``reload_gate`` is never acquired while this lock is held.
+        async with self._env_lock():
+            # STEP 0 — read the stored env ONCE under the lock; the caller derives the
+            # changes + mutator from it (the key generation and the secret-marks append are
+            # both read-then-write against this snapshot). It is also the snapshot the
+            # orphan-key report diffs against on a manifest failure.
+            stored = self._read_stored_env()
+            changes, mutator = await prepare(stored)
 
-        # STEP 2 — env-write-FIRST, snapshotting the prior stored env for rollback.
-        env_snapshot = self._read_stored_env()
-        self._config_manager.write_env(changes)
+            # STEP 1 — validate the combined change against the post-change effective env
+            # (mutated manifest, X-band payload, dangling markers, backend-needs-bus). The
+            # candidate is built OUTSIDE the store so the effective-env-dependent checks run
+            # BEFORE anything persists (the k8s transaction cannot resolve markers against the
+            # not-yet-live env, so validation cannot move inside it).
+            candidate = copy.deepcopy(self._read_preserved_manifest())
+            mutator(candidate)
+            self._validate_env_and_manifest(changes, candidate)
 
-        # STEP 3 — persist the manifest with a guarded, PURE, re-runnable mutator: it seals
-        # the mutated document against its pre-mutation snapshot before persist (parity with
-        # ``apply_change`` — a mutator can never bake a resolved secret to disk), and it edits
-        # only the passed document, so the k8s optimistic-concurrency REPLAY (re-read + re-run
-        # on a 409) is side-effect-free and never double-writes the env, which is outside the
-        # replayed span. A failure rolls the env back to its snapshot so no orphan secret is
-        # left behind, then re-raises — env + manifest are all-or-nothing.
-        def guarded(document: dict[str, Any]) -> None:
-            current = copy.deepcopy(document)
-            mutator(document)
-            self._seal_secrets(document, current)
+            # STEP 2 — env-write-FIRST. Env-first (not manifest-first) guarantees there is
+            # never a persisted ``!ENV`` marker referencing an env key not yet stored.
+            self._config_manager.write_env(changes)
 
-        try:
-            persisted = self._config_manager.mutate_manifest(guarded)
-        except Exception:
-            self._config_manager.replace_env(env_snapshot)
-            raise
+            # STEP 3 — persist the manifest with a guarded, PURE, re-runnable mutator: it seals
+            # the mutated document against its pre-mutation snapshot before persist (parity with
+            # ``apply_change`` — a mutator can never bake a resolved secret to disk), and it edits
+            # only the passed document, so the k8s optimistic-concurrency REPLAY (re-read + re-run
+            # on a 409) is side-effect-free and never double-writes the env, which is outside the
+            # replayed span. C9a: a persist failure performs NO rollback — the env write STANDS as
+            # an inert, re-runnable orphan — and raises loudly naming the orphan key(s) + pointer.
+            def guarded(document: dict[str, Any]) -> None:
+                current = copy.deepcopy(document)
+                mutator(document)
+                self._seal_secrets(document, current)
 
+            try:
+                persisted = self._config_manager.mutate_manifest(guarded)
+            except Exception as exc:
+                # The orphans are the keys whose written value differs from the pre-write
+                # snapshot; on an idempotent re-send (nothing actually changed) fall back to
+                # the full written key set so the report is NEVER blank.
+                orphans = sorted(key for key, value in changes.items() if stored.get(key) != value)
+                named = orphans or sorted(changes)
+                label = ", ".join(named) if named else "the just-written env keys"
+                pointer = f" (intended manifest pointer {manifest_pointer!r})" if manifest_pointer else ""
+                raise OrphanEnvWriteError(
+                    "Combined env+manifest op: the env write LANDED but the manifest persist FAILED "
+                    "(retries exhausted). NO rollback performed — the env write STANDS (inert, "
+                    f"re-runnable). Orphan env key(s) now referencing no persisted manifest marker: "
+                    f"{label}{pointer}. Re-run the op to complete the manifest write."
+                ) from exc
+
+        # STEP 4 — lock RELEASED; reload + broadcast (acquires reload_gate) runs outside it.
         return await self._reload_and_broadcast(document=persisted)
 
     # -- Profile apply (C5) ----------------------------------------------------
@@ -306,6 +401,7 @@ class ConfigService:
         save_previous: Callable[[dict[str, str]], Awaitable[None]],
         build_and_swap: Callable[..., Awaitable[Epoch]] = build_and_swap_epoch,
         orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+        release_llm_pools: Callable[[], Awaitable[None]] = _release_llm_pools,
     ) -> ProfileApplyOutcome:
         """Apply a settings profile: the C5 env-write-LAST reload pipeline.
 
@@ -375,6 +471,14 @@ class ConfigService:
         # door's own admitted request from the retire's in-flight drain (PLAN_2 fix); a
         # build failure re-raises here (env restored, store untouched) — STEP 4 never runs.
         async with reload_gate.lock:
+            # Release the loop-bound langgraph checkpoint/store pools BEFORE the build's
+            # settings reset drops their per-loop registries: build_and_swap_epoch opens
+            # with ``reset_all_settings()``, whose resource-registry reset REFUSES to drop
+            # a registry still holding live resources on a running loop (a prior agent run
+            # leaves a cached checkpoint saver behind). This is the same release
+            # AppLifecycle._reload_config performs before ITS build_and_swap_epoch; the
+            # profile-apply path missed it, so an apply following any LLM run 500'd.
+            await release_llm_pools()
             new_epoch = await build_and_swap(profile_env, drain_tolerate_driver=driven)
         # The pre-apply census rides the new generation for the fanout diff.
         new_epoch.census = census
@@ -449,6 +553,7 @@ class ConfigService:
         # carry — the stored env is the real values a read-modify-write round-trip re-sends.
         refuse_key_material(changes, self._read_stored_env())
         effective = self._effective_env(changes)
+        refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
             refuse_dangling_env_markers(preserved, effective)
@@ -474,6 +579,7 @@ class ConfigService:
         # signing key is refused, an unchanged carry is allowed.
         refuse_key_material(changes, self._read_stored_env())
         effective = self._effective_env(changes)
+        refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             refuse_dangling_env_markers(document, effective)
             manifest = self._validated_projection(document)
@@ -495,6 +601,7 @@ class ConfigService:
         # value is refused (see :meth:`_validate_env`).
         refuse_key_material(profile_env, self._read_stored_env())
         effective = self._effective_replace_env(profile_env)
+        refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
             refuse_dangling_env_markers(preserved, effective)

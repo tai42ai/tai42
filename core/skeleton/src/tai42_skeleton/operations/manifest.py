@@ -40,6 +40,7 @@ The one response shape every ConfigService writer returns from an
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -48,12 +49,11 @@ from tai42_kit.utils.data import load_manifest
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.config.boundary import x_band_env_keys
+from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.manifest import TaiMCPConfig
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast
-from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 
 # The env var the operator's "treat these env keys as secret" marks live under — a
 # comma-separated key-name list backing ``EnvSecretMarksSettings.secret_keys``. The
@@ -63,6 +63,9 @@ _SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
 # A generated secret-env key is a shell identifier; a hint is sanitized to this charset.
 _ENV_KEY_START = re.compile(r"[A-Za-z_]")
 _NON_ENV_KEY_CHAR = re.compile(r"[^A-Za-z0-9_]+")
+# An EXPLICIT key must be a full shell identifier (mirrors file_manager._ENV_KEY_RE, the
+# strictest provider) — an odd value is a loud 400 before any write.
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class McpConfigUpdate(BaseModel):
@@ -92,16 +95,20 @@ class ManifestReplace(BaseModel):
 class SetMcpSecretEnv(BaseModel):
     """The combined env+manifest secret op body (``POST /api/mcp-config/secret-env``).
 
-    ``value`` is the raw secret pasted by the operator; the server generates an env KEY
-    (shaped from ``key_hint``), writes ``value`` to the env store under that key (marked
-    secret), and writes an ``!ENV ${KEY}`` MARKER at ``manifest_pointer`` — so the secret
-    lives only in the env store and the manifest carries a placeholder. ``manifest_pointer``
-    is a slash-delimited, no-leading-slash path (e.g. ``mcp/0/config/headers/Authorization``)
-    whose HEAD segment MUST be ``mcp`` (the same mcp-only authority ``set_mcp_config`` holds).
-    The generated key is NOT returned."""
+    ``value`` is the raw secret pasted by the operator. The env KEY it is stored under is
+    EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one is given (C9b
+    ``{value, key | key_hint, manifest_pointer}``). The server writes ``value`` to the env
+    store under that key (marked secret) and writes an ``!ENV ${KEY}`` MARKER at
+    ``manifest_pointer`` — so the secret lives only in the env store and the manifest carries
+    a placeholder. An explicit ``key`` that collides with an existing stored key holding a
+    DIFFERENT value is refused with a loud 400 naming the key (C9c — never a silent overwrite
+    of a live secret). ``manifest_pointer`` is a slash-delimited, no-leading-slash path (e.g.
+    ``mcp/0/config/headers/Authorization``) whose HEAD segment MUST be ``mcp`` (the same
+    mcp-only authority ``set_mcp_config`` holds). The generated key is NOT returned."""
 
     value: str
-    key_hint: str
+    key: str | None = None
+    key_hint: str | None = None
     manifest_pointer: str
 
 
@@ -254,6 +261,31 @@ def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
     return candidate
 
 
+def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, stored: dict[str, str]) -> str:
+    """Resolve the env KEY a secret is stored under: exactly one of an EXPLICIT ``explicit``
+    key or a ``hint`` to generate from (C9b ``key | key_hint``).
+
+    An explicit key is validated to the shell-identifier charset (an odd value is a loud
+    ``ValueError`` → 400) and REFUSED if it collides with an existing stored key holding a
+    DIFFERENT value (C9c — never a silent overwrite of a live secret; an identical value is an
+    idempotent re-send, no collision). A generated key is made unique against the stored keys,
+    the X band, AND every registered settings ``env_var``, so it never clobbers a stored key
+    nor SHADOWS a registered var (C9c). Raises ``ValueError`` (the op maps it to a 400)."""
+    if (explicit is None) == (hint is None):
+        raise ValueError("provide exactly one of 'key' (explicit) or 'key_hint' (to generate from)")
+    if explicit is not None:
+        if not _ENV_KEY_RE.fullmatch(explicit):
+            raise ValueError(f"invalid env key {explicit!r}: must match {_ENV_KEY_RE.pattern!r}")
+        if explicit in stored and stored[explicit] != value:
+            raise ValueError(
+                f"explicit key {explicit!r} collides with an existing stored env key holding a "
+                "different value — refusing to silently overwrite a live secret"
+            )
+        return explicit
+    taken = frozenset(stored) | x_band_env_keys() | registered_env_var_names()
+    return _derive_secret_env_key(cast("str", hint), taken)
+
+
 def _set_marker_at_pointer(document: dict[str, Any], segments: list[str], marker: str) -> None:
     """Set ``document`` at the location named by ``segments`` (head ``mcp``) to ``marker``.
 
@@ -302,50 +334,60 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
     errors=[BadRequestError],
     request_model=SetMcpSecretEnv,
 )
-async def set_mcp_secret_env(value: str, key_hint: str, manifest_pointer: str) -> dict:
+async def set_mcp_secret_env(
+    value: str, manifest_pointer: str, key: str | None = None, key_hint: str | None = None
+) -> dict:
     """Store a pasted secret as an env value and reference it from the manifest by a marker.
 
-    Generates an env KEY (shaped from ``key_hint``), writes the secret ``value`` to the env
-    store under that key AND marks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and
-    writes an ``!ENV ${KEY}`` MARKER at ``manifest_pointer`` — all through the combined
+    The env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one
+    (C9b ``key | key_hint``). Writes the secret ``value`` to the env store under that key AND
+    marks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``
+    MARKER at ``manifest_pointer`` — all through the combined
     ``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate
-    stay consistent (a manifest-persist failure rolls the env back). The pointer's HEAD
-    segment MUST be ``mcp`` (loud 400 otherwise). The response is the ``reloadConfigResult``
-    shape; the generated key is NEVER returned. A dangling ``!ENV`` / X-band refusal surfaces
-    as a loud 400 naming the key (the shared boundary validator, same as ``POST
-    /api/mcp-config``)."""
+    stay consistent. C9a partial-failure: a manifest-persist failure after the env write does
+    NO rollback — the env write stands as an inert, re-runnable orphan and the op raises
+    loudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value
+    is a loud 400 naming the key (C9c); a generated key never shadows a registered settings
+    ``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response
+    is the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling
+    ``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary
+    validator, same as ``POST /api/mcp-config``)."""
     segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
 
     service = ConfigService.from_app()
-    stored = _stored_env_for_secret()
-    # The generated key must not clobber a stored key nor collide with an X-band name.
-    taken = frozenset(stored) | x_band_env_keys()
-    key = _derive_secret_env_key(key_hint, taken)
 
-    # Mark the new key secret: current marks plus {key}, order-stable, comma-joined.
-    marks = list(dict.fromkeys([*env_secret_marks_settings().secret_keys, key]))
-    changes = {key: value, _SECRET_MARKS_VAR: ",".join(marks)}
-    marker = f"!ENV ${{{key}}}"
+    async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+        # Runs INSIDE the ConfigService C9d env-write lock, against the stored env read once
+        # under that lock — so the key resolution and the secret-marks append are read-then-
+        # write against a snapshot no concurrent combined op can clobber.
+        #
+        # Resolve the key: an explicit key (collision-refused) or generated from the hint
+        # (unique against stored keys, the X band, and every registered env_var). A bad key is
+        # a ValueError the op maps to a 400 below (raised before any write).
+        key_resolved = _resolve_secret_env_key(key, key_hint, value, stored)
 
-    def mutator(document: dict[str, Any]) -> None:
-        _set_marker_at_pointer(document, segments, marker)
+        # Mark the new key secret (C9d): APPEND to the current marks read from the STORED env —
+        # never the settings cache, which is stale until a reload and would clobber a mark a
+        # prior op just added. Read→append→fold into the same write_env merge, order-stable.
+        existing_marks = [m.strip() for m in stored.get(_SECRET_MARKS_VAR, "").split(",") if m.strip()]
+        marks = list(dict.fromkeys([*existing_marks, key_resolved]))
+        changes = {key_resolved: value, _SECRET_MARKS_VAR: ",".join(marks)}
+        marker = f"!ENV ${{{key_resolved}}}"
+
+        def mutator(document: dict[str, Any]) -> None:
+            _set_marker_at_pointer(document, segments, marker)
+
+        return changes, mutator
 
     try:
-        result = await service.apply_env_and_change(changes, mutator)
+        result = await service.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
     except BackendNeedsBusError as exc:
         raise BadRequestError(str(exc)) from exc
     except ValueError as exc:
+        # A bad/colliding key from _resolve_secret_env_key (raised inside prepare, before any
+        # write) or a boundary refusal (X-band / dangling marker) — a loud 400 either way.
         raise BadRequestError(str(exc)) from exc
     return apply_response(result)
-
-
-def _stored_env_for_secret() -> dict[str, str]:
-    """The stored env map (empty when never written) — the collision set the generated
-    secret key is made unique against."""
-    try:
-        return tai42_app.config.config_manager.read_env()
-    except FileNotFoundError:
-        return {}
 
 
 @operation(

@@ -49,8 +49,10 @@ from tai42_skeleton.config.boundary import (
     excluded_env_var_names,
     key_material_env_keys,
     refuse_dangling_env_markers,
+    refuse_incomplete_admin_pair,
     refuse_key_material,
     refuse_x_band,
+    registered_env_var_names,
     x_band_env_keys,
 )
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
@@ -226,6 +228,96 @@ def test_refuse_key_material_allows_unchanged_and_non_km_payload() -> None:
     # its current value) is allowed — only a CHANGE is refused.
     refuse_key_material({"OK_KEY": "1", "ANOTHER": "2"}, {})  # no key material at all
     refuse_key_material({"CONNECTORS_KEK": "same"}, {"CONNECTORS_KEK": "same"})  # unchanged carry
+
+
+# ---------------------------------------------------------------------------
+# Admin-pair (both-or-neither, per database name) — README D8/D14
+# ---------------------------------------------------------------------------
+
+
+def test_refuse_incomplete_admin_pair_refuses_user_only_naming_both_vars() -> None:
+    with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_USER") as exc:
+        refuse_incomplete_admin_pair({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"})
+    message = str(exc.value)
+    assert "TAI_DATABASE_DEFAULT_PG_ADMIN_USER" in message
+    assert "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD" in message  # names BOTH halves of the pair
+
+
+def test_refuse_incomplete_admin_pair_refuses_password_only() -> None:
+    with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD"):
+        refuse_incomplete_admin_pair({"TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"})
+
+
+def test_refuse_incomplete_admin_pair_allows_both_and_neither() -> None:
+    refuse_incomplete_admin_pair({})  # neither → allowed (runtime identity migrates)
+    refuse_incomplete_admin_pair(
+        {"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m", "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"}
+    )  # both → allowed
+    # An empty-string value does not count as set (the store never persists empties).
+    refuse_incomplete_admin_pair({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": ""})
+
+
+def test_refuse_incomplete_admin_pair_is_per_name() -> None:
+    # Two databases: WAREHOUSE complete, DEFAULT half-set — only DEFAULT is named.
+    with pytest.raises(ValueError, match="'DEFAULT'") as exc:
+        refuse_incomplete_admin_pair(
+            {
+                "TAI_DATABASE_WAREHOUSE_PG_ADMIN_USER": "m",
+                "TAI_DATABASE_WAREHOUSE_PG_ADMIN_PASSWORD": "pw",
+                "TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m",
+            }
+        )
+    assert "WAREHOUSE" not in str(exc.value)
+
+
+async def test_apply_env_change_refuses_half_set_admin_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Wired into apply_env_change (the plain editor / backup-import path): a change resulting in
+    # a half-set admin identity is refused at the validate step before any write.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_USER"):
+        await service.apply_env_change({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"})
+
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+def test_validate_replace_refuses_half_set_admin_pair() -> None:
+    # Wired into the C5 profile-apply validate entry: a profile carrying only the admin USER
+    # (no PASSWORD) is refused, naming the incomplete pair.
+    store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD"):
+        service._validate_replace({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"})
+
+
+def test_validate_replace_allows_complete_admin_pair() -> None:
+    store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
+    service, _admin, _bus = _service(store)
+
+    service._validate_replace(
+        {"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m", "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"}
+    )  # no raise
+
+
+# ---------------------------------------------------------------------------
+# registered_env_var_names — the generated-key shadow-avoidance source (C9c)
+# ---------------------------------------------------------------------------
+
+
+def test_registered_env_var_names_covers_x_band_and_a_known_hot_var() -> None:
+    # The set the generated secret key is made unique against: it must be a SUPERSET of the X
+    # band (the excluded fields) AND carry non-excluded (hot/recycle) vars the X band omits —
+    # this is exactly what the X band alone would miss for shadow-avoidance.
+    names = registered_env_var_names()
+    assert excluded_env_var_names() <= names  # every excluded field's env_var is present
+    assert "CONNECTORS_KEK" in names  # a registered, NON-excluded var (hot key-material field)
+    assert "CONNECTORS_KEK" not in x_band_env_keys()  # which the X band does not carry
 
 
 # ---------------------------------------------------------------------------

@@ -135,14 +135,17 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await editDialog.getByRole('button', { name: 'Save profile' }).click();
   await expect(row).toContainText('edited desc');
 
-  // DIFF: the preview masks EVERY value and names the recycle-class key in its
-  // callout; a bare-shape refusal callout must NOT appear (the recycle key is not in
-  // the bare refused set).
+  // DIFF: the preview masks EVERY value and names the recycle-class key in its recycle
+  // callout. A UI-created profile is SPARSE and `apply_replace_env` is a full REPLACE, so
+  // the diff also REMOVES every baseline key — including the shape's infra-identity key
+  // (`TAI_BUS_REDIS_URL`), which the recycle policy refuses. So a refused callout DOES
+  // appear here; the invariant that matters is that the RECYCLE key routes to the recycle
+  // callout and is NEVER classified refused.
   await page.getByRole('button', { name: `Diff profile ${name}` }).click();
   const diffDialog = page.getByRole('dialog', { name: `Diff — ${name}` });
   await expect(diffDialog.getByTestId('diff-recycle')).toBeVisible();
   await expect(diffDialog.getByTestId('diff-recycle')).toContainText(RECYCLE_KEY);
-  await expect(diffDialog.getByTestId('diff-refused')).toHaveCount(0);
+  await expect(diffDialog.getByTestId('diff-refused')).not.toContainText(RECYCLE_KEY);
   // The secret's real value never renders; the mask does. The diff rows key by env
   // name (`diff-row-<KEY>`).
   await expect(diffDialog.getByTestId(`diff-row-${secretKey}`)).toBeVisible();
