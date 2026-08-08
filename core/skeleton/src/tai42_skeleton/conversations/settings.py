@@ -183,7 +183,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The twelve conversation keyspaces. Every literal key string lives ONLY here. A
+    # The fifteen conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
     # exception is ``open_code_key``, whose variable part is a single opaque ``sha256``
@@ -303,3 +303,24 @@ class ConversationsSettings(TaiBaseSettings):
             json.dumps([target_kind, target_name, door_address_key], separators=(",", ":")).encode()
         ).hexdigest()
         return f"{self.prefix}:open_code:{opaque}"
+
+    # -- Per-target config keyspace ------------------------------------------
+
+    def target_config_key(self, target_kind: str, target_name: str) -> str:
+        """Per-target config row key, keyed by ``(target_kind, target_name)``. ``target_kind``
+        is a fixed vocabulary and sits before the free-form ``target_name``, so it is checked
+        ``:``-free while the name sits LAST."""
+        _require_qualifier_segment("target_kind", target_kind)
+        _require_key_segment("target_name", target_name)
+        return f"{self.prefix}:config:{target_kind}:{target_name}"
+
+    @property
+    def target_config_key_prefix(self) -> str:
+        return f"{self.prefix}:config:"
+
+    @property
+    def target_config_names_key(self) -> str:
+        """The set index of every stored config's ``{target_kind}:{target_name}`` member,
+        kept in lockstep with the per-config keys by the upsert/delete scripts. A member
+        appended to :attr:`target_config_key_prefix` rebuilds the row key it names."""
+        return f"{self.prefix}:config_names"

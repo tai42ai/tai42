@@ -230,3 +230,91 @@ def list_failed(ctx: typer.Context) -> None:
         ["message_id", "route_name", "door", "client_address", "answer_status", "attempts"],
         items_key="items",
     )
+
+
+@app.command("config-list")
+@covers(("GET", "/api/conversation-configs"))
+def list_configs(ctx: typer.Context) -> None:
+    """List the per-target conversation configs (multichannel opt-in + first-contact greeting).
+
+    Example: ``tai conversations config-list``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get("/api/conversation-configs")
+    emit_records(
+        ctx_obj,
+        data,
+        ["target_kind", "target_name", "multichannel", "greeting_template"],
+        items_key="items",
+    )
+
+
+@app.command("config-get")
+@covers(("GET", "/api/conversation-configs/{target_kind}/{target_name}"))
+def get_config(
+    ctx: typer.Context,
+    target_kind: Annotated[str, typer.Argument(help="Target kind: 'agent' or 'tool'.")],
+    target_name: Annotated[str, typer.Argument(help="The agent or tool name.")],
+) -> None:
+    """Show one per-target conversation config by (target_kind, target_name).
+
+    Example: ``tai conversations config-get agent concierge``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/conversation-configs/{target_kind}/{target_name}")
+    emit_result(ctx_obj, data)
+
+
+@app.command("config-set")
+@covers(("PUT", "/api/conversation-configs/{target_kind}/{target_name}"))
+def set_config(
+    ctx: typer.Context,
+    target_kind: Annotated[str, typer.Argument(help="Target kind: 'agent' or 'tool' (must exist).")],
+    target_name: Annotated[str, typer.Argument(help="The agent or tool name (must exist).")],
+    multichannel: Annotated[
+        bool, typer.Option("--multichannel/--no-multichannel", help="Opt the target into person linking.")
+    ] = False,
+    greeting_template: Annotated[
+        str | None,
+        typer.Option(
+            "--greeting-template",
+            help="First-contact greeting; may reference the {pairing_code} placeholder. Omit for no greeting.",
+        ),
+    ] = None,
+) -> None:
+    """Create or replace a per-target conversation config.
+
+    An UPSERT — a config for that (target_kind, target_name) is REPLACED if it exists
+    (``created`` is ``false`` for a replace). The target must EXIST. ``--greeting-template``
+    may reference at most the ``{pairing_code}`` placeholder; omit it (or pass an empty
+    value is refused) for no greeting.
+
+    Example: ``tai conversations config-set agent concierge --multichannel \\
+    --greeting-template 'Hi! Pair another channel with {pairing_code}'``
+    """
+    ctx_obj = app_context(ctx)
+    body: dict = {"multichannel": multichannel}
+    if greeting_template is not None:
+        body["greeting_template"] = greeting_template
+    with ctx_obj.client() as client:
+        data = client.put(f"/api/conversation-configs/{target_kind}/{target_name}", json=body)
+    emit_result(ctx_obj, data)
+
+
+@app.command("config-delete")
+@covers(("DELETE", "/api/conversation-configs/{target_kind}/{target_name}"))
+def delete_config(
+    ctx: typer.Context,
+    target_kind: Annotated[str, typer.Argument(help="Target kind: 'agent' or 'tool'.")],
+    target_name: Annotated[str, typer.Argument(help="The agent or tool name.")],
+) -> None:
+    """Delete a per-target conversation config by (target_kind, target_name).
+
+    Example: ``tai conversations config-delete agent concierge``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.delete(f"/api/conversation-configs/{target_kind}/{target_name}")
+    emit_result(ctx_obj, data)

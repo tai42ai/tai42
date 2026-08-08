@@ -14,11 +14,17 @@ with a loud 501 (``NotSupportedError``).
 from __future__ import annotations
 
 import secrets
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
-from tai42_contract.conversations import ROUTE_NAME_RE, ConversationRoute, ConversationRouteCreate
+from tai42_contract.conversations import (
+    ROUTE_NAME_RE,
+    ConversationRoute,
+    ConversationRouteCreate,
+    ConversationTargetKind,
+    TargetConversationConfig,
+)
 from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX
@@ -37,6 +43,9 @@ from tai42_skeleton.operations._authority import (
     resolve_caller,
 )
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError
+
+if TYPE_CHECKING:
+    from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
 # Surfaced before a create does any bind work it would then have to discard.
 _NO_BACKEND = "conversation routes require the redis conversations backend"
@@ -61,21 +70,21 @@ def _validate_route_name(route_name: str) -> None:
         raise BadRequestError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {route_name!r}")
 
 
-async def _assert_target_exists(create: ConversationRouteCreate) -> None:
+async def _assert_target_exists(target_kind: str, target_name: str) -> None:
     """Existence only: the turn runs as the key, so the key's authority over the target is
     deliberately not checked here. An ``agent`` target must be registered; a ``tool`` target
     must resolve on the live tool registry. A miss is a loud 404, mirroring either side."""
     from tai42_skeleton.app import instance
     from tai42_skeleton.tools.binding import UnknownToolError
 
-    if create.target_kind == "agent":
-        if create.target_name not in instance.app.agents.all_agents():
-            raise NotFoundError(f"agent not found: {create.target_name!r}")
+    if target_kind == "agent":
+        if target_name not in instance.app.agents.all_agents():
+            raise NotFoundError(f"agent not found: {target_name!r}")
         return
     try:
-        await instance.app.tools.get_tool(create.target_name)
+        await instance.app.tools.get_tool(target_name)
     except UnknownToolError as exc:
-        raise NotFoundError(f"tool not found: {create.target_name!r}") from exc
+        raise NotFoundError(f"tool not found: {target_name!r}") from exc
 
 
 def _assert_exprs_compile(create: ConversationRouteCreate) -> None:
@@ -216,7 +225,7 @@ async def create_conversation_route(
 
     manager = _require_backend()
 
-    await _assert_target_exists(create)
+    await _assert_target_exists(create.target_kind, create.target_name)
     _assert_exprs_compile(create)
 
     stored = create.model_dump()
@@ -557,3 +566,118 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
     await store.drop_route_threads(route_name)
     return {"removed": removed, "route_name": route_name}
+
+
+# -- per-target conversation config --------------------------------------------------------
+#
+# The per-target multichannel opt-in + first-contact greeting, keyed ``(target_kind,
+# target_name)``. Inert operator config: nothing here reads the stored value — the accept
+# path and the pairing tool consume it in a later step.
+
+_TARGET_KINDS = get_args(ConversationTargetKind)
+
+
+def _validate_target_key(target_kind: str, target_name: str) -> None:
+    """A well-formed config key: a known ``target_kind`` and a non-blank ``target_name``. A
+    malformed key is the caller's own 400, told apart from a well-formed key that names no
+    stored config (a 404)."""
+    if target_kind not in _TARGET_KINDS:
+        raise BadRequestError(f"target_kind must be one of {list(_TARGET_KINDS)}: {target_kind!r}")
+    if not target_name.strip():
+        raise BadRequestError("target_name must be a non-blank target identifier")
+
+
+def _config_store() -> ConversationTargetConfigStore:
+    """The config store over the live conversations settings. Called only after
+    :func:`_require_backend`, so its own backend guard never fires here."""
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+    from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
+
+    return ConversationTargetConfigStore(ConversationsSettings())
+
+
+@operation(summary="List conversation target configs", tags=["conversations"], errors=[NotSupportedError])
+async def list_conversation_configs() -> dict[str, Any]:
+    """Every stored per-target conversation config. Returns ``{"items", "total"}``."""
+    _require_backend()
+    configs = await _config_store().list()
+    items = [config.model_dump(mode="json") for config in configs.values()]
+    return {"items": items, "total": len(items)}
+
+
+@operation(
+    summary="Get a conversation target config",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def get_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
+    """One per-target config by ``(target_kind, target_name)``. An unknown key is a loud
+    404; a key whose ``target_kind`` is not a known kind, or whose ``target_name`` is blank,
+    is a 400."""
+    _validate_target_key(target_kind, target_name)
+    _require_backend()
+    config = await _config_store().get(target_kind, target_name)
+    if config is None:
+        raise NotFoundError(f"conversation config not found: {target_kind}/{target_name}")
+    return config.model_dump(mode="json")
+
+
+@operation(
+    summary="Create or replace a conversation target config",
+    tags=["conversations"],
+    destructive=True,
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    request_model=TargetConversationConfig,
+)
+async def set_conversation_config(
+    target_kind: str,
+    target_name: str,
+    multichannel: bool = False,
+    greeting_template: str | None = None,
+) -> dict[str, Any]:
+    """Create or replace the per-target config for ``(target_kind, target_name)`` — an
+    UPSERT, so this is the create path AND the edit path for a config of that key.
+
+    The target must merely EXIST — the agent (``target_kind=agent``) or tool
+    (``target_kind=tool``) — exactly as the route create checks it. ``greeting_template``
+    may reference at most the ``{pairing_code}`` placeholder and a blank template is refused
+    (``null`` = no greeting), both enforced by the model. No key is bound and no authority
+    delegated: this is inert operator config. Returns
+    ``{"created", "target_kind", "target_name", "config"}``.
+    """
+    # Validate the whole body at the operation, not the edge: the MCP tool and a direct
+    # call take these flat parameters and bypass the HTTP extractor.
+    try:
+        config = TargetConversationConfig(
+            target_kind=target_kind,  # pyright: ignore[reportArgumentType]
+            target_name=target_name,
+            multichannel=multichannel,
+            greeting_template=greeting_template,
+        )
+    except ValueError as exc:
+        raise BadRequestError(f"invalid conversation config: {exc}") from exc
+    _require_backend()
+    await _assert_target_exists(config.target_kind, config.target_name)
+    created = await _config_store().upsert(config)
+    return {
+        "created": created,
+        "target_kind": config.target_kind,
+        "target_name": config.target_name,
+        "config": config.model_dump(mode="json"),
+    }
+
+
+@operation(
+    summary="Delete a conversation target config",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def delete_conversation_config(target_kind: str, target_name: str) -> dict[str, Any]:
+    """Delete the per-target config for ``(target_kind, target_name)``. An unknown key is a
+    loud 404; a malformed key is a 400. Returns ``{"removed", "target_kind", "target_name"}``."""
+    _validate_target_key(target_kind, target_name)
+    _require_backend()
+    removed = await _config_store().delete(target_kind, target_name)
+    if not removed:
+        raise NotFoundError(f"conversation config not found: {target_kind}/{target_name}")
+    return {"removed": True, "target_kind": target_kind, "target_name": target_name}

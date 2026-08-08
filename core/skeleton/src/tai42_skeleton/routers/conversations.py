@@ -18,6 +18,20 @@ the operator and Studio drive over the routing table.
   thread id is a query value because it holds a percent-encoded principal that no path
   spelling round-trips.
 
+- ``GET /api/conversation-configs`` (AUTHED) — list the per-target conversation configs
+  (the ``multichannel`` opt-in + first-contact greeting), keyed ``(target_kind,
+  target_name)``.
+- ``GET /api/conversation-configs/{target_kind}/{target_name}`` (AUTHED) — read one; an
+  unknown key is a loud 404.
+- ``PUT /api/conversation-configs/{target_kind}/{target_name}`` (AUTHED) — create or replace
+  one from a ``TargetConversationConfig`` body; the target must exist.
+- ``DELETE /api/conversation-configs/{target_kind}/{target_name}`` (AUTHED) — delete one; an
+  unknown key is a loud 404.
+
+The config doors carry their own ``/api/conversation-configs`` prefix rather than nesting
+under ``/api/conversations/{route_name}``, where a ``config`` first segment would collide
+with the read-one route door.
+
 Both thread doors parse their query at the edge here, and both declare the query they take
 as an operation ``request_model``, so the emitted spec publishes their ``in: query``
 parameters and a generated client sends the REQUIRED ``thread_id``.
@@ -37,7 +51,7 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import get_current_user_id
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ConversationMessage, ConversationRouteCreate
+from tai42_contract.conversations import ConversationMessage, ConversationRouteCreate, TargetConversationConfig
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -51,13 +65,17 @@ from tai42_skeleton.operations import (
     register_operation_route,
 )
 from tai42_skeleton.operations.conversations import create_conversation_route as _create_conversation_route_op
+from tai42_skeleton.operations.conversations import delete_conversation_config as _delete_conversation_config_op
 from tai42_skeleton.operations.conversations import delete_conversation_route as _delete_conversation_route_op
+from tai42_skeleton.operations.conversations import get_conversation_config as _get_conversation_config_op
 from tai42_skeleton.operations.conversations import get_conversation_message as _get_conversation_message_op
 from tai42_skeleton.operations.conversations import get_conversation_route as _get_conversation_route_op
 from tai42_skeleton.operations.conversations import get_conversation_thread as _get_conversation_thread_op
+from tai42_skeleton.operations.conversations import list_conversation_configs as _list_conversation_configs_op
 from tai42_skeleton.operations.conversations import list_conversation_routes as _list_conversation_routes_op
 from tai42_skeleton.operations.conversations import list_conversation_threads as _list_conversation_threads_op
 from tai42_skeleton.operations.conversations import list_failed_conversations as _list_failed_conversations_op
+from tai42_skeleton.operations.conversations import set_conversation_config as _set_conversation_config_op
 from tai42_skeleton.operations.errors import NotSupportedError
 
 logger = logging.getLogger(__name__)
@@ -185,6 +203,67 @@ get_conversation_thread = register_operation_route(
     method="GET",
     context_extractor=_extract_transcript_query,
     action="read",
+)
+
+
+async def _extract_target_config(request: Request) -> dict:
+    """Parse + validate the ``TargetConversationConfig`` body into the operation's flat
+    fields, rejecting a malformed body with an explicit 400 (the adapter's plain parse would
+    yield 422).
+
+    ``target_kind`` and ``target_name`` ride the URL path, not the body, so they are
+    injected from the path params before validation — a body that also carries either,
+    disagreeing with the path, is rejected rather than silently overriding either."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object of config params") from None
+    for field in ("target_kind", "target_name"):
+        path_value = request.path_params[field]
+        body_value = body.get(field)
+        if body_value is not None and body_value != path_value:
+            raise BadRequestError(f"{field} in the body must match the {field} in the path") from None
+        body = {**body, field: path_value}
+    try:
+        config = TargetConversationConfig.model_validate(body)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid conversation config: {exc}") from exc
+    return config.model_dump()
+
+
+list_conversation_configs = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_conversation_configs_op),
+    path="/api/conversation-configs",
+    method="GET",
+    action="read",
+)
+
+get_conversation_config = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_conversation_config_op),
+    path="/api/conversation-configs/{target_kind}/{target_name}",
+    method="GET",
+    action="read",
+)
+
+set_conversation_config = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_conversation_config_op),
+    path="/api/conversation-configs/{target_kind}/{target_name}",
+    method="PUT",
+    context_extractor=_extract_target_config,
+    action="write",
+)
+
+delete_conversation_config = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_delete_conversation_config_op),
+    path="/api/conversation-configs/{target_kind}/{target_name}",
+    method="DELETE",
+    action="write",
 )
 
 

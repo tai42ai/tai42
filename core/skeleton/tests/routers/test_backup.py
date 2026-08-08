@@ -202,6 +202,7 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
         "sub_mcp",
         "webhooks",
         "conversations",
+        "conversation_target_config",
         "templates",
         "schedules",
         "connector_categories",
@@ -228,6 +229,8 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     # The routing rows' export equals the grantable route-list read (each row's
     # callback_secret is excluded and re-minted on import), so it is not flagged.
     assert by_name["conversations"] is False
+    # The per-target config is plain operator config with no credentials — not flagged.
+    assert by_name["conversation_target_config"] is False
 
 
 # -- manifest / env round-trips (sync sections) ------------------------------

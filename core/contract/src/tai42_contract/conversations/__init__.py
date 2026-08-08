@@ -10,6 +10,7 @@ skeleton's, reached through its ``AppConversations`` facet.
 from __future__ import annotations
 
 import re
+import string
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -336,7 +337,73 @@ class CrossTargetMergeError(Exception):
     infrastructure fault."""
 
 
+# The one placeholder a greeting template may reference — the mint-at-greeting-time pair
+# code. Any other ``{...}`` field is refused at write time so a typo cannot render literally.
+GREETING_PLACEHOLDER = "pairing_code"
+
+
+def _check_greeting_placeholders(template: str) -> None:
+    """Refuse a greeting template that references anything but ``{pairing_code}``.
+
+    Parsed exactly as :meth:`str.format` would render it, so a malformed template (an
+    unbalanced brace), an auto-numbered ``{}``, a foreign field name, or a
+    ``{pairing_code}`` carrying a conversion/format-spec/attribute access is refused here —
+    at the write — rather than rendering wrong or raising when the greeting fires."""
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        raise ValueError(f"greeting_template is not a valid template: {exc}") from exc
+    for _literal, field_name, format_spec, conversion in parsed:
+        if field_name is None:
+            # Literal text, including the escaped ``{{``/``}}`` braces.
+            continue
+        if field_name != GREETING_PLACEHOLDER or conversion is not None or format_spec:
+            raise ValueError(
+                f"greeting_template may reference only the {{{GREETING_PLACEHOLDER}}} placeholder, "
+                f"got an unsupported field {field_name!r}"
+            )
+
+
+class TargetConversationConfig(BaseModel):
+    """Per-target configuration for the conversation bridge, keyed by
+    ``(target_kind, target_name)`` — the agent or tool an inbound turn is routed to.
+
+    ``multichannel`` opts the target into person linking; ``greeting_template`` is the
+    first-contact greeting, which may reference at most the ``{pairing_code}`` placeholder
+    (minted at greeting time). The row carries no server-derived fields, so it IS its own
+    create payload — no Create/stored split. An unknown ``{...}`` placeholder is refused so
+    a typo cannot render literally; a blank template string is refused, because ``None`` is
+    the explicit spelling for "no greeting". Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_kind: ConversationTargetKind
+    target_name: str = Field(min_length=1)
+    multichannel: bool = False
+    greeting_template: str | None = None
+
+    @field_validator("target_name")
+    @classmethod
+    def _non_blank_target_name(cls, value: str) -> str:
+        # It keys the config row; a blank segment would collide distinct targets onto one key.
+        if not value.strip():
+            raise ValueError("target_name must be non-blank")
+        return value
+
+    @field_validator("greeting_template")
+    @classmethod
+    def _check_greeting_template(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("greeting_template must be non-blank (use null for no greeting)")
+        _check_greeting_placeholders(value)
+        return value
+
+
 __all__ = [
+    "GREETING_PLACEHOLDER",
     "ROUTE_NAME_RE",
     "AnswerStatus",
     "BlankInboundTextError",
@@ -353,4 +420,5 @@ __all__ = [
     "PairCodeInvalidError",
     "Person",
     "PersonAddress",
+    "TargetConversationConfig",
 ]

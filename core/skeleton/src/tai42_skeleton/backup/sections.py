@@ -453,6 +453,21 @@ async def _import_conversations(payload: dict[str, Any]) -> _SectionReport:
     return await import_conversation_routes(payload, current_import_mode())
 
 
+# -- conversation target config ----------------------------------------------
+
+
+async def _export_conversation_target_config() -> dict[str, Any]:
+    from tai42_skeleton.conversations.target_config_backup import export_target_configs
+
+    return await export_target_configs()
+
+
+async def _import_conversation_target_config(payload: dict[str, Any]) -> _SectionReport:
+    from tai42_skeleton.conversations.target_config_backup import import_target_configs
+
+    return await import_target_configs(payload, current_import_mode())
+
+
 # -- templates ---------------------------------------------------------------
 
 
@@ -592,6 +607,14 @@ def register_core_sections(registry: Any) -> None:
     # AFTER ``access_control``/``templates``, as ``webhooks``. secret=False: export equals the
     # grantable route-list read (``callback_secret`` excluded, re-minted only on overwrite).
     registry.register_section("conversations", _export_conversations, _import_conversations)
+    # The per-target conversation config (multichannel opt-in + first-contact greeting).
+    # Non-secret operator config — the connectors split's non-secret half — registered
+    # beside the routing rows it configures.
+    registry.register_section(
+        "conversation_target_config",
+        _export_conversation_target_config,
+        _import_conversation_target_config,
+    )
     # Unconditional: an unbound scheduling backend surfaces as a per-section error, not a gap.
     registry.register_section("schedules", _export_schedules, _import_schedules, secret=True)
     registry.register_section("connector_categories", _export_connector_categories, _import_connector_categories)
