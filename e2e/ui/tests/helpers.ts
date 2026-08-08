@@ -5,7 +5,7 @@
  * copied from tai-studio's own suite rather than imported across repos so the
  * two Node lockfiles stay uncoupled.
  */
-import { expect, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
 
 /** The pinned ports + seeded key; defaults MUST match the studio_runner. */
 export const UI_PORT = Number(process.env.TAI_E2E_UI_PORT ?? 8770);
@@ -62,6 +62,28 @@ export const BOOTSTRAP_TOKEN = 'e2e-accounts-bootstrap-token';
 /** The app's auth header (Bearer or X-Api-Key are both accepted; the app uses X-Api-Key). */
 export function apiHeaders(key: string = API_KEY): Record<string, string> {
   return { 'x-api-key': key, 'content-type': 'application/json' };
+}
+
+/**
+ * POST a config mutation, retrying past the reload gate's documented retriable
+ * `503` ("reloading — the server is applying a config reload; retry shortly") that
+ * a `/api/config/*` or `/api/mcp-config` write can hit when it races an in-flight
+ * reload (a fanned-out apply on a MULTIWORKER stack). Retries on its own cadence
+ * (never a raw sleep) until the write leaves the gate (any non-503 response), then
+ * returns it — the caller asserts the final status, exactly as on a direct POST.
+ */
+export async function postConfig(
+  request: APIRequestContext,
+  url: string,
+  data: unknown,
+  key: string = API_KEY,
+): Promise<APIResponse> {
+  let res!: APIResponse;
+  await expect(async () => {
+    res = await request.post(url, { headers: apiHeaders(key), data });
+    expect(res.status(), await res.text()).not.toBe(503);
+  }).toPass({ timeout: 20_000 });
+  return res;
 }
 
 /**

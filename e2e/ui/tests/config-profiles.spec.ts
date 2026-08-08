@@ -25,14 +25,16 @@
  * (`data-testid=apply-report`) with its Hot-swapped section, not a fleet alert.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, postConfig, seedCredential, uniq } from './helpers';
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';
 
-/** A `TAI_BUS_*` field: recycle-class on every shape, never in the bare-shape
- *  refused set (only the two bus URLs are), so a diff carrying it shows the recycle
- *  callout without a refusal. */
+/** A `TAI_BUS_*` field (`BusSettings.ack_timeout`): recycle-class on every shape — and,
+ *  crucially, `BusSettings` is imported on every worker (core bus infra), so the serve
+ *  worker that classifies the diff reliably resolves it as `recycle`. Never in the
+ *  bare-shape refused set (only the two bus URLs are), so a diff carrying it shows the
+ *  recycle callout without a refusal. */
 const RECYCLE_KEY = 'TAI_BUS_ACK_TIMEOUT';
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
@@ -78,9 +80,9 @@ test.afterEach(async ({ request }) => {
     await request.delete(`/api/config/profiles/${name}`, { headers: apiHeaders() });
   }
   for (const key of createdEnvKeys) {
-    // Posting '' merge-deletes the marker key; a transient reload 503 on the rare
-    // failure path is tolerable (the run tears the stack down after).
-    await request.post('/api/config/env', { headers: apiHeaders(), data: { [key]: '' } });
+    // Posting '' merge-deletes the marker key; retry past the reload gate's retriable 503
+    // in case this cleanup races the just-applied reload.
+    await postConfig(request, '/api/config/env', { [key]: '' });
   }
   createdProfiles.clear();
   createdEnvKeys.clear();
@@ -111,12 +113,12 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await createDialog.getByRole('textbox', { name: `Value of variable ${secretKey}` }).fill(secretVal);
   await createDialog.getByRole('checkbox', { name: 'Secret' }).check();
 
-  // Row 2 — the recycle-class key (drives the diff's recycle callout). This key can already
-  // exist in the pre-filled env band, so its value aria-label resolves to two inputs (the
-  // existing row + the empty Add-variable row just created); scope to the NEW row (`.last()`).
-  await createDialog.getByRole('button', { name: 'Add variable' }).click();
-  await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(RECYCLE_KEY);
-  await createDialog.getByRole('textbox', { name: `Value of variable ${RECYCLE_KEY}` }).last().fill('5.0');
+  // Row 2 — the recycle-class key (drives the diff's recycle callout). The create dialog
+  // pre-fills a row for every registered setting, so a row for RECYCLE_KEY already exists
+  // (its resolved default); adding a second one via "Add variable" would name-collide and
+  // split/disable the value-input locator. Set the EXISTING row's value directly — its value
+  // aria-label resolves to that single fillable input.
+  await createDialog.getByRole('textbox', { name: `Value of variable ${RECYCLE_KEY}` }).fill('5.0');
 
   await createDialog.getByRole('button', { name: 'Create profile' }).click();
   const row = page.getByTestId(`profile-row-${name}`);

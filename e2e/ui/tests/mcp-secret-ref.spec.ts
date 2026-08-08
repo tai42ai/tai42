@@ -20,7 +20,7 @@
  *    (asserted through the API) and the masked chip.
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, postConfig, seedCredential, uniq } from './helpers';
 
 /** The env-map key on the seeded MCP entry whose value is the secret reference. */
 const ENV_ENTRY = 'REFVAL';
@@ -48,9 +48,8 @@ async function preservedMcp(request: APIRequestContext): Promise<unknown[]> {
 
 /** Seed one MCP entry referencing `key` from its `config.env.REFVAL` leaf. */
 async function seedEntry(request: APIRequestContext, title: string, key: string): Promise<void> {
-  const res = await request.post('/api/mcp-config', {
-    headers: apiHeaders(),
-    data: { mcp: [{ title, config: { command: '/bin/true', env: { [ENV_ENTRY]: envMarker(key) } } }] },
+  const res = await postConfig(request, '/api/mcp-config', {
+    mcp: [{ title, config: { command: '/bin/true', env: { [ENV_ENTRY]: envMarker(key) } } }],
   });
   expect(res.status(), await res.text()).toBe(200);
 }
@@ -86,12 +85,12 @@ test.beforeEach(async ({ request }) => {
 
 test.afterEach(async ({ request }) => {
   if (originalMcp !== null) {
-    // Best-effort restore of the mounted MCP config to its pre-test shape.
-    await request.post('/api/mcp-config', { headers: apiHeaders(), data: { mcp: originalMcp } });
+    // Best-effort restore of the mounted MCP config to its pre-test shape (past the reload gate).
+    await postConfig(request, '/api/mcp-config', { mcp: originalMcp });
     originalMcp = null;
   }
   for (const key of createdEnvKeys) {
-    await request.post('/api/config/env', { headers: apiHeaders(), data: { [key]: '' } });
+    await postConfig(request, '/api/config/env', { [key]: '' });
   }
   createdEnvKeys.clear();
 });
@@ -100,10 +99,7 @@ test('an existing !ENV secret reference renders a masked, revealable chip', asyn
   const keyPre = uniq('E2E_MCP_REF').toUpperCase();
   createdEnvKeys.add(keyPre);
   // The referenced key must exist or the save-time dangling-!ENV validator refuses it.
-  const env = await request.post('/api/config/env', {
-    headers: apiHeaders(),
-    data: { [keyPre]: uniq('secret') },
-  });
+  const env = await postConfig(request, '/api/config/env', { [keyPre]: uniq('secret') });
   expect(env.status(), await env.text()).toBe(200);
   await seedEntry(request, uniq('e2e-ref'), keyPre);
 
@@ -125,10 +121,7 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
 }) => {
   const keyPre = uniq('E2E_MCP_PRE').toUpperCase();
   createdEnvKeys.add(keyPre);
-  const seedEnv = await request.post('/api/config/env', {
-    headers: apiHeaders(),
-    data: { [keyPre]: uniq('secret') },
-  });
+  const seedEnv = await postConfig(request, '/api/config/env', { [keyPre]: uniq('secret') });
   expect(seedEnv.status(), await seedEnv.text()).toBe(200);
   await seedEntry(request, uniq('e2e-paste'), keyPre);
 
