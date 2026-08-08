@@ -10,9 +10,12 @@ Three refusals guard every env / manifest writer:
   ``replace_env``). Asserted per writer path (``apply_env_change`` and the C5
   ``_validate_replace`` entry) and spanning both halves of the union plus the two
   PLAN_4 deployment keys.
-* Key-material refusal — no profile or editor may NAME a ``key_material`` field (a
-  KEK / signing key). These are ``hot``-class (not X-band) yet must rotate through
-  their own path, never be bulk-set through a profile. Reads the PAYLOAD keys too.
+* Key-material refusal (CHANGE-aware) — no profile or editor may SET a ``key_material``
+  field (a KEK / signing key) to a NEW value; these are ``hot``-class (not X-band) yet must
+  rotate through their own path. But an UNCHANGED carry is allowed (key material CAN sit in
+  the editable store, so a read-modify-write round-trip / a profile snapshotted from the
+  stored env re-sends it unchanged), so the refusal compares the payload value to the stored
+  value and fires only on a change.
 * Dangling ``!ENV`` refusal — a manifest ``!ENV ${VAR}`` marker with no default,
   referencing a var absent from the effective env, resolves silently to ``"N/A"``
   and is refused pre-persist, naming the var and its json-pointer.
@@ -135,7 +138,8 @@ def test_validate_replace_allows_a_plain_profile_env() -> None:
 
 # Both are ``KeyMaterial`` fields on ``ConnectorsSettings`` (imported above) and
 # resolve to reload_class ``hot`` — so ONLY the key-material refusal guards them, never
-# the X band. A profile naming either must be refused and pointed at rotation.
+# the X band. A profile SETTING either to a new value must be refused and pointed at
+# rotation; carrying one UNCHANGED must be allowed.
 _KEY_MATERIAL_KEYS = ["CONNECTORS_KEK", "CONNECTORS_STATE_HMAC_KEY"]
 
 
@@ -149,7 +153,9 @@ def test_key_material_keys_are_registered_and_not_x_band() -> None:
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
-async def test_apply_env_change_refuses_key_material_key(monkeypatch: pytest.MonkeyPatch, km_key: str) -> None:
+async def test_apply_env_change_refuses_changed_key_material_key(monkeypatch: pytest.MonkeyPatch, km_key: str) -> None:
+    # SETTING key material to a value different from the current store (here: introducing it
+    # into a store that lacks it) is a rotation-via-editor and is refused.
     monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
     reset_all_settings()
     store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
@@ -166,17 +172,48 @@ async def test_apply_env_change_refuses_key_material_key(monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
-def test_validate_replace_refuses_key_material_key(km_key: str) -> None:
-    store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
+async def test_apply_env_change_allows_unchanged_key_material_carry(
+    monkeypatch: pytest.MonkeyPatch, km_key: str
+) -> None:
+    # The load-bearing fix (studio ``config.spec.ts:62``): the store already HOLDS a KEK; a
+    # read-modify-write save re-sends it UNCHANGED (real value from ``GET /api/config/env``)
+    # while editing an unrelated key. The change-aware refusal allows the carry, so the save
+    # lands — the KEK reaches the store unchanged and the edit applies.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={km_key: "provisioned", "EDITME": "old"})
+    service, _admin, _bus = _service(store)
+
+    await service.apply_env_change({km_key: "provisioned", "EDITME": "new"})
+
+    assert store.env_writes, "the unchanged-KEK carry was refused — the env save did not land"
+    assert store.env[km_key] == "provisioned"
+    assert store.env["EDITME"] == "new"
+
+
+@pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
+def test_validate_replace_refuses_changed_key_material_key(km_key: str) -> None:
+    store = FakeConfigStore(manifest={}, env={km_key: "old-kek", "EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match=km_key):
-        service._validate_replace({km_key: "new-secret"})
+        service._validate_replace({km_key: "rotated-value", "EXISTING": "1"})
+
+
+@pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
+def test_validate_replace_allows_unchanged_key_material_carry(km_key: str) -> None:
+    # A profile snapshotted from the stored env carries the KEK unchanged (studio
+    # ``config-profiles.spec.ts:147``) — allowed.
+    store = FakeConfigStore(manifest={}, env={km_key: "provisioned", "EXISTING": "1"})
+    service, _admin, _bus = _service(store)
+
+    service._validate_replace({km_key: "provisioned", "EXISTING": "1"})  # no raise
 
 
 def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
+    # A CHANGE (new value vs. empty current) names the offender + rotation path.
     with pytest.raises(ValueError, match="CONNECTORS_KEK") as exc:
-        refuse_key_material(["CONNECTORS_KEK", "OK_KEY"])
+        refuse_key_material({"CONNECTORS_KEK": "new-kek", "OK_KEY": "v"}, {})
     message = str(exc.value)
     assert "CONNECTORS_KEK" in message
     assert "OK_KEY" not in message
@@ -184,8 +221,11 @@ def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
     assert "rotat" in message.lower()
 
 
-def test_refuse_key_material_allows_a_plain_payload() -> None:
-    refuse_key_material(["OK_KEY", "ANOTHER"])  # no raise
+def test_refuse_key_material_allows_unchanged_and_non_km_payload() -> None:
+    # A non-key-material payload never fires; a key-material key carried UNCHANGED (equal to
+    # its current value) is allowed — only a CHANGE is refused.
+    refuse_key_material({"OK_KEY": "1", "ANOTHER": "2"}, {})  # no key material at all
+    refuse_key_material({"CONNECTORS_KEK": "same"}, {"CONNECTORS_KEK": "same"})  # unchanged carry
 
 
 # ---------------------------------------------------------------------------
@@ -344,10 +384,12 @@ async def test_backup_import_carrying_x_key_and_dangling_marker_is_refused(monke
     assert bus.publish_calls == []
 
 
-async def test_backup_import_carrying_key_material_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Backup restore drives apply_env_change directly, so a crafted backup carrying a
-    # key-material key (a KEK) is refused by the shared validator BY CONSTRUCTION — the
-    # KEK never reaches the store, exactly as the env editor and profile paths refuse it.
+async def test_backup_import_setting_key_material_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Backup restore drives apply_env_change directly, so a crafted backup that SETS a
+    # key-material key (a KEK) to a value differing from the current store — here, introducing
+    # one the store lacks — is refused by the shared validator BY CONSTRUCTION; the KEK never
+    # reaches the store, exactly as the env editor and profile paths refuse a key-material
+    # change (an unchanged carry would be allowed).
     monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
     reset_all_settings()
     store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})

@@ -141,10 +141,12 @@ async def test_x_band_key_refused(agents_stack: TaiStack, uniq: Callable[[str], 
 
 
 async def test_key_material_key_refused(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    """A profile naming a ``key_material`` field is refused DISTINCTLY from the X-band rule —
-    a key_material field may be ``hot`` (not X-band) yet must never ride a profile; the
-    refusal names the key and points at out-of-band rotation. The probe fixture registers
-    ``E2E_PROBE_SECRET_KEY_MATERIAL`` on every leg so this always has a target."""
+    """A profile that CHANGES a ``key_material`` field is refused DISTINCTLY from the X-band
+    rule — a key_material field may be ``hot`` (not X-band) yet its VALUE must never be
+    rotated through a profile; the refusal names the key and points at out-of-band rotation.
+    (An UNCHANGED carry is allowed — certified at the unit level; here we drive the CHANGE
+    case.) The probe fixture registers ``E2E_PROBE_SECRET_KEY_MATERIAL`` on every leg so this
+    always has a target."""
     api = agents_stack.api()
     schema = await api.get("/api/config/settings-schema")
     key_material_vars = [
@@ -158,11 +160,16 @@ async def test_key_material_key_refused(agents_stack: TaiStack, uniq: Callable[[
     )
     target = key_material_vars[0]
 
+    # A profile round-tripped from the stored env but CHANGING the key-material key to a new
+    # value — the rotation-via-profile the refusal guards against.
+    stored = (await api.get("/api/config/env"))["env"]
+    changed_value = uniq("rotated-kek")
+    assert changed_value != stored.get(target), "the test value must differ from the current stored value"
     name = uniq("profile")
     resp = await api.request_raw(
         "PUT",
         f"/api/config/profiles/{name}",
-        json={"description": "", "env": {target: "should-not-ride"}, "secret_keys": []},
+        json={"description": "", "env": {**stored, target: changed_value}, "secret_keys": []},
     )
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]

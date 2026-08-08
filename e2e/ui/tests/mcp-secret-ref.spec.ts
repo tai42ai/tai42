@@ -58,7 +58,8 @@ async function seedEntry(request: APIRequestContext, title: string, key: string)
 /** Open the MCP tab of the Manifest page and wait for the seeded entry's field. */
 async function openMcpField(page: Page): Promise<void> {
   await page.goto('/manifest');
-  await page.getByRole('tab', { name: 'MCP' }).click();
+  // ``exact`` so the "MCP" tab is not ambiguous with the "Sub-MCP" tab (a substring match).
+  await page.getByRole('tab', { name: 'MCP', exact: true }).click();
   await expect(page.getByTestId(`mcp-secret-0-${ENV_ENTRY}`)).toBeVisible();
 }
 

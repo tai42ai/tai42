@@ -13,12 +13,15 @@ X-band refusal
     ``replace_env``, so refusing the effective env would reject the applier's own
     carry.
 
-Key-material refusal
-    An env write may never NAME a ``key_material`` field (a KEK, a signing/HMAC key).
-    These are ``hot``-class — not X-band — so the X refusal misses them, yet bulk-setting
-    one through a profile would silently invalidate every secret the old key secured.
-    Rotation runs through its own controlled path. Reads the PAYLOAD keys, like the X
-    refusal (the applier legitimately carries the stored key material across ``replace_env``).
+Key-material refusal (CHANGE-aware)
+    An env write may never CHANGE a ``key_material`` field (a KEK, a signing/HMAC key) to a
+    new value. These are ``hot``-class — not X-band — so the X refusal misses them, yet
+    setting one to a new value through a profile / the env editor would silently invalidate
+    every secret the old key secured; rotation runs through its own controlled path. Unlike
+    X-band keys, key material CAN be legitimately PRESENT in the editable store (a stack that
+    provisions a KEK), so — unlike the X refusal — this one compares the payload's value to
+    the current stored value and refuses only a CHANGE: an unchanged carry (a read-modify-
+    write round-trip, or a profile snapshotted from the stored env) is allowed.
 
 Dangling ``!ENV`` refusal
     ``pyaml_env`` resolves a marker whose var is absent to the literal ``"N/A"``
@@ -123,20 +126,29 @@ def key_material_env_keys() -> frozenset[str]:
     )
 
 
-def refuse_key_material(written_keys: Iterable[str]) -> None:
-    """Refuse an env write whose PAYLOAD names a key-material field.
+def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) -> None:
+    """Refuse an env write that CHANGES a key-material field to a new value.
 
-    Key material (a KEK, a signing/HMAC key) is rotated through its own controlled
-    path — re-encrypt / re-sign what the old key secured — never bulk-set through a
-    profile or the env editor, where a careless value silently invalidates every
-    secret the old key protected. Reads the writer's declared payload, never the
-    effective env (a profile apply legitimately carries the stored key material across
-    ``replace_env``). Raises :class:`ValueError` naming every offender and the
-    rotation path (names only) — the operations layer maps it to a 400."""
-    offenders = sorted(set(written_keys) & key_material_env_keys())
+    Key material (a KEK, a signing/HMAC key) is rotated through its own controlled path —
+    re-encrypt / re-sign what the old key secured — never set to a new value through a profile
+    or the env editor, where a careless value silently invalidates every secret the old key
+    protected. But merely CARRYING an unchanged key-material value is harmless — and
+    unavoidable for a read-modify-write round-trip or a profile snapshotted from the stored
+    env — so the refusal is CHANGE-AWARE: a key-material key is refused only when its written
+    value DIFFERS from its ``current`` value (a new value, or a newly introduced key), never
+    when it is carried unchanged.
+
+    ``current`` is the current stored env — the REAL values ``GET /api/config/env`` returns
+    and the editor reads back — so a round-trip that re-sends the same value compares equal
+    and is allowed. (A client that sent a MASKED placeholder for a key-material key would look
+    "changed" and be refused; but every read surface here returns real values, so the
+    read-modify-write contract these editors use holds.) Raises :class:`ValueError` naming
+    every offender and the rotation path (names only) — the operations layer maps it to 400."""
+    key_material = key_material_env_keys()
+    offenders = sorted(key for key, value in written.items() if key in key_material and value != current.get(key))
     if offenders:
         raise ValueError(
-            "Refusing an env write naming key-material keys — rotate these out of band "
+            "Refusing an env write that CHANGES key-material keys — rotate these out of band "
             f"through their own key-rotation path, never through a profile: {', '.join(offenders)}."
         )
 

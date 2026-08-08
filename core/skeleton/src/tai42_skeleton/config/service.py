@@ -444,7 +444,10 @@ class ConfigService:
         backend-needs-bus invariant against the post-change bus configuration (so
         removing the bus while a backend remains is rejected too)."""
         refuse_x_band(changes.keys())
-        refuse_key_material(changes.keys())
+        # Change-aware: refuse a key-material key only when the payload SETS it to a value
+        # different from the current stored value (rotation-via-editor), never an unchanged
+        # carry — the stored env is the real values a read-modify-write round-trip re-sends.
+        refuse_key_material(changes, self._read_stored_env())
         effective = self._effective_env(changes)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
@@ -467,7 +470,9 @@ class ConfigService:
         reference is caught as dangling), validates the resolved projection, and
         evaluates backend-needs-bus against the post-change bus configuration."""
         refuse_x_band(changes.keys())
-        refuse_key_material(changes.keys())
+        # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
+        # signing key is refused, an unchanged carry is allowed.
+        refuse_key_material(changes, self._read_stored_env())
         effective = self._effective_env(changes)
         with _environ(effective):
             refuse_dangling_env_markers(document, effective)
@@ -485,7 +490,10 @@ class ConfigService:
         dangling against the replace-effective env, and evaluates the backend-needs-bus
         invariant against that same env."""
         refuse_x_band(profile_env.keys())
-        refuse_key_material(profile_env.keys())
+        # Change-aware key-material refusal: a profile snapshotted from the stored env carries
+        # the KEK unchanged (allowed); only a profile that would SET key material to a new
+        # value is refused (see :meth:`_validate_env`).
+        refuse_key_material(profile_env, self._read_stored_env())
         effective = self._effective_replace_env(profile_env)
         with _environ(effective):
             preserved = self._read_preserved_manifest()

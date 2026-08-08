@@ -111,10 +111,12 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await createDialog.getByRole('textbox', { name: `Value of variable ${secretKey}` }).fill(secretVal);
   await createDialog.getByRole('checkbox', { name: 'Secret' }).check();
 
-  // Row 2 — the recycle-class key (drives the diff's recycle callout).
+  // Row 2 — the recycle-class key (drives the diff's recycle callout). This key can already
+  // exist in the pre-filled env band, so its value aria-label resolves to two inputs (the
+  // existing row + the empty Add-variable row just created); scope to the NEW row (`.last()`).
   await createDialog.getByRole('button', { name: 'Add variable' }).click();
   await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(RECYCLE_KEY);
-  await createDialog.getByRole('textbox', { name: `Value of variable ${RECYCLE_KEY}` }).fill('5.0');
+  await createDialog.getByRole('textbox', { name: `Value of variable ${RECYCLE_KEY}` }).last().fill('5.0');
 
   await createDialog.getByRole('button', { name: 'Create profile' }).click();
   const row = page.getByTestId(`profile-row-${name}`);
