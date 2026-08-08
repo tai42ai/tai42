@@ -41,7 +41,11 @@ async function saveEnv(page: import('@playwright/test').Page): Promise<void> {
     await page.getByRole('button', { name: 'Save' }).click();
     const response = await posted;
     expect(response.status(), await response.text()).toBe(200);
-  }).toPass({ timeout: 20_000 });
+    // A MULTIWORKER reload cycle (epoch build + swap + the awaited sibling reload) can
+    // exceed 20s under CI load — and the failed-MCP re-probe loop can hold the reload gate
+    // for a probe on top — so the documented retriable 503 can persist past a 20s window.
+    // Give the sanctioned retry a full cycle's room (matching helpers.postConfig's 45s).
+  }).toPass({ timeout: 45_000 });
 }
 
 /** Every env key a test writes to the shared stack. The afterEach net-removes one

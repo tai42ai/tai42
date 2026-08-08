@@ -60,8 +60,11 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   // expect budget.
   await expect(page.getByRole('link', { name: alias })).toBeVisible({ timeout: 30_000 });
 
-  // API: the same connection is present over the same origin.
-  await expect.poll(async () => await connectionAliases(request)).toContain(alias);
+  // API: the same connection is present over the same origin. The connections GET
+  // round-robins across the MULTIWORKER(2) port, so it can land on the sibling worker
+  // whose reload has not yet converged; give the poll the same convergence budget the
+  // UI assertions above use (the global expect budget is too short on CI).
+  await expect.poll(async () => await connectionAliases(request), { timeout: 30_000 }).toContain(alias);
 
   // DISCONNECT from the UI: open the connection, confirm the disconnect dialog.
   await page.getByRole('link', { name: alias }).click();
@@ -77,8 +80,10 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   // worker's reload (MULTIWORKER(2)) — inherently 5-10s server-side, beyond the
   // global 10s expect budget.
   await expect(page.getByRole('link', { name: alias })).toHaveCount(0, { timeout: 30_000 });
-  // API: the connections list no longer carries it.
-  await expect.poll(async () => await connectionAliases(request)).not.toContain(alias);
+  // API: the connections list no longer carries it. Same MULTIWORKER round-robin as the
+  // connect assertion above — the sibling worker's disconnect reload converges within the
+  // convergence budget, not the shorter global expect budget.
+  await expect.poll(async () => await connectionAliases(request), { timeout: 30_000 }).not.toContain(alias);
 });
 
 test('a denied authorization surfaces a loud failure and creates no connection', async ({

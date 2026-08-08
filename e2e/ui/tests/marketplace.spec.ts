@@ -62,6 +62,11 @@ async function confirmDialog(page: Page, title: string, confirmLabel: string): P
 test('browse, install beta via UI, then the API-pinned alpha advisory + update arc', async ({
   page,
 }) => {
+  // This arc drives several REAL pip mutations end to end — an install, an uninstall, and an
+  // update — each a pip subprocess plus this worker's reload AND the awaited sibling reload
+  // (MULTIWORKER(2), 5-10s+ server-side apiece). Their sum exceeds the default 60s test budget
+  // under CI load; budget for the whole real-registry arc rather than a single mutation.
+  test.setTimeout(180_000);
   await seedCredential(page);
 
   // 1. Browse renders the three seeded listings.

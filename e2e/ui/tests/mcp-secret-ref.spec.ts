@@ -105,13 +105,23 @@ async function pasteNewSecret(page: Page, request: APIRequestContext, leaf: stri
   // Target the paste input by its textbox role + exact name (the leaf key): `getByLabel(leaf)`
   // also matches the row's `role=group` wrapper (`aria-label="<leaf> source"`, a substring hit).
   await field.getByRole('textbox', { name: leaf, exact: true }).fill(uniq('pasted-secret'));
-  // Await the combined op's own 200 so the store read below is AFTER the write landed, not mid-op.
-  const secretEnvOk = page.waitForResponse(
-    (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
-  );
-  await field.getByRole('button', { name: 'Use secret' }).click();
-  const res = await secretEnvOk;
-  expect(res.status(), await res.text()).toBe(200);
+  // Fire the combined store-then-mark op, retrying past the reload gate's documented retriable
+  // `503` exactly as `saveMcpConfig`/`postConfig` do. The `waitForReloadSettle` above frees the
+  // gate for THIS op, but a reload can re-acquire it AFTER the settle and before the click — a
+  // fanned-out sibling apply or the failed-MCP re-probe loop, which holds the gate for a probe
+  // while any seeded server (a bare `/bin/true` stub) sits in the failed set. A bare one-shot
+  // assert on that first response leaks the `reloading` body on CI, where the reload window is
+  // wider; re-clicking "Use secret" until a non-`503` lands is the sanctioned handling of the
+  // retriable response (never a sleep). The paste form stays open on a retriable `503`, so the
+  // button is present to re-click; a `200` commits the leaf and ends the retry.
+  await expect(async () => {
+    const posted = page.waitForResponse(
+      (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
+    );
+    await field.getByRole('button', { name: 'Use secret' }).click();
+    const response = await posted;
+    expect(response.status(), await response.text()).toBe(200);
+  }).toPass({ timeout: 45_000 });
   // Drain the op's reload so GET /api/config/env answers 200 (not a mid-reload 503) below.
   await waitForReloadSettle(request);
   // The op generated exactly one new env key (a transiently reduced mid-swap band cannot
@@ -141,7 +151,9 @@ async function saveMcpConfig(page: Page): Promise<void> {
     await page.getByRole('button', { name: 'Save config' }).click();
     const response = await posted;
     expect(response.status(), await response.text()).toBe(200);
-  }).toPass({ timeout: 30_000 });
+    // A MULTIWORKER reload cycle (epoch build + swap) can exceed 20s, and the failed-MCP
+    // re-probe loop can hold the gate for a probe on top; give the retry a full cycle's room.
+  }).toPass({ timeout: 45_000 });
 }
 
 /** The MCP config as it stood before a test seeded it, restored in afterEach; plus
