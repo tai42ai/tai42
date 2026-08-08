@@ -24,7 +24,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
 
-from tai42_skeleton.app.bus import OpOutcome, OriginKind, WorkerBus
+from tai42_skeleton.app.bus import OpOutcome, WorkerBus, WorkerKind
 
 SELF_DEFERRED = "self-deferred"
 """The applier self-entry status in a recycle report: the applying serve worker's own
@@ -33,7 +33,7 @@ so the applier self-entry status never diverges across its readers."""
 
 # Recycle one KIND at a time in this order: a backend replacement must be serving
 # before serve workers roll, so no kind loses every worker at once.
-_KIND_ORDER: tuple[OriginKind, ...] = (OriginKind.backend, OriginKind.serve)
+_KIND_ORDER: tuple[WorkerKind, ...] = (WorkerKind.backend, WorkerKind.serve)
 
 
 class ApplierEntry(BaseModel):
@@ -80,7 +80,7 @@ async def orchestrate_recycle(
     bus: WorkerBus,
     *,
     excluded_origin: str,
-    target_kinds: Sequence[OriginKind],
+    target_kinds: Sequence[WorkerKind],
     applier_self_deferred: bool,
     step_timeout: float,
     poll_interval: float = 0.2,
@@ -102,9 +102,9 @@ async def orchestrate_recycle(
     for kind in _KIND_ORDER:
         if kind not in wanted:
             continue
-        targets = [o.origin for o in await bus.census() if o.kind is kind and o.origin != excluded_origin]
+        targets = [o.name for o in await bus.census() if o.kind is kind and o.name != excluded_origin]
         for target in targets:
-            before = {o.origin for o in await bus.census() if o.kind is kind}
+            before = {o.name for o in await bus.census() if o.kind is kind}
             await _recycle_one(bus, target, report)
             report.recycled.append(target)
             replacement = await _await_replacement(bus, kind, before, target, step_timeout, poll_interval, report)
@@ -118,7 +118,7 @@ async def _recycle_one(bus: WorkerBus, target: str, report: RecycleReport) -> No
     result = await bus.publish({"op": "recycle"}, targets=[target], local=None)
     if not result.reachable:
         raise RecycleError(f"recycle: bus unreachable while recycling {target!r}: {result.error}", report)
-    entry = next((r for r in result.results if r.origin == target), None)
+    entry = next((r for r in result.results if r.name == target), None)
     if entry is None or entry.outcome is not OpOutcome.applied:
         detail = (entry.error or entry.detail) if entry is not None else "no reply from the target"
         raise RecycleError(f"recycle: worker {target!r} did not apply the recycle op ({detail})", report)
@@ -126,7 +126,7 @@ async def _recycle_one(bus: WorkerBus, target: str, report: RecycleReport) -> No
 
 async def _await_replacement(
     bus: WorkerBus,
-    kind: OriginKind,
+    kind: WorkerKind,
     before: set[str],
     target: str,
     step_timeout: float,
@@ -140,7 +140,7 @@ async def _await_replacement(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + step_timeout
     while True:
-        fresh = sorted(o.origin for o in await bus.census() if o.kind is kind and o.origin not in before)
+        fresh = sorted(o.name for o in await bus.census() if o.kind is kind and o.name not in before)
         if fresh:
             return fresh[0]
         if loop.time() >= deadline:

@@ -73,7 +73,7 @@ async def test_reload_config_targeted_to_remote_skips_local(monkeypatch: pytest.
 
     assert admin.calls == 0  # self not targeted → no local reload
     assert bus.publish_calls == [({"op": "reload_config"}, ["serve-w1"], None)]
-    assert {r["origin"] for r in result["results"]} == {"serve-w1"}
+    assert {r["name"] for r in result["results"]} == {"serve-w1"}
 
 
 async def test_reload_config_local_failure_still_broadcasts_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:

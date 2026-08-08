@@ -94,7 +94,7 @@ class BusSettings(TaiBaseSettings):
 
     @property
     def presence_prefix(self) -> str:
-        """Prefix for the per-origin presence keys the census scans."""
+        """Prefix for the per-name presence keys the census scans."""
         return f"{self.namespace}:bus:presence:"
 
     @property
@@ -102,9 +102,27 @@ class BusSettings(TaiBaseSettings):
         """Glob the census scans to enumerate live presence keys."""
         return f"{self.presence_prefix}*"
 
-    def presence_key(self, origin: str) -> str:
-        """The presence key for one origin id."""
-        return f"{self.presence_prefix}{origin}"
+    def presence_key(self, name: str) -> str:
+        """The presence key for one worker slot name."""
+        return f"{self.presence_prefix}{name}"
+
+    @property
+    def slot_prefix(self) -> str:
+        """Prefix for the per-name slot-claim keys (``SET NX`` at claim time)."""
+        return f"{self.namespace}:bus:slot:"
+
+    def slot_key(self, name: str) -> str:
+        """The claim key a worker wins to hold the slot ``name``."""
+        return f"{self.slot_prefix}{name}"
+
+    @property
+    def gen_prefix(self) -> str:
+        """Prefix for the per-name generation counters (``INCR`` at claim time)."""
+        return f"{self.namespace}:bus:gen:"
+
+    def gen_key(self, name: str) -> str:
+        """The monotonic generation counter for the slot ``name``."""
+        return f"{self.gen_prefix}{name}"
 
 
 @settings_cache

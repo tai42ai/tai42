@@ -455,9 +455,9 @@ class ConfigService:
         # (design seam 1: neither the recycle report nor the name-only census carries kind).
         bus = cast("WorkerBus", self._bus)
         origins = await bus.census()
-        census = frozenset(origin.origin for origin in origins)
-        origin_kinds = {origin.origin: origin.kind.value for origin in origins}
-        self_origin = bus.origin.origin
+        census = frozenset(origin.name for origin in origins)
+        origin_kinds = {origin.name: origin.kind.value for origin in origins}
+        self_origin = bus.identity.name
 
         # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
         # BEFORE the swap. A later failed build leaves it harmlessly reflecting the

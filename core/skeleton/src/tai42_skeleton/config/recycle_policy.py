@@ -28,7 +28,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from tai42_skeleton.app.bus import OriginKind
+from tai42_skeleton.app.bus import WorkerKind
 
 SUPERVISION_MARKER_ENV = "TAI_SUPERVISED"
 
@@ -120,8 +120,8 @@ TIER2_COMPOSE_REFUSED_KEYS: frozenset[str] = frozenset(
 # X-band refusal, enforced at EVERY env writer.
 X_CLASSIFIED_DEPLOYMENT_BARE_READS: frozenset[str] = frozenset({SUPERVISION_MARKER_ENV, "TAI_READY_SENTINEL_PATH"})
 
-# The origin kinds the recycle orchestrator censuses as recycle targets.
-CENSUS_TARGET_KINDS: tuple[OriginKind, ...] = (OriginKind.backend, OriginKind.serve)
+# The worker kinds the recycle orchestrator censuses as recycle targets.
+CENSUS_TARGET_KINDS: tuple[WorkerKind, ...] = (WorkerKind.backend, WorkerKind.serve)
 
 
 class Shape(StrEnum):
@@ -143,7 +143,7 @@ class CapabilityReport(BaseModel):
     shape: Shape
     recycle_supported: bool
     refused_keys: list[str] = Field(default_factory=list)
-    census_kinds: list[OriginKind] = Field(default_factory=list)
+    census_kinds: list[WorkerKind] = Field(default_factory=list)
 
 
 def detect_shape() -> Shape:

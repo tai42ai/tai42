@@ -15,7 +15,7 @@ from typing import cast
 import pytest
 
 import tai42_skeleton.app.graceful_exit as graceful_exit
-from tai42_skeleton.app.bus import OriginKind
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.graceful_exit import (
     graceful_exit_for,
     request_backend_graceful_exit,
@@ -42,10 +42,10 @@ def test_backend_primitive_self_delivers_sigterm(kill_recorder: list[tuple[int, 
 
 
 def test_dispatch_by_kind() -> None:
-    assert graceful_exit_for(OriginKind.serve) is request_serve_graceful_exit
-    assert graceful_exit_for(OriginKind.backend) is request_backend_graceful_exit
+    assert graceful_exit_for(WorkerKind.serve) is request_serve_graceful_exit
+    assert graceful_exit_for(WorkerKind.backend) is request_backend_graceful_exit
 
 
 def test_dispatch_rejects_an_unknown_kind() -> None:
     with pytest.raises(ValueError, match="graceful-exit primitive"):
-        graceful_exit_for(cast("OriginKind", "metrics"))
+        graceful_exit_for(cast("WorkerKind", "metrics"))

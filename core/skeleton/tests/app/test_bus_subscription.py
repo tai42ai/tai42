@@ -1,8 +1,8 @@
 """The app-owned worker-bus subscription seam in ``lifecycle.py``.
 
 The lifecycle joins ONE long-lived worker-bus subscription per process, built once
-and never rejoined: ``app_context`` builds the bus (``serve``/``backend`` origin kind or
-the no-op local variant), subscribes with ``_apply_bus_op`` as the callback and
+and never rejoined: ``app_context`` builds the bus (``serve``/``backend`` ``WorkerKind``
+or the no-op local variant), subscribes with ``_apply_bus_op`` as the callback and
 ``_resync_on_ready`` as the on-ready self-resync, and cancels it at shutdown.
 
 * ``_apply_bus_op`` dispatches an op to its local admin primitive AND fires the
@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.app.bus import OriginKind, WorkerBus
+from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.manifest import Manifest
@@ -55,10 +55,12 @@ def test_build_bus_is_local_without_a_redis_url(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
     reset_all_settings()
     m = _Mixin()
-    bus = m._build_bus(OriginKind.serve)
+    bus = m._build_bus(WorkerKind.serve)
     assert isinstance(bus, WorkerBus)
     assert bus._local is True
-    assert bus.origin.kind is OriginKind.serve
+    # The busless variant self-mints its identity at construction.
+    assert bus.identity.kind is WorkerKind.serve
+    assert bus.identity.name == "serve-1"
 
 
 def test_build_bus_is_real_with_a_redis_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,9 +70,10 @@ def test_build_bus_is_real_with_a_redis_url(monkeypatch: pytest.MonkeyPatch) -> 
     reset_all_settings()
     try:
         m = _Mixin()
-        bus = m._build_bus(OriginKind.backend)
+        bus = m._build_bus(WorkerKind.backend)
         assert bus._local is False
-        assert bus.origin.kind is OriginKind.backend
+        # A real bus mints name+generation at claim time; its kind is fixed at build.
+        assert bus._kind is WorkerKind.backend
     finally:
         reset_all_settings()
 

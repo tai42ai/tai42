@@ -262,7 +262,7 @@ async def test_reload_tool_targeted_to_remote_skips_local_apply(monkeypatch: pyt
     assert admin.reload_calls == []
     assert bus.validate_calls == [["serve-w1"]]
     assert bus.publish_calls == [({"op": "reload_tool", "kind": "flow", "name": "f1"}, ["serve-w1"], None)]
-    assert {r["origin"]: r["outcome"] for r in result["results"]} == {"serve-w1": "applied"}
+    assert {r["name"]: r["outcome"] for r in result["results"]} == {"serve-w1": "applied"}
 
 
 async def test_reload_tool_unknown_target_raises_before_apply(monkeypatch: pytest.MonkeyPatch) -> None:

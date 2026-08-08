@@ -526,7 +526,7 @@ def test_post_apply_fans_out_over_the_worker_bus(cfg, monkeypatch):
             assert data["status"] == "ok"  # the local reload result rides the top level
             assert data["fanout"]["mode"] == "fleet"
             assert data["fanout"]["op"] == "reload_config"
-            origins = {r["origin"] for r in data["fanout"]["results"]}
+            origins = {r["name"] for r in data["fanout"]["results"]}
             assert origins == {"serve-x", "serve-w1"}
             # The reload was broadcast to the whole fleet (targets None).
             assert bus.publish_calls[0][1] is None

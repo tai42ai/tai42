@@ -102,7 +102,7 @@ async def test_workers_lists_census(install):
     install(bus=FakeBus(origin="serve-a", remotes=["backend-b"]))
     resp = await router.list_workers(_req())
     assert resp.status_code == 200
-    origins = {w["origin"] for w in _json(resp)["data"]["workers"]}
+    origins = {w["name"] for w in _json(resp)["data"]["workers"]}
     assert origins == {"serve-a", "backend-b"}
 
 
@@ -111,7 +111,7 @@ async def test_workers_no_backend_still_lists(install):
     install(backend=None, bus=FakeBus(origin="serve-solo"))
     resp = await router.list_workers(_req())
     assert resp.status_code == 200
-    assert [w["origin"] for w in _json(resp)["data"]["workers"]] == ["serve-solo"]
+    assert [w["name"] for w in _json(resp)["data"]["workers"]] == ["serve-solo"]
 
 
 async def test_workers_census_failure_propagates(install):
@@ -136,7 +136,7 @@ async def test_reload_happy_all_workers(install):
     assert data["op"] == "reload_config"
     # The serving worker applied its own reload first (its self entry).
     assert admin.reload_calls == 1
-    assert data["results"][0]["origin"] == "serve-a"
+    assert data["results"][0]["name"] == "serve-a"
     assert data["results"][0]["outcome"] == "applied"
 
 
@@ -148,7 +148,7 @@ async def test_reload_targets_a_named_worker(install):
     data = _json(resp)["data"]
     # Targets exclude the serving worker → it does not reload itself.
     assert admin.reload_calls == 0
-    assert {r["origin"] for r in data["results"]} == {"backend-b"}
+    assert {r["name"] for r in data["results"]} == {"backend-b"}
 
 
 async def test_reload_bad_json_400(install):

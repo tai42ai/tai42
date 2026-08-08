@@ -9,7 +9,7 @@ from tai42_kit.logging import logging_settings, setup_logging
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
-from tai42_skeleton.app.bus import OriginKind
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
@@ -70,7 +70,7 @@ async def run_backend(extra_args):
     # ``launch`` — on the worker path and the non-worker (beat/flower-style) path
     # alike. Importing the plugin module outside the context would hit the
     # unbound handle and crash.
-    async with app.app_context(manifest=manifest, origin_kind=OriginKind.backend):
+    async with app.app_context(manifest=manifest, kind=WorkerKind.backend):
         await app.run_backend(extra_args)
 
 

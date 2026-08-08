@@ -26,7 +26,15 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetOrigin, FleetResult, OpOutcome, OriginKind, OriginResult
+from tai42_skeleton.app.bus import (
+    FleetResult,
+    OpOutcome,
+    WorkerIdentity,
+    WorkerKind,
+    WorkerResult,
+    WorkerRow,
+    WorkerState,
+)
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
@@ -1599,17 +1607,27 @@ class _RecordingBus:
         self.ops: list[tuple[str, str, str]] = []
         self.fail = False
         self.non_converged = False
-        self._origin = FleetOrigin(origin="serve-test", kind=OriginKind.serve, pid=1)
+        self._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
+        now = "2026-01-01T00:00:00+00:00"
+        self._row = WorkerRow(
+            name="serve-1",
+            kind=WorkerKind.serve,
+            pid=1,
+            generation=1,
+            joined_at=now,
+            beat_at=now,
+            state=WorkerState.ready,
+        )
 
     @property
-    def origin(self) -> FleetOrigin:
-        return self._origin
+    def identity(self) -> WorkerIdentity:
+        return self._identity
 
-    async def subscribe(self, origin: Any, callback: Any, on_ready: Any = None) -> None:
+    async def subscribe(self, callback: Any, on_ready: Any = None) -> None:
         await asyncio.Event().wait()
 
-    async def census(self) -> list[FleetOrigin]:
-        return [self._origin]
+    async def census(self) -> list[WorkerRow]:
+        return [self._row]
 
     async def validate_targets(self, targets: Any) -> None:
         return None
@@ -1630,13 +1648,13 @@ class _RecordingBus:
             return FleetResult(
                 op=name,
                 results=[
-                    OriginResult(origin=self._origin.origin, outcome=OpOutcome.applied),
-                    OriginResult(origin="gh-2", outcome=OpOutcome.missing),
+                    WorkerResult(name=self._identity.name, outcome=OpOutcome.applied),
+                    WorkerResult(name="gh-2", outcome=OpOutcome.missing),
                 ],
             )
         # Mirror the real bus: a converged report (self entry applied), so the
         # publisher's non-convergence check is a no-op.
-        return FleetResult(op=name, results=[OriginResult(origin=self._origin.origin, outcome=OpOutcome.applied)])
+        return FleetResult(op=name, results=[WorkerResult(name=self._identity.name, outcome=OpOutcome.applied)])
 
 
 @pytest.fixture
@@ -1644,7 +1662,7 @@ def backend(monkeypatch) -> _RecordingBus:
     """Install a recording fake worker bus on the app so the routes' fan-out is
     observable; monkeypatch restores the real bus builder after the test."""
     fake = _RecordingBus()
-    monkeypatch.setattr(instance.app, "_build_bus", lambda origin_kind: fake)
+    monkeypatch.setattr(instance.app, "_build_bus", lambda kind: fake)
     return fake
 
 
@@ -1805,7 +1823,7 @@ def test_create_non_converged_fanout_logs_loud_error(pg, emit, backend, caplog):
         asyncio.run(run())
 
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert any("did not fully converge — unconfirmed origins" in r.getMessage() for r in errors)
+    assert any("did not fully converge — unconfirmed workers" in r.getMessage() for r in errors)
     assert any("gh-2" in r.getMessage() for r in errors)
 
 
@@ -1823,7 +1841,7 @@ def test_delete_non_converged_fanout_logs_loud_error(pg, emit, backend, caplog):
         asyncio.run(run())
 
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert any("did not fully converge — unconfirmed origins" in r.getMessage() for r in errors)
+    assert any("did not fully converge — unconfirmed workers" in r.getMessage() for r in errors)
 
 
 # -- preset tool-reloader (backend-bus dispatch target) ----------------------

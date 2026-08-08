@@ -3,46 +3,82 @@
 Op-level oracle tests drive the operations directly with a faked ``tai42_app`` impl.
 :class:`FakeBus` is the bus half of that fake: it records every ``publish`` /
 ``validate_targets`` call and returns a :class:`FleetResult` built from the caller's
-own ``local`` self entry plus one ``applied`` entry per configured remote origin —
-so a publisher's per-origin response can be asserted without a real Redis.
+own ``local`` self entry plus one ``applied`` entry per configured remote worker —
+so a publisher's per-worker response can be asserted without a real Redis.
 ``validate_targets`` reproduces the census-membership raise so the
 validate-before-apply order is exercised.
+
+``census`` (and the ``rows`` accessor) synthesizes full :class:`WorkerRow` rows
+(identity fields + presence value) with a SETTABLE per-row PTTL, so a test can drive
+fresh/decayed rows through the real :func:`~tai42_skeleton.app.bus.presence_fresh`
+predicate; the fake carries a ``ttl`` alongside the rows rather than mimicking the
+freshness bound itself. Only these census/rows consumers honor freshness: ``publish``
+returns every configured remote unconditionally, never consulting ``pttl_ms``/state.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from tai42_skeleton.app.bus import (
-    FleetOrigin,
     FleetResult,
     LocalApplyResult,
     OpOutcome,
-    OriginKind,
-    OriginResult,
     UnknownFleetTargetsError,
+    WorkerIdentity,
+    WorkerKind,
+    WorkerResult,
+    WorkerRow,
+    WorkerState,
 )
+
+
+def _row(name: str, kind: WorkerKind, *, pid: int, generation: int, pttl_ms: int) -> WorkerRow:
+    now = datetime.now(UTC).isoformat()
+    return WorkerRow(
+        name=name,
+        kind=kind,
+        pid=pid,
+        generation=generation,
+        joined_at=now,
+        beat_at=now,
+        state=WorkerState.ready,
+        last_op=None,
+        pttl_ms=pttl_ms,
+    )
 
 
 class FakeBus:
     def __init__(self, *, origin: str = "serve-test", remotes: list[str] | None = None) -> None:
-        self._origin = FleetOrigin(origin=origin, kind=OriginKind.serve, pid=1)
-        self._remotes = [FleetOrigin(origin=o, kind=OriginKind.serve, pid=2) for o in (remotes or [])]
+        # A heartbeat TTL the census rows are fresh against; a test can set a row's
+        # ``pttl_ms`` low to drive the real ``presence_fresh`` gate to decayed.
+        self.ttl = 15.0
+        fresh = int(self.ttl * 1000)
+        self._identity = WorkerIdentity(name=origin, kind=WorkerKind.serve, pid=1, generation=1)
+        self._self_row = _row(origin, WorkerKind.serve, pid=1, generation=1, pttl_ms=fresh)
+        self._remote_rows = [_row(o, WorkerKind.serve, pid=2, generation=1, pttl_ms=fresh) for o in (remotes or [])]
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
         self.validate_calls: list[list[str] | None] = []
 
     @property
-    def origin(self) -> FleetOrigin:
-        return self._origin
+    def identity(self) -> WorkerIdentity:
+        return self._identity
 
-    async def census(self) -> list[FleetOrigin]:
-        return [self._origin, *self._remotes]
+    @property
+    def rows(self) -> list[WorkerRow]:
+        """The census rows (self + remotes); mutate a row's ``pttl_ms`` to drive the
+        freshness gate."""
+        return [self._self_row, *self._remote_rows]
+
+    async def census(self) -> list[WorkerRow]:
+        return [self._self_row, *self._remote_rows]
 
     async def validate_targets(self, targets: list[str] | None) -> None:
         self.validate_calls.append(targets)
         if targets is None:
             return
-        known = {self._origin.origin, *(o.origin for o in self._remotes)}
+        known = {self._identity.name, *(row.name for row in self._remote_rows)}
         unknown = sorted(set(targets) - known)
         if unknown:
             raise UnknownFleetTargetsError(f"worker bus: unknown fleet targets (not on the census): {unknown}")
@@ -54,16 +90,16 @@ class FakeBus:
         local: LocalApplyResult | None,
     ) -> FleetResult:
         self.publish_calls.append((op, targets, local))
-        results: list[OriginResult] = []
+        results: list[WorkerResult] = []
         if local is not None:
             results.append(
-                OriginResult(
-                    origin=self._origin.origin, outcome=local.outcome, payload=local.payload, error=local.error
-                )
+                WorkerResult(name=self._identity.name, outcome=local.outcome, payload=local.payload, error=local.error)
             )
         reached = (
-            [o.origin for o in self._remotes] if targets is None else [t for t in targets if t != self._origin.origin]
+            [row.name for row in self._remote_rows]
+            if targets is None
+            else [t for t in targets if t != self._identity.name]
         )
-        for origin in reached:
-            results.append(OriginResult(origin=origin, outcome=OpOutcome.applied))
+        for name in reached:
+            results.append(WorkerResult(name=name, outcome=OpOutcome.applied))
         return FleetResult(op=op["op"], results=results)

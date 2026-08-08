@@ -15,7 +15,7 @@ import os
 import signal
 from collections.abc import Callable
 
-from tai42_skeleton.app.bus import OriginKind
+from tai42_skeleton.app.bus import WorkerKind
 
 
 def _deliver_self_sigterm() -> None:
@@ -38,12 +38,12 @@ def request_backend_graceful_exit() -> None:
     _deliver_self_sigterm()
 
 
-def graceful_exit_for(kind: OriginKind) -> Callable[[], None]:
-    """The graceful self-exit primitive for an origin kind. The recycle handler arms
+def graceful_exit_for(kind: WorkerKind) -> Callable[[], None]:
+    """The graceful self-exit primitive for a worker kind. The recycle handler arms
     the returned callable on the bus's post-reply slot, so it fires only after the
     terminal reply ships."""
-    if kind is OriginKind.serve:
+    if kind is WorkerKind.serve:
         return request_serve_graceful_exit
-    if kind is OriginKind.backend:
+    if kind is WorkerKind.backend:
         return request_backend_graceful_exit
-    raise ValueError(f"no graceful-exit primitive for origin kind {kind!r}")
+    raise ValueError(f"no graceful-exit primitive for worker kind {kind!r}")

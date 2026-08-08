@@ -258,7 +258,7 @@ async def test_list_failed_mcps_targeted_to_remote_skips_local(monkeypatch: pyte
 
     assert admin.calls == []  # self not targeted → no local read
     assert bus.publish_calls == [({"op": "list_failed_mcps"}, ["serve-w1"], None)]
-    assert {r["origin"] for r in result["results"]} == {"serve-w1"}
+    assert {r["name"] for r in result["results"]} == {"serve-w1"}
 
 
 # -- reload_mcp ---------
@@ -295,7 +295,7 @@ async def test_reload_mcp_targeted_to_remote_skips_local(monkeypatch: pytest.Mon
 
     assert admin.calls == []  # self not targeted → no local re-probe
     assert bus.publish_calls == [({"op": "reload_mcp", "title": "svc"}, ["serve-w1"], None)]
-    assert {r["origin"] for r in result["results"]} == {"serve-w1"}
+    assert {r["name"] for r in result["results"]} == {"serve-w1"}
 
 
 async def test_reload_mcp_unknown_title_404(monkeypatch: pytest.MonkeyPatch) -> None:

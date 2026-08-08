@@ -513,5 +513,5 @@ async def test_reload_mcp_route_targeting_self(fake_full):
     resp = await router.reload_mcp(_req({"targets": ["serve-x"]}, title="gh"))
     assert resp.status_code == 200
     data = _data(resp)["data"]
-    assert data["results"][0]["origin"] == "serve-x"
+    assert data["results"][0]["name"] == "serve-x"
     assert data["results"][0]["payload"] == {"title": "gh", "status": "ok"}

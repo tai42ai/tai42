@@ -30,7 +30,7 @@ from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, OriginResult
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
 from tai42_skeleton.config.secret_seal import ResolvedSecretError
 from tai42_skeleton.config.service import ConfigService, OrphanEnvWriteError
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, apply_response
@@ -128,7 +128,7 @@ class RecordingBus:
         error: str | None = None,
         publish_error: Exception | None = None,
     ) -> None:
-        self.origin = "serve-test"
+        self.identity = WorkerIdentity(name="serve-test", kind=WorkerKind.serve, pid=1, generation=1)
         self._remotes = remotes or []
         self._remote_outcome = remote_outcome
         self._reachable = reachable
@@ -144,13 +144,13 @@ class RecordingBus:
             raise self._publish_error
         if not self._reachable:
             return FleetResult(op=op["op"], reachable=False, error=self._error)
-        results: list[OriginResult] = []
+        results: list[WorkerResult] = []
         if local is not None:
             results.append(
-                OriginResult(origin=self.origin, outcome=local.outcome, payload=local.payload, error=local.error)
+                WorkerResult(name=self.identity.name, outcome=local.outcome, payload=local.payload, error=local.error)
             )
         for remote in self._remotes:
-            results.append(OriginResult(origin=remote, outcome=self._remote_outcome, detail="crafted"))
+            results.append(WorkerResult(name=remote, outcome=self._remote_outcome, detail="crafted"))
         return FleetResult(op=op["op"], results=results)
 
 
@@ -225,7 +225,7 @@ async def test_apply_result_fanout_is_the_apply_response_summary(monkeypatch: py
 
     assert result.fanout == apply_response(result)["fanout"]
     assert result.fanout["mode"] == "fleet"
-    assert {r["origin"] for r in result.fanout["results"]} == {"serve-test", "serve-w1"}
+    assert {r["name"] for r in result.fanout["results"]} == {"serve-test", "serve-w1"}
 
 
 async def test_apply_change_invalid_manifest_raises_with_nothing_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,7 +729,7 @@ async def test_unconfirmed_origin_logs_error_but_returns_success(
     # Persist + local reload landed, so the call SUCCEEDS; the unconfirmed origin is a
     # loud ERROR log and an explicit non-applied entry in the report.
     assert result.fleet.ok is False
-    assert {r.origin: r.outcome for r in result.fleet.results}["serve-w1"] == OpOutcome.missing
+    assert {r.name: r.outcome for r in result.fleet.results}["serve-w1"] == OpOutcome.missing
     assert any(record.levelno == logging.ERROR for record in caplog.records)
     assert any("did not fully converge" in record.message for record in caplog.records)
 

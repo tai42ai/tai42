@@ -9,11 +9,12 @@ applier), the loud timeout, and the names-only invariant.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, cast
 
 import pytest
 
-from tai42_skeleton.app.bus import FleetOrigin, FleetResult, OpOutcome, OriginKind, OriginResult, WorkerBus, make_origin
+from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerBus, WorkerKind, WorkerResult, WorkerRow, WorkerState
 from tai42_skeleton.app.recycle import (
     SELF_DEFERRED,
     RecycleError,
@@ -22,14 +23,24 @@ from tai42_skeleton.app.recycle import (
     orchestrate_recycle,
 )
 
+_NOW = "2026-01-01T00:00:00+00:00"
+
+
+def _worker(name: str, kind: WorkerKind) -> WorkerRow:
+    return WorkerRow(name=name, kind=kind, pid=1, generation=1, joined_at=_NOW, beat_at=_NOW, state=WorkerState.ready)
+
+
+def _fresh_name(kind: WorkerKind) -> str:
+    return f"{kind.value}-{uuid.uuid4().hex}"
+
 
 class _FakeBus:
     """Scripted census + publish. A successful recycle retires the target and joins a
-    fresh same-kind origin; the ``*_fault`` knobs drive the loud-failure paths."""
+    fresh same-kind worker; the ``*_fault`` knobs drive the loud-failure paths."""
 
     def __init__(
         self,
-        origins: list[FleetOrigin],
+        origins: list[WorkerRow],
         *,
         join_replacement: bool = True,
         target_outcome: OpOutcome = OpOutcome.applied,
@@ -43,7 +54,7 @@ class _FakeBus:
         self._reachable = reachable
         self._empty_results = empty_results
 
-    async def census(self) -> list[FleetOrigin]:
+    async def census(self) -> list[WorkerRow]:
         return list(self._origins)
 
     async def publish(self, op: dict[str, Any], targets: list[str] | None, local: Any) -> FleetResult:
@@ -54,24 +65,23 @@ class _FakeBus:
             return FleetResult(op=op["op"], reachable=False, error="bus unreachable")
         if self._empty_results:
             return FleetResult(op=op["op"], results=[])
-        old = next((o for o in self._origins if o.origin == target), None)
+        old = next((o for o in self._origins if o.name == target), None)
         if self._join_replacement and old is not None and self._target_outcome is OpOutcome.applied:
-            self._origins = [o for o in self._origins if o.origin != target]
-            self._origins.append(make_origin(old.kind))
-        return FleetResult(op=op["op"], results=[OriginResult(origin=target, outcome=self._target_outcome)])
+            self._origins = [o for o in self._origins if o.name != target]
+            self._origins.append(_worker(_fresh_name(old.kind), old.kind))
+        return FleetResult(op=op["op"], results=[WorkerResult(name=target, outcome=self._target_outcome)])
 
 
 def _bus(fake: _FakeBus) -> WorkerBus:
     return cast("WorkerBus", fake)
 
 
-def _origins(**counts: int) -> dict[str, FleetOrigin]:
-    made: dict[str, FleetOrigin] = {}
+def _origins(**counts: int) -> dict[str, WorkerRow]:
+    made: dict[str, WorkerRow] = {}
     for kind_name, n in counts.items():
-        kind = OriginKind(kind_name)
+        kind = WorkerKind(kind_name)
         for i in range(n):
-            origin = make_origin(kind)
-            made[f"{kind_name}{i}"] = origin
+            made[f"{kind_name}{i}"] = _worker(_fresh_name(kind), kind)
     return made
 
 
@@ -80,13 +90,13 @@ def _origins(**counts: int) -> dict[str, FleetOrigin]:
 
 async def test_rolls_each_kind_and_records_the_report() -> None:
     o = _origins(backend=2, serve=1)
-    applier = o["serve0"].origin
+    applier = o["serve0"].name
     fake = _FakeBus(list(o.values()))
 
     report = await orchestrate_recycle(
         _bus(fake),
         excluded_origin=applier,
-        target_kinds=[OriginKind.backend, OriginKind.serve],
+        target_kinds=[WorkerKind.backend, WorkerKind.serve],
         applier_self_deferred=True,
         step_timeout=1.0,
         poll_interval=0.001,
@@ -94,7 +104,7 @@ async def test_rolls_each_kind_and_records_the_report() -> None:
 
     # Both backend workers recycled one at a time; the only serve origin is the
     # excluded applier, so serve rolls nobody.
-    assert report.recycled == [o["backend0"].origin, o["backend1"].origin]
+    assert report.recycled == [o["backend0"].name, o["backend1"].name]
     assert len(report.replacements) == 2
     assert all(name.startswith("backend-") for name in report.replacements)
     assert report.timeouts == []
@@ -105,8 +115,8 @@ async def test_rolls_each_kind_and_records_the_report() -> None:
     assert applier not in report.recycled
     # One recycle op per retired worker, each targeted to exactly that origin.
     assert fake.published == [
-        ("recycle", (o["backend0"].origin,)),
-        ("recycle", (o["backend1"].origin,)),
+        ("recycle", (o["backend0"].name,)),
+        ("recycle", (o["backend1"].name,)),
     ]
 
 
@@ -116,33 +126,33 @@ async def test_backend_only_diff_produces_no_applier_entry() -> None:
 
     report = await orchestrate_recycle(
         _bus(fake),
-        excluded_origin=o["serve0"].origin,
-        target_kinds=[OriginKind.backend],
+        excluded_origin=o["serve0"].name,
+        target_kinds=[WorkerKind.backend],
         applier_self_deferred=False,
         step_timeout=1.0,
         poll_interval=0.001,
     )
 
-    assert report.recycled == [o["backend0"].origin]
+    assert report.recycled == [o["backend0"].name]
     assert len(report.replacements) == 1
     assert report.applier is None
 
 
 async def test_the_excluded_applier_is_never_targeted_even_within_its_kind() -> None:
     o = _origins(serve=2)
-    applier = o["serve0"].origin
+    applier = o["serve0"].name
     fake = _FakeBus(list(o.values()))
 
     report = await orchestrate_recycle(
         _bus(fake),
         excluded_origin=applier,
-        target_kinds=[OriginKind.serve],
+        target_kinds=[WorkerKind.serve],
         applier_self_deferred=True,
         step_timeout=1.0,
         poll_interval=0.001,
     )
 
-    assert report.recycled == [o["serve1"].origin]
+    assert report.recycled == [o["serve1"].name]
     assert applier not in report.recycled
     assert all(target != (applier,) for _op, target in fake.published)
 
@@ -152,8 +162,8 @@ async def test_report_carries_names_only() -> None:
     fake = _FakeBus(list(o.values()))
     report = await orchestrate_recycle(
         _bus(fake),
-        excluded_origin=o["serve0"].origin,
-        target_kinds=[OriginKind.backend],
+        excluded_origin=o["serve0"].name,
+        target_kinds=[WorkerKind.backend],
         applier_self_deferred=True,
         step_timeout=1.0,
         poll_interval=0.001,
@@ -177,19 +187,19 @@ async def test_a_replacement_that_never_joins_raises_and_names_the_origin() -> N
         await orchestrate_recycle(
             _bus(fake),
             excluded_origin="serve-applier",
-            target_kinds=[OriginKind.backend],
+            target_kinds=[WorkerKind.backend],
             applier_self_deferred=False,
             step_timeout=0.05,
             poll_interval=0.01,
         )
 
     err = excinfo.value
-    assert err.origin == o["backend0"].origin
-    assert o["backend0"].origin in str(err)
+    assert err.origin == o["backend0"].name
+    assert o["backend0"].name in str(err)
     # The partial report rides the error: the worker was recycled, then timed out.
     assert isinstance(err.report, RecycleReport)
-    assert err.report.recycled == [o["backend0"].origin]
-    assert err.report.timeouts == [o["backend0"].origin]
+    assert err.report.recycled == [o["backend0"].name]
+    assert err.report.timeouts == [o["backend0"].name]
 
 
 async def test_a_recycle_op_that_does_not_apply_raises() -> None:
@@ -200,14 +210,14 @@ async def test_a_recycle_op_that_does_not_apply_raises() -> None:
         await orchestrate_recycle(
             _bus(fake),
             excluded_origin="serve-applier",
-            target_kinds=[OriginKind.backend],
+            target_kinds=[WorkerKind.backend],
             applier_self_deferred=False,
             step_timeout=1.0,
             poll_interval=0.01,
         )
     # Raised BEFORE recording the origin as recycled (the op never applied).
     assert excinfo.value.report.recycled == []
-    assert o["backend0"].origin in str(excinfo.value)
+    assert o["backend0"].name in str(excinfo.value)
 
 
 async def test_a_reply_naming_no_target_origin_raises() -> None:
@@ -218,7 +228,7 @@ async def test_a_reply_naming_no_target_origin_raises() -> None:
         await orchestrate_recycle(
             _bus(fake),
             excluded_origin="serve-applier",
-            target_kinds=[OriginKind.backend],
+            target_kinds=[WorkerKind.backend],
             applier_self_deferred=False,
             step_timeout=1.0,
             poll_interval=0.01,
@@ -233,7 +243,7 @@ async def test_an_unreachable_bus_raises() -> None:
         await orchestrate_recycle(
             _bus(fake),
             excluded_origin="serve-applier",
-            target_kinds=[OriginKind.backend],
+            target_kinds=[WorkerKind.backend],
             applier_self_deferred=False,
             step_timeout=1.0,
             poll_interval=0.01,

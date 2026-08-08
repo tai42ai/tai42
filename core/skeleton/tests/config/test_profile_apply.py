@@ -25,7 +25,7 @@ import pytest
 import tai42_skeleton.app.bus_settings  # noqa: F401
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetOrigin, FleetResult, OriginKind
+from tai42_skeleton.app.bus import FleetResult, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
@@ -367,9 +367,20 @@ def test_profile_apply_response_omits_applier_when_not_serve_affecting() -> None
 
 
 def test_origin_kind_map_covers_fleet() -> None:
-    """A serve/backend census populates the origin->kind map the response reads."""
+    """A serve/backend census populates the name->kind map the response reads."""
+    now = "2026-01-01T00:00:00+00:00"
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
-    origins = [FleetOrigin(origin="backend-x", kind=OriginKind.backend, pid=9)]
-    # Sanity: FleetOrigin carries a kind the response's recycle[].kind is filled from.
-    assert origins[0].kind is OriginKind.backend
-    assert bus.origin.kind is OriginKind.serve
+    origins = [
+        WorkerRow(
+            name="backend-1",
+            kind=WorkerKind.backend,
+            pid=9,
+            generation=1,
+            joined_at=now,
+            beat_at=now,
+            state=WorkerState.ready,
+        )
+    ]
+    # Sanity: a census row carries a kind the response's recycle[].kind is filled from.
+    assert origins[0].kind is WorkerKind.backend
+    assert bus.identity.kind is WorkerKind.serve

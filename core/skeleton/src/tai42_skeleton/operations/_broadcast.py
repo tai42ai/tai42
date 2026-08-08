@@ -49,7 +49,7 @@ def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:
     """
     if not fleet.reachable:
         return {"mode": "unreachable", **fleet.model_dump(mode="json")}
-    remotes = [result for result in fleet.results if result.origin != instance.app.bus.origin.origin]
+    remotes = [result for result in fleet.results if result.name != instance.app.bus.identity.name]
     if not remotes:
         return {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"}
     return {"mode": "fleet", **fleet.model_dump(mode="json")}
@@ -113,8 +113,8 @@ def log_non_convergence(report: FleetResult) -> None:
     the store-backed helpers that publish directly) so the message stays identical."""
     if not (report.reachable and not report.ok):
         return
-    unconfirmed = [(r.origin, r.outcome.value) for r in report.results if r.outcome != OpOutcome.applied]
-    logger.error("worker bus: op %r did not fully converge — unconfirmed origins: %s", report.op, unconfirmed)
+    unconfirmed = [(r.name, r.outcome.value) for r in report.results if r.outcome != OpOutcome.applied]
+    logger.error("worker bus: op %r did not fully converge — unconfirmed workers: %s", report.op, unconfirmed)
 
 
 async def broadcast(
@@ -132,7 +132,7 @@ async def broadcast(
     :class:`~tai42_skeleton.app.bus.FleetResult` as a JSON-ready dict.
     """
     bus = instance.app.bus
-    self_targeted = targets is None or bus.origin.origin in targets
+    self_targeted = targets is None or bus.identity.name in targets
     # Validate the whole target set against the census BEFORE any local side effect,
     # so a typo'd worker name is a loud error and never a silent narrowing. A name
     # absent from the census is a caller mistake, surfaced as a 400 (never a bare 500).

@@ -618,7 +618,7 @@ def test_epoch_handlers_dedup_and_preserve_order() -> None:
 async def test_capture_census_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Origin:
         def __init__(self, origin: str) -> None:
-            self.origin = origin
+            self.name = origin
 
     class _Bus:
         async def census(self):

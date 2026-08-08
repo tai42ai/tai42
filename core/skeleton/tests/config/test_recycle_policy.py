@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from tai42_skeleton.app.bus import OriginKind
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.config.recycle_policy import (
     CENSUS_TARGET_KINDS,
     TIER1_REFUSED_KEYS,
@@ -133,7 +133,7 @@ def test_compose_tier2_enumerates_the_anchor_verbatim() -> None:
 
 
 def test_census_target_kinds_are_backend_then_serve() -> None:
-    assert (OriginKind.backend, OriginKind.serve) == CENSUS_TARGET_KINDS
+    assert (WorkerKind.backend, WorkerKind.serve) == CENSUS_TARGET_KINDS
 
 
 # -- X-classification of the deployment-infra bare reads ----------------------

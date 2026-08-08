@@ -23,7 +23,7 @@ from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
-from tai42_skeleton.app.bus import OriginKind, WorkerBus, make_origin
+from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none, is_epoch_rebuild_in_progress
 from tai42_skeleton.app.graceful_exit import graceful_exit_for
@@ -365,7 +365,7 @@ class TaiMCPLifecycleMixin(ABC):
         await self._run_handlers(list(self._post_swap_handlers.values()), raise_on_error=raise_on_error)
 
     @asynccontextmanager
-    async def app_context(self, manifest: Manifest, *, origin_kind: OriginKind = OriginKind.serve):
+    async def app_context(self, manifest: Manifest, *, kind: WorkerKind = WorkerKind.serve):
         # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
         # cross: a process with a registered backend, or a k8s-mode deployment, must
         # have the worker bus configured — otherwise sibling workers or sibling pods
@@ -404,7 +404,7 @@ class TaiMCPLifecycleMixin(ABC):
             # ``serve`` or ``backend``) and open its single long-lived subscription.
             # The subscription registers presence and self-resyncs (reload_config)
             # through on_ready on every (re)connect.
-            self._bus = self._build_bus(origin_kind)
+            self._bus = self._build_bus(kind)
             self._spawn_bus_subscription()
             # Start the failed-MCP re-probe task so a server that failed its boot
             # probe self-heals on an exponential backoff without a manual reload.
@@ -440,16 +440,16 @@ class TaiMCPLifecycleMixin(ABC):
             raise RuntimeError("the worker bus is not built — enter app_context first")
         return bus
 
-    def _build_bus(self, origin_kind: OriginKind) -> WorkerBus:
+    def _build_bus(self, kind: WorkerKind) -> WorkerBus:
         """Construct this process's one worker bus. With ``TAI_BUS_REDIS_URL`` set the
-        real bus joins the fleet; otherwise the no-op ``WorkerBus.local`` variant —
-        legal only under the boot rules that permit a busless deployment (single
-        worker, file mode, no backend)."""
-        origin = make_origin(origin_kind)
+        real bus joins the fleet (its slot name + generation minted on the first claim
+        at subscribe time); otherwise the no-op ``WorkerBus.local`` variant — legal
+        only under the boot rules that permit a busless deployment (single worker, file
+        mode, no backend)."""
         settings = bus_settings()
         if settings.enabled:
-            return WorkerBus(settings, origin)
-        return WorkerBus.local(origin)
+            return WorkerBus(settings, kind=kind)
+        return WorkerBus.local(kind)
 
     def _spawn_bus_subscription(self) -> None:
         """Start the one long-lived bus subscription on the serving loop. Owned by
@@ -460,7 +460,7 @@ class TaiMCPLifecycleMixin(ABC):
         if bus is None:
             raise RuntimeError("bus subscription spawned before the bus was built")
         self._bus_subscription_task = asyncio.create_task(
-            bus.subscribe(bus.origin, self._apply_bus_op, on_ready=self._resync_on_ready),
+            bus.subscribe(self._apply_bus_op, on_ready=self._resync_on_ready),
             name="tai-worker-bus-subscription",
         )
         self._bus_subscription_task.add_done_callback(self._on_perpetual_task_done)
@@ -590,18 +590,22 @@ class TaiMCPLifecycleMixin(ABC):
             # Bare list, matching the self-apply shape — see reload_failed_mcps above.
             return tai42_app.admin.list_failed_mcps()
         if op_name == "recycle":
-            return self._apply_recycle()
+            return await self._apply_recycle()
         raise ValueError(f"unknown fleet op {op_name!r}")
 
-    def _apply_recycle(self) -> dict[str, Any]:
-        """Apply a targeted recycle op: arm the bus's single-shot post-terminal-reply
-        slot with this process's graceful self-exit, then return the applied payload.
+    async def _apply_recycle(self) -> dict[str, Any]:
+        """Apply a targeted recycle op: write ``state=recycling`` into presence, arm
+        the bus's single-shot post-terminal-reply slot with this process's graceful
+        self-exit, then return the applied payload.
 
-        The exit fires only AFTER the terminal ``applied`` reply ships, so the
-        orchestrator records a successful recycle before this process departs.
-        Scheduling the exit here (e.g. ``create_task``) would race that reply. The
-        payload names the graceful-exit kind only — never an env value."""
-        kind = self.bus.origin.kind
+        The recycling state is written BEFORE arming the self-SIGTERM — the only viable
+        seam, since the graceful-exit callable is sync and a ``create_task`` there would
+        race the SIGTERM — so the census shows WHY this worker is departing. The exit
+        fires only AFTER the terminal ``applied`` reply ships, so the orchestrator
+        records a successful recycle before this process departs. The payload names the
+        graceful-exit kind only — never an env value."""
+        kind = self.bus.identity.kind
+        await self.bus.mark_recycling()
         self.bus.arm_post_reply(graceful_exit_for(kind))
         return {"recycling": kind.value}
 

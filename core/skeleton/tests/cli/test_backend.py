@@ -80,14 +80,14 @@ class _FakeApp:
         # children that inherit the resolved manifest, so the launcher must publish it
         # BEFORE the context opens (start() imports the backend module inside it).
         self.manifest_env_at_entry: str | None = None
-        # The origin kind the launcher joined the worker bus under: a backend runtime
+        # The worker kind the launcher joined the worker bus under: a backend runtime
         # subscribes as ``backend``, not ``serve``.
-        self.origin_kind_at_entry = None
+        self.kind_at_entry = None
 
     @asynccontextmanager
-    async def app_context(self, manifest, *, origin_kind=None):
+    async def app_context(self, manifest, *, kind=None):
         self.context_entered = True
-        self.origin_kind_at_entry = origin_kind
+        self.kind_at_entry = kind
         settings = backend.base_backend_settings()
         self.manifest_env_at_entry = os.environ.get(settings.manifest_key)
         yield
@@ -119,7 +119,7 @@ def fake_app(monkeypatch: pytest.MonkeyPatch) -> _FakeApp:
 async def test_run_backend_non_worker_enters_context_as_backend_origin(
     fake_app: _FakeApp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tai42_skeleton.app.bus import OriginKind
+    from tai42_skeleton.app.bus import WorkerKind
 
     settings = backend.base_backend_settings()
     monkeypatch.delenv(settings.manifest_key, raising=False)
@@ -131,7 +131,7 @@ async def test_run_backend_non_worker_enters_context_as_backend_origin(
 
     assert fake_app.context_entered is True
     assert fake_app.run_backend_args == [["beat"]]
-    assert fake_app.origin_kind_at_entry is OriginKind.backend
+    assert fake_app.kind_at_entry is WorkerKind.backend
     assert fake_app.manifest_env_at_entry is None
     assert settings.manifest_key not in os.environ
 
@@ -378,7 +378,7 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
             self.lifecycle = _FakeLifecycle()
 
         @asynccontextmanager
-        async def app_context(self, manifest, *, origin_kind=None):
+        async def app_context(self, manifest, *, kind=None):
             try:
                 yield
             finally:

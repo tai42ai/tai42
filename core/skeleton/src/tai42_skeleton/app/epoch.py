@@ -341,7 +341,7 @@ async def capture_census_snapshot() -> frozenset[str]:
     from tai42_skeleton.app import instance
 
     origins = await instance.app.bus.census()
-    return frozenset(o.origin for o in origins)
+    return frozenset(o.name for o in origins)
 
 
 @register_settings_reset
