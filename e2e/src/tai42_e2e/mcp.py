@@ -84,6 +84,14 @@ class McpClient:
     def _new_client(self) -> Client:
         return Client(self._url, auth=self._auth) if self._auth is not None else Client(self._url)
 
+    @property
+    def session_id(self) -> str | None:
+        """The current streamable-http session id (the ``mcp-session-id`` the server minted
+        for this session), or ``None`` before the initialize handshake completes. It CHANGES
+        when a D13a epoch swap retires the session and this client transparently
+        re-initialises a fresh one — the direct, observable signal of the session break."""
+        return self._client.transport.get_session_id()
+
     async def __aenter__(self) -> McpClient:
         await self._client.__aenter__()
         return self

@@ -31,6 +31,14 @@ _EXPECTED: list[tuple[str, str, str]] = [
     ("POST", "/api/config/env", "fenced"),
     ("POST", "/api/config/reload", "fenced"),
     ("POST", "/api/manifest/replace", "fenced"),
+    # The settings-profile doors: a list is a plain read; a body/version/diff read exposes
+    # REAL secret values (the ``secret`` fence); a save / apply mutates the deployment (the
+    # ``fenced`` mutation).
+    ("GET", "/api/config/profiles", "read"),
+    ("GET", "/api/config/profiles/{name}", "secret"),
+    ("POST", "/api/config/profiles/{name}/diff", "secret"),
+    ("PUT", "/api/config/profiles/{name}", "fenced"),
+    ("POST", "/api/config/profiles/{name}/apply", "fenced"),
     ("GET", "/api/auth/roles", "secret"),
     ("GET", "/api/config/env", "secret"),
     ("GET", "/api/config/settings-schema", "secret"),

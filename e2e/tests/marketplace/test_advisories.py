@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _market_support import uninstall_and_assert_clean, wait_tool_live
+from _market_support import MarketInstaller, uninstall_and_assert_clean, wait_tool_live
 
 from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, MarketplaceService
 from tai42_e2e.stack import TaiStack
@@ -21,20 +21,31 @@ pytestmark = pytest.mark.backendless
 
 _TOOL = "e2e_market_probe"
 
+# The install POST runs pip install + a heavier PLAN_2 build_and_swap reload; at the
+# interleaved full-suite loaded tail it completes but exceeds the 60s default client read
+# timeout, so this ONE slow install path is given a defensible ceiling (not a global slacken).
+_INSTALL_TIMEOUT = 180.0
+
 
 async def _skeleton_summaries(stack: TaiStack) -> set[str]:
     snapshot = await stack.api().get("/api/marketplace/advisories")
     return {row["summary"] for row in snapshot["advisories"]}
 
 
+# 300s: the install POST's own read timeout is raised to 180s, so the default 120s test
+# budget would be too tight if that call ran near its ceiling under interleaved load.
+@pytest.mark.timeout(300)
 async def test_advisory_propagates_and_withdraws(
-    marketplace_service: MarketplaceService, marketplace_stack: TaiStack, uniq: Callable[[str], str]
+    marketplace_service: MarketplaceService,
+    marketplace_stack: TaiStack,
+    uniq: Callable[[str], str],
+    market_installer: MarketInstaller,
 ) -> None:
     mp = marketplace_service
     stack = marketplace_stack
     summary = uniq("advisory")
 
-    await stack.api().post("/api/marketplace/install", json={"ref": ALPHA_REF, "version": "0.1.0"})
+    await market_installer.install(stack, ALPHA_REF, ALPHA_PACKAGE, version="0.1.0", timeout=_INSTALL_TIMEOUT)
     await wait_tool_live(stack, _TOOL, dist_version="0.1.0")
 
     created = await mp.api.post(

@@ -92,6 +92,9 @@ def _probe_tools_entry(
         # Branch the record-then-block probe so the worker-crash spec can start a run
         # observably in-flight in the worker, SIGKILL it, and read a bounded terminal.
         extensions["e2e_slow_task"] = [["sync_task"]]
+        # Branch the drain probe (started → sleep → done) so the recycle-drain spec can read
+        # whether an in-flight backend job DRAINED to completion across a recycle.
+        extensions["e2e_drain_probe"] = [["sync_task"]]
         # Universal backend-execution door: run_tool_sync_task runs any registered tool
         # by name inside the backend worker. Its base is the FIXTURE ``run_tool`` dispatch
         # tool (the skeleton ``run_tool`` op is a tier-1 meta-executor blocked from the MCP
@@ -472,6 +475,51 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
         run_backend=True,
         run_metrics=True,
         auth=False,
+    )
+
+
+def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """SUPERVISED MULTIWORKER(1) + backend — the settings-profile RECYCLE leg.
+
+    One serve worker (the applier) plus one backend runtime on the bus, carrying the
+    skeleton component store (profiles) and the sync-task probe branch (an observably
+    in-flight backend job). ``supervised=True`` stamps ``TAI_SUPERVISED=harness`` into every
+    child (a recycle-supported shape) and runs the harness respawn-on-exit supervisor, so a
+    recycle self-exit (the applier's own deferred exit AND each orchestrated sibling) is
+    re-launched and rejoins the census under a fresh origin.
+
+    ``BACKEND_MANIFEST_KEY`` / ``BACKEND_TOOL_NAME_ARG`` are the recycle-class fields the flip
+    test diffs (``reload_class="recycle"``, not in any refused tier on the ``harness`` shape).
+    The recycle step budget is widened so a real worker RESPAWN boot fits inside the per-step
+    census wait ``orchestrate_recycle`` allows the replacement."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "backend_module": variants.backend.module,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=True),
+            *_builtin_entries(),
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    # A recycled worker's replacement must boot + rejoin the census within the recycle
+    # orchestrator's per-step budget (``shutdown_drain_seconds``); a fresh process boot is far
+    # slower than the 10s default, so widen it for this leg.
+    env["TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS"] = "90"
+    return StackConfig(
+        name="recycle",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=True,
+        run_metrics=False,
+        auth=False,
+        supervised=True,
     )
 
 

@@ -15,6 +15,7 @@ blocks) live here too, shared by the CLI-parity and compat specs.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.metadata
 import json
@@ -86,6 +87,37 @@ async def wait_tool_absent(stack: TaiStack, tool_name: str, *, deadline: float =
             return tool_name not in await mcp.tool_names()
 
     await wait_for_async(absent, deadline=deadline, message=f"tool {tool_name!r} never disappeared after uninstall")
+
+
+class MarketInstaller:
+    """Abort-safe install ledger for one test: every install it performs is uninstalled in
+    the fixture's teardown even if the test body raises before its own clean-tail. It is
+    belt-and-suspenders, NOT the tripwire — the session ``_venv_state_guard`` still asserts
+    the venv is clean at session edges, so a leak this net misses is still caught loudly."""
+
+    def __init__(self) -> None:
+        self._installed: list[tuple[TaiStack, str, str]] = []
+
+    async def install(
+        self, stack: TaiStack, ref: str, package: str, *, version: str | None = None, timeout: float | None = None
+    ) -> None:
+        body: dict[str, str] = {"ref": ref}
+        if version is not None:
+            body["version"] = version
+        await stack.api().post("/api/marketplace/install", json=body, timeout=timeout)
+        self._installed.append((stack, ref, package))
+
+    async def acleanup(self) -> None:
+        # Reverse order, best-effort: a teardown must never mask the body's own exception,
+        # and a distribution the test already uninstalled (its clean-tail ran) is skipped.
+        importlib.invalidate_caches()
+        for stack, ref, package in reversed(self._installed):
+            try:
+                importlib.metadata.distribution(package)
+            except importlib.metadata.PackageNotFoundError:
+                continue
+            with contextlib.suppress(Exception):
+                await stack.api().post("/api/marketplace/uninstall", json={"ref": ref})
 
 
 def distribution_absent(package: str) -> bool:

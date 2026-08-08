@@ -20,6 +20,7 @@ import contextlib
 import enum
 import shutil
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -271,6 +272,13 @@ class StackConfig:
     # of the ``tai serve`` fleet. One app process, in-process metrics mode; a
     # backend worker still joins the app-owned worker bus.
     embed: bool = False
+    # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=harness`` into every child's env
+    # (so the SUT resolves a recycle-supported shape, ``recycle_policy.detect_shape``) AND
+    # run a respawn-on-exit supervisor that re-launches a serve/backend process the instant
+    # it self-exits — the external supervisor a graceful recycle self-exit assumes (the
+    # applier's own deferred self-exit and each orchestrated sibling recycle). Off by default
+    # (bare): a recycle-class profile apply is then refused at the API, which is itself a test.
+    supervised: bool = False
     # Per-process CWD overrides, keyed by process name (the shared-dir test launches
     # the three kinds from three different working directories).
     cwd_overrides: dict[str, str] = field(default_factory=dict)
@@ -359,6 +367,12 @@ class TaiStack:
         self.metrics_dir: str = ""
         self._config_dir = root / "config"
         self._logs_dir = root / "logs"
+        # Respawn-on-exit supervisor (opt-in ``config.supervised``). Serialises every
+        # ``_procs``/``_specs`` mutation the supervisor and teardown/restart race on.
+        self._supervisor_lock = threading.RLock()
+        self._supervisor_stop = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
+        self._supervised_names: set[str] = set()
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -408,11 +422,19 @@ class TaiStack:
 
         self._spawn_all(manifest_path, family_dirs)
         self._wait_ready()
+        # Only after the fleet is ready: a supervised stack now respawns any serve/backend
+        # process that self-exits (a recycle). Before readiness, an early exit is a boot
+        # failure surfaced by ``_early_exit_detail``, never a recycle — so the supervisor
+        # must not start until boot has converged.
+        self._start_supervisor()
 
     def teardown(self) -> None:
         if getattr(self, "_torn_down", False):
             return
         self._torn_down = True
+        # Stop the respawn supervisor FIRST and wait for any in-flight respawn to finish, so
+        # it never re-launches a process this teardown is about to reap (a leak).
+        self._stop_supervisor()
         errors: list[str] = []
         # Stop every process group (SIGTERM -> SIGKILL) and assert reaped.
         for handle in list(self._procs.values()):
@@ -502,6 +524,12 @@ class TaiStack:
         # The worker bus env lands LAST so its mandatory URL + namespace win; the bus
         # TIMING knobs are pinned through config.env, which this never touches.
         env.update(self._bus_env())
+        # The supervision marker is a PROCESS-env-only shape signal (never written to
+        # ``.env``): it is X-band, so a profile may not carry it, and keeping it out of the
+        # store means a profile built from the stored env never trips the X-band refusal —
+        # yet ``detect_shape`` reads it off ``os.environ`` on every (re)spawned child.
+        if self.config.supervised:
+            env["TAI_SUPERVISED"] = "harness"
         if "PROMETHEUS_MULTIPROC_DIR" in env:
             raise RuntimeError(
                 "the harness must never set PROMETHEUS_MULTIPROC_DIR in a child env; "
@@ -751,8 +779,13 @@ class TaiStack:
         # unstable across subscription re-homes, so "a new backend-kind origin" could
         # in general be a surviving worker that merely re-keyed — but with exactly one
         # backend worker in play, the only backend origin that can appear outside the
-        # pre-restart set is the restarted process. Do not reuse this against a
-        # multi-backend fleet without revisiting that assumption.
+        # pre-restart set is the restarted process.
+        #
+        # For a fleet with MULTIPLE new backend origins (a per-kind rolling recycle across a
+        # multi-backend supervised fleet), use :meth:`wait_new_origin` with an explicit
+        # ``count`` and the pre-recycle origin snapshot as ``before`` — the generalized
+        # census wait that keys on N genuinely-new origins of a kind rather than "any new
+        # one", so it does not pass on a single re-key when several replacements are due.
         def probe() -> bool:
             early = self._early_exit_detail()
             if early is not None:
@@ -864,6 +897,11 @@ class TaiStack:
     def restart(self, name: str) -> None:
         """Stop and respawn one process from its saved spec (component-restart
         tests). The new process re-enters readiness for its own port kind."""
+        if self.config.supervised:
+            # The respawn-on-exit supervisor would observe the terminated handle and
+            # double-spawn a second replacement — a supervised stack recycles through the
+            # supervisor (a graceful self-exit), never a manual restart.
+            raise RuntimeError(f"restart({name!r}) is unsupported on a supervised stack; recycle via the supervisor")
         handle = self._procs[name]
         # The backend worker joins no port — its readiness keys on a ``backend``-kind
         # census origin. The dying worker's presence key lingers until its heartbeat
@@ -894,6 +932,10 @@ class TaiStack:
     def kill(self, name: str) -> None:
         """SIGKILL one process immediately without respawning (dead-worker
         tests); its presence key lingers until the heartbeat TTL expires."""
+        if self.config.supervised:
+            # The supervisor would respawn the killed process, defeating the dead-worker
+            # scenario — a supervised stack must not be manually killed.
+            raise RuntimeError(f"kill({name!r}) is unsupported on a supervised stack; the supervisor would respawn it")
         self._procs[name].kill_now()
 
     def attach_relay(self, relay: TcpRelay) -> None:
@@ -923,6 +965,87 @@ class TaiStack:
             self._wait_http_ok(f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
         elif name == "backend":
             self._wait_backend_census(deadline, exclude=before_backends)
+
+    # ---- respawn-on-exit supervisor (opt-in supervised shape) ------------
+
+    def _start_supervisor(self) -> None:
+        """Start the respawn-on-exit supervisor once the fleet is ready. Only the
+        recyclable kinds (serve + backend) are watched — metrics is not a recycle
+        target and joins no bus census."""
+        if not self.config.supervised:
+            return
+        with self._supervisor_lock:
+            self._supervised_names = {name for name in self._procs if name.startswith("serve") or name == "backend"}
+        self._supervisor_thread = threading.Thread(
+            target=self._supervisor_loop, name=f"tai-e2e-supervisor-{self.config.name}", daemon=True
+        )
+        self._supervisor_thread.start()
+
+    def _stop_supervisor(self) -> None:
+        """Stop the supervisor and wait for any in-flight respawn to finish, so teardown
+        never races a re-launch. Idempotent."""
+        self._supervisor_stop.set()
+        thread = self._supervisor_thread
+        if thread is not None:
+            thread.join(timeout=30.0)
+            self._supervisor_thread = None
+
+    def _supervisor_loop(self) -> None:
+        while not self._supervisor_stop.wait(0.2):
+            with self._supervisor_lock:
+                if self._supervisor_stop.is_set():
+                    return
+                for name in list(self._supervised_names):
+                    handle = self._procs.get(name)
+                    if handle is not None and handle.poll() is not None:
+                        self._respawn_supervised(name)
+
+    def _respawn_supervised(self, name: str) -> None:
+        """Re-launch a self-exited supervised process from its saved spec — the external
+        supervisor a graceful recycle self-exit assumes. The caller holds
+        ``_supervisor_lock``. Reaps the exited handle, waits for its port to free, then
+        respawns; the replacement rejoins the bus census under a FRESH origin (new pid)."""
+        old = self._procs.get(name)
+        if old is not None:
+            with contextlib.suppress(Exception):
+                old.terminate()
+        for port in self._ports_for(name):
+            with contextlib.suppress(TimeoutError):
+                wait_for(lambda p=port: ports.is_free(p), deadline=15.0, message=f"port {port} never freed for respawn")
+        self._spawn(self._specs[name])
+
+    def wait_new_origin(
+        self, kind: str, before: set[str] | frozenset[str], *, count: int = 1, deadline: float = 90.0
+    ) -> set[str]:
+        """Wait until at least ``count`` NEW ``kind`` origins (absent from ``before``) are on
+        the bus census, then return the full set of new origins. The recycle assertions use
+        it to confirm a recycled/self-exited worker's REPLACEMENT rejoined under a fresh
+        identity (the old origin's presence key lingers until its heartbeat TTL, so keying on
+        a genuinely new origin is what proves the respawn, not the corpse)."""
+        before_set = set(before)
+
+        def probe() -> bool:
+            early = self._early_exit_detail_supervised()
+            if early is not None:
+                raise RuntimeError(f"census wait: {early}")
+            current = {origin.origin for origin in self.census() if origin.kind == kind}
+            return len(current - before_set) >= count
+
+        wait_for(probe, deadline=deadline, message=f"{count} new {kind!r} origin(s) never joined the census")
+        return {origin.origin for origin in self.census() if origin.kind == kind} - before_set
+
+    def _early_exit_detail_supervised(self) -> str | None:
+        """Like ``_early_exit_detail`` but tolerant of the supervised churn: a serve/backend
+        handle momentarily exited is being respawned by the supervisor, not a failure. Only a
+        NON-supervised process that exited (or a supervised one with no respawn thread) is a
+        real early exit worth surfacing."""
+        with self._supervisor_lock:
+            for handle in self._procs.values():
+                if handle.name in self._supervised_names:
+                    continue
+                if not handle.is_running():
+                    return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
+        return None
 
     # ---- config rendering ------------------------------------------------
 

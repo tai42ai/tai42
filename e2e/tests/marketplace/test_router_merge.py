@@ -3,27 +3,31 @@ with ``TAI_E2E_MARKETPLACE=1``.
 
 Installing a plugin that provides a ``router`` (and a ``middleware``) proves README
 D2 + D4 compose: the loader owns the SPA catch-all's last position, and the merge
-inserts the plugin's router BEFORE it. The served ASGI route table is a boot-time
-snapshot, so the deliverable is PERSIST + activate-on-restart — NOT a hot route:
+inserts the plugin's router BEFORE it. Post-PLAN_2 the serving surface is rebuilt fresh
+PER EPOCH — ``epoch._default_build_serving_app`` builds a fresh ``http_app`` off the
+reloaded core each swap, so its route table (including a reload-added router) is
+snapshotted anew and actually serves (``lifecycle._reload_config``: "a reload-added
+router serves after the swap"). So an install reload HOT-LOADS the router — it serves 200
+immediately, no restart — and this test asserts that landed contract:
 
-* After install (no restart): the persisted manifest CONTAINS the plugin's router
-  module immediately before ``tai42_skeleton.routers.plugins`` (and its middleware in
-  ``middlewares_modules``), but ``GET /api/e2e-epsilon/ping`` is STILL 404 in the
-  running process (a mere reload does not hot-load a new router — asserting non-404
-  here would be testing the deferred hot-load feature, which is out of scope).
-* After a RESTART on the now-persisted manifest: the route is LIVE and answers the
-  epsilon marker — reachable because it precedes the catch-all, not shadowed behind
-  it — and the middleware's response header is present.
-* Uninstall + restart reverts: the module leaves the manifest (catch-all still last)
-  and the route 404s again; the venv guard confirms the distribution is gone.
+* After install (no restart): the persisted manifest CONTAINS the plugin's router module
+  immediately before ``tai42_skeleton.routers.plugins`` (and its middleware in
+  ``middlewares_modules``), AND ``GET /api/e2e-epsilon/ping`` answers 200 in the running
+  process — reachable because it precedes the catch-all, not shadowed behind it — with the
+  merged middleware's response header present. No restart needed.
+* A subsequent RESTART re-boots on the now-persisted manifest and STILL serves the route.
+* Uninstall HOT-UNLOADS: its reload rebuilds the serving surface WITHOUT the module, so the
+  route 404s again with no restart, the module leaves the manifest (catch-all still last),
+  and the venv guard confirms the distribution is gone.
 """
 
 from __future__ import annotations
 
 import pytest
 import yaml
-from _market_support import distribution_absent
+from _market_support import MarketInstaller, distribution_absent
 
+from tai42_e2e import wait_for_async
 from tai42_e2e.marketplace import (
     EPSILON_PACKAGE,
     EPSILON_REF,
@@ -55,11 +59,23 @@ async def _ping_status(stack: TaiStack) -> int:
     return resp.status_code
 
 
-async def test_router_and_middleware_merge_persist_then_restart(
+async def _wait_ping(stack: TaiStack, expected: int) -> None:
+    """Poll ``GET /api/e2e-epsilon/ping`` until it reaches ``expected`` — the hot
+    load/unload lands the instant the swap completes, but a bounded wait absorbs any
+    reload-tail scheduling; a genuine miss still fails at the deadline."""
+
+    async def reached() -> bool:
+        return await _ping_status(stack) == expected
+
+    await wait_for_async(reached, deadline=15.0, message=f"{_PING} never reached status {expected}")
+
+
+async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     marketplace_service: MarketplaceService,
     package_index: FixturePackageIndex,
     fixture_artifacts: FixtureArtifacts,
     router_merge_stack: TaiStack,
+    market_installer: MarketInstaller,
 ) -> None:
     stack = router_merge_stack
 
@@ -71,9 +87,10 @@ async def test_router_and_middleware_merge_persist_then_restart(
     assert await _ping_status(stack) == 404
     assert distribution_absent(EPSILON_PACKAGE)
 
-    await stack.api().post("/api/marketplace/install", json={"ref": EPSILON_REF, "version": "0.1.0"})
+    # Install through the abort-safe ledger so a mid-body failure still uninstalls.
+    await market_installer.install(stack, EPSILON_REF, EPSILON_PACKAGE, version="0.1.0")
 
-    # (a) PERSISTED before the SPA catch-all — the primary assertion. No restart yet.
+    # (a) PERSISTED before the SPA catch-all.
     manifest = _persisted_manifest(stack)
     routers = manifest.get("routers_modules") or []
     middlewares = manifest.get("middlewares_modules") or []
@@ -83,27 +100,33 @@ async def test_router_and_middleware_merge_persist_then_restart(
         f"router module is not immediately before the SPA catch-all: {routers}"
     )
     assert _MIDDLEWARE_MODULE in middlewares, f"middleware module not persisted into middlewares_modules: {middlewares}"
-    # A mere install reload does NOT make a new router path live in the running
-    # process — the route table is a boot-time snapshot.
-    assert await _ping_status(stack) == 404
 
-    # (b) After a RESTART the route is LIVE, ordered before the catch-all, and the
-    # merged middleware is active.
-    stack.restart("serve")
+    # (b) HOT-LOADED (no restart): the install reload built a fresh serving surface, so the
+    # merged router serves 200 immediately — ahead of the catch-all — and the merged
+    # middleware's header is present.
+    await _wait_ping(stack, 200)
     resp = await stack.api().request_raw("GET", _PING)
-    assert resp.status_code != 404, f"route still dark after restart: {resp.status_code}; body {resp.text}"
+    assert resp.status_code == 200, f"router did not hot-load after install: {resp.status_code}; body {resp.text}"
     body = resp.json()
     assert body["data"]["epsilon"] == "pong", f"epsilon handler did not answer (catch-all shadowed it?): {body}"
+    assert resp.headers.get("x-e2e-epsilon") == "1", "the merged middleware's response header is absent after install"
+
+    # (c) A RESTART re-boots on the persisted manifest and STILL serves the route + header.
+    stack.restart("serve")
+    resp = await stack.api().request_raw("GET", _PING)
+    assert resp.status_code == 200, (
+        f"route dark after restart on the persisted manifest: {resp.status_code}; {resp.text}"
+    )
+    assert resp.json()["data"]["epsilon"] == "pong", "epsilon handler did not answer after restart"
     assert resp.headers.get("x-e2e-epsilon") == "1", "the merged middleware's response header is absent after restart"
 
-    # Uninstall removes the module from the persisted manifest (catch-all still last);
-    # after a restart the route 404s again and the venv is clean.
+    # Uninstall HOT-UNLOADS: the reload rebuilds the surface without the module, so the
+    # route 404s again with no restart, the module leaves the manifest (catch-all still
+    # last), and the distribution is gone from the venv.
     await stack.api().post("/api/marketplace/uninstall", json={"ref": EPSILON_REF})
+    await _wait_ping(stack, 404)
     after = _persisted_manifest(stack)
     routers_after = after.get("routers_modules") or []
     assert _ROUTER_MODULE not in routers_after, f"router module lingered after uninstall: {routers_after}"
     assert routers_after[-1] == _SPA_CATCH_ALL, f"SPA catch-all is no longer last after uninstall: {routers_after}"
-
-    stack.restart("serve")
-    assert await _ping_status(stack) == 404
     assert distribution_absent(EPSILON_PACKAGE)

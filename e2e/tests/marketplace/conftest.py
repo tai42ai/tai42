@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from _market_support import MarketInstaller
 
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
@@ -132,6 +133,20 @@ def _pip_preflight() -> None:
             "installer shells out to `sys.executable -m pip`, which relies on tai42-skeleton's `pip>=25` runtime "
             f"dependency. Restore that dependency rather than adding pip to tai42-e2e.\n{proc.stdout}\n{proc.stderr}"
         )
+
+
+@pytest.fixture
+def market_installer() -> Iterator[MarketInstaller]:
+    """Per-test install ledger whose teardown uninstalls every install even on a mid-body
+    failure — so an aborted spec never leaves a fixture distribution in the shared venv to
+    cascade into the next module (or trip the session venv guard)."""
+    installer = MarketInstaller()
+    try:
+        yield installer
+    finally:
+        # A fresh loop: the test's own event loop is already closed at fixture teardown,
+        # and each ApiClient call opens a short-lived, loop-unbound connection.
+        asyncio.run(installer.acleanup())
 
 
 @pytest.fixture(scope="session")

@@ -13,7 +13,8 @@ import socket
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
-from tai42_kit.clients import RedisConnectionSettings
+from tai42_kit.clients import RedisConnectionSettings, current_client_epoch
+from tai42_kit.settings import KeyMaterial, TaiBaseSettings
 
 
 class _E2eProbeRedisSettings(RedisConnectionSettings):
@@ -21,6 +22,19 @@ class _E2eProbeRedisSettings(RedisConnectionSettings):
     0) via ``E2E_PROBE_REDIS_URL``."""
 
     model_config = SettingsConfigDict(env_prefix="E2E_PROBE_")
+
+
+class E2eProbeSecretSettings(TaiBaseSettings):
+    """A registered ``key_material`` field the settings-profile door suite drives the
+    key_material refusal against on every leg (this module ships in every stack's
+    ``tools:`` entry). It is ``hot`` (the class default) and thus NOT X-band, so a
+    profile naming ``E2E_PROBE_SECRET_KEY_MATERIAL`` exercises the DISTINCT key_material
+    refusal rather than the X-band one. Unset by default — no stack sets it, so it never
+    enters a stored-env payload."""
+
+    model_config = SettingsConfigDict(env_prefix="E2E_PROBE_SECRET_")
+
+    key_material: KeyMaterial | None = None
 
 
 @tai42_app.tools.tool(tags={"e2e"})
@@ -62,6 +76,93 @@ async def e2e_worker_info() -> dict:
         "multiproc_dir_env": os.environ.get("PROMETHEUS_MULTIPROC_DIR"),
         "socket_class": f"{socket.socket.__module__}.{socket.socket.__qualname__}",
         "state_digest": state_digest,
+    }
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_settings_snapshot() -> dict:
+    """Report this process's live settings-epoch posture — the observable the profile
+    flip test reads to certify a hot config apply converged with no leak.
+
+    Walks ``registered_settings()`` and resolves each field's EFFECTIVE value from the
+    live process env (the precedence a freshly-constructed singleton reads under — a
+    reset cache re-reads it), masking ``secret`` / ``key_material`` fields (value ``None``,
+    only a ``set`` flag). ``settings_epoch`` and ``client_pool_epoch`` are the ONE shared
+    process counter (``current_client_epoch``). ``stale_holders`` is PLAN_1's sanctioned
+    :func:`sweep_stale_settings` run over every RETIRED epoch — a settings instance of a
+    retired epoch a holder still keeps alive; a clean flip leaves ZERO. ``stale_pool_epochs``
+    are retired client-pool epochs still present (a clean retire drains + detaches them);
+    ``pool_leases_by_epoch`` is the live lease count per pooled epoch. Probes never mock:
+    every field is read off in-process live state."""
+    import tai42_kit.clients.base as clients_base
+    from tai42_kit.settings import registered_settings
+    from tai42_kit.settings.cache_registry import sweep_stale_settings
+
+    # Settings + client pools share ONE monotonic counter; read it once.
+    current = current_client_epoch()
+
+    # Stale settings holders: sweep every retired epoch (< current) through PLAN_1's
+    # sanctioned sweep. ``sweep_stale_settings`` rejects the current/future epoch, so the
+    # range stops one short of ``current``.
+    stale_holders: list[dict] = []
+    for retired in range(current):
+        for holder in sweep_stale_settings(retired):
+            stale_holders.append(
+                {"settings_type": holder.settings_type, "epoch": holder.epoch, "holders": list(holder.holders)}
+            )
+
+    # Client-pool leases per epoch across every pooled loop. ``current_client_epoch`` and
+    # the pool maps share the same non-reentrant lock, so ``current`` is read ABOVE, never
+    # inside this block. Reaching the module globals is the only pool observable there is.
+    leases_by_epoch: dict[int, int] = {}
+    entries_by_epoch: dict[int, int] = {}
+    with clients_base._registry_lock:
+        for per_loop in clients_base._loop_clients.values():
+            for epoch, per_epoch in per_loop.items():
+                for clients in per_epoch.values():
+                    for entry in clients.values():
+                        leases_by_epoch[epoch] = leases_by_epoch.get(epoch, 0) + entry.leases
+                        entries_by_epoch[epoch] = entries_by_epoch.get(epoch, 0) + 1
+    stale_pool_epochs = sorted(epoch for epoch in entries_by_epoch if epoch < current)
+
+    groups: list[dict] = []
+    for info in registered_settings():
+        fields: list[dict] = []
+        for field in info.fields:
+            masked = field.secret or field.key_material
+            is_set = bool(field.env_var and field.env_var in os.environ)
+            value = None if masked or not field.env_var else os.environ.get(field.env_var, field.default)
+            fields.append(
+                {
+                    "name": field.name,
+                    "env_var": field.env_var,
+                    "reload_class": field.reload_class,
+                    "secret": field.secret,
+                    "key_material": field.key_material,
+                    "set": is_set,
+                    "value": value,
+                    "default": None if masked else field.default,
+                }
+            )
+        groups.append(
+            {
+                "name": info.name,
+                "module": info.module,
+                "qualname": info.qualname,
+                "reload_class": info.reload_class,
+                "fields": fields,
+            }
+        )
+
+    return {
+        "pid": os.getpid(),
+        "settings_epoch": current,
+        "client_pool_epoch": current,
+        "stale_holder_count": len(stale_holders),
+        "stale_holders": stale_holders,
+        "pool_leases_by_epoch": {str(epoch): count for epoch, count in sorted(leases_by_epoch.items())},
+        "stale_pool_epochs": stale_pool_epochs,
+        "groups": groups,
     }
 
 
@@ -115,6 +216,33 @@ async def e2e_slow_task(key: str, seconds: float) -> str:
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
     await asyncio.sleep(seconds)  # noqa: TID251 — the observed in-flight work, bounded above
+    return "done"
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_drain_probe(key: str, seconds: float) -> str:
+    """RPUSH a ``started`` marker, sleep ``seconds`` (bounded at 30), then RPUSH a ``done``
+    marker — both onto ``e2e:rec:{key}`` with this process's pid.
+
+    The recycle-drain spec attaches ``sync_task`` and runs it INTO the backend: after the
+    ``started`` marker proves it is in-flight, the backend is recycled. Whether ``done`` also
+    lands tells the test if the in-flight backend job DRAINED to completion during the
+    graceful recycle shutdown (both markers) or was lost (only ``started``) — the direct
+    observable of the arq job-completion-wait behavior, independent of the serve-side
+    tool-run record (which a serve recycle legitimately cancels)."""
+    import asyncio
+    from collections.abc import Awaitable
+    from typing import cast
+
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+
+    if seconds > 30:
+        raise ValueError(f"e2e_drain_probe bound exceeded: {seconds} > 30 seconds")
+    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", json.dumps({"value": "started", "pid": os.getpid()})))
+        await asyncio.sleep(seconds)  # noqa: TID251 — the observed in-flight work, bounded above
+        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", json.dumps({"value": "done", "pid": os.getpid()})))
     return "done"
 
 

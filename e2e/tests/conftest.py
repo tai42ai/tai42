@@ -52,6 +52,7 @@ from tai42_e2e.manifests import (
     build_postgres_mcp_stack,
     build_projection_authz_stack,
     build_projection_stack,
+    build_recycle_stack,
     build_replicas_stack,
     build_schedule_stack,
     build_shipped_connectors_stack,
@@ -249,6 +250,11 @@ def replicas_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
         "stripe_webhook_secret": secrets.token_hex(16),
     }
     yield from _boot(infra, tmp_path_factory.mktemp("replicas"), build_replicas_stack, resource_kwargs=resource_kwargs)
+
+
+@pytest.fixture(scope="module")
+def recycle_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    yield from _boot(infra, tmp_path_factory.mktemp("recycle"), build_recycle_stack)
 
 
 @pytest.fixture(scope="module")

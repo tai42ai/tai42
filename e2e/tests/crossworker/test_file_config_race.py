@@ -6,6 +6,7 @@ sidecar lock file, so concurrent writers cannot interleave and drop keys."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 
@@ -55,3 +56,39 @@ async def test_concurrent_env_writes_lose_nothing(replicas_stack: TaiStack) -> N
     env = (await api_a.get("/api/config/env"))["env"]
     missing = [k for i in range(20) for k in (f"E2E_A_{i}", f"E2E_B_{i}") if k not in env]
     assert not missing, f"concurrent config writes dropped keys: {missing}"
+
+
+# NOTE on REPLACE vs the merge race above: ``FileConfigManager.replace_env`` (the profile
+# apply's env write) is a WHOLE-MAP blind write under the SAME sidecar flock as ``write_env``
+# — there is no read-modify step, so two concurrent replaces are last-writer-wins by design
+# (the flock guarantees each write lands atomically, never a torn interleave). The
+# "no key silently dropped" lost-update property is ``write_env``'s MERGE contract, proven
+# above; a whole-map replace legitimately drops the keys the new map omits. What the profile
+# apply adds over ``write_env`` is exactly that delete-on-omission, asserted here on the same
+# flock'd file manager.
+@pytest.mark.timeout(300)
+async def test_replace_env_is_whole_map_and_deletes_omitted_keys(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api = replicas_stack.api(port=replicas_stack.port_a)
+
+    # Seed one plain HOT marker key, then read the FULL stored env back (GET returns real
+    # values). Building the profile as "current stored env MINUS the marker" keeps every
+    # deployment-pinned / recycle-class stored key (e.g. TAI_BUS_REDIS_URL) at its current
+    # value — a zero diff on them, so a BARE stack does not refuse the apply — while the
+    # whole-map replace deletes ONLY the omitted hot marker.
+    marker = uniq("E2E_REPL_MARKER").upper()
+    await _write_env(api, {marker: "seeded"})
+    baseline = (await api.get("/api/config/env"))["env"]
+    assert marker in baseline, baseline
+
+    profile_env = {key: value for key, value in baseline.items() if key != marker}
+    name = uniq("replace")
+    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env}, retry_on_reloading=True)
+    await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True)
+
+    # Whole-map replace under the flock: the store reads back as EXACTLY the profile's env —
+    # the omitted hot marker deleted, every preserved key intact.
+    stored = (await api.get("/api/config/env"))["env"]
+    assert marker not in stored, f"whole-map replace did not delete the omitted key: {stored}"
+    assert stored == profile_env, f"replace_env did not write the whole profile map atomically: {stored}"
