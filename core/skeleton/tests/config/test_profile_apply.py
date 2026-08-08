@@ -194,6 +194,34 @@ async def test_apply_passes_drain_tolerate_driver_from_context(monkeypatch: pyte
     assert outcome.serve_affecting is False
 
 
+async def test_apply_releases_llm_pools_before_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The apply MUST close the loop-bound checkpoint/store pools BEFORE the build's
+    settings reset drops their per-loop registries — the build's reset refuses to drop a
+    registry still holding live resources on a running loop (an apply following any LLM run
+    otherwise 500s). Mirrors AppLifecycle._reload_config, the other build_and_swap_epoch
+    caller."""
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)  # bare — a hot-only diff is fine on bare
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    order: list[str] = []
+
+    async def _release() -> None:
+        order.append("release")
+
+    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        order.append("build")
+        return Epoch(number=0)
+
+    await _service(store).apply_replace_env(
+        {"MY_APP_FLAG": "new"},
+        driven=True,
+        save_previous=_PrevSpy(),
+        build_and_swap=_build,
+        release_llm_pools=_release,
+    )
+    # Release strictly precedes the build (the ordering the kit reset contract requires).
+    assert order == ["release", "build"]
+
+
 # ---------------------------------------------------------------------------
 # Serve-affecting recycle — orchestrate rolls, applier self-defers
 # ---------------------------------------------------------------------------

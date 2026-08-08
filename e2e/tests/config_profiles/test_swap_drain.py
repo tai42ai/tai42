@@ -66,6 +66,23 @@ async def _settings_epoch(stack: TaiStack) -> int:
     return data["settings_epoch"]
 
 
+async def _effective_settings_values(stack: TaiStack) -> dict[str, Any]:
+    """The EFFECTIVE (os.environ-resolved) value of every non-masked registered settings field,
+    read off the live worker via the F1 probe (``e2e_settings_snapshot`` resolves each field
+    from ``os.environ``). Used to assert a failed build RESTORED ``os.environ`` (not just the
+    stored env) — matching the skeleton unit ``test_profile_apply.py`` os.environ==before check."""
+    async with stack.mcp(port=stack.port_a) as mcp:
+        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+    data = result.data if isinstance(result.data, dict) else result.structured_content
+    assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
+    return {
+        field["env_var"]: field["value"]
+        for group in data["groups"]
+        for field in group["fields"]
+        if field["env_var"] and not (field["secret"] or field["key_material"])
+    }
+
+
 async def _snapshot_epoch_over(mcp: McpClient) -> int:
     """The ``settings_epoch`` read over an ALREADY-OPEN stateful session (not a fresh one) —
     so a re-init after a swap is observed on the same client handle."""
@@ -96,6 +113,9 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
 
     before_env: dict[str, Any] = (await api.get("/api/config/env"))["env"]
     before_epoch = await _settings_epoch(replicas_stack)
+    # The EFFECTIVE settings values (resolved off os.environ) before the poisoned build — a
+    # failed build must restore os.environ, so these must be byte-for-byte identical after.
+    before_effective = await _effective_settings_values(replicas_stack)
 
     # A profile carrying a non-integer where the build expects an int. The save-time
     # boundary validator accepts it (it never constructs AccessControlSettings); the build
@@ -120,6 +140,19 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
     after_env = (await api.get("/api/config/env"))["env"]
     assert after_env == before_env, f"a failed build mutated the stored env: {before_env} -> {after_env}"
     assert _BUILD_POISON_VAR not in after_env, f"the poison value leaked into the stored env: {after_env}"
+
+    # F6 / os.environ RESTORED: the failed build applied the profile to os.environ before the
+    # rebuild raised; ``build_and_swap_epoch`` must restore os.environ exactly, so the EFFECTIVE
+    # settings values (read off os.environ by the probe) are unchanged and the poison never
+    # stuck in the live process env.
+    after_effective = await _effective_settings_values(replicas_stack)
+    assert after_effective == before_effective, (
+        f"a failed build left os.environ mutated (effective settings values changed): "
+        f"{before_effective} -> {after_effective}"
+    )
+    assert after_effective.get(_BUILD_POISON_VAR) != "not-an-integer", (
+        f"the poison value is still live in os.environ after the failed build: {after_effective.get(_BUILD_POISON_VAR)}"
+    )
 
 
 @pytest.mark.timeout(300)

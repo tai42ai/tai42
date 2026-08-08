@@ -203,6 +203,124 @@ async def test_secret_env_dangling_marker_elsewhere_is_400_naming_var(fake, monk
     assert fake.cm._env == {}
 
 
+async def test_secret_env_explicit_key_collision_different_value_is_400(fake):
+    # C9c: an EXPLICIT `key` colliding with an existing stored key holding a DIFFERENT value is
+    # refused with a loud 400 naming the key — never a silent overwrite of a live secret.
+    fake.cm._env = {"GITHUB_TOKEN": "the-live-secret"}
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "a-DIFFERENT-secret",
+                "key": "GITHUB_TOKEN",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 400
+    assert "GITHUB_TOKEN" in _data(resp)["error"]
+    # Nothing written: the live secret is untouched and the manifest carries no marker.
+    assert fake.cm._env == {"GITHUB_TOKEN": "the-live-secret"}
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"] == {}
+
+
+async def test_secret_env_explicit_key_same_value_is_idempotent(fake):
+    # An explicit key matching an existing stored VALUE is not a collision (idempotent re-send):
+    # the op writes the marker and marks the key, the stored value unchanged.
+    fake.cm._env = {"GITHUB_TOKEN": "same-secret"}
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "same-secret",
+                "key": "GITHUB_TOKEN",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 200
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == "!ENV ${GITHUB_TOKEN}"
+    assert fake.cm._env["GITHUB_TOKEN"] == "same-secret"
+    assert "GITHUB_TOKEN" in fake.cm._env["TAI_ENV_SECRET_KEYS"].split(",")
+
+
+async def test_secret_env_explicit_invalid_key_is_400(fake):
+    # An explicit key outside the shell-identifier charset is a loud 400 before any write.
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req({"value": "s", "key": "bad-key!", "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert resp.status_code == 400
+    assert fake.cm._env == {}
+
+
+async def test_secret_env_requires_exactly_one_of_key_or_hint(fake):
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    # Neither key nor key_hint → 400.
+    neither = await router.set_mcp_secret_env(
+        _req({"value": "s", "manifest_pointer": "mcp/0/config/headers/Authorization"})
+    )
+    assert neither.status_code == 400
+    # Both key and key_hint → 400.
+    both = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "s",
+                "key": "K",
+                "key_hint": "H",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert both.status_code == 400
+    assert fake.cm._env == {}
+
+
+async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
+    # C9c shadow-avoidance: even with the stored env FREE of the candidate, a generated key that
+    # would match a REGISTERED settings env_var is skipped — the generator mints a fresh,
+    # non-shadowing key (suffix). Uses a REAL registered, non-X-band var as the target so the op
+    # must consult registered_env_var_names() (the X band alone would not carry it).
+    from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+
+    target = sorted(registered_env_var_names() - x_band_env_keys())[0]
+    fake.cm._env = {}  # the stored env does NOT hold the target — only the registry does
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "fresh-secret",
+                "key_hint": target,  # base derives to exactly the registered var
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 200
+    assert target not in fake.cm._env  # the registered var is NOT shadowed
+    assert fake.cm._env[f"{target}_2"] == "fresh-secret"  # a fresh, non-shadowing key was minted
+    assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == f"!ENV ${{{target}_2}}"
+
+
+async def test_secret_env_marks_appended_not_clobbered_reads_stored_env(fake):
+    # C9d: the op APPENDS the new key to the marks read from the STORED env (never the settings
+    # cache), so a pre-existing stored mark survives and the new key joins it.
+    fake.cm._env = {"DB_SECRET": "v", "TAI_ENV_SECRET_KEYS": "DB_SECRET"}
+    fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
+    resp = await router.set_mcp_secret_env(
+        _req(
+            {
+                "value": "new-secret",
+                "key_hint": "API_TOKEN",
+                "manifest_pointer": "mcp/0/config/headers/Authorization",
+            }
+        )
+    )
+    assert resp.status_code == 200
+    marks = fake.cm._env["TAI_ENV_SECRET_KEYS"].split(",")
+    assert "DB_SECRET" in marks  # the pre-existing stored mark is NOT clobbered
+    assert "API_TOKEN" in marks  # the new key is appended
+
+
 async def test_mcp_config_schema_shape():
     # No app impl needed: the handler only calls a pydantic classmethod.
     resp = await router.get_mcp_config_schema(_req())
