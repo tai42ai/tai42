@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: agents
 package: tai42-agents
-version: 0.4.0
+version: 0.5.0
 description: >-
   Reference agents package for the TAI ecosystem: opt-in, manifest-loaded
   generic agents built on the deepagents/LangGraph runtime.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/agents
-contract: '>=1.4,<2'
+contract: '>=1.5,<2'
 categories:
   - agents
 tags:

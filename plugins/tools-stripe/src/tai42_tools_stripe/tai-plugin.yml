@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: tools-stripe
 package: tai42-tools-stripe
-version: 0.3.8
+version: 0.4.0
 description: >-
   Stripe payment tools for the TAI ecosystem: manifest-loaded Checkout Session
   tools for the external-ask checkout link, the webhook-bridge confirm, the
@@ -11,7 +11,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-stripe
-contract: '>=1.4,<2'
+contract: '>=1.5,<2'
 categories:
   - payments
   - utilities

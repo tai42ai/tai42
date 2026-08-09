@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: monitoring-langfuse
 package: tai42-monitoring-langfuse
-version: 0.2.6
+version: 0.3.0
 description: >-
   Langfuse monitoring backend for the TAI ecosystem — trace/span emission plus
   the observability read surface over Langfuse.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/monitoring-langfuse
-contract: '>=1.4,<2'
+contract: '>=1.5,<2'
 categories:
   - monitoring
 tags:
