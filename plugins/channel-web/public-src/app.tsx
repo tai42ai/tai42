@@ -146,6 +146,11 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   useViewportFit(rootRef);
 
+  // The entry code carried in the page URL (`?tai_entry=…`), read ONCE. A rotation
+  // on a gated route re-presents it so the fresh session is admitted. It is never
+  // stripped from the URL — a reload must re-present it to the page door.
+  const entryCode = useMemo(() => new URLSearchParams(window.location.search).get('tai_entry'), []);
+
   const items = stream.items;
   const itemIds = useMemo(() => new Set(items.map((item) => item.id)), [items]);
   // The idempotency keys the transcript has echoed back — the second way a frame
@@ -325,7 +330,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   const confirmReset = useCallback(() => {
     setResetting(true);
     setResetError(null);
-    rotateSession(identity).then(
+    rotateSession(identity, entryCode).then(
       () => {
         generationRef.current += 1;
         setResetting(false);
@@ -343,7 +348,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
         setResetError(err instanceof Error ? err : new Error(String(err)));
       },
     );
-  }, [identity]);
+  }, [identity, entryCode]);
 
   const entries = useMemo<readonly TranscriptEntry[]>(() => {
     const fromStream: TranscriptEntry[] = items.map((item) =>

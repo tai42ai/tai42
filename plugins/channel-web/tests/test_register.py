@@ -39,10 +39,29 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/api/channels/web/stream",
             "/api/channels/web/questions/{interaction_id}/answer",
             "/api/channels/web/session/rotate",
+            "/api/channels/web/gates/{identity}",
+            "/api/channels/web/gates/{identity}/codes",
+            "/api/channels/web/gates/{identity}/codes/{code_id}",
         }
-        # Every door is public — the visitor session cookie is the only credential,
-        # and no door reads a platform api key or Studio session.
-        assert all(route.authed is False for route in stub_app.http.routes)
+        # The chat doors are public — the visitor session cookie is their only
+        # credential. The entry-gate management doors are AUTHED and each declares an
+        # explicit action-class (an authed door with none refuses to register).
+        public = {route.path for route in stub_app.http.routes if route.authed is False}
+        authed = {(route.path, tuple(route.methods), route.action) for route in stub_app.http.routes if route.authed}
+        assert public == {
+            "/api/channels/web/chat/{identity}",
+            "/api/channels/web/assets/{file}",
+            "/api/channels/web/messages",
+            "/api/channels/web/stream",
+            "/api/channels/web/questions/{interaction_id}/answer",
+            "/api/channels/web/session/rotate",
+        }
+        assert authed == {
+            ("/api/channels/web/gates/{identity}", ("GET",), "read"),
+            ("/api/channels/web/gates/{identity}", ("PUT",), "write"),
+            ("/api/channels/web/gates/{identity}/codes", ("POST",), "write"),
+            ("/api/channels/web/gates/{identity}/codes/{code_id}", ("DELETE",), "write"),
+        }
     finally:
         for name, module in saved_modules.items():
             if module is not None:

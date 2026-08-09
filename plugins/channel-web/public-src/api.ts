@@ -200,12 +200,22 @@ export async function answerQuestion(interactionId: string, answer: unknown): Pr
 
 /** Mint a fresh session for this web route — the visitor's "new conversation". A
  * session belongs to one route, so the door is told which; the next message opens
- * a conversation on the new address, and the old transcript is untouched. */
-export async function rotateSession(identity: string): Promise<void> {
+ * a conversation on the new address, and the old transcript is untouched.
+ *
+ * `entryCode` carries the page URL's `tai_entry` value when it has one: a rotation
+ * on a gated route is refused without a live code, exactly as opening the page is.
+ * It is omitted from the body when absent, so an ungated route's request is
+ * byte-identical to before. */
+export async function rotateSession(
+  identity: string,
+  entryCode: string | null = null,
+): Promise<void> {
+  const body: { identity: string; entry_code?: string } =
+    entryCode === null ? { identity } : { identity, entry_code: entryCode };
   const response = await fetch(`${BASE}/session/rotate`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({ identity }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) throw await failure(response, ROTATE_DOOR);
 }

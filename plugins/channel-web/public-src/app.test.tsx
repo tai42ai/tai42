@@ -470,9 +470,29 @@ describe('new conversation', () => {
 
     await waitFor(() => expect(api.rotateSession).toHaveBeenCalledTimes(1));
     // The fresh session is minted for THIS page's web route — a session serves one.
-    expect(api.rotateSession).toHaveBeenCalledWith('site-alpha');
+    // No `?tai_entry=` on this page URL, so the rotate carries no entry code.
+    expect(api.rotateSession).toHaveBeenCalledWith('site-alpha', null);
     expect(await screen.findByText('Start the conversation')).toBeInTheDocument();
     expect(screen.queryByText('hello')).not.toBeInTheDocument();
+  });
+
+  it('re-presents the URL entry code on a rotation and never strips it', async () => {
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?tai_entry=code-xyz');
+    try {
+      const user = userEvent.setup();
+      render(app());
+
+      await user.click(screen.getByRole('button', { name: 'New conversation' }));
+      await user.click(screen.getByRole('button', { name: 'Start new' }));
+
+      await waitFor(() => expect(api.rotateSession).toHaveBeenCalledTimes(1));
+      // A gated route admits the fresh session only with the code from the URL.
+      expect(api.rotateSession).toHaveBeenCalledWith('site-alpha', 'code-xyz');
+      // Unlike `pair`, the entry code is NOT stripped — a reload must re-present it.
+      expect(new URLSearchParams(window.location.search).get('tai_entry')).toBe('code-xyz');
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
   });
 
   it('keeps a send from the old conversation out of the fresh one', async () => {

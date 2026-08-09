@@ -4,6 +4,7 @@ and the fail-closed redis guard."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import replace
@@ -14,6 +15,7 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_web import store
 from tai42_channel_web.store import (
+    EntryCode,
     QuestionRecord,
     SessionRecordError,
     SessionRegistration,
@@ -21,8 +23,14 @@ from tai42_channel_web.store import (
     append_message,
     append_question,
     capture_cursor,
+    check_entry_code,
     claim_question,
     drop_session,
+    entry_attempt_allowed,
+    get_entry_code,
+    is_gate_enabled,
+    list_entry_codes,
+    mint_entry_code,
     peek_question,
     read_backlog_batch,
     read_tail,
@@ -31,8 +39,11 @@ from tai42_channel_web.store import (
     reserve_question,
     resolve_session,
     restore_question,
+    revoke_entry_code,
+    set_gate,
+    update_session_params,
 )
-from tests.conftest import CALLBACK, IDENTITY, SESSION_TOKEN, VISITOR_ID, FakeRedis
+from tests.conftest import CALLBACK, IDENTITY, OTHER_IDENTITY, SESSION_TOKEN, VISITOR_ID, FakeRedis
 
 pytestmark = pytest.mark.usefixtures("web_env")
 
@@ -57,7 +68,7 @@ def _data(entry: tuple[str, dict[str, str]]) -> dict:
 
 
 async def test_register_then_resolve_returns_the_address_and_its_route(fake_redis: FakeRedis):
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
 
     assert json.loads(fake_redis.store[_SESSION_KEY])["visitor_id"] == VISITOR_ID
     # The route the session was minted on rides the registration: it is what binds
@@ -69,21 +80,21 @@ async def test_register_then_resolve_returns_the_address_and_its_route(fake_redi
 async def test_a_fresh_mint_only_gets_the_short_pending_ttl(fake_redis: FakeRedis):
     # Nothing has come back with this cookie yet: an anonymous GET loop must leave
     # minute-lived keys behind, not one 30-day registration per request.
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
     assert fake_redis.ttls[_SESSION_KEY] == 600
 
 
 async def test_resolving_promotes_a_pending_registration_to_the_full_ttl(fake_redis: FakeRedis):
     # The cookie came back, so this is a real visitor — from here the registration
     # lives as long as any other session.
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
 
     assert await resolve_session(SESSION_TOKEN) is not None
     assert fake_redis.ttls[_SESSION_KEY] == 30 * 86400
 
 
 async def test_resolve_refreshes_the_registration_ttl(fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch):
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
     fake_redis.ttls[_SESSION_KEY] = 5
     monkeypatch.setenv("CHANNEL_WEB_SESSION_TTL_SECONDS", "600")
     reset_all_settings()
@@ -95,7 +106,7 @@ async def test_resolve_refreshes_the_registration_ttl(fake_redis: FakeRedis, mon
 async def test_resolve_reads_and_expires_in_one_round_trip(fake_redis: FakeRedis):
     # GETEX, not GET+EXPIRE: every door that touches a cookie resolves a session, so
     # the second round trip would be paid on every request.
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
     fake_redis.events.clear()
 
     await resolve_session(SESSION_TOKEN)
@@ -112,20 +123,56 @@ async def test_resolve_unregistered_token_is_none(fake_redis: FakeRedis):
 @pytest.mark.parametrize(
     ("stored", "missing"),
     [
-        ({"created_at": "now", "identity": IDENTITY}, "visitor_id"),
-        ({"created_at": "now", "visitor_id": VISITOR_ID}, "identity"),
+        ({"created_at": "now", "identity": IDENTITY, "params": {}}, "visitor_id"),
+        ({"created_at": "now", "visitor_id": VISITOR_ID, "params": {}}, "identity"),
+        # No old-format tolerance: a record predating link params (no ``params`` key)
+        # fails loud and the visitor re-mints, rather than being silently defaulted.
+        ({"created_at": "now", "visitor_id": VISITOR_ID, "identity": IDENTITY}, "params"),
+        ({"visitor_id": VISITOR_ID, "identity": IDENTITY, "params": "x"}, "params"),
+        ({"visitor_id": VISITOR_ID, "identity": IDENTITY, "params": {"k": 1}}, "params"),
     ],
 )
 async def test_resolve_malformed_registration_raises(fake_redis: FakeRedis, stored: dict, missing: str):
-    # Both halves are load-bearing — the address a door speaks for, and the route it
-    # may speak on — so a record missing either is a loud fault, never a session.
+    # Every half is load-bearing — the address a door speaks for, the route it may
+    # speak on, and the captured params map — so a record missing or mis-typing any is
+    # a loud fault, never a session.
     fake_redis.store[_SESSION_KEY] = json.dumps(stored)
     with pytest.raises(SessionRecordError, match=missing):
         await resolve_session(SESSION_TOKEN)
 
 
+async def test_register_captures_and_resolves_params(fake_redis: FakeRedis):
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring", "n": "3"})
+    stored = json.loads(fake_redis.store[_SESSION_KEY])
+    assert stored["params"] == {"ref": "spring", "n": "3"}
+    registration = await resolve_session(SESSION_TOKEN)
+    assert registration is not None
+    assert registration.params == {"ref": "spring", "n": "3"}
+
+
+async def test_a_fresh_mint_without_params_still_carries_the_empty_map(fake_redis: FakeRedis):
+    # The key is ALWAYS present — the strict decode requires it, so there is no
+    # absent-key shape to tolerate.
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
+    assert json.loads(fake_redis.store[_SESSION_KEY])["params"] == {}
+
+
+async def test_update_session_params_rewrites_at_the_full_ttl(fake_redis: FakeRedis):
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "old"})
+    registration = await resolve_session(SESSION_TOKEN)
+    assert registration is not None
+    await update_session_params(SESSION_TOKEN, registration, {"ref": "new"})
+    stored = json.loads(fake_redis.store[_SESSION_KEY])
+    # Same token, same visitor id, new params — and the cookie came back, so a real
+    # visitor gets the FULL session TTL.
+    assert stored["visitor_id"] == VISITOR_ID
+    assert stored["identity"] == IDENTITY
+    assert stored["params"] == {"ref": "new"}
+    assert fake_redis.ttls[_SESSION_KEY] == 30 * 86400
+
+
 async def test_drop_session_unregisters_the_token(fake_redis: FakeRedis):
-    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    await register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {})
     await drop_session(SESSION_TOKEN)
     assert await resolve_session(SESSION_TOKEN) is None
 
@@ -470,7 +517,7 @@ async def test_every_store_op_raises_when_redis_url_unset(fake_redis: FakeRedis,
 
     record = QuestionRecord(callback_url=CALLBACK, identity=IDENTITY, address=VISITOR_ID, timeout_at=_deadline())
     for call in (
-        register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY),
+        register_session(SESSION_TOKEN, VISITOR_ID, IDENTITY, {}),
         resolve_session(SESSION_TOKEN),
         drop_session(SESSION_TOKEN),
         append_message(IDENTITY, VISITOR_ID, "in", "x"),
@@ -504,3 +551,110 @@ def test_tail_connection_strips_the_socket_read_timeout(stub_app, fake_redis: Fa
     kwargs = stub_app.clients.ctx_kwargs[-1]
     assert kwargs["settings"].socket_timeout is None
     assert kwargs["fresh"] is True
+
+
+# -- entry gate + codes ---------------------------------------------------------
+
+_GATE_KEY = f"channel:web:entry_gate:{IDENTITY}"
+
+
+async def test_gate_flag_is_explicit(fake_redis: FakeRedis):
+    # An ungated route reads False; the flag is set explicitly and read back True.
+    assert await is_gate_enabled(IDENTITY) is False
+    await set_gate(IDENTITY, True)
+    assert fake_redis.store[_GATE_KEY] == "1"
+    assert await is_gate_enabled(IDENTITY) is True
+    await set_gate(IDENTITY, False)
+    assert _GATE_KEY not in fake_redis.store
+    assert await is_gate_enabled(IDENTITY) is False
+
+
+async def test_mint_stores_only_the_hash_and_returns_the_raw_code_once(fake_redis: FakeRedis):
+    raw_code, code_id = await mint_entry_code(IDENTITY, "spring launch", None)
+    assert code_id == hashlib.sha256(raw_code.encode()).hexdigest()
+    key = f"channel:web:entry_code:{IDENTITY}:{code_id}"
+    # The raw code is never at rest — only its hash keys the record.
+    assert raw_code not in json.dumps(fake_redis.store)
+    stored = json.loads(fake_redis.store[key])
+    assert stored["label"] == "spring launch"
+    assert stored["expires_at"] is None
+    # No expiry -> no TTL.
+    assert key not in fake_redis.ttls
+
+
+async def test_mint_with_an_expiry_sets_a_ttl(fake_redis: FakeRedis):
+    expires_at = datetime.now(UTC) + timedelta(hours=1)
+    _, code_id = await mint_entry_code(IDENTITY, None, expires_at)
+    key = f"channel:web:entry_code:{IDENTITY}:{code_id}"
+    assert json.loads(fake_redis.store[key])["expires_at"] == expires_at.isoformat()
+    assert 3500 <= fake_redis.ttls[key] <= 3600
+
+
+async def test_mint_refuses_a_past_expiry(fake_redis: FakeRedis):
+    with pytest.raises(ValueError, match="not in the future"):
+        await mint_entry_code(IDENTITY, None, datetime.now(UTC) - timedelta(seconds=1))
+
+
+async def test_check_entry_code_is_liveness_by_hash(fake_redis: FakeRedis):
+    raw_code, _ = await mint_entry_code(IDENTITY, None, None)
+    assert await check_entry_code(IDENTITY, raw_code) is True
+    assert await check_entry_code(IDENTITY, "not-the-code") is False
+    # A live code is scoped to its own route — the same raw value is unknown elsewhere.
+    assert await check_entry_code(OTHER_IDENTITY, raw_code) is False
+
+
+async def test_get_and_list_expose_metadata_never_the_raw_code(fake_redis: FakeRedis):
+    raw_code, code_id = await mint_entry_code(IDENTITY, "launch", None)
+    fetched = await get_entry_code(IDENTITY, code_id)
+    assert fetched is not None
+    assert fetched == EntryCode(code_id=code_id, label="launch", created_at=fetched.created_at, expires_at=None)
+    listed = await list_entry_codes(IDENTITY)
+    assert [code.code_id for code in listed] == [code_id]
+    assert raw_code not in json.dumps([code.__dict__ for code in listed])
+
+
+async def test_revoke_kills_the_code_and_reports_whether_it_existed(fake_redis: FakeRedis):
+    raw_code, code_id = await mint_entry_code(IDENTITY, None, None)
+    assert await revoke_entry_code(IDENTITY, code_id) is True
+    assert await check_entry_code(IDENTITY, raw_code) is False
+    # A second revoke of the same id finds nothing.
+    assert await revoke_entry_code(IDENTITY, code_id) is False
+
+
+async def test_deleting_every_code_leaves_the_gate_closed(fake_redis: FakeRedis):
+    # The gate flag is EXPLICIT: revoking the last code does not silently reopen the
+    # route — it stays gated, and now unreachable until a code is minted.
+    await set_gate(IDENTITY, True)
+    _, code_id = await mint_entry_code(IDENTITY, None, None)
+    await revoke_entry_code(IDENTITY, code_id)
+    assert await is_gate_enabled(IDENTITY) is True
+    assert await list_entry_codes(IDENTITY) == []
+
+
+async def test_list_escapes_a_glob_metachar_identity(fake_redis: FakeRedis):
+    # ``_clean_identity`` admits Redis glob metacharacters; an unescaped ``*`` in the
+    # SCAN pattern would match every sibling identity's keys. The escape keeps the
+    # segment literal, so a ``*`` identity matches only its OWN codes.
+    _, star_code = await mint_entry_code("*", None, None)
+    await mint_entry_code("site-alpha", None, None)
+    await mint_entry_code("site-beta", None, None)
+    listed = await list_entry_codes("*")
+    assert [code.code_id for code in listed] == [star_code]
+
+
+async def test_throttle_allows_up_to_the_cap_then_refuses(fake_redis: FakeRedis):
+    bucket = "net-1.2.3.4"
+    key = f"channel:web:entry_throttle:{bucket}"
+    # The default cap is 10 per window.
+    allowed = [await entry_attempt_allowed(bucket) for _ in range(11)]
+    assert allowed == [True] * 10 + [False]
+    # The window is set once, on the first attempt.
+    assert fake_redis.ttls[key] == 300
+
+
+async def test_throttle_is_per_bucket(fake_redis: FakeRedis):
+    for _ in range(10):
+        await entry_attempt_allowed("net-a")
+    assert await entry_attempt_allowed("net-a") is False
+    # A different bucket has its own budget.
+    assert await entry_attempt_allowed("net-b") is True

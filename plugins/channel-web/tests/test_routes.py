@@ -28,7 +28,15 @@ from tai42_channel_web import stream as stream_module
 from tai42_channel_web.channel import WebChannel
 from tai42_channel_web.page import PAGE_CSP, REFUSAL_CODE_META, REFUSAL_CSP
 from tai42_channel_web.routes import AnswerForwardError
-from tai42_channel_web.store import QuestionRecord, reserve_question, resolve_session, transcript_order
+from tai42_channel_web.store import (
+    QuestionRecord,
+    mint_entry_code,
+    reserve_question,
+    resolve_session,
+    revoke_entry_code,
+    set_gate,
+    transcript_order,
+)
 from tests.conftest import (
     CALLBACK,
     CLIENT_HOST,
@@ -1442,3 +1450,415 @@ async def test_rotate_unconfigured_store_is_501(no_web_env, stub_app):
     # nothing to mint into, whatever the body says.
     resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE, token=SESSION_TOKEN))
     assert resp.status_code == 501
+
+
+# -- link params capture (chat page door) ---------------------------------------
+
+
+async def test_chat_page_captures_link_params_at_mint(web_env, stub_app, fake_redis: FakeRedis, public_build: Path):
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query="ref=spring&n=3"))
+    assert resp.status_code == 200
+    registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
+    assert registration is not None
+    assert registration.params == {"ref": "spring", "n": "3"}
+
+
+async def test_a_fresh_mint_with_no_params_stores_the_empty_map(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    resp = await _handler(stub_app, _CHAT)(_chat_request())
+    registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
+    assert registration is not None
+    assert registration.params == {}
+
+
+async def test_reserved_query_names_are_stripped_never_stored(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    # ``pair`` (client-consumed) and ``tai_entry`` (gate code) never become params.
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query="pair=LINK-ABCD1234&tai_entry=code&ref=spring"))
+    registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
+    assert registration is not None
+    assert registration.params == {"ref": "spring"}
+
+
+async def test_a_navigation_with_new_params_rewrites_a_live_session(
+    web_env, stub_app, registered_session: FakeRedis, public_build: Path
+):
+    resp = await _handler(stub_app, _CHAT)(
+        _chat_request(token=SESSION_TOKEN, query="ref=summer", extra_headers=_NAVIGATION)
+    )
+    assert resp.status_code == 200
+    assert _set_cookie(resp)[SECURE_COOKIE].value == SESSION_TOKEN
+    registration = await resolve_session(SESSION_TOKEN)
+    assert registration is not None
+    assert registration.params == {"ref": "summer"}
+
+
+async def test_a_navigation_without_params_preserves_stored_params(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "keep"})
+    resp = await _handler(stub_app, _CHAT)(_chat_request(token=SESSION_TOKEN, extra_headers=_NAVIGATION))
+    assert resp.status_code == 200
+    registration = await resolve_session(SESSION_TOKEN)
+    assert registration is not None
+    assert registration.params == {"ref": "keep"}
+
+
+async def test_a_subresource_with_params_never_rewrites_a_live_session(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    # A cross-site subresource GET must not overwrite a live visitor's params — only a
+    # top-level NAVIGATION rewrites them.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "keep"})
+    resp = await _handler(stub_app, _CHAT)(
+        _chat_request(token=SESSION_TOKEN, query="ref=evil", extra_headers=_SUBRESOURCE)
+    )
+    assert resp.status_code == 200
+    registration = await resolve_session(SESSION_TOKEN)
+    assert registration is not None
+    assert registration.params == {"ref": "keep"}
+
+
+async def test_a_rotation_mints_a_clean_registration_with_no_params(web_env, stub_app, fake_redis: FakeRedis):
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "old"})
+    resp = await _handler(stub_app, _ROTATE)(_rotate_request(token=SESSION_TOKEN))
+    registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
+    assert registration is not None
+    assert registration.params == {}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "pair=a&pair=b",  # a duplicated RESERVED name is a bound violation too
+        "tai_entry=x&tai_entry=y",
+        "a=1&a=2",  # duplicated non-reserved key
+        "bad key=1",  # key regex: a space
+        "a" * 65 + "=1",  # key regex: over 64 chars
+        "k=" + "x" * 513,  # value over 512 chars
+        "&".join(f"k{i}=1" for i in range(17)),  # over 16 keys
+    ],
+)
+async def test_link_params_bound_violations_are_a_400_page(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path, query: str
+):
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query=query))
+    assert resp.status_code == 400
+    _refusal(resp, "link_params_invalid")
+    # Nothing was minted: a refused entry establishes no session.
+    assert fake_redis.store == {}
+
+
+async def test_messages_pass_captured_params_to_accept(web_env, stub_app, fake_redis: FakeRedis):
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring"})
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "x"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.conversations.accept_calls[0]["params"] == {"ref": "spring"}
+
+
+async def test_messages_pass_none_when_no_params(web_env, stub_app, registered_session: FakeRedis):
+    # Empty params -> None -> the tool payload is byte-identical to today.
+    await _handler(stub_app, _MESSAGES)(
+        build_request(json_body={"identity": IDENTITY, "text": "x"}, token=SESSION_TOKEN)
+    )
+    assert stub_app.conversations.accept_calls[0]["params"] is None
+
+
+# -- old-shape session records fail loud, the door re-mints ----------------------
+
+
+def _seed_old_shape_record(fake: FakeRedis) -> None:
+    """A record predating link params (no ``params`` key) — the strict decode refuses
+    it; the DOOR re-mints. Hand-written, not via ``register`` (which writes the new
+    shape)."""
+    fake.store[_SESSION_KEY] = json.dumps({"visitor_id": VISITOR_ID, "identity": IDENTITY, "created_at": "now"})
+
+
+async def test_page_door_re_mints_over_an_old_shape_record(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path, caplog: pytest.LogCaptureFixture
+):
+    _seed_old_shape_record(fake_redis)
+    with caplog.at_level("WARNING"):
+        resp = await _handler(stub_app, _CHAT)(_chat_request(token=SESSION_TOKEN))
+    # No 500: a fresh session under a NEW token, and the dead record is orphaned (not
+    # overwritten) so it ages out on its own.
+    assert resp.status_code == 200
+    minted = _set_cookie(resp)[SECURE_COOKIE].value
+    assert minted != SESSION_TOKEN
+    registration = await resolve_session(minted)
+    assert registration is not None
+    assert registration.params == {}
+    assert any("record was refused" in record.getMessage() for record in caplog.records)
+
+
+async def test_message_door_takes_the_no_session_refusal_over_an_old_shape_record(
+    web_env, stub_app, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    _seed_old_shape_record(fake_redis)
+    with caplog.at_level("WARNING"):
+        resp = await _handler(stub_app, _MESSAGES)(
+            build_request(json_body={"identity": IDENTITY, "text": "x"}, token=SESSION_TOKEN)
+        )
+    # The shared session helper catches the decode error and the door takes its normal
+    # no-session 401 — never a 500.
+    assert resp.status_code == 401
+    assert _body(resp)["code"] == "session_missing"
+    assert stub_app.conversations.accept_calls == []
+
+
+# -- entry gate (chat page door) ------------------------------------------------
+
+
+async def test_gated_route_admits_a_navigation_with_a_valid_code(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    await set_gate(IDENTITY, True)
+    raw_code, _ = await mint_entry_code(IDENTITY, None, None)
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query=f"tai_entry={raw_code}"))
+    assert resp.status_code == 200
+    # A valid code consumes nothing — codes are multi-use.
+    assert await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value) is not None
+
+
+async def test_gated_route_refuses_missing_and_wrong_codes_identically(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    await set_gate(IDENTITY, True)
+    handler = _handler(stub_app, _CHAT)
+    missing = await handler(_chat_request())
+    wrong = await handler(_chat_request(query="tai_entry=nope"))
+    assert missing.status_code == wrong.status_code == 403
+    _refusal(missing, "entry_refused")
+    # ONE page, ONE wording — the same bytes for both (no oracle).
+    assert bytes(missing.body) == bytes(wrong.body)
+    assert missing.headers.items() == wrong.headers.items()
+
+
+async def test_gated_route_refuses_an_expired_code(web_env, stub_app, fake_redis: FakeRedis, public_build: Path):
+    await set_gate(IDENTITY, True)
+    raw_code, code_id = await mint_entry_code(IDENTITY, None, datetime.now(UTC) + timedelta(hours=1))
+    # The TTL lapsing IS the key vanishing.
+    del fake_redis.store[f"channel:web:entry_code:{IDENTITY}:{code_id}"]
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query=f"tai_entry={raw_code}"))
+    assert resp.status_code == 403
+    _refusal(resp, "entry_refused")
+
+
+async def test_gated_route_refuses_a_revoked_code(web_env, stub_app, fake_redis: FakeRedis, public_build: Path):
+    await set_gate(IDENTITY, True)
+    raw_code, code_id = await mint_entry_code(IDENTITY, None, None)
+    await revoke_entry_code(IDENTITY, code_id)
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query=f"tai_entry={raw_code}"))
+    assert resp.status_code == 403
+    _refusal(resp, "entry_refused")
+
+
+async def test_gated_route_refuses_once_the_guess_throttle_is_spent(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    await set_gate(IDENTITY, True)
+    handler = _handler(stub_app, _CHAT)
+    # The default cap is 10 guesses per window, all from one client bucket.
+    for _ in range(10):
+        assert (await handler(_chat_request(query="tai_entry=nope"))).status_code == 403
+    # Now even a VALID code is refused — the bucket is spent (throttle checked FIRST).
+    raw_code, _ = await mint_entry_code(IDENTITY, None, None)
+    resp = await handler(_chat_request(query=f"tai_entry={raw_code}"))
+    assert resp.status_code == 403
+    _refusal(resp, "entry_refused")
+
+
+async def test_non_navigation_on_a_gated_route_ignores_the_code(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    # The navigation guard runs BEFORE the gate check: a subresource answers
+    # ``not_a_navigation`` with a VALID and with an INVALID code alike, so the response
+    # never differs by code validity (no oracle).
+    await set_gate(IDENTITY, True)
+    raw_code, _ = await mint_entry_code(IDENTITY, None, None)
+    handler = _handler(stub_app, _CHAT)
+    valid = await handler(_chat_request(query=f"tai_entry={raw_code}", extra_headers=_SUBRESOURCE))
+    invalid = await handler(_chat_request(query="tai_entry=nope", extra_headers=_SUBRESOURCE))
+    assert valid.status_code == invalid.status_code == 403
+    _refusal(valid, "not_a_navigation")
+    assert bytes(valid.body) == bytes(invalid.body)
+    assert valid.headers.items() == invalid.headers.items()
+
+
+async def test_a_live_session_bypasses_the_gate(web_env, stub_app, registered_session: FakeRedis, public_build: Path):
+    # A session is an already-granted capability: it admits without a code.
+    await set_gate(IDENTITY, True)
+    resp = await _handler(stub_app, _CHAT)(_chat_request(token=SESSION_TOKEN))
+    assert resp.status_code == 200
+    assert _set_cookie(resp)[SECURE_COOKIE].value == SESSION_TOKEN
+
+
+async def test_page_and_refusals_carry_no_referrer(web_env, stub_app, fake_redis: FakeRedis, public_build: Path):
+    # A capability URL must never leak via referrer.
+    ok = await _handler(stub_app, _CHAT)(_chat_request())
+    assert ok.headers["referrer-policy"] == "no-referrer"
+    await set_gate(IDENTITY, True)
+    refused = await _handler(stub_app, _CHAT)(_chat_request())
+    assert refused.headers["referrer-policy"] == "no-referrer"
+
+
+async def test_page_and_rotate_refusals_share_the_entry_wording(
+    web_env, stub_app, fake_redis: FakeRedis, public_build: Path
+):
+    from tai42_channel_web.routes import _ENTRY_REFUSED_MESSAGE
+
+    await set_gate(IDENTITY, True)
+    page_resp = await _handler(stub_app, _CHAT)(_chat_request())
+    rotate_resp = await _handler(stub_app, _ROTATE)(_rotate_request())
+    assert _ENTRY_REFUSED_MESSAGE in bytes(page_resp.body).decode()
+    assert _body(rotate_resp)["error"] == _ENTRY_REFUSED_MESSAGE
+    assert _body(rotate_resp)["code"] == "entry_refused"
+
+
+# -- entry gate (rotate door) ---------------------------------------------------
+
+
+async def test_rotate_on_a_gated_route_refuses_without_a_live_code(web_env, stub_app, fake_redis: FakeRedis):
+    await set_gate(IDENTITY, True)
+    handler = _handler(stub_app, _ROTATE)
+    missing = await handler(_rotate_request())
+    wrong = await handler(build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": "nope"}))
+    assert missing.status_code == wrong.status_code == 403
+    assert _body(missing)["code"] == _body(wrong)["code"] == "entry_refused"
+
+
+async def test_rotate_on_a_gated_route_admits_a_live_code_and_clears_params(web_env, stub_app, fake_redis: FakeRedis):
+    await set_gate(IDENTITY, True)
+    raw_code, _ = await mint_entry_code(IDENTITY, None, None)
+    resp = await _handler(stub_app, _ROTATE)(
+        build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": raw_code})
+    )
+    assert resp.status_code == 200
+    registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
+    assert registration is not None
+    assert registration.params == {}
+
+
+async def test_rotate_on_an_ungated_route_ignores_the_code_field(web_env, stub_app, fake_redis: FakeRedis):
+    resp = await _handler(stub_app, _ROTATE)(
+        build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": "irrelevant"})
+    )
+    assert resp.status_code == 200
+
+
+# -- management doors (authed) --------------------------------------------------
+
+_GATES = "/api/channels/web/gates/{identity}"
+_CODES = "/api/channels/web/gates/{identity}/codes"
+_CODE = "/api/channels/web/gates/{identity}/codes/{code_id}"
+
+
+def _managed_route(stub_app, path: str, method: str):
+    routes = [route for route in stub_app.http.routes if route.path == path and method in route.methods]
+    assert len(routes) == 1
+    return routes[0]
+
+
+def _gate_request(method: str, path: str, *, json_body=None, path_params: dict[str, str]):
+    return build_request(method=method, path=path, json_body=json_body, path_params=path_params)
+
+
+def test_management_doors_are_authed_with_the_pinned_action_class(stub_app):
+    # An authed route with no action-class refuses to register in the core registry
+    # (fail-closed); the stub records the declared metadata so the pin is asserted here.
+    read = _managed_route(stub_app, _GATES, "GET")
+    assert read.authed is True
+    assert read.action == "read"
+    for path, method in [(_GATES, "PUT"), (_CODES, "POST"), (_CODE, "DELETE")]:
+        route = _managed_route(stub_app, path, method)
+        assert route.authed is True
+        assert route.action == "write"
+
+
+async def test_gate_read_returns_the_flag_and_its_codes(web_env, stub_app, fake_redis: FakeRedis):
+    await set_gate(IDENTITY, True)
+    _, code_id = await mint_entry_code(IDENTITY, "spring", None)
+    resp = await _managed_route(stub_app, _GATES, "GET").handler(
+        _gate_request("GET", _GATES, path_params={"identity": IDENTITY})
+    )
+    data = _body(resp)["data"]
+    assert data["enabled"] is True
+    assert [code["code_id"] for code in data["codes"]] == [code_id]
+    assert data["codes"][0]["label"] == "spring"
+
+
+async def test_gate_toggle_sets_the_explicit_flag(web_env, stub_app, fake_redis: FakeRedis):
+    route = _managed_route(stub_app, _GATES, "PUT")
+    on = await route.handler(
+        _gate_request("PUT", _GATES, json_body={"enabled": True}, path_params={"identity": IDENTITY})
+    )
+    assert _body(on)["data"] == {"enabled": True}
+    assert f"channel:web:entry_gate:{IDENTITY}" in fake_redis.store
+    off = await route.handler(
+        _gate_request("PUT", _GATES, json_body={"enabled": False}, path_params={"identity": IDENTITY})
+    )
+    assert _body(off)["data"] == {"enabled": False}
+    assert f"channel:web:entry_gate:{IDENTITY}" not in fake_redis.store
+
+
+async def test_mint_returns_the_raw_code_once_and_list_never_does(web_env, stub_app, fake_redis: FakeRedis):
+    minted = await _managed_route(stub_app, _CODES, "POST").handler(
+        _gate_request(
+            "POST", _CODES, json_body={"label": "launch", "expires_at": None}, path_params={"identity": IDENTITY}
+        )
+    )
+    data = _body(minted)["data"]
+    raw_code = data["code"]
+    assert data["code_id"] == hashlib.sha256(raw_code.encode()).hexdigest()
+    listed = _body(
+        await _managed_route(stub_app, _GATES, "GET").handler(
+            _gate_request("GET", _GATES, path_params={"identity": IDENTITY})
+        )
+    )["data"]
+    # The raw code was returned ONCE at mint and is never read back.
+    assert raw_code not in json.dumps(listed)
+    assert [code["code_id"] for code in listed["codes"]] == [data["code_id"]]
+
+
+async def test_mint_with_an_expiry_returns_it(web_env, stub_app, fake_redis: FakeRedis):
+    expires_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    resp = await _managed_route(stub_app, _CODES, "POST").handler(
+        _gate_request(
+            "POST", _CODES, json_body={"label": None, "expires_at": expires_at}, path_params={"identity": IDENTITY}
+        )
+    )
+    assert _body(resp)["data"]["expires_at"] == expires_at
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "2000-01-01T00:00:00+00:00",  # in the past
+        "2999-01-01T00:00:00",  # naive (no timezone)
+    ],
+)
+async def test_mint_refuses_a_past_or_naive_expiry(web_env, stub_app, fake_redis: FakeRedis, expires_at: str):
+    resp = await _managed_route(stub_app, _CODES, "POST").handler(
+        _gate_request("POST", _CODES, json_body={"expires_at": expires_at}, path_params={"identity": IDENTITY})
+    )
+    assert resp.status_code == 422
+    assert "expires_at" in _body(resp)["error"]
+
+
+async def test_revoke_kills_the_code_and_404s_an_unknown_id(web_env, stub_app, fake_redis: FakeRedis):
+    _, code_id = await mint_entry_code(IDENTITY, None, None)
+    route = _managed_route(stub_app, _CODE, "DELETE")
+    ok = await route.handler(_gate_request("DELETE", _CODE, path_params={"identity": IDENTITY, "code_id": code_id}))
+    assert _body(ok)["data"] == {"status": "revoked"}
+    gone = await route.handler(_gate_request("DELETE", _CODE, path_params={"identity": IDENTITY, "code_id": code_id}))
+    assert gone.status_code == 404
+
+
+async def test_management_doors_refuse_an_unusable_identity(web_env, stub_app):
+    resp = await _managed_route(stub_app, _GATES, "GET").handler(
+        _gate_request("GET", _GATES, path_params={"identity": "site:alpha"})
+    )
+    assert resp.status_code == 422

@@ -77,6 +77,11 @@ class WebSettings(TaiBaseSettings):
     max_streams_total: int = Field(default=500, gt=0)
     # The chat page's ``<title>`` — the visitor-facing name of the conversation.
     page_title: str = "Chat"
+    # Entry-code guesses one client bucket may make against a gated route per window,
+    # and the window's length. A gate refuses uniformly (no oracle), so throttling the
+    # guess rate is what bounds a brute force over the code space.
+    entry_attempts_per_window: int = Field(default=10, gt=0)
+    entry_throttle_window_seconds: int = Field(default=300, gt=0)
 
 
 @settings_cache

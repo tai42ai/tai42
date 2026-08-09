@@ -1,9 +1,14 @@
-"""The public web-chat doors — under ``/api/channels/web``.
+"""The web-chat doors — under ``/api/channels/web``.
+
+The chat doors are PUBLIC; the entry-gate management doors (bottom of this module)
+are AUTHED — they carry the platform api key and declare an explicit action-class.
 
 * ``GET /api/channels/web/chat/{identity}`` — the standalone chat page for one web
   route: the HTML shell around the built bundle. Mints AND registers the visitor's
   session when their cookie resolves to none for THIS route, and refreshes both the
-  cookie's ``Max-Age`` and the registration on every load.
+  cookie's ``Max-Age`` and the registration on every load. The navigation's query
+  string carries link params (captured with the session, delivered to the turn's tool
+  payload) and, on a gated route, the ``tai_entry`` code that admits a new entry.
 * ``GET /api/channels/web/assets/{file}`` — one file of that bundle, served only
   when the build manifest's integrity map lists it by exact name.
 * ``POST /api/channels/web/messages`` — the visitor sends one message into their own
@@ -19,23 +24,32 @@
   session for that web route (the visitor's "new conversation"); the next message
   opens a conversation on the new address.
 
-Every door is PUBLIC (``authed=False``): the transport credential is the visitor's
-session cookie, and no door reads the platform api key or a Studio session. A session
-is a capability on ONE web route: it is minted against the route it was minted on,
-and a door presented with it on any other route refuses exactly as it refuses an
-unknown token — the two are indistinguishable to a caller, so no session can be
-probed for which route it belongs to. Success bodies are ``{"data": {...}}``;
+The chat doors are PUBLIC (``authed=False``): the transport credential is the
+visitor's session cookie, and no chat door reads the platform api key or a Studio
+session. A session is a capability on ONE web route: it is minted against the route
+it was minted on, and a door presented with it on any other route refuses exactly as
+it refuses an unknown token — the two are indistinguishable to a caller, so no session
+can be probed for which route it belongs to. Success bodies are ``{"data": {...}}``;
 failures are ``{"error": "<message>"}``, plus a ``code`` on the refusals a caller
 must tell apart from their status alone — ``session_missing`` (401),
-``origin_mismatch`` (403), ``not_a_navigation`` (403),
+``origin_mismatch`` (403), ``not_a_navigation`` (403), ``entry_refused`` (403),
 ``web_transcript_store_off`` (501).
 
 The chat page door is the exception: its caller is a browser NAVIGATION, which would
 render a JSON body as text, so every refusal it answers is a minimal HTML page under
 ``REFUSAL_CSP`` instead — same status and, for the refusals that have one, the same
-machine-readable code carried in a meta tag. The unusable-
+machine-readable code carried in a meta tag (``link_params_invalid`` for a params
+bound violation, ``entry_refused`` for a gated route with no live code, uniform for
+all five of missing/unknown/expired/revoked/throttled — no oracle). The unusable-
 bundle 500 has no code: it is a server fault with no API counterpart, and nothing the
-page could do differently for.
+page could do differently for. Every page-door HTML response carries
+``Referrer-Policy: no-referrer`` — a capability URL must never leak via referrer.
+
+The entry-gate management doors are AUTHED (``authed=True``): they mint, list, revoke
+codes and toggle the gate for a web route, keyed by the platform api key, and each
+declares an explicit ``read``/``write`` action-class (an authed route with none
+fails to register). Entry codes are hashed at rest, multi-use, optionally expiring;
+the raw code is returned once at mint and never read back. A gate refuses uniformly.
 
 Flood control on these doors is NOT this plugin's: the platform's public-door limiter
 bounds requests per caller ahead of them, and the operator's ingress bounds what
@@ -54,6 +68,7 @@ import json
 import logging
 import math
 import re
+from datetime import UTC, datetime
 from stat import S_ISREG
 from typing import Any
 from uuid import uuid4
@@ -64,7 +79,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import BlankInboundTextError, validate_entry_params
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.utils.client_address import XFF_HEADER, client_bucket
 
@@ -89,16 +104,26 @@ from tai42_channel_web.session import (
 )
 from tai42_channel_web.settings import WebSettings, web_redis_settings, web_settings
 from tai42_channel_web.store import (
+    EntryCode,
+    SessionRecordError,
     SessionRegistration,
     append_answered,
     append_message,
+    check_entry_code,
     claim_question,
     drop_session,
+    entry_attempt_allowed,
+    is_gate_enabled,
+    list_entry_codes,
+    mint_entry_code,
     peek_question,
     register_session,
     resolve_session,
     restore_question,
+    revoke_entry_code,
+    set_gate,
     transcript_order,
+    update_session_params,
 )
 from tai42_channel_web.stream import StreamLimitError, check_stream_admission, stream_transcript
 
@@ -176,6 +201,33 @@ _PAGE_UNAVAILABLE_PAGE = render_refusal(
     "The chat page could not be loaded. Please try again later.",
 )
 
+# A capability URL must never leak via the ``Referer`` header — set on EVERY
+# page-door HTML response (the chat page and every refusal page).
+_REFERRER_POLICY = {"referrer-policy": "no-referrer"}
+
+# Query names the web door consumes itself and NEVER stores or delivers as params:
+# ``pair`` (existing, client-consumed) and the entry-gate code ``tai_entry``. Link
+# param VALUES (and the entry code) never appear in any log line, error body, or
+# transcript frame — keys may be logged, values never.
+_RESERVED_QUERY_PARAMS = frozenset({"pair", "tai_entry"})
+
+# The link params carried a value that violates a bound (count, key shape, value
+# length, or total size). One byte-constant page; the log names the bound.
+_LINK_PARAMS_INVALID_CODE = "link_params_invalid"
+_LINK_PARAMS_INVALID_PAGE = render_refusal(
+    "This chat link is not valid",
+    "This chat link is not valid. Please check the link and try again.",
+    _LINK_PARAMS_INVALID_CODE,
+)
+
+# The route is gated and the navigation's code is missing, unknown, expired, revoked,
+# or the client is throttled — ONE page and ONE wording for all five, so no response
+# ever differs by code validity (no oracle). The wording constant is shared by the
+# rotate door's JSON refusal.
+_ENTRY_REFUSED_CODE = "entry_refused"
+_ENTRY_REFUSED_MESSAGE = "This chat is private. Open it from the link you were given."
+_ENTRY_REFUSED_PAGE = render_refusal("This chat is private", _ENTRY_REFUSED_MESSAGE, _ENTRY_REFUSED_CODE)
+
 # A web route identity is a URL segment naming a configured route; longer than this
 # is not one.
 _MAX_IDENTITY_CHARS = 256
@@ -192,6 +244,11 @@ _ANSWER_TYPES = (str, bool, int, float)
 # The retry key a page may put on a message POST: opaque to the server, and the only
 # thing that makes a re-POST resolve to the turn the lost first attempt started.
 _CLIENT_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+_IDENTITY_REQUIREMENT = (
+    f"identity must be a non-blank, ':'-free web route identity of at most {_MAX_IDENTITY_CHARS} characters"
+)
 
 
 def _clean_identity(value: str) -> str | None:
@@ -221,14 +278,49 @@ class IdentityBody(BaseModel):
     def _canonical_identity(cls, value: str) -> str:
         identity = _clean_identity(value)
         if identity is None:
-            raise ValueError(
-                f"identity must be a non-blank, ':'-free web route identity of at most {_MAX_IDENTITY_CHARS} characters"
-            )
+            raise ValueError(_IDENTITY_REQUIREMENT)
         return identity
 
 
 class RotateBody(IdentityBody):
-    """The web route the fresh session is minted for — a session is bound to one."""
+    """The web route the fresh session is minted for — a session is bound to one.
+
+    ``entry_code`` carries the URL's ``tai_entry`` value: a gated identity refuses a
+    rotation with a missing/dead code exactly as the page door refuses an entry; an
+    ungated identity ignores the field."""
+
+    entry_code: str | None = None
+
+
+# The longest operator label a minted code may carry — bounded so an authed door
+# cannot store an unbounded string.
+_MAX_LABEL_CHARS = 256
+
+
+class GateToggleBody(BaseModel):
+    """The management PUT body: whether the route is gated."""
+
+    enabled: bool
+
+
+class MintCodeBody(BaseModel):
+    """The management mint body: an optional operator label and an optional expiry.
+    ``expires_at`` must be timezone-aware and in the future (the code's Redis TTL is
+    derived from it)."""
+
+    label: str | None = Field(default=None, max_length=_MAX_LABEL_CHARS)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _future_and_tz_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must be timezone-aware")
+        if value <= datetime.now(UTC):
+            raise ValueError("expires_at must be in the future")
+        return value
 
 
 class MessageBody(IdentityBody):
@@ -266,7 +358,7 @@ def _refusal_page(html: str, status_code: int) -> Response:
     URL, so it is served one of the byte-constant pages above rather than the API
     doors' JSON. Cached as little as the page itself — a refusal is about this caller
     at this moment."""
-    headers = {"content-security-policy": REFUSAL_CSP, **_NOSNIFF, "cache-control": _NO_STORE}
+    headers = {"content-security-policy": REFUSAL_CSP, **_NOSNIFF, "cache-control": _NO_STORE, **_REFERRER_POLICY}
     return Response(html, status_code=status_code, media_type=HTML_CONTENT_TYPE, headers=headers)
 
 
@@ -323,7 +415,15 @@ async def _session(request: Request, settings: WebSettings) -> SessionRegistrati
     token = session_token(request, settings)
     if token is None:
         return None
-    return await resolve_session(token)
+    try:
+        return await resolve_session(token)
+    except SessionRecordError:
+        # A stored record in any other shape fails loud in the decoder; the DOOR
+        # re-mints. The session read already refreshed the record's TTL, so without
+        # this catch the raise escapes as a 500 and the dead record never ages out.
+        # Value-free: nothing of the record (or the token) is logged.
+        logger.warning("web chat door ignored a session: its stored record was refused")
+        return None
 
 
 def _serves(registration: SessionRegistration | None, identity: str) -> bool:
@@ -334,13 +434,61 @@ def _serves(registration: SessionRegistration | None, identity: str) -> bool:
     return registration is not None and registration.identity == identity
 
 
-async def _mint_session(response: Response, identity: str, settings: WebSettings) -> None:
-    """Register a fresh token/visitor-id pair for one web route and set the cookie.
-    The registration lands first: a cookie whose token resolves to nothing is not a
-    session."""
+async def _mint_session(response: Response, identity: str, settings: WebSettings, params: dict[str, str]) -> None:
+    """Register a fresh token/visitor-id pair for one web route, with the entry's link
+    params, and set the cookie. The registration lands first: a cookie whose token
+    resolves to nothing is not a session."""
     token = mint_session_token()
-    await register_session(token, mint_visitor_id(), identity)
+    await register_session(token, mint_visitor_id(), identity, params)
     set_session_cookie(response, token, settings)
+
+
+def _client_bucket(request: Request) -> str:
+    """The accountable network client bucket for a request — the same value the
+    public-door rate limiter derives, keyed on the network peer, never a resettable
+    visitor id. It is what the turn cap and the entry-gate throttle hold accountable."""
+    return client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))
+
+
+def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], Response | None]:
+    """Parse the navigation's query into the validated link params, or a byte-constant
+    400 refusal page. A DUPLICATE key — checked on the RAW query, reserved names
+    included, so ``?pair=a&pair=b`` is a 400 too — is a bound violation; the reserved
+    names are then stripped before validation. Param VALUES never reach the log: the
+    duplicate warning names no value, and ``validate_entry_params`` names only the
+    violated bound (and at most a key)."""
+    pairs = request.query_params.multi_items()
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        logger.warning("web chat page refused link params for identity %s: a query parameter is repeated", identity)
+        return {}, _refusal_page(_LINK_PARAMS_INVALID_PAGE, 400)
+    candidate = {key: value for key, value in pairs if key not in _RESERVED_QUERY_PARAMS}
+    try:
+        return validate_entry_params(candidate), None
+    except ValueError as exc:
+        logger.warning("web chat page refused link params for identity %s: %s", identity, exc)
+        return {}, _refusal_page(_LINK_PARAMS_INVALID_PAGE, 400)
+
+
+async def _entry_gate_refusal(request: Request, identity: str, entry_code: str | None) -> Response | None:
+    """The entry-gate check for a mint-needing caller on ``identity``, or ``None`` when
+    the route is ungated or the code is live. Runs AFTER the navigation guard (README
+    door order), so a non-navigation never reaches it and no response differs by code
+    validity. Throttle is checked BEFORE the code lookup; missing/throttled/unknown all
+    answer the ONE byte-constant refusal page. The presented value is never logged."""
+    if not await is_gate_enabled(identity):
+        return None
+    bucket = _client_bucket(request)
+    if entry_code is None:
+        outcome = "missing"
+    elif not await entry_attempt_allowed(bucket):
+        outcome = "throttled"
+    elif not await check_entry_code(identity, entry_code):
+        outcome = "unknown"
+    else:
+        return None
+    logger.warning("web chat page refused entry for identity %s: %s (bucket %s)", identity, outcome, bucket)
+    return _refusal_page(_ENTRY_REFUSED_PAGE, 403)
 
 
 def _door_error_detail(response: httpx.Response) -> str:
@@ -468,11 +616,34 @@ async def web_chat_page(request: Request) -> Response:
     settings = web_settings()
     raw_identity = request.path_params["identity"]
     identity = _clean_identity(raw_identity) or raw_identity
+
+    # Door order (README): parse + strip reserved -> params bounds -> navigation guard
+    # -> gate check for mint-needing callers -> mint/refresh with params.
+    params, params_refusal = _read_link_params(request, identity)
+    if params_refusal is not None:
+        return params_refusal
+    entry_code = request.query_params.get("tai_entry")
+
     token = session_token(request, settings)
-    registration = await resolve_session(token) if token is not None else None
+    try:
+        registration = await resolve_session(token) if token is not None else None
+    except SessionRecordError:
+        # The dead record fails loud in the decoder; the door re-mints. Value-free.
+        logger.warning("web chat page ignored a session for identity %s: its stored record was refused", identity)
+        registration = None
     existing = token if _serves(registration, identity) else None
-    if existing is None and not is_document_navigation(request):
-        return _refusal_page(_NOT_A_NAVIGATION_PAGE, 403)
+    navigation = is_document_navigation(request)
+
+    if existing is None:
+        # The navigation guard runs BEFORE the gate check: a non-navigation answers
+        # ``not_a_navigation`` regardless of any presented code, so no response ever
+        # differs by code validity (no oracle).
+        if not navigation:
+            return _refusal_page(_NOT_A_NAVIGATION_PAGE, 403)
+        gate_refusal = await _entry_gate_refusal(request, identity, entry_code)
+        if gate_refusal is not None:
+            return gate_refusal
+
     try:
         build = load_build()
     except PublicBuildError as exc:
@@ -481,12 +652,18 @@ async def web_chat_page(request: Request) -> Response:
     response = Response(
         render_page(raw_identity, settings.page_title, build),
         media_type=HTML_CONTENT_TYPE,
-        headers={"content-security-policy": PAGE_CSP, **_NOSNIFF, "cache-control": _NO_STORE},
+        headers={"content-security-policy": PAGE_CSP, **_NOSNIFF, "cache-control": _NO_STORE, **_REFERRER_POLICY},
     )
     if existing is not None:
+        # A NAVIGATION carrying params rewrites the live visitor's params (same token,
+        # same visitor id); a cross-site subresource must not, and empty params leave
+        # the stored ones untouched.
+        if params and navigation:
+            assert registration is not None  # _serves guarantees it when existing is set
+            await update_session_params(existing, registration, params)
         set_session_cookie(response, existing, settings)
     else:
-        await _mint_session(response, identity, settings)
+        await _mint_session(response, identity, settings, params)
     return response
 
 
@@ -592,7 +769,7 @@ async def web_messages(request: Request) -> Response:
     # unauthenticated doors and a visitor can rotate at will — so it cannot bound spend.
     # The turn cap keys instead on the accountable NETWORK bucket, the same value the
     # public-door rate limiter derives for this request.
-    cap_key = client_bucket(request.client.host if request.client else None, request.headers.get(XFF_HEADER, ""))
+    cap_key = _client_bucket(request)
 
     async with transcript_order(body.identity, address):
         try:
@@ -603,6 +780,9 @@ async def web_messages(request: Request) -> Response:
                 cap_key=cap_key,
                 text=body.text,
                 provider_message_id=_provider_message_id(body.identity, address, body.client_message_id),
+                # The captured link params ride the turn's tool payload under their own
+                # key; empty -> None -> payload byte-identical to today.
+                params=registration.params or None,
             )
         except BlankInboundTextError:
             return _error("message text is blank", 400)
@@ -807,9 +987,153 @@ async def web_session_rotate(request: Request) -> Response:
         body = RotateBody.model_validate(raw)
     except ValidationError as exc:
         return _error(_body_refusal(exc), 422)
+    # A rotation mints a session, so a gated identity gates it too — same throttle then
+    # code check, same wording as the page refusal. An ungated identity ignores the code.
+    if await is_gate_enabled(body.identity):
+        bucket = _client_bucket(request)
+        if (
+            body.entry_code is None
+            or not await entry_attempt_allowed(bucket)
+            or not await check_entry_code(body.identity, body.entry_code)
+        ):
+            logger.warning("web chat rotate refused entry for identity %s (bucket %s)", body.identity, bucket)
+            return _error(_ENTRY_REFUSED_MESSAGE, 403, _ENTRY_REFUSED_CODE)
     token = session_token(request, settings)
     if token is not None:
         await drop_session(token)
     response = _ok({"status": "rotated"})
-    await _mint_session(response, body.identity, settings)
+    # A rotation mints a CLEAN registration: it carries no link params (README pin).
+    await _mint_session(response, body.identity, settings, {})
     return response
+
+
+# -- management doors (authed=True, platform api key) ---------------------------
+#
+# The entry gate's operator plane. Unlike the public chat doors these require the
+# platform api key (``authed=True``) and declare an explicit action-class — an authed
+# route with none REFUSES TO REGISTER (fail-closed fence). They refuse with the
+# standard JSON envelope; they are not navigations and get no refusal pages.
+
+
+def _managed_identity(request: Request) -> str | None:
+    """The canonical identity a management door acts on, or ``None`` when the path
+    segment is unusable (the door answers a 422)."""
+    return _clean_identity(request.path_params["identity"])
+
+
+def _code_view(code: EntryCode) -> dict[str, Any]:
+    return {
+        "code_id": code.code_id,
+        "label": code.label,
+        "created_at": code.created_at,
+        "expires_at": code.expires_at,
+    }
+
+
+@tai42_app.http.custom_route(
+    "/api/channels/web/gates/{identity}",
+    methods=["GET"],
+    summary="Read a web route's entry-gate state and its codes",
+    tags=["channels"],
+    response_model=None,
+    authed=True,
+    action="read",
+)
+async def web_gate_read(request: Request) -> Response:
+    """The gate flag for a web route and the live codes minted for it (never the raw
+    codes — only their ids and metadata)."""
+    identity = _managed_identity(request)
+    if identity is None:
+        return _error(_IDENTITY_REQUIREMENT, 422)
+    off = _store_off()
+    if off is not None:
+        return off
+    enabled = await is_gate_enabled(identity)
+    codes = await list_entry_codes(identity)
+    return _ok({"enabled": enabled, "codes": [_code_view(code) for code in codes]})
+
+
+@tai42_app.http.custom_route(
+    "/api/channels/web/gates/{identity}",
+    methods=["PUT"],
+    summary="Turn a web route's entry gate on or off",
+    tags=["channels"],
+    response_model=None,
+    request_model=GateToggleBody,
+    authed=True,
+    action="write",
+)
+async def web_gate_toggle(request: Request) -> Response:
+    """Set the explicit gate flag. Turning it off does not touch the codes; turning it
+    on with no live code makes the route unreachable until one is minted."""
+    identity = _managed_identity(request)
+    if identity is None:
+        return _error(_IDENTITY_REQUIREMENT, 422)
+    off = _store_off()
+    if off is not None:
+        return off
+    settings = web_settings()
+    raw, refusal = await _json_body(request, settings)
+    if refusal is not None:
+        return refusal
+    try:
+        body = GateToggleBody.model_validate(raw)
+    except ValidationError as exc:
+        return _error(_body_refusal(exc), 422)
+    await set_gate(identity, body.enabled)
+    return _ok({"enabled": body.enabled})
+
+
+@tai42_app.http.custom_route(
+    "/api/channels/web/gates/{identity}/codes",
+    methods=["POST"],
+    summary="Mint an entry code for a web route",
+    tags=["channels"],
+    response_model=None,
+    request_model=MintCodeBody,
+    authed=True,
+    action="write",
+)
+async def web_gate_mint_code(request: Request) -> Response:
+    """Mint a multi-use entry code. The raw code is returned ONCE, here — only its hash
+    is stored, so it can never be read back."""
+    identity = _managed_identity(request)
+    if identity is None:
+        return _error(_IDENTITY_REQUIREMENT, 422)
+    off = _store_off()
+    if off is not None:
+        return off
+    settings = web_settings()
+    raw, refusal = await _json_body(request, settings)
+    if refusal is not None:
+        return refusal
+    try:
+        body = MintCodeBody.model_validate(raw)
+    except ValidationError as exc:
+        return _error(_body_refusal(exc), 422)
+    raw_code, code_id = await mint_entry_code(identity, body.label, body.expires_at)
+    expires_at = body.expires_at.astimezone(UTC).isoformat() if body.expires_at is not None else None
+    return _ok({"code": raw_code, "code_id": code_id, "expires_at": expires_at})
+
+
+@tai42_app.http.custom_route(
+    "/api/channels/web/gates/{identity}/codes/{code_id}",
+    methods=["DELETE"],
+    summary="Revoke a web route's entry code",
+    tags=["channels"],
+    response_model=None,
+    authed=True,
+    action="write",
+)
+async def web_gate_revoke_code(request: Request) -> Response:
+    """Revoke one code by its id; an unknown id is a 404 envelope error."""
+    identity = _managed_identity(request)
+    if identity is None:
+        return _error(_IDENTITY_REQUIREMENT, 422)
+    off = _store_off()
+    if off is not None:
+        return off
+    code_id = request.path_params["code_id"]
+    if not await revoke_entry_code(identity, code_id):
+        return _error("entry code not found", 404)
+    return _ok({"status": "revoked"})

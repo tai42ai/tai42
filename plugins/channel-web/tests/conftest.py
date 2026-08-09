@@ -8,7 +8,7 @@ answer paths reach clients via ``tai42_app.clients.client_ctx``; a stub bound he
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,10 +76,22 @@ class _StubHttp:
         response_model: Any,
         request_model: Any = None,
         authed: bool = True,
+        action: str | None = None,
     ) -> Callable[[Any], Any]:
+        # ``action`` is recorded as metadata only — the stub enforces nothing (the
+        # fail-closed authed-without-action refusal is the core registry's, exercised
+        # by the skeleton route-parity gate, not here).
         def decorator(fn: Any) -> Any:
             self.routes.append(
-                SimpleNamespace(path=path, methods=methods, authed=authed, summary=summary, tags=tags, handler=fn)
+                SimpleNamespace(
+                    path=path,
+                    methods=methods,
+                    authed=authed,
+                    action=action,
+                    summary=summary,
+                    tags=tags,
+                    handler=fn,
+                )
             )
             return fn
 
@@ -97,7 +109,14 @@ class _StubConversations:
         self.accept_error: Exception | None = None
 
     async def accept(
-        self, channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+        self,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        cap_key: str,
+        text: str,
+        provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         self.accept_calls.append(
             {
@@ -107,6 +126,7 @@ class _StubConversations:
                 "cap_key": cap_key,
                 "text": text,
                 "provider_message_id": provider_message_id,
+                "params": params,
             }
         )
         if self.accept_error is not None:
@@ -163,6 +183,62 @@ def _in_range(entry_id: str, low: str, high: str) -> bool:
     return high == "+" or parsed <= _parse_id(high)
 
 
+def _redis_glob_match(pattern: str, value: str) -> bool:
+    """Redis KEYS/SCAN glob semantics for the fake ``scan_iter`` — ``*`` (any run),
+    ``?`` (one char), ``[set]`` (with ``^`` negation and ``a-b`` ranges), and ``\\``
+    escaping the next metacharacter. Ignoring ``MATCH`` would make the glob-escape
+    test pass vacuously, so the fake honors it exactly."""
+
+    def match(pi: int, vi: int) -> bool:
+        while pi < len(pattern):
+            char = pattern[pi]
+            if char == "*":
+                while pi < len(pattern) and pattern[pi] == "*":
+                    pi += 1
+                if pi == len(pattern):
+                    return True
+                return any(match(pi, vk) for vk in range(vi, len(value) + 1))
+            if vi >= len(value):
+                return False
+            if char == "?":
+                pi, vi = pi + 1, vi + 1
+                continue
+            if char == "[":
+                pi += 1
+                negate = pi < len(pattern) and pattern[pi] == "^"
+                if negate:
+                    pi += 1
+                hit = False
+                while pi < len(pattern) and pattern[pi] != "]":
+                    if pattern[pi] == "\\" and pi + 1 < len(pattern):
+                        if value[vi] == pattern[pi + 1]:
+                            hit = True
+                        pi += 2
+                    elif pi + 2 < len(pattern) and pattern[pi + 1] == "-" and pattern[pi + 2] != "]":
+                        if pattern[pi] <= value[vi] <= pattern[pi + 2]:
+                            hit = True
+                        pi += 3
+                    else:
+                        if value[vi] == pattern[pi]:
+                            hit = True
+                        pi += 1
+                if pi < len(pattern):
+                    pi += 1  # consume ']'
+                if hit == negate:
+                    return False
+                vi += 1
+                continue
+            if char == "\\" and pi + 1 < len(pattern):
+                pi += 1
+                char = pattern[pi]
+            if value[vi] != char:
+                return False
+            pi, vi = pi + 1, vi + 1
+        return vi == len(value)
+
+    return match(0, 0)
+
+
 class FakePipeline:
     """Buffers commands the way redis-py's pipeline does — every queued call returns
     the pipeline, and ``execute`` replays them against the fake in order."""
@@ -185,9 +261,11 @@ class FakePipeline:
 
 
 class FakeRedis:
-    """In-memory stand-in for the async redis commands the session, transcript, and
-    question stores use: strings (set nx/ex, get, getex, getdel, delete), key TTLs
-    (expire), streams (xadd with MAXLEN, xrange, xrevrange, xread), and pipelines."""
+    """In-memory stand-in for the async redis commands the session, transcript,
+    question, and entry-gate stores use: strings (set nx/ex, get, getex, getdel,
+    delete, incr), key TTLs (expire), a glob-honoring ``scan_iter``, streams (xadd
+    with MAXLEN, xrange, xrevrange, xread), and pipelines. Responses are decoded
+    strings, matching the ``decode_responses=True`` the store connects with."""
 
     def __init__(self, events: list[tuple[str, str]] | None = None) -> None:
         self.store: dict[str, str] = {}
@@ -223,6 +301,19 @@ class FakeRedis:
     async def delete(self, key: str) -> int:
         self.ttls.pop(key, None)
         return 0 if self.store.pop(key, None) is None else 1
+
+    async def incr(self, key: str) -> int:
+        self.events.append(("redis_incr", key))
+        value = int(self.store.get(key, "0")) + 1
+        self.store[key] = str(value)
+        return value
+
+    async def scan_iter(self, match: str | None = None) -> AsyncIterator[str]:
+        # A snapshot of the keyspace, glob-filtered on ``match`` exactly as Redis
+        # SCAN does — the escape test depends on ``\\*`` matching a literal ``*``.
+        for key in list(self.store.keys()):
+            if match is None or _redis_glob_match(match, key):
+                yield key
 
     def pipeline(self) -> FakePipeline:
         return FakePipeline(self)
@@ -367,11 +458,18 @@ def registered_session(fake_redis: FakeRedis) -> FakeRedis:
     return fake_redis
 
 
-def register(fake: FakeRedis, token: str, visitor_id: str, identity: str) -> None:
+def register(fake: FakeRedis, token: str, visitor_id: str, identity: str, params: dict[str, str] | None = None) -> None:
     """Seed one session registration exactly as ``store.register_session`` writes it:
-    the address the token resolves to and the web route it was minted on."""
+    the address the token resolves to, the web route it was minted on, and its captured
+    link params. The ``params`` key is ALWAYS present (empty dict included) — the strict
+    decode refuses any other shape, so an old-shape record is seeded by hand, not here."""
     fake.store[f"channel:web:session:{token}"] = json.dumps(
-        {"visitor_id": visitor_id, "identity": identity, "created_at": datetime.now(UTC).isoformat()}
+        {
+            "visitor_id": visitor_id,
+            "identity": identity,
+            "created_at": datetime.now(UTC).isoformat(),
+            "params": params or {},
+        }
     )
 
 

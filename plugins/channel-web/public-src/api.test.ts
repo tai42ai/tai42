@@ -177,6 +177,26 @@ describe('rotateSession', () => {
     expect(init.body).toBe(JSON.stringify({ identity: 'site-alpha' }));
   });
 
+  it('carries the entry code in the body when the page URL has one', async () => {
+    // A rotation on a gated route re-presents the URL's `tai_entry`, so the fresh
+    // session is admitted exactly as opening the page was.
+    fetchMock.mockResolvedValue(reply(200, { data: { status: 'rotated' } }));
+
+    await rotateSession('site-alpha', 'code-xyz');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(JSON.stringify({ identity: 'site-alpha', entry_code: 'code-xyz' }));
+  });
+
+  it('omits the entry code when there is none, leaving the body unchanged', async () => {
+    fetchMock.mockResolvedValue(reply(200, { data: { status: 'rotated' } }));
+
+    await rotateSession('site-alpha', null);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(JSON.stringify({ identity: 'site-alpha' }));
+  });
+
   it('surfaces a refusal', async () => {
     fetchMock.mockResolvedValue(reply(403, { error: 'cross-origin request refused' }));
 
