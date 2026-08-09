@@ -347,9 +347,15 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             ("/health", "public", None),
             ("/metrics", "public", None),
             ("/ready", "public", None),
-            # Every channel webhook door (twilio inbound/status, whatsapp inbound):
-            # unauthenticated at the platform edge, authenticated by the provider signature.
+            # Every channel webhook door (twilio inbound/status, whatsapp inbound) and the web
+            # channel's PUBLIC chat doors: unauthenticated at the platform edge, authenticated
+            # by the provider signature or the visitor's session cookie.
             ("bridge-channels", "public", r"^/api/channels/.*$"),
+            # The web entry-gate MANAGEMENT doors are authed (platform api key): pin them to
+            # e2e-all so the blanket public channel rule above does not open them. Deny wins
+            # across tiers, so the path resolving to BOTH ids stays protected — an unauthed
+            # caller is refused, the operator (root) is admitted.
+            ("bridge-web-gates", "e2e-all", r"^/api/channels/web/gates(?:/.*)?$"),
             # The interactions callback door a channel adapter forwards an ask_user reply
             # to (a server-side loopback POST that carries no token).
             ("bridge-callback", "public", r"^/api/interactions/callback(?:/.*)?$"),

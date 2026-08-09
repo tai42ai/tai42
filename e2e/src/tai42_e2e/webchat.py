@@ -80,6 +80,33 @@ def transcript_keys(store_url: str, identity: str) -> set[str]:
         client.close()
 
 
+async def get_chat_page(
+    base_url: str,
+    identity: str,
+    *,
+    query: dict[str, str] | list[tuple[str, str]] | str | None = None,
+    cookies: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """GET the chat page and return the RAW response — no cookie is asserted.
+
+    :meth:`WebChatClient.open_page` raises when the door mints no cookie, so it cannot drive
+    the refusal legs (a 400 bounds page and a 403 gate page mint none by design): this helper
+    is how those legs read the page-door refusal — its status and its ``tai42-refusal-code``
+    meta. ``query`` passes through to httpx, so a list of pairs expresses a DUPLICATE key
+    (``[("x", "1"), ("x", "2")]``) the door must refuse; ``cookies`` presents an existing
+    session (the admitted-reload legs); ``headers`` sets navigation hints (a non-``document``
+    ``Sec-Fetch-Dest`` is the non-navigation the door must refuse BEFORE the gate)."""
+    # httpx no longer honours per-request cookies (the jar lives on the client), so an
+    # existing session is presented by seating it on the client itself.
+    async with httpx.AsyncClient(timeout=10.0, cookies=cookies) as client:
+        return await client.get(
+            f"{base_url.rstrip('/')}/api/channels/web/chat/{identity}",
+            params=query,
+            headers=headers,
+        )
+
+
 @dataclass
 class WebChatClient:
     """One visitor of one web route: a base origin, the route identity, the cookie token
@@ -101,10 +128,12 @@ class WebChatClient:
         registered against. Raises when the door mints no cookie — without a session
         there is no conversation to open.
 
-        ``query`` appends URL query parameters to the page load — the browser-side coordinates
-        the shell reads (e.g. the ``pair`` invite code, which the bundle submits once as the
-        visitor's first message). The server ignores them, so the shell it returns is
-        identical; the caller stands in for the bundle by sending whatever the query implies."""
+        ``query`` appends URL query parameters to the page load. Two are the browser's own
+        coordinates the door consumes and never stores: the ``pair`` invite code (the bundle
+        submits it once as the visitor's first message) and the ``tai_entry`` gate code. Every
+        OTHER name is a link param captured with this session and delivered to the turn's tool
+        payload under ``.params`` — the shell HTML is identical either way; the caller stands in
+        for the bundle by sending whatever the query implies."""
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{base_url.rstrip('/')}/api/channels/web/chat/{identity}", params=query)
         token = response.cookies.get(SESSION_COOKIE)
@@ -166,6 +195,39 @@ class WebChatClient:
     ) -> httpx.Response:
         async with self._client(15.0, cookies) as client:
             return await client.post(self._url(f"/questions/{interaction_id}/answer"), json={"answer": value})
+
+    async def rotate(
+        self,
+        *,
+        store_url: str,
+        identity: str | None = None,
+        entry_code: str | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> tuple[WebChatClient | None, httpx.Response]:
+        """POST the rotate door — the visitor's "new conversation" — and adopt the fresh
+        session it mints. Returns ``(client, response)``: the client is a new
+        :class:`WebChatClient` bound to the minted token's own ``visitor_id``, or ``None`` when
+        the door minted no cookie (a gated route refusing a rotation with no live code). A
+        rotation mints a CLEAN registration, so the returned session carries no link params.
+
+        ``entry_code`` carries the URL's ``tai_entry`` value the bundle sends on a gated route;
+        it is NEVER logged (a code in CI logs outlives the run)."""
+        target = self.identity if identity is None else identity
+        body: dict[str, str] = {"identity": target}
+        if entry_code is not None:
+            body["entry_code"] = entry_code
+        async with self._client(15.0, cookies) as client:
+            response = await client.post(self._url("/session/rotate"), json=body)
+        token = response.cookies.get(SESSION_COOKIE)
+        if token is None:
+            return None, response
+        fresh = type(self)(
+            base_url=self.base_url,
+            identity=target,
+            token=token,
+            visitor_id=registered_visitor_id(store_url, token),
+        )
+        return fresh, response
 
     @contextlib.asynccontextmanager
     async def hold_stream(self, *, deadline: float = 20.0) -> AsyncIterator[httpx.Response]:
