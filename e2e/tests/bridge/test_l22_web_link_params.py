@@ -210,7 +210,8 @@ async def test_bounds_violations_answer_a_400_page_and_mint_no_session(
     too_many = {f"k{i}": "v" for i in range(17)}
     oversize = {"x": "z" * 513}
     bad_key = {"bad.key": "v"}
-    duplicate: list[tuple[str, str]] = [("x", "1"), ("x", "2")]
+    # A raw query string is the type-clean way to present a DUPLICATE key to httpx.
+    duplicate = "x=1&x=2"
 
     for query in (too_many, oversize, bad_key, duplicate):
         response = await get_chat_page(base, identity, query=query)

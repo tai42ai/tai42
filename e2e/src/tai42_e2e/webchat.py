@@ -84,7 +84,7 @@ async def get_chat_page(
     base_url: str,
     identity: str,
     *,
-    query: dict[str, str] | list[tuple[str, str]] | str | None = None,
+    query: dict[str, str] | str | None = None,
     cookies: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
 ) -> httpx.Response:
@@ -93,8 +93,8 @@ async def get_chat_page(
     :meth:`WebChatClient.open_page` raises when the door mints no cookie, so it cannot drive
     the refusal legs (a 400 bounds page and a 403 gate page mint none by design): this helper
     is how those legs read the page-door refusal — its status and its ``tai42-refusal-code``
-    meta. ``query`` passes through to httpx, so a list of pairs expresses a DUPLICATE key
-    (``[("x", "1"), ("x", "2")]``) the door must refuse; ``cookies`` presents an existing
+    meta. ``query`` passes through to httpx — a dict for distinct keys, or a raw query string
+    for a DUPLICATE key (``"x=1&x=2"``) the door must refuse; ``cookies`` presents an existing
     session (the admitted-reload legs); ``headers`` sets navigation hints (a non-``document``
     ``Sec-Fetch-Dest`` is the non-navigation the door must refuse BEFORE the gate)."""
     # httpx no longer honours per-request cookies (the jar lives on the client), so an
