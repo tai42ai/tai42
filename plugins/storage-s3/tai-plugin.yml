@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: storage-s3
 package: tai42-storage-s3
-version: 0.2.6
+version: 0.3.0
 description: >-
   S3 storage backend for the TAI ecosystem — text, binary, and media content
   over an S3 bucket.
