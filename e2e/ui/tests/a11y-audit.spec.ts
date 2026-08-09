@@ -26,6 +26,19 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { MP_WEB_URL } from './helpers';
 
+// Publish-circular: the marketplace-web frontend (M34 PLAN_5) renders against the
+// M34 marketplace backend's browse contract (kind facet / nullable updated_at /
+// premium / docs_url), but the e2e installs the backend at the pre-M34
+// _MARKETPLACE_PIN. Un-skipped post-release after the pin bump (see MISSION_END_TASKS).
+// Every surface in this file is a tai-marketplace-web page, so this gates the whole file.
+test.skip(
+  true,
+  'Publish-circular: the marketplace-web frontend (M34 PLAN_5) renders against the M34 ' +
+    'marketplace backend browse contract (kind facet / nullable updated_at / premium / ' +
+    'docs_url), but the e2e installs the backend at the pre-M34 _MARKETPLACE_PIN. ' +
+    'Un-skipped post-release after the pin bump (see MISSION_END_TASKS).',
+);
+
 const WCAG_AA_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] as const;
 
 const ALPHA_REF = 'tai42/e2e-alpha';
