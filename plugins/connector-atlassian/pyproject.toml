@@ -55,7 +55,7 @@ namespaces = true
 include = ["tai42_connector*"]
 
 [tool.setuptools.package-data]
-"tai42_connector.atlassian" = ["py.typed", "tai-plugin.yml"]
+"tai42_connector.atlassian" = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

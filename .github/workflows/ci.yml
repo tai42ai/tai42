@@ -309,6 +309,14 @@ jobs:
       - run: uv sync --locked
       - name: Fleet consistency
         run: uv run pytest tests/
+      - name: Plugin docs gate
+        # Every first-party plugin's in-package docs/ tree validated against the
+        # canonical contract (kit's validate_docs) — the fleet's docs enforcement
+        # point beside marketplace ingest and the generator. Runs in this job, not
+        # the per-member check matrix: it imports tai42_kit (absent from a member
+        # env that does not depend on it) and discovers plugins fleet-wide, so it
+        # needs the full-workspace sync. Skips a plugin with no docs/ tree yet.
+        run: uv run --no-sync python scripts/check_plugin_docs.py
 
   # Each backend leg is split 3 ways by pytest-split using the committed
   # per-test durations in e2e/.test_durations; unknown/new tests get the

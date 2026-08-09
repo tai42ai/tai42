@@ -55,7 +55,7 @@ where = ["src"]
 include = ["tai42_webhook_verifier_github*"]
 
 [tool.setuptools.package-data]
-tai42_webhook_verifier_github = ["py.typed", "tai-plugin.yml"]
+tai42_webhook_verifier_github = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

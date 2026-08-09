@@ -1,0 +1,56 @@
+---
+title: "Stripe payment tools"
+description: "The four Stripe checkout and reconciliation tools and the STRIPE settings that configure them."
+---
+
+Four tools that take a payment through Stripe Checkout and reconcile the result back
+to a blocked interaction. The full deployment — the money-pinning preset, the manifest
+wiring, the verifier binding, the reconciliation schedule, and the confused-deputy
+rules that make it safe to hand an agent — is a guide that stays central; see
+[Use interactions](/guides/use-interactions). This page is the
+per-tool index and the settings.
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `STRIPE_SECRET_KEY` | unset | Stripe secret or restricted key. Missing or empty raises on every tool call. |
+| `STRIPE_API_BASE` | `https://api.stripe.com` | Stripe API origin. |
+| `STRIPE_REQUEST_TIMEOUT_SECONDS` | `20` | Per-request HTTP timeout in seconds. |
+| `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` | `1.2` | Serial pacing between answers in a reconciliation run. |
+
+Two further values are read under their unprefixed platform names, shared with the
+rest of the deployment: `TAI_BRIDGE_CALLBACK_SECRET` (signs the answer the tools post
+back) and `INTERACTIONS_PUBLIC_BASE_URL` (the callback origin). Both must be present on
+every process — app and worker — that runs these tools.
+
+The tools reject a session whose `livemode` disagrees with the configured key's mode,
+so a worker's key must be the same mode (`sk_live_`/`rk_live_` vs `sk_test_`/`rk_test_`)
+as the app's.
+
+## confirm_stripe_payment
+
+Answers a paid checkout ask from a Stripe webhook event. Bound to a payments topic
+through a hook so the signed `checkout.session.completed` delivery answers the blocked
+caller.
+
+## create_stripe_checkout
+
+Creates a Stripe Checkout Session and returns its hosted payment URL. Compose it with
+the `ask_external` extension to open a blocking payment ask.
+
+## create_stripe_payment_link
+
+Creates a flexible-amount, non-blocking Stripe payment link and returns its URL and
+session id.
+
+## reconcile_stripe_payments
+
+Re-answers paid Stripe checkout sessions the single-delivery webhook path may have
+lost, by listing recent sessions from Stripe and answering each through the same
+pinned bridge path. Run it on a schedule as the recovery layer for payments.
+
+## See also
+
+- [Use interactions](/guides/use-interactions) — the full Stripe payments deployment, in order.
+- [Triggers and webhooks](/concepts/triggers-and-webhooks) — the verifier that authenticates the signed callback.

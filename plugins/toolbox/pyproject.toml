@@ -75,7 +75,7 @@ where = ["src"]
 include = ["tai42_toolbox*"]
 
 [tool.setuptools.package-data]
-tai42_toolbox = ["py.typed", "tai-plugin.yml"]
+tai42_toolbox = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

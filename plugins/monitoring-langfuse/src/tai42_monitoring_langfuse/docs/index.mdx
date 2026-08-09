@@ -1,0 +1,54 @@
+---
+title: Langfuse monitoring
+description: Configure the Langfuse monitoring backend — the LANGFUSE_ env group, the required key pair, and scoping several deployments onto one project.
+---
+
+The Langfuse monitoring backend writes tool-run and agent-turn traces to a
+Langfuse project — cloud or self-hosted — and the Studio reads them back through
+the same interface.
+
+## Enable it
+
+```yaml manifest.yml
+monitoring_module: tai42_monitoring_langfuse
+```
+
+## Configuration
+
+The `LANGFUSE_` env group. Create a project in Langfuse Cloud or a self-hosted
+instance and copy its key pair from the project settings.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `LANGFUSE_PUBLIC_KEY` | unset | Project public key. Required. |
+| `LANGFUSE_SECRET_KEY` | unset | Project secret key. Required. Secret. |
+| `LANGFUSE_HOST` | unset | Langfuse base URL — the cloud endpoint or your own instance. Required. |
+| `LANGFUSE_TIMEOUT_SECONDS` | `30` | Client timeout, applied per read request too. |
+| `LANGFUSE_TRACING_ENVIRONMENT` | `tai` | Langfuse `environment` stamped on every write, and the scope every read filters by. |
+
+<Warning>
+Selecting `monitoring_module` without the three required keys raises at startup,
+naming all three — a monitoring backend that silently drops traces is worse than
+a server that will not boot. To run without monitoring, omit `monitoring_module`
+entirely; the runtime falls back to a built-in no-op.
+</Warning>
+
+## Share one project between deployments
+
+`LANGFUSE_TRACING_ENVIRONMENT` both stamps writes and scopes reads, so several
+deployments can share one Langfuse project by diverging on it — staging and
+production write into the same project and each reads only its own traces.
+Reading a trace by id is the one unscoped call, because trace ids are globally
+unique.
+
+## Quirks
+
+- The package pins the Langfuse SDK to a narrow range because it reaches into SDK
+  internals for the read paths. Upgrading the Langfuse **server** is safe;
+  changing the pinned SDK is not.
+- A self-hosted Langfuse is a standalone stack (its own Postgres, ClickHouse,
+  Redis, and object store); wire the runtime to it with the four variables above.
+
+## See also
+
+- [Observe](/operate/observe) — metrics, traces, and what the runtime emits.

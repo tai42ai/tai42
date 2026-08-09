@@ -22,7 +22,8 @@ def test_plugin_spec_validates_and_names_this_listing():
     spec = _spec()
     assert spec.ref == "tai42/backend-rq"
     for item in spec.provides:
-        assert importlib.util.find_spec(item.module) is not None, item.module
+        if item.module is not None:
+            assert importlib.util.find_spec(item.module) is not None, item.module
 
 
 def test_plugin_spec_matches_the_project_metadata():
@@ -43,3 +44,13 @@ def test_packaged_spec_is_declared_in_package_data():
     ]
     declaring = [key for key, files in package_data.items() if "tai-plugin.yml" in files]
     assert declaring == ["tai42_backend_rq"]
+
+
+def test_pyproject_ships_the_docs_tree_as_package_data():
+    package_data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    assert "docs/*" in package_data["tai42_backend_rq"], (
+        "the in-package docs/ tree must ship via the 'docs/*' glob on the "
+        "'tai42_backend_rq' [tool.setuptools.package-data] key, or the wheel omits docs/index.mdx"
+    )

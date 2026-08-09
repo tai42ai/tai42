@@ -1,0 +1,58 @@
+---
+title: OIDC machine identity
+description: Configure the validate-only OIDC identity provider — the TAI_IDENTITY_OIDC_ env group, provider selection, and the resolved user id shape.
+---
+
+This provider lets machines authenticate with a JWT your identity provider
+already issues, rather than with an API key the runtime minted. It **verifies**
+tokens; it never issues them — there is no authorization-code flow, no client id
+or secret, and no key-minting surface.
+
+## Register and select it
+
+```yaml manifest.yml
+lifecycle_modules:
+  - tai42_identity_oidc
+```
+
+```bash
+ACCESS_CONTROL_ENABLE=true
+ACCESS_CONTROL_AUTH_PROVIDERS=["identity-oidc","redis"]
+```
+
+The provider registers itself under the name `identity-oidc`, which is the value
+`ACCESS_CONTROL_AUTH_PROVIDERS` selects. Listing `redis` alongside it keeps
+minted API keys working next to issuer-signed JWTs.
+
+## Configuration
+
+The `TAI_IDENTITY_OIDC_` env group.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_IDENTITY_OIDC_ISSUER` | unset | Issuer URL. Discovery is read from `{issuer}/.well-known/openid-configuration`. Required. |
+| `TAI_IDENTITY_OIDC_AUDIENCE` | unset | Value the token's `aud` must contain. Required. |
+| `TAI_IDENTITY_OIDC_ALLOWED_ALGS` | `["RS256"]` | Signing algorithms accepted, checked before any key lookup. At least one. |
+| `TAI_IDENTITY_OIDC_CLAIM` | `sub` | Claim whose value becomes the user id. |
+| `TAI_IDENTITY_OIDC_JWKS_TTL_SECONDS` | `3600` | How long the fetched JWKS is cached. |
+
+The issuer must publish standard discovery metadata and a JWKS endpoint. Startup
+fetches both, so a misconfigured issuer fails at boot rather than on the first
+call.
+
+## Write the policy
+
+A verified token resolves to the user id `idp:{issuer}:{claim value}`. Nothing is
+provisioned automatically: until a policy exists for that exact id, every
+protected route denies the call. The `owner_user_id` claim is stripped from the
+claims the runtime keeps, so it cannot be used to escalate.
+
+```bash
+tai roles --help         # named access-control policies
+```
+
+## See also
+
+- [Access control](/concepts/access-control) — the policy model this feeds.
+- [User types and permissions](/concepts/permissions) — how each identity type is judged.
+- [Set up access control](/guides/access-control) — the jq policy end to end.

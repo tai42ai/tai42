@@ -22,10 +22,11 @@ def test_plugin_spec_validates_and_names_this_listing():
     spec = _spec()
     assert spec.ref == "tai42/accounts-oidc"
     for item in spec.provides:
-        assert importlib.util.find_spec(item.module) is not None, (
-            f"provided item {item.kind.value}/{item.name} declares module {item.module!r}, "
-            "which does not resolve to an importable module"
-        )
+        if item.module is not None:
+            assert importlib.util.find_spec(item.module) is not None, (
+                f"provided item {item.kind.value}/{item.name} declares module {item.module!r}, "
+                "which does not resolve to an importable module"
+            )
 
 
 def test_plugin_spec_matches_the_project_metadata():
@@ -48,3 +49,13 @@ def test_packaged_spec_is_declared_in_package_data():
 
 def test_packaged_copy_is_identical_to_the_root_spec():
     assert _PACKAGED_SPEC.read_bytes() == _ROOT_SPEC.read_bytes()
+
+
+def test_docs_are_declared_in_package_data():
+    package_data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    (owner,) = [patterns for _key, patterns in package_data.items() if "tai-plugin.yml" in patterns]
+    assert "docs/*" in owner, (
+        f"docs/* must be declared in package-data so the wheel ships docs/index.mdx; got {owner!r}"
+    )

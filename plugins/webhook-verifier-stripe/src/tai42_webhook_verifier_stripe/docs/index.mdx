@@ -1,0 +1,59 @@
+---
+title: "Stripe webhook verifier"
+description: "Bind the stripe webhook verifier to a hook topic, name the signing-secret environment variable, and tune the replay window."
+---
+
+Registers the `stripe` webhook verifier. It authenticates an inbound delivery's
+`Stripe-Signature` HMAC-SHA256 over `{timestamp}.{raw body}`, keyed by the endpoint's
+signing secret, and enforces a freshness window against replay. It is the verifier
+binding behind the platform's Stripe payments flow.
+
+## Bind it to a topic
+
+A verifier is bound per hook topic. The binding names the environment variable that
+holds the endpoint's signing secret through `config.secret_env` — the verifier looks
+that variable up at verify time, so the secret itself never lives in the manifest:
+
+```bash
+curl -X PUT .../api/hooks/topics/payments/verifier \
+  -d '{"verifier": "stripe", "config": {"secret_env": "STRIPE_WEBHOOK_SECRET"}}'
+```
+
+Set the signing secret from the Stripe dashboard webhook endpoint in that variable on
+every process that receives deliveries:
+
+```bash
+STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+The variable name is yours to choose — pick a distinct name per topic when one
+deployment verifies several Stripe endpoints with different secrets.
+
+### Replay window
+
+`config` takes an optional `tolerance_seconds` (a positive int, default `300`), the
+age past which a delivery is rejected:
+
+```json
+{"verifier": "stripe", "config": {"secret_env": "STRIPE_WEBHOOK_SECRET", "tolerance_seconds": 300}}
+```
+
+Only a stale timestamp is rejected; a future timestamp is not, since sender clock skew
+is not an attack signal.
+
+## Behaviour
+
+- **Fails closed.** A missing `secret_env` key, a missing environment variable, an
+  empty secret, or a non-positive `tolerance_seconds` raises loudly rather than
+  degrading to an unauthenticated door. A malformed or mismatched signature is an
+  ordinary verification failure.
+- **Rotation-tolerant.** A header may carry several `v1=` digests during a secret
+  rotation; any one that matches passes, and a malformed candidate is dropped rather
+  than rejecting the delivery.
+- **POST only.** The signature covers the raw body, so a door binding this verifier
+  rejects GET.
+
+## See also
+
+- [Triggers and webhooks](/concepts/triggers-and-webhooks) — the verifier model and the built-in `shared_secret` verifier.
+- [Use interactions](/guides/use-interactions) — the full Stripe payments deployment this verifier anchors.

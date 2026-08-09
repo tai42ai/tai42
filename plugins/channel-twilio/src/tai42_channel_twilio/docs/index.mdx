@@ -1,0 +1,62 @@
+---
+title: Twilio channel
+description: Configure the Twilio WhatsApp channel — the CHANNEL_TWILIO_ env group, the two webhooks, and the whatsapp-prefixed route identity.
+---
+
+Bridge a WhatsApp number carried by Twilio to an agent. Twilio sends and receives
+text only.
+
+## Enable it
+
+```yaml manifest.yml
+channel_modules:
+  - tai42_channel_twilio
+```
+
+## Configuration
+
+The `CHANNEL_TWILIO_` env group. `CHANNEL_TWILIO_REDIS_URL` (and the inherited
+connection-tuning fields) point the plugin-owned correlation store.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_TWILIO_ACCOUNT_SID` | unset | Twilio account SID. |
+| `CHANNEL_TWILIO_AUTH_TOKEN` | unset | Authenticates the outbound send and keys the inbound signature check (a mis-signed webhook is rejected). Secret. |
+| `CHANNEL_TWILIO_FROM` | unset | The WhatsApp sender, `whatsapp:`-prefixed (Twilio's `From`). |
+| `CHANNEL_TWILIO_ALLOWED_RECIPIENTS` | empty | Whitelist of `To` numbers a caller-requested recipient must be on. Comma-separated or JSON list. |
+| `CHANNEL_TWILIO_DEFAULT_RECIPIENT` | unset | `To` number used when the caller requests none; not allowlist-checked. |
+| `CHANNEL_TWILIO_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the outbound send and the loopback answer forward. |
+| `CHANNEL_TWILIO_DEDUPE_TTL` | `172800` | Seconds a handled `MessageSid` stays remembered (replay guard). |
+| `CHANNEL_TWILIO_REDIS_URL` | unset | Connection for the correlation store. |
+
+## Point the webhooks at the deployment
+
+Twilio calls two webhooks (configured in the Twilio console or REST — the plugin
+never mutates your Twilio account):
+
+- **Inbound message** (HTTP POST) → `{public base URL}/api/channels/twilio/inbound`
+- **Delivery status callback** (HTTP POST) → `{public base URL}/api/channels/twilio/status`
+
+The status callback surfaces a **late** delivery failure: Twilio accepts the
+send, then posts a `failed`/`undelivered` status, which flips the answer record
+to `failed`. This is how the WhatsApp 24-hour service window is surfaced on the
+async path.
+
+## Create a bridge route
+
+`our_identity` is the number the client texts — the Twilio WhatsApp sender,
+`whatsapp:`-prefixed:
+
+```bash
+tai conversations create support-line \
+  --door channel --target-name support --execution-key support-bot \
+  --channel twilio --identity whatsapp:+14155238886
+```
+
+A `(channel, identity)` pair may be claimed by only one route; more senders are
+more rows.
+
+## See also
+
+- [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.
+- [Conversation bridge](/reference/conversation-bridge) — every setting and the authorization model.

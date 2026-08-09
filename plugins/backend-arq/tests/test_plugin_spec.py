@@ -22,10 +22,11 @@ def test_plugin_spec_validates_and_names_this_listing():
     spec = _spec()
     assert spec.ref == "tai42/backend-arq"
     for item in spec.provides:
-        assert importlib.util.find_spec(item.module) is not None, (
-            f"provides item {item.kind.value}/{item.name} names module {item.module!r}, "
-            "which does not resolve to an importable module"
-        )
+        if item.module is not None:
+            assert importlib.util.find_spec(item.module) is not None, (
+                f"provides item {item.kind.value}/{item.name} names module {item.module!r}, "
+                "which does not resolve to an importable module"
+            )
 
 
 def test_plugin_spec_matches_the_project_metadata():
@@ -49,4 +50,14 @@ def test_pyproject_ships_the_spec_as_package_data():
         "exactly the 'tai42_backend_arq' package must ship 'tai-plugin.yml' via "
         f"[tool.setuptools.package-data]; found owners {owners!r} — a key drifting to a "
         "wrong/non-existent package would leave the wheel without the spec"
+    )
+
+
+def test_pyproject_ships_the_docs_tree_as_package_data():
+    package_data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    assert "docs/*" in package_data["tai42_backend_arq"], (
+        "the in-package docs/ tree must ship via the 'docs/*' glob on the "
+        "'tai42_backend_arq' [tool.setuptools.package-data] key, or the wheel omits docs/index.mdx"
     )

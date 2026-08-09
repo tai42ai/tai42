@@ -59,7 +59,7 @@ where = ["src"]
 include = ["tai42_identity_redis*"]
 
 [tool.setuptools.package-data]
-tai42_identity_redis = ["py.typed", "tai-plugin.yml"]
+tai42_identity_redis = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]

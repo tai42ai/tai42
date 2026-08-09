@@ -66,7 +66,7 @@ where = ["src"]
 include = ["tai42_channel_slack*"]
 
 [tool.setuptools.package-data]
-tai42_channel_slack = ["py.typed", "tai-plugin.yml"]
+tai42_channel_slack = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

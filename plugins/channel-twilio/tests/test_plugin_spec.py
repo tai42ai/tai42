@@ -22,9 +22,10 @@ def test_plugin_spec_validates_and_names_this_listing():
     spec = _spec()
     assert spec.ref == "tai42/channel-twilio"
     for item in spec.provides:
-        assert importlib.util.find_spec(item.module) is not None, (
-            f"provides entry {item.name!r} names module {item.module!r} which does not resolve"
-        )
+        if item.module is not None:
+            assert importlib.util.find_spec(item.module) is not None, (
+                f"provides entry {item.name!r} names module {item.module!r} which does not resolve"
+            )
 
 
 def test_plugin_spec_matches_the_project_metadata():
@@ -47,4 +48,14 @@ def test_packaged_spec_is_declared_in_package_data():
     assert owning_packages == ["tai42_channel_twilio"], (
         "tai-plugin.yml must be shipped by exactly the tai42_channel_twilio package-data key; "
         f"found {owning_packages!r} — a wrong/missing key means the wheel omits the spec"
+    )
+
+
+def test_pyproject_ships_the_docs_tree_as_package_data():
+    package_data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    assert "docs/*" in package_data["tai42_channel_twilio"], (
+        "the in-package docs/ tree must ship via the 'docs/*' glob on the "
+        "'tai42_channel_twilio' [tool.setuptools.package-data] key, or the wheel omits docs/index.mdx"
     )
