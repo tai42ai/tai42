@@ -25,10 +25,10 @@ classifiers = [
 dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError
     # and the tai42_app handle the plugin registers through.
-    "tai42-contract>=1.3,<2",
+    "tai42-contract>=1.4,<2",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=1.2,<2",
+    "tai42-kit[redis]>=1.3,<2",
     # Imported directly (transport error types).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).

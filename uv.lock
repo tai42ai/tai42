@@ -5269,7 +5269,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5465,7 +5465,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "1.3.0"
+version = "1.4.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5703,7 +5703,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "1.2.0"
+version = "1.3.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5932,7 +5932,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.4.0"
+version = "1.5.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
