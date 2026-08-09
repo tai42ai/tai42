@@ -23,6 +23,19 @@ The MCP-backed agents copy named variables from the process environment into eac
 MCP server's environment through an `env_allowlist` — a per-manifest list, not a
 fixed variable of this package.
 
+## Tool-error resilience
+
+A tool failure surfaces to the model as an error tool result and the agent loop
+continues, rather than aborting the run: a `ToolException` — which is how an
+in-process tool's own body exception is reported — or a pydantic `ValidationError`
+from a malformed tool call becomes an error result the model can react to. Failures
+outside the tool call (agent machinery, provider or infrastructure errors) still
+abort loudly. This holds across every tool-running agent in this package, including a
+deep agent's explicit and nested subagents. A thread whose previous turn was aborted
+mid-tool-call is repaired at the next turn start — its unanswered tool calls get
+synthetic error results so the provider accepts the thread — while a thread paused on
+a real interrupt is left untouched.
+
 ## deep_agent
 
 Runs a deep agent with planning, subagents, skills, and a filesystem backend.
