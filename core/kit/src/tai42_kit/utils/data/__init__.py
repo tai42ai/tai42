@@ -1,5 +1,11 @@
 """Pure data & text transforms: json, json schema, jq, mcp tool output, string, url, yaml."""
 
+from tai42_kit.utils.data.env_markers import (
+    ENV_REF,
+    EnvMarkerRef,
+    scalar_leaves,
+    scan_env_marker_refs,
+)
 from tai42_kit.utils.data.jq_util import get_compiled_jq, run_jq_bounded, run_jq_first
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model
 from tai42_kit.utils.data.mcp_output_util import (
@@ -16,6 +22,8 @@ from tai42_kit.utils.data.yaml_util import (
 )
 
 __all__ = [
+    "ENV_REF",
+    "EnvMarkerRef",
     "build_url",
     "dump_manifest",
     "extract_tool_error",
@@ -27,6 +35,8 @@ __all__ = [
     "merge_and_dump_manifest",
     "run_jq_bounded",
     "run_jq_first",
+    "scalar_leaves",
+    "scan_env_marker_refs",
     "snake_to_pascal",
     "text_to_md5",
     "tool_has_error",

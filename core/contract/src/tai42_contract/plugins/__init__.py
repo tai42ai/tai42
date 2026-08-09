@@ -15,8 +15,8 @@ contract itself has no YAML dependency.
 ``KIND_MANIFEST_BINDINGS`` is the single source for how each provided item
 kind wires into a :class:`~tai42_contract.manifest.Manifest`: which manifest
 field an installer patches and with what shape (a config row, a module-list
-entry, a single-module slot, a package-name entry, or no manifest field at
-all for the env-selected ``config`` kind).
+entry, a single-module slot, a package-name entry, an ``mcp`` transport entry,
+or no manifest field at all for the env-selected ``config`` kind).
 
 Version strings are validated as PEP 440 (an anchored regex of the spec's
 canonical pattern) and ``contract`` as a PEP 440 specifier set — shape-level
@@ -39,6 +39,8 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from tai42_contract.manifest import MCPConfig
 
 # Lowercase slug for the publisher namespace, the listing name, and categories:
 # a letter, then lowercase alphanumerics/hyphens.
@@ -258,6 +260,7 @@ class PluginItemKind(StrEnum):
     STUDIO_PLUGIN = "studio-plugin"
     ROUTER = "router"
     MIDDLEWARE = "middleware"
+    MCP_SERVER = "mcp-server"
 
 
 class ManifestBinding(BaseModel):
@@ -274,6 +277,8 @@ class ManifestBinding(BaseModel):
       must reject loudly.
     - ``package_list`` — append the plugin's DISTRIBUTION name (not the item's
       module) to a package list (``studio_plugins``).
+    - ``mcp_entry`` — append one ``{title: item.name, config: item.mcp}`` object
+      to the manifest ``mcp`` list; uninstall removes the entry by title.
     - ``env_selected`` — no manifest field: the kind is selected through the
       environment (a ``config`` provider is named by ``TAI_CONFIG_MODE`` and
       imported by the config seam), so ``field`` is ``None``.
@@ -282,7 +287,7 @@ class ManifestBinding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     field: str | None
-    mode: Literal["config_row", "module_list", "scalar_module", "package_list", "env_selected"]
+    mode: Literal["config_row", "module_list", "scalar_module", "package_list", "mcp_entry", "env_selected"]
 
     @model_validator(mode="after")
     def _field_iff_manifest_wired(self) -> ManifestBinding:
@@ -309,6 +314,7 @@ KIND_MANIFEST_BINDINGS: Mapping[PluginItemKind, ManifestBinding] = MappingProxyT
         PluginItemKind.STUDIO_PLUGIN: ManifestBinding(field="studio_plugins", mode="package_list"),
         PluginItemKind.ROUTER: ManifestBinding(field="routers_modules", mode="module_list"),
         PluginItemKind.MIDDLEWARE: ManifestBinding(field="middlewares_modules", mode="module_list"),
+        PluginItemKind.MCP_SERVER: ManifestBinding(field="mcp", mode="mcp_entry"),
     }
 )
 
@@ -334,13 +340,18 @@ class PluginItem(BaseModel):
     ``module`` is the import path whose import side-effect registers the item
     (or, for env-selected kinds, the module the selecting seam imports); the
     installer patches it into the manifest per ``KIND_MANIFEST_BINDINGS``.
+
+    The item shape is kind-conditional (a model validator enforces it, loud
+    both ways): an ``mcp-server`` item carries ``mcp`` transport config and no
+    ``module``; every other kind carries ``module`` and no ``mcp``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: PluginItemKind
     name: str
-    module: str
+    module: str | None = None
+    mcp: MCPConfig | None = None
     description: str
     tags: list[str] = Field(default_factory=list)
 
@@ -353,7 +364,11 @@ class PluginItem(BaseModel):
 
     @field_validator("module")
     @classmethod
-    def _check_module(cls, value: str) -> str:
+    def _check_module(cls, value: str | None) -> str | None:
+        # Presence is the model validator's concern (required iff not
+        # mcp-server); this checks only shape when a value is given.
+        if value is None:
+            return None
         if not MODULE_RE.fullmatch(value):
             raise ValueError(f"module {value!r} must be a dotted Python import path")
         return value
@@ -368,6 +383,28 @@ class PluginItem(BaseModel):
     def _check_item_tags(cls, value: list[str]) -> list[str]:
         return _check_tags(value)
 
+    @model_validator(mode="after")
+    def _shape_by_kind(self) -> PluginItem:
+        if self.kind is PluginItemKind.MCP_SERVER:
+            if self.mcp is None:
+                raise ValueError(f"kind {self.kind.value!r} requires 'mcp' transport config")
+            # A static mcp-server spec must name a reachable transport: MCPConfig
+            # permits zero-transport only for runtime entries built empty then
+            # mutated, so require it loudly at the plugin boundary rather than
+            # letting an empty shell surface late at spawn. Its own validator
+            # already guarantees at MOST one of url/uds/command; this adds the
+            # at-least-one requirement.
+            if self.mcp.url is None and self.mcp.uds is None and self.mcp.command is None:
+                raise ValueError(f"kind {self.kind.value!r} 'mcp' must declare a transport (url/uds/command)")
+            if self.module is not None:
+                raise ValueError(f"kind {self.kind.value!r} must not set 'module'")
+        else:
+            if self.module is None:
+                raise ValueError(f"kind {self.kind.value!r} requires 'module'")
+            if self.mcp is not None:
+                raise ValueError(f"kind {self.kind.value!r} must not set 'mcp'")
+        return self
+
 
 class PluginSpec(BaseModel):
     """The complete, validated content of one ``tai-plugin.yml``.
@@ -377,8 +414,11 @@ class PluginSpec(BaseModel):
     normalized pip distribution the listing points at; ``version`` must equal
     the built wheel's version (each plugin repo's spec test and the registry's
     ingest validation both pin that); ``contract`` is the tai42-contract
-    compatibility range as a PEP 440 specifier set. ``display_name`` and
-    ``icon`` are optional marketplace display metadata.
+    compatibility range as a PEP 440 specifier set, required unless every
+    provided item is kind ``mcp-server`` (such a package imports no contract),
+    and a spec may not mix ``mcp-server`` with any other kind. ``display_name``
+    and ``icon`` are optional marketplace display metadata; ``premium`` marks a
+    paid listing.
 
     ``migrations`` is an OPT-IN, package-relative directory holding the plugin's
     ordered SQL schema chain — absent means the plugin owns no tables and is not
@@ -397,10 +437,11 @@ class PluginSpec(BaseModel):
     version: str
     description: str
     icon: str | None = None
+    premium: bool = False
     license: str
     homepage: str | None = None
     repository: str | None = None
-    contract: str
+    contract: str | None = None
     categories: list[str]
     tags: list[str] = Field(default_factory=list)
     permissions: PluginPermissions = Field(default_factory=PluginPermissions)
@@ -480,12 +521,16 @@ class PluginSpec(BaseModel):
 
     @field_validator("contract")
     @classmethod
-    def _check_contract_range(cls, value: str) -> str:
-        # The stored value must already be clean: the clause-stripping below is
-        # only to parse each PEP 440 operator, so a surrounding-or-embedded
-        # newline / control char or leading/trailing whitespace would validate
-        # yet be stored verbatim. Reject it here (inner whitespace around commas,
-        # e.g. ``">=0.1, <0.2"``, stays allowed).
+    def _check_contract_range(cls, value: str | None) -> str | None:
+        # Presence is the model validator's concern (required unless every
+        # provided item is mcp-server); this checks only shape when a value is
+        # given. The stored value must already be clean: the clause-stripping
+        # below is only to parse each PEP 440 operator, so a
+        # surrounding-or-embedded newline / control char or leading/trailing
+        # whitespace would validate yet be stored verbatim. Reject it here (inner
+        # whitespace around commas, e.g. ``">=0.1, <0.2"``, stays allowed).
+        if value is None:
+            return None
         if _has_disallowed_control_char(value) or value != value.strip():
             raise ValueError("contract must be a single line with no leading, trailing, or embedded whitespace")
         clauses = [clause.strip() for clause in value.split(",")]
@@ -538,6 +583,26 @@ class PluginSpec(BaseModel):
         if ".." in value.split("/"):
             raise ValueError(f"migrations path {value!r} must not contain a '..' segment")
         return value
+
+    @model_validator(mode="after")
+    def _contract_by_kind(self) -> PluginSpec:
+        # One package is one thing: an mcp-server package imports no
+        # tai42-contract, so a declared range would be fiction; any other kind
+        # needs one. A spec may not mix the two.
+        kinds = {item.kind for item in self.provides}
+        if PluginItemKind.MCP_SERVER in kinds and len(kinds) > 1:
+            others = sorted(kind.value for kind in kinds if kind is not PluginItemKind.MCP_SERVER)
+            raise ValueError(
+                f"kind {PluginItemKind.MCP_SERVER.value!r} may not share a spec with other kinds; also found {others}"
+            )
+        if kinds == {PluginItemKind.MCP_SERVER}:
+            if self.contract is not None:
+                raise ValueError(f"an all-{PluginItemKind.MCP_SERVER.value} spec must not declare 'contract'")
+        elif self.contract is None:
+            raise ValueError(
+                f"'contract' is required unless every provided item is kind {PluginItemKind.MCP_SERVER.value!r}"
+            )
+        return self
 
 
 __all__ = [

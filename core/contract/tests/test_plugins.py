@@ -1,6 +1,6 @@
 """Tests for the plugin-spec contract (``tai42_contract.plugins``).
 
-Pins the 14-kind vocabulary, the kind→manifest binding table (the single
+Pins the 15-kind vocabulary, the kind→manifest binding table (the single
 source the installer and the registry consume), the frozen ``PluginSpec``
 model family, and every validator's pass/raise paths.
 """
@@ -42,7 +42,7 @@ def _spec_kwargs(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def test_kind_enum_has_the_fourteen_kinds():
+def test_kind_enum_has_the_fifteen_kinds():
     from tai42_contract.plugins import PluginItemKind
 
     assert {k.value for k in PluginItemKind} == {
@@ -60,7 +60,14 @@ def test_kind_enum_has_the_fourteen_kinds():
         "studio-plugin",
         "router",
         "middleware",
+        "mcp-server",
     }
+
+
+def test_mcp_server_binds_to_the_mcp_entry_mode():
+    from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, ManifestBinding, PluginItemKind
+
+    assert KIND_MANIFEST_BINDINGS[PluginItemKind.MCP_SERVER] == ManifestBinding(field="mcp", mode="mcp_entry")
 
 
 def test_bindings_cover_every_kind_exactly():
@@ -103,7 +110,7 @@ def test_binding_mode_matches_manifest_field_cardinality():
     # This guards the binding table against a mode/field cardinality mismatch
     # that would make an installer append to a scalar or overwrite a list.
     scalar_modes = {"scalar_module"}
-    list_modes = {"config_row", "module_list", "package_list"}
+    list_modes = {"config_row", "module_list", "package_list", "mcp_entry"}
     for kind, binding in KIND_MANIFEST_BINDINGS.items():
         if binding.field is None:
             continue
@@ -623,10 +630,12 @@ def test_plugins_module_imports_only_stdlib_or_pydantic():
 
     # The contract must stay dependency-light: no third-party import (notably
     # ``packaging``) may creep back into the plugin-spec module. Re-adding one
-    # would pass every behavioural test, so this AST scan is the guard.
+    # would pass every behavioural test, so this AST scan is the guard. The
+    # package's own root is first-party (the module reuses ``MCPConfig`` from
+    # ``tai42_contract.manifest``), so it joins stdlib + pydantic.
     source_path = Path(plugins_module.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    allowed_roots = set(sys.stdlib_module_names) | {"pydantic"}
+    allowed_roots = set(sys.stdlib_module_names) | {"pydantic", "tai42_contract"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             roots = [alias.name.split(".")[0] for alias in node.names]
@@ -833,3 +842,147 @@ def test_http_urls_are_accepted_for_homepage_and_repository():
         PluginSpec(**_spec_kwargs(repository="http://github.com/tai42ai/tai42/tree/main/plugins/toolbox")).repository
         == "http://github.com/tai42ai/tai42/tree/main/plugins/toolbox"
     )
+
+
+def _mcp_item(**overrides: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "kind": "mcp-server",
+        "name": "postgres_mcp",
+        "mcp": {"url": "https://mcp.example.com"},
+        "description": "A hosted MCP server.",
+    }
+    item.update(overrides)
+    return item
+
+
+def test_mcp_server_item_takes_mcp_and_no_module():
+    from tai42_contract.manifest import MCPConfig
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    item = PluginItem(**_mcp_item())
+    assert item.kind is PluginItemKind.MCP_SERVER
+    assert item.module is None
+    assert isinstance(item.mcp, MCPConfig)
+    assert item.mcp.url == "https://mcp.example.com"
+
+
+def test_mcp_server_item_rejects_module():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    with pytest.raises(ValidationError, match="must not set 'module'"):
+        PluginItem(**_mcp_item(module="pkg.mod"))
+
+
+def test_mcp_server_item_requires_mcp():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    item = _mcp_item()
+    del item["mcp"]
+    with pytest.raises(ValidationError, match="requires 'mcp'"):
+        PluginItem(**item)
+
+
+def test_mcp_server_item_requires_a_transport():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    # An mcp-server with an empty/transportless mcp (url/uds/command all None) is
+    # an unusable shell — MCPConfig permits zero-transport only for runtime
+    # mutate-later entries, so a static spec is rejected loudly at the plugin
+    # boundary rather than surfacing late at spawn.
+    with pytest.raises(ValidationError, match="must declare a transport"):
+        PluginItem(**_mcp_item(mcp={}))
+
+
+def test_non_mcp_item_requires_module():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    with pytest.raises(ValidationError, match="requires 'module'"):
+        PluginItem(kind=PluginItemKind.TOOL, name="x", description="d")
+
+
+def test_non_mcp_item_rejects_mcp():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    with pytest.raises(ValidationError, match="must not set 'mcp'"):
+        PluginItem(
+            kind=PluginItemKind.TOOL,
+            name="x",
+            module="a.b",
+            mcp={"url": "https://mcp.example.com"},  # pyright: ignore[reportArgumentType]
+            description="d",
+        )
+
+
+def test_premium_defaults_false_and_round_trips():
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _spec_kwargs()
+    assert "premium" not in kwargs
+    assert PluginSpec(**kwargs).premium is False
+    spec = PluginSpec(**_spec_kwargs(premium=True))
+    assert spec.premium is True
+    # Whole-spec round-trip (the kit stores/rehydrates the dumped spec) preserves
+    # the flag.
+    assert PluginSpec.model_validate(spec.model_dump()).premium is True
+
+
+def _all_mcp_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs = _spec_kwargs(provides=[_mcp_item()], **overrides)
+    kwargs.pop("contract", None)
+    return kwargs
+
+
+def test_all_mcp_server_spec_omits_contract():
+    from tai42_contract.plugins import PluginSpec
+
+    spec = PluginSpec(**_all_mcp_kwargs())
+    assert spec.contract is None
+
+
+def test_all_mcp_server_spec_rejects_contract():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _all_mcp_kwargs()
+    kwargs["contract"] = ">=0.1,<0.2"
+    with pytest.raises(ValidationError, match="must not declare 'contract'"):
+        PluginSpec(**kwargs)
+
+
+def test_non_mcp_spec_requires_contract():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _spec_kwargs()
+    del kwargs["contract"]
+    with pytest.raises(ValidationError, match="'contract' is required"):
+        PluginSpec(**kwargs)
+
+
+def test_spec_rejects_mixed_mcp_server_and_other_kinds():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    tool_item = {
+        "kind": "tool",
+        "name": "generate_uuid",
+        "module": "tai42_toolbox.tools.generate_uuid",
+        "description": "Generate a random UUID.",
+    }
+    kwargs = _spec_kwargs(provides=[_mcp_item(), tool_item])
+    kwargs.pop("contract", None)
+    with pytest.raises(ValidationError, match="may not share a spec with other kinds"):
+        PluginSpec(**kwargs)
