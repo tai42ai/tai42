@@ -2,12 +2,32 @@
 // through the library, so React's raw `act` would run with the act environment
 // switched off and warn on every update it flushes.
 import { act } from '@testing-library/react';
+import type { Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/api')>()),
   openChatStream: vi.fn().mockRejectedValue(new Error('no stream in this test')),
 }));
+
+// The entry mounts on import and never unmounts — the product page lives until the
+// tab closes. Left mounted here, React 19's scheduler keeps pending work that fires
+// after vitest tears the jsdom window down (`window is not defined`), so every root
+// the entry creates is captured and unmounted between tests. Wrapping `createRoot`
+// is the only seam: the entry holds its root privately and exports no handle.
+const roots = vi.hoisted(() => [] as Root[]);
+
+vi.mock('react-dom/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-dom/client')>();
+  return {
+    ...actual,
+    createRoot: (...args: Parameters<typeof actual.createRoot>): Root => {
+      const root = actual.createRoot(...args);
+      roots.push(root);
+      return root;
+    },
+  };
+});
 
 function shell(attributes: Record<string, string>): void {
   const root = document.createElement('div');
@@ -20,9 +40,14 @@ beforeEach(() => {
   document.body.innerHTML = '';
   document.title = 'Support';
   vi.resetModules();
+  roots.length = 0;
 });
 
 afterEach(() => {
+  // `act` flushes the unmount's effects so no scheduler work outlives the test.
+  act(() => {
+    for (const root of roots) root.unmount();
+  });
   vi.restoreAllMocks();
 });
 
