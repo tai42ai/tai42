@@ -841,12 +841,20 @@ def _patch_build_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(ragent, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
 
+    class _FakeCompiled:
+        # A faithful compiled-graph stand-in: the turn-start repair reads ``aget_state``,
+        # and an empty message log means a non-poisoned thread (repair is a no-op).
+        async def aget_state(self, config: Any) -> SimpleNamespace:
+            return SimpleNamespace(values={}, interrupts=())
+
     class FakeGraph:
         def __init__(self, **kwargs: Any) -> None:
             captured["graph_kwargs"] = kwargs
 
-        async def abuild(self) -> str:
-            return "compiled-graph"
+        async def abuild(self) -> _FakeCompiled:
+            compiled = _FakeCompiled()
+            captured["compiled"] = compiled
+            return compiled
 
     monkeypatch.setattr(ragent, "RetrievalToolsGraph", FakeGraph)
     monkeypatch.setattr(ragent, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}})
@@ -865,7 +873,7 @@ class TestBuild:
             agent._build(system_message="be brief", user_message="do it", tools_limit=7)
         )
 
-        assert compiled == "compiled-graph"
+        assert compiled is captured["compiled"]
         assert config == {"configurable": {"thread_id": "t"}}
         # ``_build`` hands back the resolved llm for the structured finalization pass.
         assert llm == "llm-obj"

@@ -21,6 +21,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
 
 
@@ -35,14 +36,17 @@ async def _build_agent_and_input(
     system_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    """Compile the tools agent and build its input messages and run config.
+    """Compile the tools agent, build its input messages and run config, and ready
+    the thread for the turn.
 
     The model resolves from the kit LLM settings (``llm_kwargs`` override the
     defaults), the checkpointer from the checkpoint registry, and the
     context-overflow middleware is attached. A ``response_format`` (JSON-Schema
     dict or pydantic class) forces the structured output onto
-    ``state["structured_response"]``; ``None`` keeps free-form text. Returns
-    ``(agent, messages, config)``.
+    ``state["structured_response"]``; ``None`` keeps free-form text. The single
+    choke point every face builds through, so the thread's dangling tool_calls are
+    repaired here (once the config resolves a ``thread_id``) for every face.
+    Returns ``(agent, messages, config)``.
     """
     llm_provider = llm_provider or llm_provider_settings().llm
     llm = await get_llm_async(provider=llm_provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
@@ -57,7 +61,7 @@ async def _build_agent_and_input(
         llm,
         tools=tools,
         checkpointer=checkpointer,
-        middleware=context_overflow_middlewares(),
+        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
         debug=logging_settings().is_enabled_for("DEBUG"),
         response_format=response_format,
     )
@@ -68,6 +72,7 @@ async def _build_agent_and_input(
         system_message=system_message,
         system_content_kwargs=system_content_kwargs,
     )
+    await _repair_dangling_tool_calls(agent, config)
     return agent, messages, config
 
 

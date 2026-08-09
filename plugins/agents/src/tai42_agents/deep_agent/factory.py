@@ -14,7 +14,12 @@ import asyncio
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
+from deepagents.middleware.subagents import (
+    GENERAL_PURPOSE_SUBAGENT,
+    CompiledSubAgent,
+    SubAgent,
+    SubAgentMiddleware,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -23,6 +28,7 @@ from langgraph.store.base import BaseStore
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_settings
 
+from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.deep_agent.backend import SKILLS_ROOT, build_backend
 from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
@@ -31,6 +37,31 @@ from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 _DEEPAGENTS_BUILTIN_TOOLS = frozenset(
     {"task", "ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute", "write_todos"}
 )
+
+
+def _general_purpose_subagent(skills: list[str] | None = None) -> SubAgent:
+    """deepagents' auto-added general-purpose subagent, carrying the shared tool-error
+    middleware on its own tool node.
+
+    Supplying it explicitly (deepagents skips its auto-add when a subagent named
+    ``general-purpose`` is present) is the only way to reach that stack — deepagents'
+    own GP middleware-inheritance filter drops any middleware whose name is not a
+    default GP slot. It reuses deepagents' name/description/prompt and sets no
+    ``model``/``tools``, so the subagent still inherits the agent's model and tools and
+    only tool-error visibility is added.
+
+    ``skills`` are the same resolved skill sources this level passes to
+    ``create_deep_agent``: deepagents has no ``inline_skills`` concept (inline skills
+    are already flattened into ``skills`` sources), and its auto-added GP builds a
+    ``SkillsMiddleware`` from that exact value — an explicit spec has no parent
+    fallback, so the sources are forwarded here to match. ``_skills_with_inline``
+    yields ``None`` or a non-empty list, so the key is set only when there are sources
+    (matching the auto-add's ``if skills is not None`` / the inline path's truthiness).
+    """
+    sub: SubAgent = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [_tool_error_middleware]}
+    if skills:
+        sub["skills"] = skills
+    return sub
 
 
 def _validate(
@@ -199,6 +230,10 @@ async def _resolve_subagent(
             provider=spec.llm_provider,
             **llm_settings().with_fallbacks(spec.llm_kwargs or {}),
         )
+    # Every subagent stack merges the shared tool-error middleware onto its own tool
+    # node (deepagents forwards spec ``middleware`` to the subagent's create_agent), so
+    # a tool-logic failure inside a subagent surfaces to its model instead of aborting.
+    sub_middleware: list[Any] = []
     if spec.subagents:
         parent_model = sub.get("model") or llm
         if parent_model is None or store is None or backend is None:
@@ -219,7 +254,9 @@ async def _resolve_subagent(
                 for child in spec.subagents
             )
         )
-        sub["middleware"] = [SubAgentMiddleware(backend=backend, subagents=list(nested))]
+        sub_middleware.append(SubAgentMiddleware(backend=backend, subagents=list(nested)))
+    sub_middleware.append(_tool_error_middleware)
+    sub["middleware"] = sub_middleware
     return sub
 
 
@@ -243,15 +280,20 @@ async def _compile_nested_subagent(
             provider=child.llm_provider,
             **llm_settings().with_fallbacks(child.llm_kwargs or {}),
         )
+    child_skills = _skills_with_inline(child.skills, child.inline_skills)
     runnable = create_deep_agent(
         model=model,
         tools=list(child.tools) or parent_tools,
         system_prompt=child.system_prompt,
-        skills=_skills_with_inline(child.skills, child.inline_skills),
+        skills=child_skills,
         backend=backend,
         store=store,
         interrupt_on=child.interrupt_on,
         response_format=child.response_format,
+        # Same tool-error visibility on the nested subagent's own tool node and on its
+        # own auto-added general-purpose subagent, which inherits the child's skills.
+        middleware=[_tool_error_middleware],
+        subagents=[_general_purpose_subagent(child_skills)],
     )
     return {"name": child.name, "description": child.description, "runnable": runnable}
 
@@ -292,17 +334,27 @@ async def build_deep_agent(
     resolved = await asyncio.gather(
         *(_resolve_subagent(spec, llm=llm, tools=tools or [], store=store, backend=backend) for spec in subagent_specs)
     )
-    resolved_subagents = list(resolved) or None
+    main_skills = _skills_with_inline(skills, inline_skills)
+    resolved_subagents: list[SubAgent | CompiledSubAgent] = list(resolved)
+    # deepagents auto-adds a general-purpose subagent when the caller supplies none;
+    # supply it explicitly (with the same skills it would have inherited) so its tool
+    # node carries the shared middleware too (a caller who names their own
+    # general-purpose subagent already gets it via _resolve_subagent).
+    if not any(sub.get("name") == GENERAL_PURPOSE_SUBAGENT["name"] for sub in resolved_subagents):
+        resolved_subagents.insert(0, _general_purpose_subagent(main_skills))
 
     return create_deep_agent(
         model=llm,
         tools=tools or [],
         system_prompt=system_prompt,
         subagents=resolved_subagents,
-        skills=_skills_with_inline(skills, inline_skills),
+        skills=main_skills,
         backend=backend,
         checkpointer=checkpointer,
         store=store,
         interrupt_on=interrupt_on,
         response_format=response_format,
+        # A tool-logic failure surfaces to the model as an error ToolMessage rather
+        # than aborting the run; every other exception stays a loud abort.
+        middleware=[_tool_error_middleware],
     )

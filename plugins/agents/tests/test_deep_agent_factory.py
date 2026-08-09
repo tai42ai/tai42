@@ -12,6 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
 
+from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.deep_agent import factory
 from tai42_agents.deep_agent.backend import SKILLS_ROOT
 from tai42_agents.deep_agent.factory import (
@@ -55,10 +56,11 @@ def _tool(name: str) -> StructuredTool:
 
 
 def test_resolve_subagent_emits_only_set_keys() -> None:
-    """Inheritance relies on optional keys being ABSENT, not None."""
+    """Inheritance relies on optional keys being ABSENT, not None; the shared
+    tool-error middleware is the one always-present stack entry every subagent gets."""
     spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p")
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
-    assert sub == {"name": "b", "description": "d", "system_prompt": "p"}
+    assert sub == {"name": "b", "description": "d", "system_prompt": "p", "middleware": [_tool_error_middleware]}
 
 
 def test_resolve_subagent_resolves_model_when_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +204,100 @@ def test_build_deep_agent_collapses_empty_subagents(monkeypatch: pytest.MonkeyPa
         )
     )
     assert agent == "AGENT"
-    assert captured["subagents"] is None  # empty -> None, so deepagents adds its default
+    # No caller subagents: the general-purpose subagent is supplied explicitly so its
+    # own tool node carries the shared tool-error middleware (deepagents would otherwise
+    # auto-add it without that middleware).
+    (gp,) = captured["subagents"]
+    assert gp["name"] == "general-purpose"
+    assert _tool_error_middleware in gp["middleware"]
+
+
+def test_build_deep_agent_does_not_double_add_general_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create(*args: object, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "AGENT"
+
+    monkeypatch.setattr(factory, "create_deep_agent", fake_create)
+    gp_spec = ResolvedSubAgentSpec(name="general-purpose", description="d", system_prompt="p")
+    asyncio.run(
+        build_deep_agent(
+            llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[gp_spec]
+        )
+    )
+    names = [s["name"] for s in captured["subagents"]]
+    assert names.count("general-purpose") == 1
+    # The caller's own general-purpose subagent already carries the shared middleware
+    # (via _resolve_subagent), so no second one is injected.
+    (caller_gp,) = [s for s in captured["subagents"] if s["name"] == "general-purpose"]
+    assert _tool_error_middleware in caller_gp["middleware"]
+
+
+def _injected_gp(captured: dict[str, Any]) -> dict[str, Any]:
+    (gp,) = [s for s in captured["subagents"] if s["name"] == "general-purpose"]
+    return cast(dict[str, Any], gp)
+
+
+def test_general_purpose_subagent_inherits_skill_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    # deepagents' auto-added GP builds a SkillsMiddleware from the ``skills`` sources;
+    # the explicit GP has no parent fallback, so it must carry the SAME sources the
+    # level passes to create_deep_agent (an empty/None skill set sets no key).
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+
+    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[]))
+    assert captured["skills"] is None
+    assert "skills" not in _injected_gp(captured)
+
+    captured.clear()
+    skills = [f"{SKILLS_ROOT}jq/"]
+    asyncio.run(
+        build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], skills=skills)
+    )
+    assert _injected_gp(captured)["skills"] == captured["skills"] == skills
+
+
+def test_general_purpose_subagent_inherits_inline_skill_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    # inline_skills have no deepagents equivalent — they are flattened into
+    # ``SKILLS_ROOT<name>/`` skill sources, and the GP inherits them exactly.
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+
+    asyncio.run(
+        build_deep_agent(
+            llm=_FAKE_LLM,
+            store=InMemoryStore(),
+            checkpointer=InMemorySaver(),
+            tools=[],
+            inline_skills=[InlineSkill(name="helper", content="# helper")],
+        )
+    )
+    gp_skills = _injected_gp(captured)["skills"]
+    assert gp_skills == captured["skills"]
+    assert f"{SKILLS_ROOT}helper/" in gp_skills
+
+
+def test_nested_general_purpose_subagent_inherits_child_skill_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The nested leaf's own auto-added GP inherits the child's skill sources too.
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: calls.append(kwargs) or _FakeRunnable())
+    child = ResolvedSubAgentSpec(
+        name="leaf",
+        description="l",
+        system_prompt="sp",
+        skills=[f"{SKILLS_ROOT}jq/"],
+        inline_skills=[InlineSkill(name="helper", content="# helper")],
+    )
+    asyncio.run(
+        factory._compile_nested_subagent(
+            child, parent_model=_FAKE_LLM, parent_tools=[], store=InMemoryStore(), backend=object()
+        )
+    )
+    (gp,) = [s for s in calls[-1]["subagents"] if s["name"] == "general-purpose"]
+    assert gp["skills"] == calls[-1]["skills"]
+    assert f"{SKILLS_ROOT}jq/" in gp["skills"]
+    assert f"{SKILLS_ROOT}helper/" in gp["skills"]
 
 
 # --- nested subagents --------------------------------------------------------
@@ -286,9 +381,11 @@ def test_resolve_subagent_compiles_nested_into_middleware(monkeypatch: pytest.Mo
     assert [t.name for t in captured[0]["tools"]] == ["search"]
     assert captured[0]["system_prompt"] == "cp"
     assert captured[0]["backend"] is backend
-    # ...and attached to the parent through a SubAgentMiddleware.
-    (middleware,) = sub["middleware"]
-    assert isinstance(middleware, factory.SubAgentMiddleware)
+    # ...and attached to the parent through a SubAgentMiddleware, ahead of the shared
+    # tool-error middleware every subagent stack carries.
+    sub_middleware, tool_error = sub["middleware"]
+    assert isinstance(sub_middleware, factory.SubAgentMiddleware)
+    assert tool_error is _tool_error_middleware
 
 
 def test_nested_child_inherits_parent_tools_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,9 +437,12 @@ def test_build_deep_agent_passes_nested_subagents_through(monkeypatch: pytest.Mo
         )
     )
     main_call = calls[-1]
-    (advisor,) = main_call["subagents"]
-    assert advisor["name"] == "advisor"
-    assert isinstance(advisor["middleware"][0], factory.SubAgentMiddleware)
+    # The caller's subagent passes through alongside the explicit general-purpose
+    # subagent now supplied so its tool node carries the shared middleware.
+    subs = {s["name"]: s for s in main_call["subagents"]}
+    assert set(subs) == {"general-purpose", "advisor"}
+    assert isinstance(subs["advisor"]["middleware"][0], factory.SubAgentMiddleware)
+    assert _tool_error_middleware in subs["general-purpose"]["middleware"]
 
 
 # --- inline skills -----------------------------------------------------------

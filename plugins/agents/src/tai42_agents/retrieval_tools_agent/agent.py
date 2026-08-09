@@ -33,6 +33,7 @@ from tai42_kit.llm.settings import embedding_settings, llm_provider_settings, ll
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
@@ -227,6 +228,9 @@ class RetrievalToolsAgent(Agent):
         config = init_langgraph_config(config)
         system_prompt = RETRIEVAL_SYSTEM_MESSAGE.format(system_message=rendered_system)
         messages = build_agent_input(rendered_user, system_message=system_prompt)
+        # The single spot both faces (run drains astream) build through, so a thread
+        # poisoned by an aborted turn is repaired here before the run.
+        await _repair_dangling_tool_calls(agent, config)
         return agent, messages, config, llm
 
     async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:

@@ -36,6 +36,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
     reject_unhonored,
@@ -387,10 +388,12 @@ class DeepAgent(Agent):
         """Project a built agent's run into contract events, then one
         :class:`InterruptFinal` per pending interrupt.
 
-        The shared streaming core behind both faces. A graph can only pause when
+        The shared streaming core behind both faces, so a thread poisoned by an
+        aborted turn is repaired here before the run. A graph can only pause when
         ``interrupt_on`` is configured, so the paused-state read is skipped
         otherwise. ``response_format`` is handed to the projection for validation.
         """
+        await _repair_dangling_tool_calls(agent, config)
         async for event in aproject_agent_events(agent, agent_input, config, response_format=response_format):
             yield event
         if interrupt_on:

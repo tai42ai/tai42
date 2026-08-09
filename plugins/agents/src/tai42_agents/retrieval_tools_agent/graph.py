@@ -41,6 +41,8 @@ from pydantic import ValidationError
 from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
 from tai42_kit.utils.data.string_util import text_to_md5
 
+from tai42_agents._internal.recovery import _tool_error_middleware
+
 
 def _merged_selected_tools(left: list[str], right: list[str]) -> list[str]:
     # De-dup against ``left`` AND within ``right`` (order preserved): one turn's
@@ -194,7 +196,12 @@ class RetrievalToolsGraph:
         if self._execute_tools_node:
             return self._execute_tools_node
 
-        self._execute_tools_node = ToolNode(list(self.tool_registry.values()))
+        # The shared middleware turns a tool-logic failure (ToolException /
+        # ValidationError) into a model-visible error ToolMessage; every other
+        # exception stays a loud abort — matching the select-tools node above.
+        self._execute_tools_node = ToolNode(
+            list(self.tool_registry.values()), awrap_tool_call=_tool_error_middleware.awrap_tool_call
+        )
         return self._execute_tools_node
 
     def select_tools_node(self) -> RunnableCallable:

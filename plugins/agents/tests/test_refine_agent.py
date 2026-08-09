@@ -420,10 +420,11 @@ def test_run_with_response_format_forces_final_answer_on_a_fresh_thread(
     # Only the THIRD create_agent call (the structured final pass) carried the schema;
     # the text-loop evaluator and critic were built without one.
     assert recorder.response_formats == [None, None, _REFINE_SCHEMA]
-    # The loop's evaluator (not the structured graph) was resumed via aget_state to
-    # read history, and the structured pass is a DISTINCT graph (no cross-topology
+    # The loop's evaluator (not the structured graph) is read via aget_state twice —
+    # once by the turn-start repair before the loop, once to read history for the
+    # structured pass — and the structured pass is a DISTINCT graph (no cross-topology
     # resume of the text-loop thread).
-    assert evaluator.get_state_calls == 1
+    assert evaluator.get_state_calls == 2
     assert structured is not evaluator
     # The structured pass was fed the negotiation history + the approval prompt as
     # EXPLICIT input, not resumed from the loop thread's checkpoint.

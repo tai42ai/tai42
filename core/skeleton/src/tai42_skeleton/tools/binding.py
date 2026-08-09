@@ -22,7 +22,7 @@ from fastmcp.tools.function_parsing import ParsedFunction
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import Audio, File, Image, get_cached_typeadapter
-from langchain_core.tools import StructuredTool, tool
+from langchain_core.tools import StructuredTool, ToolException, tool
 from makefun import create_function
 from pydantic_core import to_jsonable_python
 from tai42_contract.extensions import ExtensionKind
@@ -658,10 +658,17 @@ class ToolBinding:
                     execution_identity, tool_obj.name, _named_call_arguments(target_sig, args, kwargs)
                 )
             with bridge_context(self._app.fastmcp):
-                result = target(*args, **kwargs)
-                if inspect.isawaitable(result):
-                    return await result
-                return result
+                # Only the tool body's own failure becomes a model-visible tool error;
+                # the machinery above (identity gate, live re-resolution, bridge setup)
+                # stays a raw abort. CancelledError/BaseException pass through untouched.
+                try:
+                    result = target(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        return await result
+                    return result
+                except Exception as exc:
+                    logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
+                    raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
 
         runnable.__name__ = resolved.__name__
         # langchain reads the runnable's docstring for the client tool's

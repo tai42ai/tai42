@@ -60,6 +60,10 @@ def _patch_seams(
 
     fake_agent = MagicMock()
     fake_agent.ainvoke = AsyncMock(return_value=state if state is not None else {"messages": []})
+    # The faces repair a thread's dangling tool_calls before running: a fresh thread
+    # has no checkpointed messages, so the double reports empty state (no repair).
+    fake_agent.aget_state = AsyncMock(return_value=SimpleNamespace(values={}))
+    fake_agent.aupdate_state = AsyncMock()
 
     async def fake_astream(messages: Any, config: Any, stream_mode: str) -> AsyncIterator[Any]:
         captured["stream"] = (messages, config, stream_mode)
@@ -108,7 +112,10 @@ class TestBuildAgentAndInput:
         assert captured["create"]["llm"] == "llm-obj"
         assert captured["create"]["tools"] == [tool]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
-        assert captured["create"]["middleware"] == ["mw"]
+        # The context-overflow middleware is threaded through, with the tool-error
+        # middleware appended so a tool-logic failure never aborts the loop.
+        assert captured["create"]["middleware"][0] == "mw"
+        assert captured["create"]["middleware"][-1] is bta._tool_error_middleware
         assert captured["create"]["debug"] is True
         # No response_format requested -> the text-behavior default is threaded through.
         assert captured["create"]["response_format"] is None

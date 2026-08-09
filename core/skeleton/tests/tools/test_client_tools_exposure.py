@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from fastmcp.server.context import Context
+from langchain_core.tools import ToolException
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.app.instance import app
@@ -112,11 +113,13 @@ def test_client_tool_exposes_preset_and_bakes_constant(preset_manager_restored):
 
             # ...and the baked key can never override it: the advertised schema
             # excludes it (langchain drops it before the call), and the resolved
-            # runnable itself rejects it if passed directly.
+            # runnable rejects it if passed directly — the baked partial's signature
+            # TypeError surfaces as a tool error carrying that TypeError as its cause.
             preset = await app.tools.get_tool("paris")
             runnable = app._tool_binding._client_runnable(preset)
-            with pytest.raises(TypeError):
+            with pytest.raises(ToolException) as excinfo:
                 await runnable(city="paris", units="metric")
+            assert isinstance(excinfo.value.__cause__, TypeError)
 
     asyncio.run(run())
 

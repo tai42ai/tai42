@@ -33,6 +33,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.reject import reject_unhonored, reject_untitled_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import aproject_agent_events
@@ -150,19 +151,23 @@ async def _run_refine_loop(
         evaluator_llm,
         tools=list(tools),
         checkpointer=checkpointer,
-        middleware=context_overflow_middlewares(),
+        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
         debug=is_enabled_for_debug,
     )
     critic: Any = create_agent(
         critic_llm,
         tools=list(tools),
         checkpointer=checkpointer,
-        middleware=context_overflow_middlewares(),
+        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
         debug=is_enabled_for_debug,
     )
 
     evaluator_config = init_langgraph_config(evaluator_config)
     critic_config = init_langgraph_config(critic_config)
+    # The two role graphs run on their own checkpointed threads; repair either if an
+    # aborted prior turn left it with dangling tool_calls before the loop resumes it.
+    await _repair_dangling_tool_calls(evaluator, evaluator_config)
+    await _repair_dangling_tool_calls(critic, critic_config)
 
     iteration = 0
     evaluator_input: dict[str, Any] = build_agent_input(evaluator_message, system_message=EVALUATOR_SYSTEM_MESSAGE)
@@ -202,7 +207,7 @@ async def _run_refine_loop(
         evaluator_llm,
         tools=list(tools),
         checkpointer=checkpointer,
-        middleware=context_overflow_middlewares(),
+        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
         debug=is_enabled_for_debug,
         response_format=response_format,
     )

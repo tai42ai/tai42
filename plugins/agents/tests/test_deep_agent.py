@@ -751,7 +751,10 @@ class _FakeCompiledGraph:
             yield chunk
 
     async def aget_state(self, config: Any) -> SimpleNamespace:
-        return SimpleNamespace(interrupts=self._interrupts)
+        # A faithful StateSnapshot exposes both ``values`` (read by the turn-start
+        # repair) and ``interrupts`` (read by the interrupt projection); an empty
+        # message log means a non-poisoned thread, so the repair is a no-op.
+        return SimpleNamespace(values={}, interrupts=self._interrupts)
 
 
 def _scripted_chunks() -> list[tuple[str, Any]]:
