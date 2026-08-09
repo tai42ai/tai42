@@ -24,10 +24,10 @@ classifiers = [
 ]
 dependencies = [
     # The pure interface contract this provider implements — the ConfigManager ABC.
-    "tai42-contract>=1.3,<2",
+    "tai42-contract>=1.4,<2",
     # Settings machinery (TaiBaseSettings + settings_cache) and the manifest
     # !ENV-tag yaml utilities (EnvTagLoader / merge_and_dump_manifest).
-    "tai42-kit>=1.2,<2",
+    "tai42-kit>=1.3,<2",
     # settings.py imports these directly (model_validator + SettingsConfigDict).
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
