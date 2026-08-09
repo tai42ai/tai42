@@ -6,7 +6,7 @@ streaming agents override with real per-step events.
 
 Two faces are derived from one ``Agent`` class:
 
-* a JSON ``run`` tool (LLM / MCP / flow-engine facing) — auto-generated downstream
+* a JSON ``run`` tool (LLM / MCP / plugin facing) — auto-generated downstream
   from :attr:`Agent.ToolInput` + :attr:`Agent.tool_description`;
 * an in-process ``astream`` method (API / SSE facing) that can take live tools.
 
@@ -56,8 +56,8 @@ class AgentInterruptedError(Exception):
 
 class PresetSpec(BaseModel):
     """A base tool bound to fixed kwargs, resolved into a ``StructuredTool`` at
-    run time (see ``resolve_tools``). A sub-flow is ``base_tool="flow"`` with
-    ``fixed_kwargs={"flow_graph": ...}``.
+    run time (see ``resolve_tools``). A base tool that interprets its fixed kwargs
+    as a nested document carries that document opaquely here.
     """
 
     name: str

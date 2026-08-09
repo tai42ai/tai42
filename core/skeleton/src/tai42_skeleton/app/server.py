@@ -55,6 +55,7 @@ from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
 from tai42_skeleton.presets.manager import PresetManager
+from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -206,6 +207,10 @@ class ServingCore:
         # re-imports the manifest's modules and re-registers cleanly.
         self._webhook_verifier_registry = WebhookVerifierRegistry()
         self._channel_registry = ChannelRegistry()
+
+        # Per-base-tool preset write-validator registry, reset each start() so a
+        # reload re-imports the tool modules and re-registers cleanly.
+        self._write_validator_registry = PresetWriteValidatorRegistry()
 
         # The backup registry is the host's first consumer of its own AppBackup facet:
         # the core host sections are registered here (never on reload, which keeps this

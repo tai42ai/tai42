@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from tai42_contract.backend import Backend
     from tai42_contract.config import ConfigManager
     from tai42_contract.monitoring import Monitoring
-    from tai42_contract.presets import PresetBody, PresetStore
+    from tai42_contract.presets import PresetBody, PresetStore, PresetWriteValidator
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
@@ -408,6 +408,16 @@ class PresetsFacet(_Facet):
         return await self._app._preset_bind(
             base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
         )
+
+    def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
+        return self._app._write_validator_registry.register(base_tool, validator)
+
+    def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
+        """The registered write validator for ``base_tool``, or ``None`` when none
+        is registered. Skeleton-only — the preset write path consults it, so it is
+        not on the ``AppPresets`` protocol (the precedent :meth:`list_active_bodies`
+        sets)."""
+        return self._app._write_validator_registry.get(base_tool)
 
     @property
     def store(self) -> PresetStore:

@@ -642,3 +642,134 @@ def test_set_version_tags_store_less_501(monkeypatch) -> None:
             assert exc_info.value.extra["code"] == "versioning-not-configured"
 
     asyncio.run(run())
+
+
+# -- per-base-tool write validator -------------------------------------------
+
+# A base-tool plugin registers a write validator for its base tool; the preset
+# write path consults it on the full body before persisting. The registry is reset
+# each ``start()``, so each ``app_context`` opens with a clean one and a test
+# registers a validator for the fixture ``weather`` base tool.
+
+
+def test_create_rejected_by_write_validator_400(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+
+            async def validator(body):
+                return ["weather rejects this", "second reason"]
+
+            instance.app.presets.register_write_validator("weather", validator)
+            with pytest.raises(preset_ops.BadRequestError) as exc_info:
+                await _create("w", fixed_kwargs={"units": "v"})
+            # Issues verbatim, one per line, and no row persisted.
+            assert exc_info.value.message == "weather rejects this\nsecond reason"
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("w")
+
+    asyncio.run(run())
+
+
+def test_create_accepted_when_write_validator_passes(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+
+            async def validator(body):
+                return []
+
+            instance.app.presets.register_write_validator("weather", validator)
+            await _create("w", fixed_kwargs={"units": "v"})
+            assert (await instance.app.presets.store.get_preset("w")).name == "w"
+
+    asyncio.run(run())
+
+
+def test_create_untouched_when_no_write_validator(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            # No validator registered for the base tool — the write path runs ungated.
+            await _create("w", fixed_kwargs={"units": "v"})
+            assert (await instance.app.presets.store.get_preset("w")).name == "w"
+
+    asyncio.run(run())
+
+
+def test_create_write_validator_exception_propagates(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+
+            async def validator(body):
+                raise RuntimeError("validator kaput")
+
+            instance.app.presets.register_write_validator("weather", validator)
+            # A validator exception surfaces loudly — never swallowed, never a pass.
+            with pytest.raises(RuntimeError, match="validator kaput"):
+                await _create("w", fixed_kwargs={"units": "v"})
+
+    asyncio.run(run())
+
+
+def test_save_version_rejected_by_write_validator_400(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            issues: list[str] = []
+
+            async def validator(body):
+                return list(issues)
+
+            instance.app.presets.register_write_validator("weather", validator)
+            await _create("w", fixed_kwargs={"units": "v"})
+            issues.append("save rejected")
+            with pytest.raises(preset_ops.BadRequestError) as exc_info:
+                await preset_ops.save_version(
+                    name="w",
+                    fixed_kwargs={"units": "z"},
+                    extensions=None,
+                    output_schema=None,
+                    output_schema_provided=False,
+                    description=None,
+                )
+            assert exc_info.value.message == "save rejected"
+
+    asyncio.run(run())
+
+
+def test_rollback_rejected_by_write_validator_400(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            issues: list[str] = []
+
+            async def validator(body):
+                return list(issues)
+
+            instance.app.presets.register_write_validator("weather", validator)
+            await _create("w", fixed_kwargs={"units": "v"})
+            await preset_ops.save_version(
+                name="w",
+                fixed_kwargs={"units": "z"},
+                extensions=None,
+                output_schema=None,
+                output_schema_provided=False,
+                description=None,
+            )
+            issues.append("rollback rejected")
+            with pytest.raises(preset_ops.BadRequestError) as exc_info:
+                await preset_ops.rollback_preset(name="w", version=1)
+            assert exc_info.value.message == "rollback rejected"
+
+    asyncio.run(run())
+
+
+def test_validate_verdict_carries_write_validator_issues(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+
+            async def validator(body):
+                return ["draft would be rejected"]
+
+            instance.app.presets.register_write_validator("weather", validator)
+            data = await preset_ops.validate_preset(name="w", base_tool="weather", fixed_kwargs={"units": "v"})
+            assert data["valid"] is False
+            assert data["error"] == "draft would be rejected"
+
+    asyncio.run(run())

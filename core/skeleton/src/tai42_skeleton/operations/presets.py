@@ -435,6 +435,20 @@ async def _dry_run_bind_error(
     return None
 
 
+async def _write_validator_error(body: PresetBody) -> str | None:
+    """The base tool's write-validator verdict for the FULL body about to persist,
+    as a 400 message joining its blocking issues (one per line), or ``None`` when
+    the base tool has no registered validator or it passes. Any exception the
+    validator raises propagates loudly — never swallowed, never treated as a pass."""
+    validator = instance.app.presets.write_validator(body.base_tool)
+    if validator is None:
+        return None
+    issues = await validator(body)
+    if issues:
+        return "\n".join(issues)
+    return None
+
+
 # -- record views ------------------------------------------------------------
 
 
@@ -623,6 +637,19 @@ async def create_preset(
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
+    # The base tool's own write validator over the full body about to persist — a
+    # body its base tool rejects is a 400 that never persists a row.
+    write_validator_error = await _write_validator_error(
+        PresetBody(
+            base_tool=base_tool,
+            description=description,
+            fixed_kwargs=fixed_kwargs,
+            extensions=extensions,
+            output_schema=output_schema,
+        )
+    )
+    if write_validator_error is not None:
+        raise BadRequestError(write_validator_error)
 
     # A preset needs the durable store; on a store-less deploy (the skeleton
     # database unconfigured) refuse cleanly here — the same predicate the
@@ -787,6 +814,17 @@ async def save_version(
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
+    write_validator_error = await _write_validator_error(
+        PresetBody(
+            base_tool=base_tool,
+            description=new_description,
+            fixed_kwargs=new_fixed_kwargs,
+            extensions=new_extensions,
+            output_schema=new_output_schema,
+        )
+    )
+    if write_validator_error is not None:
+        raise BadRequestError(write_validator_error)
 
     # Snapshot the OLD wire tool + its extension combos BEFORE the store write —
     # reload tears the old tool down, and after the write the active body already
@@ -879,6 +917,9 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
+    write_validator_error = await _write_validator_error(target_body)
+    if write_validator_error is not None:
+        raise BadRequestError(write_validator_error)
 
     prior_active = prior_record.active_version
     record = await store.rollback(name, version)
@@ -1185,6 +1226,17 @@ async def _verdict_bind_chain(
     )
     if bind_error is not None:
         return _verdict(bind_error)
+    write_validator_error = await _write_validator_error(
+        PresetBody(
+            base_tool=base_tool,
+            description=description,
+            fixed_kwargs=fixed_kwargs,
+            extensions=combos,
+            output_schema=output_schema,
+        )
+    )
+    if write_validator_error is not None:
+        return _verdict(write_validator_error)
     return _verdict(None)
 
 

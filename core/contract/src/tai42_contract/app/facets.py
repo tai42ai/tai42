@@ -36,7 +36,7 @@ from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.monitoring import Monitoring
-from tai42_contract.presets import PresetStore
+from tai42_contract.presets import PresetStore, PresetWriteValidator
 from tai42_contract.storage import Storage
 from tai42_contract.sub_mcp import SubMcpAppRouter
 from tai42_contract.versioning import VersionedStore
@@ -511,6 +511,17 @@ class AppPresets(Protocol):
         a plain tool base. ``bind`` is async because it must resolve the base
         ``Tool`` object (via ``app.tools.get_tool(base_tool)``) to feed the
         transform."""
+        ...
+
+    def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
+        """Register the write validator for ``base_tool`` (one per base tool;
+        duplicate registration raises).
+
+        A base-tool plugin calls this through the ``tai42_app`` handle when its tool
+        module loads. The validator runs on every write that persists a body —
+        create / save-version / rollback — and in the dry-run ``validate`` verdict,
+        so a body its base tool cannot accept is a loud 400 that never persists. A
+        base tool with no registered validator gets no extra check."""
         ...
 
     @property

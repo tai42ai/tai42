@@ -324,9 +324,9 @@ class Manifest(BaseModel):
     # appears in ``live_manifest`` output for the Studio-plugin registry to read.
     studio_plugins: list[str] = Field(default_factory=list)
 
-    # Curates which built-in tools the end user is offered in the flow builder.
-    # A NORMAL serialized field (no exclude): it must survive ``model_dump`` so
-    # it appears in ``live_manifest`` output.
+    # Curates which built-in tools the end user is offered in the authoring
+    # surfaces. A NORMAL serialized field (no exclude): it must survive
+    # ``model_dump`` so it appears in ``live_manifest`` output.
     user_tools: set[str] = Field(default_factory=set)
 
     # Curates the MCP tool surface projected from the operations layer. A NORMAL

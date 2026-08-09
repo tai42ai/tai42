@@ -102,8 +102,9 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (2) — `store` shared with versioning above
+    # presets (3) — `store` shared with versioning above
     "bind",
+    "register_write_validator",
 }
 
 
@@ -203,11 +204,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 60 (sub-protocol, member) pairs over 57 distinct names — ``store`` is
+    # 61 (sub-protocol, member) pairs over 58 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 57, f"union={len(union)}"
-    assert total == 60 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 58, f"union={len(union)}"
+    assert total == 61 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_namespaces():

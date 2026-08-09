@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.backup import BackupRegistry
     from tai42_skeleton.channels.registry import ChannelRegistry
     from tai42_skeleton.presets.manager import PresetManager
+    from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
@@ -101,7 +102,7 @@ class TaiMCPLifecycleMixin(ABC):
         # qualified name so a module re-import replaces rather than accumulates.
         self._post_swap_handlers: dict[str, Callable] = {}
 
-        # Per-kind tool reloaders (e.g. "flow" / "agentic_flow"), registered
+        # Per-kind tool reloaders, one per plugin-defined tool kind, registered
         # by the host app via @tool_reloader; fleet reload_tool/remove_tool
         # ops dispatch through run_tool_reload on every worker.
         self._tool_reloaders: dict[str, Callable] = {}
@@ -270,6 +271,10 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _channel_registry(self) -> "ChannelRegistry":
         return self._serving_core._channel_registry
+
+    @property
+    def _write_validator_registry(self) -> "PresetWriteValidatorRegistry":
+        return self._serving_core._write_validator_registry
 
     @property
     def _backup_registry(self) -> "BackupRegistry":
@@ -708,6 +713,11 @@ class TaiMCPLifecycleMixin(ABC):
         # manifest's channel modules re-run their register() call each start().
         # Mirrors the webhook-verifier reset above.
         self._channel_registry.reset()
+
+        # Reset so a dropped preset write validator doesn't linger across
+        # update()/reload — the manifest's tool modules re-run their
+        # register_write_validator() call each start(). Mirrors the resets above.
+        self._write_validator_registry.reset()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep

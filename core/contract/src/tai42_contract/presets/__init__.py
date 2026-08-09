@@ -13,7 +13,7 @@ lives in the skeleton (no versioning code in the view).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.agent.base import PresetSpec
@@ -27,6 +27,11 @@ from tai42_contract.presets.errors import (
 )
 from tai42_contract.presets.models import CARRY_FORWARD, CarryForward, PresetBody
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
+
+#: A per-base-tool write validator: given the FULL body about to persist, returns
+#: the BLOCKING issue lines that forbid the write (empty = pass). Blocking only —
+#: warnings are not a write-path concept.
+PresetWriteValidator = Callable[[PresetBody], Awaitable[Sequence[str]]]
 
 
 @runtime_checkable
@@ -149,4 +154,5 @@ __all__ = [
     "PresetSpec",
     "PresetStore",
     "PresetVersionNotFoundError",
+    "PresetWriteValidator",
 ]
