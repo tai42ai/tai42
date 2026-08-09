@@ -113,6 +113,29 @@ def _truncate(text: str) -> str:
     return f"... (truncated) {text[-_ENVELOPE_DETAIL_CHARS:]}"
 
 
+def _provided_items(spec: dict[str, Any]) -> list[dict[str, str]]:
+    """The ``{kind, name}`` of every item the stored spec provides, in spec order.
+
+    Read from the locally stored ``PluginSpec`` document (``model_dump(mode="json")``,
+    so ``kind`` is its enum string), NOT the registry — the answer is offline truth.
+    Studio joins these names against the manifest's ``mcp`` entry titles to mark an
+    installer-written entry read-only (the ``mcp_entry`` writer keys the title on the
+    provides item ``name``); a malformed/absent provides list yields ``[]``.
+    """
+    provides = spec.get("provides")
+    if not isinstance(provides, list):
+        return []
+    items: list[dict[str, str]] = []
+    for item in provides:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        name = item.get("name")
+        if isinstance(kind, str) and isinstance(name, str):
+            items.append({"kind": kind, "name": name})
+    return items
+
+
 def _to_operation_error(exc: MarketplaceError) -> OperationError:
     """Translate an internal marketplace failure to its honest operation error.
 
@@ -305,6 +328,11 @@ async def marketplace_installed() -> dict[str, Any]:
     rows without their update picture would be a silent degrade of the spec'd
     shape.
 
+    Each row also carries ``items`` — the ``{kind, name}`` of every item its
+    stored spec provides (from LOCAL truth, never the registry). Studio joins
+    these against the manifest's ``mcp`` entry titles to render an
+    installer-written entry read-only.
+
     ``quarantined`` mirrors the boot pass's plugin-quarantine registry — the
     plugins this worker SKIPPED (incompatible or import-broken) with the
     human-readable reason each.
@@ -347,6 +375,7 @@ async def marketplace_installed() -> dict[str, Any]:
                 "incompatible_newer": targets.incompatible_newer if targets is not None else None,
                 "missing_upstream": missing_upstream,
                 "compat": compat.as_payload(),
+                "items": _provided_items(record.spec),
             }
         )
     quarantined = [{"name": name, "reason": reason} for name, reason in sorted(quarantined_plugins().items())]

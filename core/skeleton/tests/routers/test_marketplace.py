@@ -245,6 +245,27 @@ async def test_installed_happy_computes_update_availability(monkeypatch: pytest.
     assert body["quarantined"] == []
 
 
+async def test_installed_exposes_provided_item_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Studio joins these names against the manifest's mcp-entry titles; the row
+    # carries {kind, name} from LOCAL spec truth, in spec order. A spec with no
+    # provides yields [].
+    record = InstallRecord(
+        ref="tai42/postgres-mcp",
+        version="1.0.0",
+        source="pypi",
+        repository_url=None,
+        tag=None,
+        spec={"provides": [{"kind": "mcp-server", "name": "postgres", "mcp": {"command": "run"}}]},
+        installed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    _use_store(monkeypatch, [record, _record("tai42/toolbox", "1.0.0")])
+    _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
+    resp = await router.marketplace_installed(_get())
+    rows = {r["ref"]: r for r in _data(resp)["data"]["installed"]}
+    assert rows["tai42/postgres-mcp"]["items"] == [{"kind": "mcp-server", "name": "postgres"}]
+    assert rows["tai42/toolbox"]["items"] == []
+
+
 async def test_installed_incompatible_newer_never_advertises_as_update(monkeypatch: pytest.MonkeyPatch) -> None:
     # 2.0.0 needs a different contract: it must NOT drive update_available, but
     # it must be named in incompatible_newer — visible, never silently dropped.
