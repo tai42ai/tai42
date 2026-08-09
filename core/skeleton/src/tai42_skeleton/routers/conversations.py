@@ -314,7 +314,11 @@ async def send_conversation_message(request: Request) -> Response:
     try:
         message = ConversationMessage.model_validate(body)
     except ValidationError as exc:
-        return _error(f"invalid conversation message: {exc}", 400)
+        # VALUE-FREE: a params failure's pydantic error dict embeds ``input_value``, so the
+        # body renders each error's ``msg`` only (which names the violated bound, never the
+        # value) — never ``str(exc)`` or the error dicts, both of which reflect the input.
+        detail = "; ".join(error["msg"] for error in exc.errors())
+        return _error(f"invalid conversation message: {detail}", 400)
 
     cap = ConversationsSettings().sync_wait_max_seconds
     wait_seconds = 0 if message.wait_seconds is None else min(message.wait_seconds, cap)
@@ -323,7 +327,12 @@ async def send_conversation_message(request: Request) -> Response:
 
     try:
         result = await submit_api_message(
-            route_name, message.external_user_id, message.text, get_current_user_id(), wait_seconds
+            route_name,
+            message.external_user_id,
+            message.text,
+            get_current_user_id(),
+            wait_seconds,
+            params=message.params,
         )
     except ConversationRouteResolutionError as exc:
         return _error(str(exc), 404)

@@ -33,9 +33,10 @@ class ConversationsFacet:
         cap_key: str,
         text: str,
         provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         return await self._app._conversation_accept(
-            channel, our_identity, client_address, cap_key, text, provider_message_id
+            channel, our_identity, client_address, cap_key, text, provider_message_id, params=params
         )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:

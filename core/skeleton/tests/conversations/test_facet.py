@@ -22,9 +22,9 @@ class _FakeApp:
         self.receipts: list[tuple] = []
 
     async def _conversation_accept(
-        self, channel, our_identity, client_address, cap_key, text, provider_message_id
+        self, channel, our_identity, client_address, cap_key, text, provider_message_id, params=None
     ) -> str:
-        self.accepted.append((channel, our_identity, client_address, cap_key, text, provider_message_id))
+        self.accepted.append((channel, our_identity, client_address, cap_key, text, provider_message_id, params))
         return "mid-1"
 
     async def _conversation_record_delivery_status(self, channel, provider_message_id, status) -> None:
@@ -43,7 +43,16 @@ async def test_channel_side_accept_forwards_to_the_core():
     facet: AppConversations = ConversationsFacet(app)  # type: ignore[arg-type]
     message_id = await facet.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     assert message_id == "mid-1"
-    assert app.accepted == [("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")]
+    # params defaults to None and forwards through the facet hop.
+    assert app.accepted == [("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", None)]
+
+
+async def test_channel_side_accept_forwards_params_through_the_facet_hop():
+    app = _FakeApp()
+    facet: AppConversations = ConversationsFacet(app)  # type: ignore[arg-type]
+    params = {"token": "abc-123"}
+    await facet.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", params=params)
+    assert app.accepted == [("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", params)]
 
 
 async def test_channel_side_record_delivery_status_forwards_to_the_core():

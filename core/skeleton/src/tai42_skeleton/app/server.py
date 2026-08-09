@@ -588,11 +588,18 @@ class TaiMCP(TaiMCPLifecycleMixin):
     # package never imports the conversations module at construction.
 
     async def _conversation_accept(
-        self, channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+        self,
+        channel: str,
+        our_identity: str,
+        client_address: str,
+        cap_key: str,
+        text: str,
+        provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         from tai42_skeleton.conversations import accept
 
-        return await accept(channel, our_identity, client_address, cap_key, text, provider_message_id)
+        return await accept(channel, our_identity, client_address, cap_key, text, provider_message_id, params=params)
 
     async def _conversation_record_delivery_status(
         self, channel: str, provider_message_id: str, status: "DeliveryReceipt"

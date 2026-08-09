@@ -227,6 +227,7 @@ class AppConversations(Protocol):
         cap_key: str,
         text: str,
         provider_message_id: str,
+        params: dict[str, str] | None = None,
     ) -> str:
         """Accept one inbound channel message, persist it, and return its
         ``message_id`` (a uuid4).
@@ -242,6 +243,11 @@ class AppConversations(Protocol):
         a door that mints its own visitor id passes a key the platform does NOT mint —
         its network client bucket — so the cap bounds spend the visitor cannot reset.
         Required and non-blank; a door that omits it is refused, never defaulted.
+
+        ``params`` are optional entry parameters the door captured with the conversation
+        entry, delivered verbatim to a tool target's payload under ``params``;
+        ``None``/empty leaves the payload unchanged. The door validates them with
+        :func:`~tai42_contract.conversations.validate_entry_params` before accept.
         """
         ...
 

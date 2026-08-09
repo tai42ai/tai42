@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 
@@ -622,6 +623,131 @@ async def test_tool_target_over_the_api_door_silent_sync_wait_returns_the_marker
     assert record is not None
     assert record.delivery_status is DeliveryStatus.DELIVERED
     assert posted == []  # the sync wait delivered it; no callback fired
+
+
+# -- entry params reach the tool payload -------------------------------------
+
+# The channel-door tool payload with no params — the byte-identical baseline every
+# ``None``/empty-params turn must reproduce exactly (``payload_expr="."`` passes it whole).
+_BASELINE_CHANNEL_PAYLOAD = {
+    "message": "hi",
+    "sender": "+15550002222",
+    "our_identity": "+15550001111",
+    "channel": "twilio",
+}
+
+
+async def test_tool_payload_carries_params_when_passed(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")  # pass the whole payload through as kwargs
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"token": "abc-123"}
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {**_BASELINE_CHANNEL_PAYLOAD, "params": {"token": "abc-123"}}
+
+
+@pytest.mark.parametrize("params", [None, {}])
+async def test_tool_payload_omits_params_when_none_or_empty(env, monkeypatch, params):
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", params)
+    await _settle()
+
+    # Byte-identical to today's payload: no ``params`` key at all.
+    assert tools.calls[0]["arguments"] == _BASELINE_CHANNEL_PAYLOAD
+    assert "params" not in tools.calls[0]["arguments"]
+
+
+async def test_a_param_named_like_a_root_field_stays_under_params_only(env, monkeypatch):
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        {"sender": "spoofed", "message": "spoofed", "channel": "spoofed"},
+    )
+    await _settle()
+
+    seen = tools.calls[0]["arguments"]
+    # The root fields keep their real values; the same-named params live ONLY under params —
+    # a param can never shadow a platform-set root field.
+    assert seen["message"] == "hi"
+    assert seen["sender"] == "+15550002222"
+    assert seen["channel"] == "twilio"
+    assert seen["params"] == {"sender": "spoofed", "message": "spoofed", "channel": "spoofed"}
+
+
+async def test_api_path_params_reach_the_tool_payload(env, monkeypatch):
+    route = _tool_api_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", 5, {"token": "xyz"})
+    await _settle()
+
+    assert tools.calls[0]["arguments"]["params"] == {"token": "xyz"}
+
+
+async def test_agent_target_ignores_params(env, monkeypatch):
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"token": "abc"}
+    )
+    await _settle()
+
+    # accept() takes params for every target, but the agent turn receives exactly the raw
+    # text and nothing else — no params reach the agent.
+    assert agent.calls == [("hi", "bridge:line:+15550002222")]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "echo: hi"
+
+
+async def test_payload_mapping_failure_is_value_free_in_log_and_record(env, monkeypatch, caplog):
+    channel = FakeChannel()
+    # A jq runtime error (string + number) whose text embeds the offending input value; the
+    # platform's mapping-error path must persist and log the error CLASS only.
+    route = _tool_channel_route(payload_expr=".params.secret + 1")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "unreachable")
+
+    secret = "super-secret-param-value"
+    with caplog.at_level(logging.ERROR):
+        message_id = await turn_module.accept(
+            "twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1", {"secret": secret}
+        )
+        await _settle()
+
+    assert tools.calls == []  # the mapping failed before the tool ran
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    # The persisted detail names the error class, never the offending param value.
+    assert secret not in record.error
+    # No captured log line carries the value either.
+    assert caplog.records  # the failure WAS logged (not swallowed)
+    assert all(secret not in rec.getMessage() for rec in caplog.records)
 
 
 # -- API door ----------------------------------------------------------------

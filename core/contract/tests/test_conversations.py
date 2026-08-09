@@ -63,6 +63,93 @@ def test_conversation_message_rejects_blank_fields(blank: str):
         ConversationMessage(external_user_id="u-1", text=blank)
 
 
+# -- validate_entry_params ------------------------------------------------------
+
+
+def test_validate_entry_params_returns_a_clean_dict_unchanged():
+    from tai42_contract.conversations import validate_entry_params
+
+    clean = {"token": "abc-123", "ref": "x_9", "Mixed-CASE": "v"}
+    assert validate_entry_params(clean) is clean
+
+
+def test_validate_entry_params_accepts_the_empty_dict():
+    from tai42_contract.conversations import validate_entry_params
+
+    assert validate_entry_params({}) == {}
+
+
+def test_validate_entry_params_refuses_too_many_keys():
+    from tai42_contract.conversations import ENTRY_PARAMS_MAX_COUNT, validate_entry_params
+
+    too_many = {f"k{i}": "v" for i in range(ENTRY_PARAMS_MAX_COUNT + 1)}
+    with pytest.raises(ValueError, match=f"over the {ENTRY_PARAMS_MAX_COUNT} allowed"):
+        validate_entry_params(too_many)
+
+
+@pytest.mark.parametrize("bad_key", ["has space", "sym$bol", "dot.dot", "slash/es", "", "café"])
+def test_validate_entry_params_refuses_a_bad_key_charset(bad_key: str):
+    from tai42_contract.conversations import validate_entry_params
+
+    with pytest.raises(ValueError, match="must match"):
+        validate_entry_params({bad_key: "v"})
+
+
+def test_validate_entry_params_refuses_an_over_long_key():
+    from tai42_contract.conversations import validate_entry_params
+
+    with pytest.raises(ValueError, match="must match"):
+        validate_entry_params({"k" * 65: "v"})
+
+
+def test_validate_entry_params_refuses_a_non_str_value():
+    from tai42_contract.conversations import validate_entry_params
+
+    with pytest.raises(ValueError, match="must be a string"):
+        validate_entry_params({"k": 1})  # type: ignore[dict-item]
+
+
+def test_validate_entry_params_refuses_an_over_long_value():
+    from tai42_contract.conversations import ENTRY_PARAM_VALUE_MAX_CHARS, validate_entry_params
+
+    with pytest.raises(ValueError, match="character limit"):
+        validate_entry_params({"k": "v" * (ENTRY_PARAM_VALUE_MAX_CHARS + 1)})
+
+
+def test_validate_entry_params_refuses_an_over_size_total():
+    from tai42_contract.conversations import ENTRY_PARAM_VALUE_MAX_CHARS, validate_entry_params
+
+    # Each value is under the per-value cap, but enough of them push the serialized total
+    # over the byte budget — the bound the transport cap is really about.
+    over_total = {f"k{i:02d}": "v" * ENTRY_PARAM_VALUE_MAX_CHARS for i in range(8)}
+    with pytest.raises(ValueError, match="bytes, over"):
+        validate_entry_params(over_total)
+
+
+def test_validate_entry_params_error_never_carries_a_value():
+    from tai42_contract.conversations import validate_entry_params
+
+    secret = "super-secret-token-value"
+    with pytest.raises(ValueError, match="character limit") as excinfo:
+        validate_entry_params({"k": secret + "x" * 512})
+    assert secret not in str(excinfo.value)
+
+
+def test_conversation_message_accepts_none_and_valid_params():
+    from tai42_contract.conversations import ConversationMessage
+
+    assert ConversationMessage(external_user_id="u-1", text="hi").params is None
+    msg = ConversationMessage(external_user_id="u-1", text="hi", params={"token": "abc"})
+    assert msg.params == {"token": "abc"}
+
+
+def test_conversation_message_refuses_invalid_params():
+    from tai42_contract.conversations import ConversationMessage
+
+    with pytest.raises(ValidationError):
+        ConversationMessage(external_user_id="u-1", text="hi", params={"bad key": "v"})
+
+
 # -- ConversationAnswer ---------------------------------------------------------
 
 
@@ -300,6 +387,7 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "cap_key",
         "text",
         "provider_message_id",
+        "params",
     ]
     assert inspect.iscoroutinefunction(AppConversations.record_delivery_status)
     assert list(inspect.signature(AppConversations.record_delivery_status).parameters) == [

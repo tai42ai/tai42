@@ -434,8 +434,17 @@ async def _run_tool_turn(
     try:
         kwargs = await _tool_kwargs(route, payload)
     except Exception as exc:
-        logger.error("conversations: mapping the inbound payload for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"payload_expr error: {exc}")
+        # VALUE-FREE: a jq runtime error embeds the offending payload input (which now
+        # carries opaque entry params) in its text, and this detail is both logged and
+        # persisted into the record — so it names the error CLASS only, never its message
+        # and never ``exc_info``. The adjacent tool-run/reply-mapping paths keep their
+        # diagnosable text: they render the tool's own output, not the platform's jq input.
+        logger.error(
+            "conversations: mapping the inbound payload for route %r failed with %s",
+            route.route_name,
+            type(exc).__name__,
+        )
+        return _tool_error(f"payload_expr error ({type(exc).__name__})")
     try:
         async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
             # ``offload_sync``: a synchronous tool runs off the event loop, matching the
@@ -1050,6 +1059,7 @@ async def _accept_for_turn(
         intake_token=intake_token,
         deliver_on_completion=True,
         multichannel=multichannel,
+        params=params,
     )
     return message_id
 
@@ -1058,7 +1068,12 @@ async def _accept_for_turn(
 
 
 async def submit_api_message(
-    route_name: str, external_user_id: str, text: str, caller_principal: str | None, wait_seconds: int
+    route_name: str,
+    external_user_id: str,
+    text: str,
+    caller_principal: str | None,
+    wait_seconds: int,
+    params: dict[str, str] | None = None,
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
@@ -1074,7 +1089,12 @@ async def submit_api_message(
 
     ``caller_principal`` is MANDATORY: it qualifies the thread (so no caller can reach
     another's conversation memory by naming its ``external_user_id``) and it alone keys the
-    rate bucket (so the cap bounds the accountable party, not a value the caller picks)."""
+    rate bucket (so the cap bounds the accountable party, not a value the caller picks).
+
+    Non-empty ``params`` reach a tool target's payload under ``params``; ``None``/empty
+    leave the turn byte-identical to today. The door validates their bounds before submit;
+    this seam runs only a cheap isinstance sweep against its in-process caller."""
+    checked_params = _checked_params(params)
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"api conversation route {route_name!r} needs an authenticated caller principal and this "
@@ -1124,6 +1144,7 @@ async def submit_api_message(
         intake_token=intake_token,
         deliver_on_completion=False,
         multichannel=multichannel,
+        params=checked_params,
     )
 
     if wait_seconds > 0:

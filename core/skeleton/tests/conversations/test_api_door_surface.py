@@ -44,8 +44,8 @@ class _Engine:
         self._raises = raises
         self.calls: list[tuple] = []
 
-    async def __call__(self, route_name, external_user_id, text, caller_principal, wait_seconds):
-        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds))
+    async def __call__(self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None):
+        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params))
         if self._raises is not None:
             raise self._raises
         return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)
@@ -195,6 +195,41 @@ def test_an_unfinished_turn_answers_202_without_an_answer(monkeypatch):
     response = _post(client)
     assert response.status_code == 202
     assert "answer" not in response.json()["data"]
+
+
+# -- entry params --------------------------------------------------------------
+
+
+def test_valid_params_thread_through_to_the_engine(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "params": {"token": "abc-123"}})
+    assert response.status_code == 202
+    assert engine.calls[0][5] == {"token": "abc-123"}
+
+
+def test_absent_params_reach_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][5] is None
+
+
+def test_invalid_params_are_a_400_that_never_echoes_the_value(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    secret = "super-secret-token-value"
+    response = client.post(
+        _PATH,
+        json={"external_user_id": "u-7", "text": "hi", "params": {"k": secret + "x" * 512}},
+    )
+    assert response.status_code == 400
+    body = response.json()["error"]
+    assert "invalid conversation message" in body
+    # The bound is named; the offending VALUE never appears in the response.
+    assert "character limit" in body
+    assert secret not in body
+    assert engine.calls == []
 
 
 # -- the route-create body extractor ------------------------------------------
