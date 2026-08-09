@@ -27,6 +27,19 @@ from tai42_e2e.waiting import wait_for_async
 
 pytestmark = [
     pytest.mark.backendless,
+    # PUBLISH-CIRCULAR (deferred to post-release, same pin bump as the mcp-server leg):
+    # the assertions here require the marketplace's github docs-ingest branch that fetches
+    # the tag's docs index over the git-data ``/git/trees/`` + ``/git/blobs/`` surfaces —
+    # PLAN_3 code that lives ONLY on the unpushed M34 marketplace commit. The e2e installs
+    # tai42-marketplace at the pre-M34 _MARKETPLACE_PIN (marketplace.py), which has no
+    # git-tree docs ingest, so ``sum('/git/trees/' ...) >= 1`` is unsatisfiable until the
+    # pin is bumped to the published PLAN_3 marketplace. Verified post-release alongside
+    # test_install_mcp_server, after _MARKETPLACE_PIN is bumped (see MISSION_END_TASKS).
+    pytest.mark.skip(
+        reason="Publish-circular: asserts the PLAN_3 marketplace github docs-ingest "
+        "(/git/trees + /git/blobs), which ships in this release wave's marketplace commit; "
+        "the e2e's pre-M34 _MARKETPLACE_PIN lacks it. Un-skipped post-release after the pin bump."
+    ),
     # The github-ingest path here reads the in-process FixturePackageIndex (the release
     # surfaces it serves + the source=github ingest). Under TAI_E2E_REAL=marketplace-github the
     # ingest goes to real github, so this is the github-ingest mock leg — it steps aside. The
