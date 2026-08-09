@@ -99,9 +99,7 @@ def _project(item: dict[str, Any]) -> dict[str, str]:
     non-identifying and defaults to ``""``."""
     for field in _ITEM_IDENTITY_FIELDS:
         if field not in item:
-            raise RegistryResponseError(
-                f"marketplace item row is missing the required {field!r} field", status=None
-            )
+            raise RegistryResponseError(f"marketplace item row is missing the required {field!r} field", status=None)
     return {
         "name": item["name"],
         "kind": item["kind"],
