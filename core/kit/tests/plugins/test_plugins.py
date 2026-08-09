@@ -695,6 +695,25 @@ def test_validate_docs_rejects_reference_definition_javascript_scheme():
         validate_docs({"docs/index.mdx": page}, first_party=False)
 
 
+def test_validate_docs_allows_site_root_reference_first_party():
+    # A first-party page may link to central docs pages by site-root route; these
+    # resolve against the unified docs site, not this isolated set.
+    page = _page("See [x](/concepts/connectors) and [y](/operate/accounts#oauth).")
+    validate_docs({"docs/index.mdx": page}, first_party=True)
+
+
+def test_validate_docs_rejects_site_root_reference_third_party():
+    with pytest.raises(PluginDocsError, match="site-root-relative"):
+        validate_docs({"docs/index.mdx": _page("[x](/concepts/connectors)")}, first_party=False)
+
+
+def test_validate_docs_rejects_protocol_relative_reference_first_party():
+    # A ``//host`` protocol-relative target is not a site-root route and must not
+    # slip through as one, even for first-party.
+    with pytest.raises(PluginDocsError, match="not in the docs set"):
+        validate_docs({"docs/index.mdx": _page("[x](//evil.example/path)")}, first_party=True)
+
+
 def test_validate_docs_rejects_reference_definition_offset_relative():
     # A reference-definition destination pointing outside the docs set is caught.
     page = _page("[x][ref]\n\n[ref]: missing.mdx")

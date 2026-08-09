@@ -531,6 +531,17 @@ def _check_reference(page: str, raw: str, line: int, files: dict[str, bytes], *,
                 "docs (only http(s) or an in-set relative reference)"
             )
         return
+    # A single leading slash is a site-root route (``/concepts/…``); a ``//host``
+    # protocol-relative target is not one and falls through to in-set resolution.
+    if target.startswith("/") and not target.startswith("//"):
+        if first_party:
+            # A first-party site-root route resolves only against the unified docs
+            # site, whose links are validated at docs-site build time, not this set.
+            return
+        raise PluginDocsError(
+            f"{page}:{line}: site-root-relative reference {target!r} is not permitted in third-party "
+            "docs (only http(s) or an in-set relative reference)"
+        )
     resolved = _resolve_reference(page, target)
     if resolved is None:
         return
