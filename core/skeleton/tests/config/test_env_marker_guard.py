@@ -1,11 +1,15 @@
-"""The expanded-read dangling guard (cold-boot + offline CLI validation) and the
-``get_mcp_env_refs`` names-only projection.
+"""The dangling ``!ENV`` marker contract and the ``get_mcp_env_refs`` names-only
+projection.
 
 A bare ``!ENV ${VAR}`` (no ``:default``) resolves to the literal ``"N/A"`` when its var
-is absent — a silent phantom. The guard closes that path at every expanded read
-(``read_manifest`` / ``read_defaults_manifest``) and on the offline CLI validate path,
-raising loudly naming each ``(var, json-pointer)``; ``get_mcp_env_refs`` surfaces the
-same marker refs as a names/booleans-only checklist (never a value).
+is absent. That is REFUSED where a caller INTRODUCES it — a config write/replace
+(:class:`~tai42_skeleton.config.service.ConfigService`, covered in ``test_service`` /
+``test_boundary``) and the offline CLI ``validate`` path — raising loudly naming each
+``(var, json-pointer)``. But the worker BOOT / runtime read (``read_manifest`` /
+``read_defaults_manifest``) TOLERATES a not-yet-resolved marker: the fleet
+backup/import/convergence pattern seeds a manifest whose env is supplied AFTER boot, so
+refusing at boot would abort a legitimate deferred-env deployment. ``get_mcp_env_refs``
+surfaces the same marker refs as a names/booleans-only checklist (never a value).
 """
 
 from __future__ import annotations
@@ -26,11 +30,13 @@ def _manager(tmp_path, monkeypatch) -> FileConfigManager:
     return FileConfigManager(config_dir_path=str(tmp_path))
 
 
-def test_read_manifest_refuses_a_dangling_required_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_manifest_tolerates_a_deferred_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Boot/runtime read: an as-yet-unresolved required marker must NOT abort boot — the
+    # fleet import/convergence pattern supplies the env after boot. pyaml_env materializes
+    # the absent marker to its literal "N/A" default until the env write lands.
     (tmp_path / "manifest.yml").write_text(_DANGLING, encoding="utf-8")
     mgr = _manager(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match=r"M34_MISSING_VAR.*/db_url"):
-        mgr.read_manifest()
+    assert mgr.read_manifest()["db_url"] == "N/A"  # no raise
 
 
 def test_read_manifest_boots_a_resolvable_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,13 +53,14 @@ def test_read_manifest_boots_a_default_bearing_marker(tmp_path, monkeypatch: pyt
     assert mgr.read_manifest()["db_url"] == "sqlite://x"
 
 
-def test_read_defaults_manifest_refuses_a_dangling_required_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_defaults_manifest_tolerates_a_deferred_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same boot-read contract as read_manifest: a not-yet-resolved marker in the template
+    # defaults does not abort boot (it resolves to "N/A" until the env is supplied).
     templates = tmp_path / "templates"
     templates.mkdir()
     (templates / "manifest.yml").write_text(_DANGLING, encoding="utf-8")
     mgr = _manager(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match=r"M34_MISSING_VAR.*/db_url"):
-        mgr.read_defaults_manifest()
+    assert mgr.read_defaults_manifest()["db_url"] == "N/A"  # no raise
 
 
 def test_cli_validate_refuses_a_dangling_marker(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

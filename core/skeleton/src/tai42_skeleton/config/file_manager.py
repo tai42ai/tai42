@@ -276,28 +276,22 @@ class FileConfigManager(ConfigManager):
         with open(path) as fh:
             return load_manifest(fh.read())
 
-    def _refuse_dangling_expanded(self, path: str) -> None:
-        """Close the cold-boot silent path before an EXPANDED read returns: load the
-        PRESERVED view and run the shared dangling scan against ``os.environ``, raising
-        loudly naming each ``(var, json-pointer)``. Without it, ``pyaml_env`` would
-        materialize an absent no-default marker to the literal ``"N/A"`` — a phantom
-        value the expanded view must never carry. Delegates to the shared kit scan via
-        the config boundary's refusal (imported locally to keep import order flat)."""
-        from tai42_skeleton.config.boundary import refuse_dangling_env_markers
-
-        refuse_dangling_env_markers(self._load_yaml_preserved(path), os.environ)
-
     def read_manifest(self) -> dict:
-        """Read ``manifest.yml`` with ``!ENV`` tags EXPANDED (runtime view). A required
-        marker whose var is absent is refused loudly (never a phantom ``"N/A"``)."""
+        """Read ``manifest.yml`` with ``!ENV`` tags EXPANDED (runtime view).
+
+        This is the worker BOOT / runtime read, so it TOLERATES a marker whose var is
+        not yet resolved — the fleet backup/import/convergence pattern seeds a manifest
+        whose env is supplied AFTER boot, and an unresolved required marker transiently
+        materializes to ``pyaml_env``'s literal ``"N/A"`` until the env write lands.
+        Refusing it here would abort boot for a legitimate deferred-env deployment. A
+        mutation that INTRODUCES a dangling marker is still refused at the write/replace
+        validation (:class:`~tai42_skeleton.config.service.ConfigService`) and by the
+        offline CLI ``validate`` — closing the silent WRITE path, never the boot read.
+        """
         path = self._manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
-        # Expand first (a malformed file surfaces its parser error here), then guard
-        # the well-formed document against dangling markers before returning it.
-        expanded = self._load_yaml_expanded(path)
-        self._refuse_dangling_expanded(path)
-        return expanded
+        return self._load_yaml_expanded(path)
 
     def read_manifest_preserved(self) -> dict:
         """Read ``manifest.yml`` with ``!ENV`` tags PRESERVED as ``"!ENV <expr>"``
@@ -312,14 +306,15 @@ class FileConfigManager(ConfigManager):
 
         A missing defaults file is optional and yields ``{}``; a malformed one
         raises so the broken template surfaces instead of silently dropping the
-        defaults from the write-merge backfill.
+        defaults from the write-merge backfill. Like :meth:`read_manifest` this is a
+        boot/runtime read, so it TOLERATES a not-yet-resolved marker (the deferred-env
+        pattern); a dangling marker is refused only at the write/replace validation and
+        the offline CLI ``validate``, never here.
         """
         path = self._defaults_manifest_path
         if not os.path.exists(path):
             return {}
-        expanded = self._load_yaml_expanded(path)
-        self._refuse_dangling_expanded(path)
-        return expanded
+        return self._load_yaml_expanded(path)
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         """Atomically read-modify-write the manifest under the transaction lock.
