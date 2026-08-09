@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end (checklist items 1-6):
 
-1. the projected tool surface is exactly the expected op surface — the 118
-   default-projected ops (160 total - 38 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 119
+   default-projected ops (161 total - 38 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -118,7 +118,7 @@ class _RecordingApp:
         self.tools = _RecordingTools()
 
 
-# -- checklist 1: the projected surface is exactly the 118 default ops ---------
+# -- checklist 1: the projected surface is exactly the 119 default ops ---------
 
 
 def test_d1_projected_surface_is_the_expected_op_count():
@@ -130,7 +130,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier1 = sorted(op.name for op in ops if is_tier1(op))
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
-            # The arithmetic: 160 total - 38 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 118.
+            # The arithmetic: 161 total - 38 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 119.
             # The +8 over the historical 143 are the settings-profile CRUD ops (list/get/put/
             # delete/diff/versions/version/rollback under /api/config/profiles*) — tier-0
             # default-projected like the sibling config ops (read_env/write_env/reload_config);
@@ -146,8 +146,10 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # reads scoped by the route's own read-door policy. The +4 to 160 are the
             # conversation target-config CRUD ops ``list``/``get``/``set``/``delete_conversation_config``
             # — tier-0 default-projected (``set`` is destructive but not authority_changing, so
-            # it stays on the default surface, like ``upsert_tool_meta``).
-            assert total == 160, total
+            # it stays on the default surface, like ``upsert_tool_meta``). The +1 to 161 is
+            # ``get_mcp_env_refs`` — the manifest MCP section's !ENV-marker checklist (names +
+            # set/unset booleans only), a tier-0 read like its ``get_manifest`` siblings.
+            assert total == 161, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -202,17 +204,17 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 118, measured two ways.
+            # The default-projected surface = 119, measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 118, len(projected)
-            assert total - len(tier2) - len(tier1) == 118
+            assert len(projected) == 119, len(projected)
+            assert total - len(tier2) - len(tier1) == 119
 
-            # And the LIVE booted tool surface is exactly those 118 (no keep-set /
+            # And the LIVE booted tool surface is exactly those 119 (no keep-set /
             # plugin / toolbox tools are loaded in this projection-only stack).
             live = await app.tools.get_tools()
             assert set(live) == set(projected)
-            assert len(live) == 118
+            assert len(live) == 119
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -377,7 +379,7 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 118
+            assert len(live) == 119
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

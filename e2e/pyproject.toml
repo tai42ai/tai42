@@ -205,48 +205,6 @@ tai42-connector-atlassian = { workspace = true }
 tai42-config-k8s = { workspace = true }
 reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 
-# Source-of-truth annotations for the catalog membership of every ecosystem
-# package this suite loads. Each entry records whether the package registers
-# ecosystem-catalog (ecosystem.yml) entries.
-#   tier:    "oss-public" — shipped in the open-source ecosystem.
-#   catalog: true  — the package registers entries in the public ecosystem catalog.
-#            false — it registers no catalog entries (framework, foundation
-#                    library, or front-end).
-[tool.tai42-e2e.siblings]
-tai42-contract = { tier = "oss-public", catalog = false }
-tai42-kit = { tier = "oss-public", catalog = false }
-tai42-skeleton = { tier = "oss-public", catalog = true }
-tai42-toolbox = { tier = "oss-public", catalog = true }
-tai42-tools-stripe = { tier = "oss-public", catalog = true }
-tai42-agents = { tier = "oss-public", catalog = true }
-tai42-identity-redis = { tier = "oss-public", catalog = true }
-tai42-accounts-postgres = { tier = "oss-public", catalog = true }
-tai42-accounts-oidc = { tier = "oss-public", catalog = true }
-tai42-identity-oidc = { tier = "oss-public", catalog = true }
-tai42-backend-arq = { tier = "oss-public", catalog = true }
-tai42-backend-celery = { tier = "oss-public", catalog = true }
-tai42-backend-rq = { tier = "oss-public", catalog = true }
-tai42-storage-local = { tier = "oss-public", catalog = true }
-tai42-storage-s3 = { tier = "oss-public", catalog = true }
-tai42-storage-github = { tier = "oss-public", catalog = true }
-tai42-webhook-verifier-github = { tier = "oss-public", catalog = true }
-tai42-webhook-verifier-stripe = { tier = "oss-public", catalog = true }
-tai42-channel-telegram = { tier = "oss-public", catalog = true }
-tai42-channel-slack = { tier = "oss-public", catalog = true }
-tai42-channel-twilio = { tier = "oss-public", catalog = true }
-tai42-channel-whatsapp = { tier = "oss-public", catalog = true }
-tai42-channel-web = { tier = "oss-public", catalog = true }
-tai42-monitoring-langfuse = { tier = "oss-public", catalog = true }
-tai42-connector-google = { tier = "oss-public", catalog = true }
-tai42-connector-atlassian = { tier = "oss-public", catalog = true }
-tai42-config-k8s = { tier = "oss-public", catalog = true }
-# The Studio SPA repo (catalog = false); the browser-e2e studio_stack serves its
-# reference plugin, sourced via the git-subdirectory override above.
-tai-studio = { tier = "oss-public", catalog = false }
-# The public marketplace front-end (a JS repo — no uv source / dependency row;
-# its checkout is wired in CI and the ui workspace serves it).
-tai-marketplace-web = { tier = "oss-public", catalog = false }
-
 [tool.ruff]
 src = ["src", "tests"]
 target-version = "py313"

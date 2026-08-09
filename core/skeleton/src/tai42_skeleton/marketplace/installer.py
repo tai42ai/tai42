@@ -80,6 +80,7 @@ import asyncio
 import copy
 import importlib.metadata
 import logging
+import os
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -93,6 +94,7 @@ from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpe
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.config.service import ApplyResult, ConfigService
@@ -102,6 +104,7 @@ from tai42_skeleton.marketplace.compat import running_contract_version, update_t
 from tai42_skeleton.marketplace.errors import (
     ContractIncompatibleError,
     EnvironmentShadowError,
+    InstallEnvError,
     InstallStateError,
     InstallUnwindError,
     LocalStateError,
@@ -133,6 +136,10 @@ from tai42_skeleton.marketplace.store import InstallRecord, MarketplaceInstallSt
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, fleet_fanout
 
 logger = logging.getLogger(__name__)
+
+# The operator's "treat these env keys as secret" marks (comma-separated key names),
+# the same var ``set_mcp_secret_env`` appends to so the Studio editor masks the value.
+_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
 
 # Per-worker fast-path lock: a second same-worker operation is refused
 # immediately rather than queued. NOT the correctness layer — each uvicorn worker
@@ -411,7 +418,14 @@ class Installer:
 
     # -- install ------------------------------------------------------------
 
-    async def install(self, ref: str, version: str | None = None) -> dict[str, Any]:
+    async def install(
+        self,
+        ref: str,
+        version: str | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        secret_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Install a marketplace plugin, aborting and unwinding on any failure.
 
         Steps, in order: parse the ref and pre-flight local state (not already
@@ -421,15 +435,23 @@ class Installer:
         manifest BEFORE pip; ``pip install`` the locally-composed pin; patch the
         manifest through the one door and reload; write the attribution row.
 
+        ``env`` / ``secret_keys`` are accepted only for an mcp-server install: an
+        mcp entry's ``!ENV`` markers are satisfied by writing these values to the env
+        store in the SAME combined transaction that writes the entry (never deferred).
+        ``secret_keys`` marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``).
+
         Each step past the pip install unwinds the applied steps in reverse on
-        failure (manifest restored, live app converged back, pip uninstall) and
-        re-raises; a failed unwind escalates to :class:`InstallUnwindError`. Only
-        skeleton state fully reverts — see the pip-transaction caveat.
+        failure (env keys THIS install wrote deleted, manifest restored, live app
+        converged back, pip uninstall) and re-raises; a failed unwind escalates to
+        :class:`InstallUnwindError`. Only skeleton state fully reverts — see the
+        pip-transaction caveat.
         """
         async with self._guard():
-            return await self._install_locked(ref, version)
+            return await self._install_locked(ref, version, env, secret_keys)
 
-    async def _install_locked(self, ref: str, version: str | None) -> dict[str, Any]:
+    async def _install_locked(
+        self, ref: str, version: str | None, env: dict[str, str] | None, secret_keys: list[str] | None
+    ) -> dict[str, Any]:
         ns, name = _parse_ref(ref)
         existing = await self._store.get(ref)
         if existing is not None:
@@ -474,16 +496,29 @@ class Installer:
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False
+        # The env keys THIS install writes to the store (deployment/already-set vars are
+        # omitted, so no pre-existing marker can reference a key this install owns).
+        # ``env_restore`` captures the PRIOR store value of EVERY key this install writes
+        # (the value keys AND the ``TAI_ENV_SECRET_KEYS`` marks var) — populated by the
+        # combined pipeline under its C9d lock, and consumed by the unwind to restore each
+        # key to its prior value (delete when it was absent), diffed against the live store
+        # so a pre-persist refusal reverts nothing.
+        env_written = self._env_to_write(env)
+        env_restore: dict[str, str] = {}
         try:
             # Step 4 — manifest patch through the pipeline: the mutator applies the
             # provides, the pipeline validates the resolved compose (a compose the
             # resolved schema or the backend-needs-bus invariant rejects raises inside
             # the transaction so nothing persists — mapped to the typed compose error),
-            # persists, reloads locally, and broadcasts.
+            # persists, reloads locally, and broadcasts. An mcp-server spec routes
+            # through the COMBINED env+manifest pipeline so the entry is written exactly
+            # once alongside its required env values.
             def mutator(document: dict[str, Any]) -> None:
                 apply_provides(document, spec)
 
-            apply_result = await self._apply_composed(mutator)
+            apply_result = await self._apply_provides_change(
+                spec, mutator, env=env, secret_keys=secret_keys, env_to_write=env_written, env_restore=env_restore
+            )
             manifest_persisted = True
             # Step 5 — attribution write, stamped with the core versions doing it.
             repo_url, tag, artifact_ref, sha256 = _pin_provenance(resolved, source)
@@ -507,7 +542,10 @@ class Installer:
             # failed AFTER its persist committed (:class:`FleetBroadcastError`).
             persisted = manifest_persisted or isinstance(step_error, FleetBroadcastError)
             await self._unwind_install(
-                step_error, package=spec.package, saved_manifest=saved_manifest if persisted else None
+                step_error,
+                package=spec.package,
+                saved_manifest=saved_manifest if persisted else None,
+                env_restore=env_restore,
             )
             raise
 
@@ -522,22 +560,132 @@ class Installer:
         }
 
     async def _unwind_install(
-        self, step_error: Exception, *, package: str, saved_manifest: dict[str, Any] | None
+        self,
+        step_error: Exception,
+        *,
+        package: str,
+        saved_manifest: dict[str, Any] | None,
+        env_restore: dict[str, str] | None = None,
     ) -> None:
-        """Reverse an install whose Step 4/5 failed: restore the manifest through the
-        pipeline (converging the live app and the fleet back) when the change had
-        persisted, then pip uninstall the freshly-installed package. A failed
-        sub-step escalates to :class:`InstallUnwindError`; otherwise the caller
+        """Reverse an install whose Step 4/5 failed: revert THIS install's env write
+        (the combined pipeline's C9a leaves it standing as an inert orphan, but the
+        installer-unwind layer above it restores exactly this install's contribution —
+        each key it wrote back to its captured PRIOR store value, so a newly-created key
+        is deleted, an overwritten pre-existing key keeps its operator value, and the
+        ``TAI_ENV_SECRET_KEYS`` marks var keeps an operator's OTHER marks), restore the
+        manifest through the pipeline (converging the live app and the fleet back) when
+        the change had persisted, then pip uninstall the freshly-installed package. A
+        failed sub-step escalates to :class:`InstallUnwindError`; otherwise the caller
         re-raises the original step error."""
         try:
             if saved_manifest is not None:
                 await self._svc().apply_replace(saved_manifest)
+            # Revert AFTER the manifest restore so no restored marker references a
+            # key being dropped (on the orphan path the manifest never persisted, so
+            # the live manifest already names none of these keys).
+            await self._revert_env_write(env_restore)
         except Exception as unwind_error:
             raise InstallUnwindError(step_error, unwind_error) from step_error
         try:
             await self._remove_package(package)
         except Exception as unwind_error:
             raise InstallUnwindError(step_error, unwind_error) from step_error
+
+    @staticmethod
+    def _env_to_write(env: dict[str, str] | None) -> dict[str, str]:
+        """The subset of ``env`` this install actually writes to the store: keys the
+        process env does not already provide. A deployment/already-set var is omitted
+        (its marker resolves from the live env), so no pre-existing marker can end up
+        referencing a key this install owns."""
+        return {key: value for key, value in (env or {}).items() if key not in os.environ}
+
+    async def _revert_env_write(self, env_restore: dict[str, str] | None) -> None:
+        """Revert THIS install's env contribution through the ConfigService env door,
+        restoring every key this install wrote to the PRIOR store value ``prepare``
+        captured (its exact prior string, or ``""`` to delete a key that was ABSENT
+        before) — never a blind delete, so a key this install merely OVERWROTE keeps its
+        operator value and the ``TAI_ENV_SECRET_KEYS`` marks var keeps an operator's OTHER
+        marks. The change set is DIFFED against the live store, so when nothing actually
+        persisted (the pre-persist dangling refusal) it is EMPTY and no env change fires —
+        no fleet broadcast on a no-op. Runs AFTER any manifest restore, so no restored
+        marker references a dropped key."""
+        if not env_restore:
+            return
+        try:
+            current = self._cm().read_env()
+        except FileNotFoundError:
+            current = {}
+        changes = {key: value for key, value in env_restore.items() if current.get(key, "") != value}
+        if changes:
+            await self._svc().apply_env_change(changes)
+
+    async def _apply_provides_change(
+        self,
+        spec: PluginSpec,
+        mutator: Callable[[dict[str, Any]], None],
+        *,
+        env: dict[str, str] | None,
+        secret_keys: list[str] | None,
+        env_to_write: dict[str, str],
+        env_restore: dict[str, str],
+    ) -> ApplyResult:
+        """Persist a provides patch through the pipeline.
+
+        An mcp-server spec routes through the COMBINED env+manifest pipeline
+        (:meth:`~tai42_skeleton.config.service.ConfigService.apply_env_and_change`): the
+        supplied env values land in the store and the ``{title, config}`` entry is
+        written in ONE unit, so the entry is written exactly once (the standalone
+        ``apply_provides`` never runs a second time). An unsatisfied required marker is
+        the pipeline's dangling refusal, surfaced as :class:`InstallEnvError` naming each
+        missing var + json-pointer BEFORE anything persists. The C9a non-atomicity
+        contract is preserved (a manifest-persist failure leaves the env write standing
+        and raises ``OrphanEnvWriteError``); the installer-unwind above reverts it.
+
+        Under the pipeline's C9d lock (against the SAME stored-env snapshot the write
+        derives from) this records the PRIOR store value of EVERY key it will write into
+        ``env_restore`` — the value keys AND, when ``secret_keys`` are supplied, the
+        ``TAI_ENV_SECRET_KEYS`` marks var it MERGES into (each key's exact prior string, or
+        ``""`` when the key was absent). The unwind restores exactly those, so it reverts
+        this install's contribution without deleting an operator's pre-existing store value
+        or clobbering their other secret marks.
+
+        Every other spec routes through ``apply_change``; ``env`` / ``secret_keys`` are
+        meaningless there and supplying them is a loud input error."""
+        if not _mcp_entry_items(spec):
+            if env or secret_keys:
+                raise InstallEnvError(
+                    f"env / secret_keys are only accepted for an mcp-server install; {spec.ref} provides "
+                    "no mcp-server item"
+                )
+            return await self._apply_composed(mutator)
+
+        marks = list(secret_keys or [])
+
+        async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+            changes = dict(env_to_write)
+            if marks:
+                # Append to the marks read from the STORED env (never the settings
+                # cache, stale until a reload), mirroring ``set_mcp_secret_env``.
+                prior = stored.get(_SECRET_MARKS_VAR)
+                existing = [m.strip() for m in (prior or "").split(",") if m.strip()]
+                changes[_SECRET_MARKS_VAR] = ",".join(dict.fromkeys([*existing, *marks]))
+            # Capture the PRIOR store value of EVERY key this install writes (value keys
+            # AND the marks var) from the STORED snapshot: its exact prior string when
+            # present, else ``""`` (the key was absent). The unwind restores each to this,
+            # so an overwritten pre-existing store key is never blind-deleted and the marks
+            # var keeps an operator's OTHER marks.
+            for key in changes:
+                env_restore[key] = stored.get(key, "")
+            return changes, mutator
+
+        try:
+            return await self._svc().apply_env_and_change(prepare, manifest_pointer="mcp")
+        except (ValidationError, BackendNeedsBusError) as exc:
+            raise ManifestComposeError(f"the composed manifest is invalid: {exc}") from exc
+        except ValueError as exc:
+            # A dangling-marker refusal (each missing required var + json-pointer) or
+            # another env-boundary refusal — raised before anything persisted.
+            raise InstallEnvError(str(exc)) from exc
 
     # -- uninstall ----------------------------------------------------------
 
@@ -612,7 +760,14 @@ class Installer:
 
     # -- update -------------------------------------------------------------
 
-    async def update(self, ref: str, version: str | None = None) -> dict[str, Any]:
+    async def update(
+        self,
+        ref: str,
+        version: str | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        secret_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Update an installed plugin to a newer (or named) version — an install
         of the new version with the same pre-flights, in one manifest
         read-modify-write.
@@ -637,9 +792,11 @@ class Installer:
         pip-transaction caveat.
         """
         async with self._guard():
-            return await self._update_locked(ref, version)
+            return await self._update_locked(ref, version, env, secret_keys)
 
-    async def _update_locked(self, ref: str, version: str | None) -> dict[str, Any]:
+    async def _update_locked(
+        self, ref: str, version: str | None, env: dict[str, str] | None, secret_keys: list[str] | None
+    ) -> dict[str, Any]:
         ns, name = _parse_ref(ref)
         ensure_pip_available()
         if self._prefix is not None:
@@ -711,15 +868,30 @@ class Installer:
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False
+        # The env keys THIS update writes to the store. A new version adding a required
+        # marker is loudly refused unless its value is supplied here (the dangling
+        # refusal → InstallEnvError, below). ``env_restore`` captures the PRIOR store
+        # value of every key this update writes (value keys AND the ``TAI_ENV_SECRET_KEYS``
+        # marks var) so the unwind restores each rather than blind-deleting it.
+        env_written = self._env_to_write(env)
+        env_restore: dict[str, str] = {}
         try:
             # Step 5 — one pipeline apply: the mutator removes the old provides and
             # applies the new; the pipeline validates the resolved compose (mapped to
             # the typed compose error on a fault), persists, reloads, and broadcasts.
+            # An mcp-server new spec routes through the combined env+manifest pipeline.
             def mutator(document: dict[str, Any]) -> None:
                 remove_provides(document, old_spec)
                 apply_provides(document, new_spec)
 
-            apply_result = await self._apply_composed(mutator)
+            apply_result = await self._apply_provides_change(
+                new_spec,
+                mutator,
+                env=env,
+                secret_keys=secret_keys,
+                env_to_write=env_written,
+                env_restore=env_restore,
+            )
             manifest_persisted = True
             # Step 6 — attribution upsert, stamped with the core versions doing it.
             repo_url, tag, artifact_ref, sha256 = _pin_provenance(resolved, source)
@@ -744,6 +916,7 @@ class Installer:
                 new_package=new_spec.package,
                 row=row,
                 saved_manifest=saved_manifest if persisted else None,
+                env_restore=env_restore,
             )
             raise
 
@@ -765,9 +938,13 @@ class Installer:
         new_package: str,
         row: InstallRecord,
         saved_manifest: dict[str, Any] | None,
+        env_restore: dict[str, str] | None = None,
     ) -> None:
-        """Reverse an update whose Step 5/6 failed: reinstall the OLD pin, then
-        restore the manifest through the pipeline (when the change had persisted).
+        """Reverse an update whose Step 5/6 failed: revert THIS update's env write (every
+        key it wrote restored to its captured PRIOR store value — a newly-created key
+        deleted, an overwritten one kept, the ``TAI_ENV_SECRET_KEYS`` marks var back to its
+        prior value), reinstall the OLD pin, then restore the manifest through the
+        pipeline (when the change had persisted).
         The old wheel goes back BEFORE the restore's reload so the old manifest never
         loads against the new wheel. A github old pin is reinstalled through the SAME
         fetch-and-verify path as a forward install, using the stored row's
@@ -782,6 +959,9 @@ class Installer:
             await self._pip_install(old_package, row.version, row.source, row.artifact_ref, row.sha256)
             if saved_manifest is not None:
                 await self._svc().apply_replace(saved_manifest)
+            # Revert the env write this update made AFTER the old manifest is back, so
+            # the restored old entry never references a dropped key.
+            await self._revert_env_write(env_restore)
         except Exception as unwind_error:
             raise InstallUnwindError(step_error, unwind_error) from step_error
 
@@ -844,7 +1024,7 @@ class Installer:
                     "outcome": "up-to-date",
                     "detail": f"{row.version} is the latest compatible version{blocked}",
                 }
-            result = await self._update_locked(row.ref, targets.latest_compatible)
+            result = await self._update_locked(row.ref, targets.latest_compatible, None, None)
             return {"ref": row.ref, "outcome": "upgraded", "detail": f"{row.version} -> {result['version']}"}
         except Exception as exc:
             # The explicit per-ref recovery path: logged with the traceback and
@@ -994,28 +1174,59 @@ def _env_selected_items(spec: PluginSpec) -> list[PluginItem]:
     return items
 
 
+def _mcp_entry_items(spec: PluginSpec) -> list[PluginItem]:
+    """The spec's provides items that write an ``mcp`` entry (an mcp-server item
+    carrying transport config, no module). A spec never mixes mcp-server with any
+    other kind, so a non-empty result means this whole install is an mcp-server one."""
+    items: list[PluginItem] = []
+    for item in spec.provides:
+        binding = KIND_MANIFEST_BINDINGS.get(item.kind)
+        if binding is not None and binding.mode == "mcp_entry":
+            items.append(item)
+    return items
+
+
 def _install_notes(spec: PluginSpec) -> list[str]:
-    """One activation note per env-selected item: installed but inactive until
+    """Activation notes: one per env-selected item (installed but inactive until
     ``TAI_CONFIG_MODE`` selects it, and only providers the skeleton's fixed
-    mode→module map covers can be selected (a new provider needs a skeleton-side
-    enum/map entry)."""
-    return [
+    mode→module map covers can be selected), plus one per mcp-server item naming
+    the mounted server title."""
+    notes = [
         f"{item.name!r} is installed but inactive: TAI_CONFIG_MODE selects config providers from the "
         "skeleton's fixed mode->module map, so activation needs the mode to exist there "
         "(tai42-config-k8s is the one provider covered today; a new provider needs a skeleton-side map entry)"
         for item in _env_selected_items(spec)
     ]
+    notes.extend(
+        f"mounted MCP server {item.name!r} in the manifest 'mcp' section; its tools go live on the reload"
+        for item in _mcp_entry_items(spec)
+    )
+    return notes
 
 
 def _uninstall_notes(spec: PluginSpec) -> list[str]:
-    """One warning per env-selected item: if ``TAI_CONFIG_MODE`` currently selects
-    the removed provider, the next boot fails importing it until the operator
-    re-points or unsets the env var."""
-    return [
+    """Removal notes: one per env-selected item (if ``TAI_CONFIG_MODE`` currently
+    selects the removed provider, the next boot fails importing it until re-pointed
+    or unset), plus one per mcp-server item — its manifest entry is removed but the
+    stored env values its ``!ENV`` markers referenced are LEFT (never silently
+    delete operator secrets); the note names those orphaned vars, scanned from the
+    entry BEFORE removal."""
+    notes = [
         f"{item.name!r} was a config provider: if TAI_CONFIG_MODE currently selects it, the next boot will "
         "fail importing the removed provider until you re-point or unset TAI_CONFIG_MODE"
         for item in _env_selected_items(spec)
     ]
+    for item in _mcp_entry_items(spec):
+        assert item.mcp is not None  # guaranteed for the mcp-server kind
+        orphaned = sorted({ref.var for ref in scan_env_marker_refs(item.mcp.model_dump(exclude_none=True))})
+        if orphaned:
+            notes.append(
+                f"removed MCP server {item.name!r}; its stored env value(s) are LEFT untouched — "
+                f"{', '.join(orphaned)} may now be orphaned (remove them by hand if no other entry uses them)"
+            )
+        else:
+            notes.append(f"removed MCP server {item.name!r} from the manifest 'mcp' section")
+    return notes
 
 
 def _require(resolved: dict[str, Any], key: str) -> Any:

@@ -41,6 +41,23 @@ pytestmark = [
 
 _REPO_FULL_NAME = "tai42ai/tai-e2e-market-delta"
 
+# The mandatory docs landing page the github docs ingest fetches over the tree/blob
+# surfaces for delta's tag (W2_CONTRACTS §2). Keyed docs-relative, so ``index.mdx``
+# is the ``docs/index.mdx`` a real delta repo carries at its root.
+_DELTA_DOCS = {
+    "index.mdx": (
+        "---\n"
+        "title: e2e-delta fixture plugin\n"
+        "description: GitHub-sourced end-to-end marketplace fixture plugin exercising the tai42 ingest.\n"
+        "---\n"
+        "\n"
+        "# e2e-delta fixture plugin\n"
+        "\n"
+        "This landing page ships so the github-sourced fixture carries the mandatory docs\n"
+        "index the marketplace ingest requires for every published version.\n"
+    )
+}
+
 
 async def _wait_published(mp: MarketplaceService, version: str, *, deadline: float = 30.0) -> None:
     async def published() -> bool:
@@ -65,6 +82,9 @@ async def test_signed_webhook_ingests_github_source(
     # The seed entry carries the inline stamped 0.1.0 spec and the tag it installs
     # from; the tag webhook fetches later versions' specs over the contents surface.
     package_index.register_github_release("v0.1.0", fixture_artifacts.delta_v1.plugin_yml)
+    # Stage the tag's docs tree too: PLAN_3's ingest fetches docs over the tree/blob
+    # surfaces (never the tarball), and a published version must carry its docs index.
+    package_index.register_github_docs_tree("v0.1.0", _DELTA_DOCS)
     seeded = await mp.api.post(
         "/api/v1/admin/seed",
         json={
@@ -94,10 +114,18 @@ async def test_signed_webhook_ingests_github_source(
     # since nothing was registered there) and fell through to the github ingest.
     assert package_index.requests.count("/pypi/tai-e2e-market-delta/json") >= 1
 
+    # The github docs ingest fetches the tag's docs index over the git-data tree +
+    # blob surfaces (never the tarball); assert both were exercised for the published
+    # version, so the docs-ingest branch is load-bearing, not staged-and-skipped. The
+    # recorded paths carry the tree/blob SHA, so match by substring, not exact count.
+    assert sum("/git/trees/" in req for req in package_index.requests) >= 1
+    assert sum("/git/blobs/" in req for req in package_index.requests) >= 1
+
     # Stage 0.2.0 and drive it in with a correctly-signed tag-push webhook. The
     # webhook fetches the spec at ``?ref=v0.2.0``, so the tag serves its own
     # stamped 0.2.0 spec (a version mismatch would be rejected).
     package_index.register_github_release("v0.2.0", fixture_artifacts.delta_v2.plugin_yml)
+    package_index.register_github_docs_tree("v0.2.0", _DELTA_DOCS)
     body = {
         "ref": "refs/tags/v0.2.0",
         "repository": {"html_url": DELTA_REPOSITORY_URL, "full_name": _REPO_FULL_NAME},

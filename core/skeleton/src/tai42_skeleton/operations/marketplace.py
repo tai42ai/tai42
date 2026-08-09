@@ -64,6 +64,7 @@ from tai42_skeleton.marketplace.errors import (
     ArtifactIntegrityError,
     ContractIncompatibleError,
     EnvironmentShadowError,
+    InstallEnvError,
     InstallStateError,
     ListingNotFoundError,
     MalformedRefError,
@@ -118,9 +119,10 @@ def _to_operation_error(exc: MarketplaceError) -> OperationError:
     The classification keys on the typed class (and, for a state conflict, its
     ``not_installed`` flag) — never on message text.
     """
-    if isinstance(exc, MalformedRefError):
-        # The caller's own author error — a ref that is not a well-formed
-        # lowercase ``namespace/name``.
+    if isinstance(exc, MalformedRefError | InstallEnvError):
+        # The caller's own author error — a ref that is not a well-formed lowercase
+        # ``namespace/name``, or an mcp-server install missing a required !ENV value
+        # (each missing var + json-pointer named, names only).
         return BadRequestError(str(exc))
     if isinstance(exc, RegistryUnreachableError | RegistryResponseError):
         # The registry is this surface's upstream; a dead/garbled upstream is a
@@ -165,10 +167,19 @@ def _to_operation_error(exc: MarketplaceError) -> OperationError:
 
 
 class MarketplaceInstall(BaseModel):
-    """Install a marketplace plugin by ref, optionally pinning a version."""
+    """Install a marketplace plugin by ref, optionally pinning a version.
+
+    ``env`` / ``secret_keys`` are accepted for an mcp-server install: an mcp entry's
+    required ``!ENV`` markers are satisfied by writing these values to the env store
+    in the same transaction that writes the entry (never deferred), and ``secret_keys``
+    marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``). Declared on the
+    model so a Studio body carrying them is not silently dropped (pydantic ignores
+    unknown fields)."""
 
     ref: str
     version: str | None = None
+    env: dict[str, str] | None = None
+    secret_keys: list[str] | None = None
 
 
 class MarketplaceUninstall(BaseModel):
@@ -178,10 +189,16 @@ class MarketplaceUninstall(BaseModel):
 
 
 class MarketplaceUpdate(BaseModel):
-    """Update an installed plugin to a newer (or named) version."""
+    """Update an installed plugin to a newer (or named) version.
+
+    ``env`` / ``secret_keys`` mirror :class:`MarketplaceInstall`: a new mcp-server
+    version adding a required marker is loudly refused unless its value is supplied
+    here."""
 
     ref: str
     version: str | None = None
+    env: dict[str, str] | None = None
+    secret_keys: list[str] | None = None
 
 
 @operation(summary="Search the marketplace", tags=["marketplace"], errors=[UpstreamError])
@@ -370,15 +387,22 @@ async def marketplace_advisories() -> dict[str, Any]:
     ],
     request_model=MarketplaceInstall,
 )
-async def marketplace_install(ref: str, version: str | None = None) -> dict[str, Any]:
+async def marketplace_install(
+    ref: str,
+    version: str | None = None,
+    env: dict[str, str] | None = None,
+    secret_keys: list[str] | None = None,
+) -> dict[str, Any]:
     """Resolve, pip install, patch the manifest, reload, and record attribution —
-    aborting and unwinding on any failure (see :meth:`Installer.install`)."""
+    aborting and unwinding on any failure (see :meth:`Installer.install`). For an
+    mcp-server install ``env`` / ``secret_keys`` satisfy the entry's required ``!ENV``
+    markers in the same combined transaction."""
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # install cannot record, so it refuses with a named, machine-readable reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     try:
-        return await Installer().install(ref, version)
+        return await Installer().install(ref, version, env=env, secret_keys=secret_keys)
     except MarketplaceError as exc:
         raise _to_operation_error(exc) from exc
 
@@ -422,16 +446,21 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
     ],
     request_model=MarketplaceUpdate,
 )
-async def marketplace_update(ref: str, version: str | None = None) -> dict[str, Any]:
+async def marketplace_update(
+    ref: str,
+    version: str | None = None,
+    env: dict[str, str] | None = None,
+    secret_keys: list[str] | None = None,
+) -> dict[str, Any]:
     """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert
-    attribution — with the same pre-flights as install (see
-    :meth:`Installer.update`)."""
+    attribution — with the same pre-flights as install (see :meth:`Installer.update`).
+    ``env`` / ``secret_keys`` satisfy a new mcp-server version's required markers."""
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # update cannot upsert, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     try:
-        return await Installer().update(ref, version)
+        return await Installer().update(ref, version, env=env, secret_keys=secret_keys)
     except MarketplaceError as exc:
         raise _to_operation_error(exc) from exc
 

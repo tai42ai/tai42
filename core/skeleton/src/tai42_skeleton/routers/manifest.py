@@ -6,6 +6,7 @@ stays behind the credential):
 
 - ``GET  /api/manifest``                     — the PRESERVED manifest MCP section + user tools (markers intact).
 - ``GET  /api/manifest/preserved``           — the PRESERVED manifest view the McpTab editor reads.
+- ``GET  /api/manifest/mcp-env-refs``         — the MCP section's !ENV marker refs (names + set/unset only).
 - ``POST /api/manifest/replace``             — replace the WHOLE persisted manifest, fleet-wide (tier-2).
 - ``POST /api/mcp-config``                   — replace the MCP section (persist + reload).
 - ``POST /api/mcp-config/secret-env``        — write a secret env value + its manifest !ENV marker together.
@@ -37,6 +38,7 @@ from tai42_skeleton.operations.manifest import deregister_mcp as _deregister_mcp
 from tai42_skeleton.operations.manifest import get_manifest as _get_manifest_op
 from tai42_skeleton.operations.manifest import get_manifest_preserved as _get_manifest_preserved_op
 from tai42_skeleton.operations.manifest import get_mcp_config_schema as _get_mcp_config_schema_op
+from tai42_skeleton.operations.manifest import get_mcp_env_refs as _get_mcp_env_refs_op
 from tai42_skeleton.operations.manifest import get_mcp_status as _get_mcp_status_op
 from tai42_skeleton.operations.manifest import list_failed_mcps as _list_failed_mcps_op
 from tai42_skeleton.operations.manifest import reload_failed_mcps as _reload_failed_mcps_op
@@ -166,6 +168,14 @@ set_mcp_secret_env = register_operation_route(
     method="POST",
     context_extractor=_extract_secret_env,
     action="fenced",
+)
+
+get_mcp_env_refs = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_mcp_env_refs_op),
+    path="/api/manifest/mcp-env-refs",
+    method="GET",
+    action="read",
 )
 
 get_mcp_config_schema = register_operation_route(

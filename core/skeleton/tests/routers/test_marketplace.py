@@ -131,13 +131,13 @@ def _use_store(monkeypatch: pytest.MonkeyPatch, rows: list[InstallRecord]) -> No
 
 def _use_installer(monkeypatch: pytest.MonkeyPatch, *, install: Callable[[str, str | None], Awaitable[Any]]) -> None:
     class _Installer:
-        async def install(self, ref, version=None):
+        async def install(self, ref, version=None, *, env=None, secret_keys=None):
             return await install(ref, version)
 
         async def uninstall(self, ref):
             return await install(ref, None)
 
-        async def update(self, ref, version=None):
+        async def update(self, ref, version=None, *, env=None, secret_keys=None):
             return await install(ref, version)
 
         async def upgrade_all(self):

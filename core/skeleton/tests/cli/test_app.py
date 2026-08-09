@@ -70,10 +70,11 @@ def test_serve_help_renders() -> None:
     assert "--transport" in result.output
 
 
-@pytest.mark.parametrize("command", ["catalog", "version"])
+@pytest.mark.parametrize("command", ["version"])
 def test_native_command_runs_offline(command: str) -> None:
-    # ``catalog`` and ``version`` read only packaged data / installed metadata, so
-    # they succeed on a bare install with no server, DB, or network.
+    # ``version`` reads only installed metadata, so it succeeds on a bare install with
+    # no server, DB, or network. (``catalog`` now queries the marketplace registry — it
+    # is deliberately network-required, offline = loud error, so it is NOT offline-safe.)
     result = CliRunner().invoke(app_module.app, [command])
 
     assert result.exit_code == 0, result.output

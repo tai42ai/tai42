@@ -122,6 +122,14 @@ class ManifestComposeError(MarketplaceError):
     fault, never the caller's request."""
 
 
+class InstallEnvError(MarketplaceError):
+    """An mcp-server install/update whose required ``!ENV`` markers were not
+    satisfied — a dangling-marker refusal (each missing var + json-pointer named),
+    or another env-boundary refusal (X-band / key-material) raised by the combined
+    env+manifest pipeline before anything persisted. The caller's own input error
+    (supply the values), mapped at the boundary to a 400. Names only, never values."""
+
+
 class InstallUnwindError(MarketplaceError):
     """A step failed AND the unwind of the already-applied steps also failed.
 

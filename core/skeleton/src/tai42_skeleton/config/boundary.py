@@ -34,10 +34,11 @@ Dangling ``!ENV`` refusal
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from tai42_kit.settings import registered_settings
+from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 
@@ -56,13 +57,6 @@ X_BAND_EXTRA: frozenset[str] = frozenset(
         "PROMETHEUS_RUNTIME",
     }
 )
-
-# ``pyaml_env``'s own marker grammar (``parse_config`` with the default ``:``
-# separator): group 1 is the env var name, group 2 an optional ``:default`` suffix.
-# A ref with no default (group 2 empty) resolves to ``"N/A"`` when the var is absent.
-_ENV_REF = re.compile(r"\$\{([^}{:]+)(:[^}]+)?\}")
-
-_ENV_MARKER_PREFIX = "!ENV "
 
 
 def excluded_env_var_names() -> frozenset[str]:
@@ -202,41 +196,19 @@ def refuse_incomplete_admin_pair(effective_env: Mapping[str, str]) -> None:
 def refuse_dangling_env_markers(preserved_manifest: Mapping[str, Any], effective_env: Mapping[str, str]) -> None:
     """Refuse a change that leaves a manifest ``!ENV`` marker dangling.
 
-    Walks the PRESERVED document's scalar leaves; a leaf beginning ``"!ENV "`` is a
-    marker whose expression is scanned for ``${VAR}`` refs. A ref DANGLES iff it
-    carries no ``:default`` AND its var is absent from *effective_env* —
-    ``${VAR:default}`` and a bare ``!ENV VAR`` never dangle. Raises
-    :class:`ValueError` naming each ``(VAR, json-pointer)`` pair (names only, never
-    the marker value) — the operations layer maps it to a 400."""
-    dangling: list[str] = []
-    for pointer, leaf in _scalar_leaves(preserved_manifest, ""):
-        if not leaf.startswith(_ENV_MARKER_PREFIX):
-            continue
-        expression = leaf[len(_ENV_MARKER_PREFIX) :]
-        for var, default in _ENV_REF.findall(expression):
-            if not default and var not in effective_env:
-                dangling.append(f"{var} (at {pointer})")
+    Delegates the scan to the shared kit authority
+    (:func:`~tai42_kit.utils.data.env_markers.scan_env_marker_refs`): a ref DANGLES iff
+    it carries no ``:default`` (``ref.required``) AND its var is absent from
+    *effective_env* — ``${VAR:default}`` and a bare ``!ENV VAR`` never dangle. Raises
+    :class:`ValueError` naming each ``(VAR, json-pointer)`` pair (names only, never the
+    marker value) — the operations layer maps it to a 400."""
+    dangling = [
+        f"{ref.var} (at {ref.pointer})"
+        for ref in scan_env_marker_refs(preserved_manifest)
+        if ref.required and ref.var not in effective_env
+    ]
     if dangling:
         raise ValueError(
             "Refusing a change that leaves manifest !ENV markers dangling — these "
             'references resolve to no env var and would silently run on "N/A": ' + ", ".join(dangling) + "."
         )
-
-
-def _scalar_leaves(node: Any, pointer: str) -> Iterator[tuple[str, str]]:
-    """Yield ``(json-pointer, value)`` for every string scalar leaf of *node*,
-    descending mappings and sequences. RFC 6901 pointers (``~`` → ``~0``, ``/`` →
-    ``~1`` in map keys)."""
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            yield from _scalar_leaves(value, f"{pointer}/{_escape(str(key))}")
-    elif isinstance(node, (list, tuple)):
-        for index, value in enumerate(node):
-            yield from _scalar_leaves(value, f"{pointer}/{index}")
-    elif isinstance(node, str):
-        yield pointer, node
-
-
-def _escape(token: str) -> str:
-    """RFC 6901 json-pointer token escaping."""
-    return token.replace("~", "~0").replace("/", "~1")

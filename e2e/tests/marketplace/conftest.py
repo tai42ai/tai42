@@ -39,6 +39,7 @@ from tai42_e2e.marketplace import (
     BETA_PACKAGE,
     DELTA_PACKAGE,
     EPSILON_PACKAGE,
+    ETA_PACKAGE,
     GAMMA_PACKAGE,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
@@ -88,7 +89,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 # The fixture distributions a marketplace install pip-installs into the shared
 # venv. The venv guard asserts none of them linger before or after the area.
-_FIXTURE_DISTRIBUTIONS = (ALPHA_PACKAGE, BETA_PACKAGE, GAMMA_PACKAGE, DELTA_PACKAGE, EPSILON_PACKAGE, ZETA_PACKAGE)
+_FIXTURE_DISTRIBUTIONS = (
+    ALPHA_PACKAGE,
+    BETA_PACKAGE,
+    GAMMA_PACKAGE,
+    DELTA_PACKAGE,
+    EPSILON_PACKAGE,
+    ZETA_PACKAGE,
+    ETA_PACKAGE,
+)
 
 
 def _assert_fixture_distributions_absent() -> None:
@@ -151,9 +160,9 @@ def market_installer() -> Iterator[MarketInstaller]:
 
 @pytest.fixture(scope="session")
 def fixture_artifacts(tmp_path_factory: pytest.TempPathFactory) -> FixtureArtifacts:
-    """Forge the five wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon
-    0.1.0) and the two delta source tarballs (0.1.0/0.2.0) once per session — the
-    artifacts are immutable and shared across modules."""
+    """Forge the six wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon
+    0.1.0, eta 0.1.0) and the two delta source tarballs (0.1.0/0.2.0) once per
+    session — the artifacts are immutable and shared across modules."""
     return forge_fixture_artifacts(tmp_path_factory.mktemp("artifacts"))
 
 

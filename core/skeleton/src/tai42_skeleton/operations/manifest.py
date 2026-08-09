@@ -39,6 +39,7 @@ The one response shape every ConfigService writer returns from an
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from typing import Any, cast
@@ -46,6 +47,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_kit.utils.data import load_manifest
+from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -157,6 +159,32 @@ async def get_manifest_preserved() -> dict:
     Same ``{mcp, user_tools}`` view as ``get_manifest`` (both serve the preserved read
     post-retighten); the explicit ``/preserved`` door is the PLAN_5-pinned contract."""
     return _preserved_manifest_view()
+
+
+@operation(summary="List the manifest MCP section's !ENV marker refs (names + set/unset only)", tags=["manifest"])
+async def get_mcp_env_refs() -> list[dict[str, Any]]:
+    """The ``!ENV ${VAR[:default]}`` markers carried by the manifest's MCP section —
+    NAMES and BOOLEANS only, never values.
+
+    Walks the PRESERVED manifest (markers intact) with the shared marker scan and
+    returns one row per marker ref, in document order:
+    ``{var, pointer, has_default, set}``. ``pointer`` is the RFC 6901 json-pointer of
+    the leaf (``/mcp/<i>/config/...``); ``has_default`` is whether the ref carries a
+    ``:default``; ``set`` is whether the var is present in ``os.environ`` — the SAME
+    effective env the store flows into and the source-marker resolution + dangling
+    refusals read, so a var supplied only by the deployment environment shows green,
+    never a false red. Works identically for hand-written marker-bearing entries (a
+    platform feature, not an mcp-server-kind feature)."""
+    section = {"mcp": _preserved_manifest_view()["mcp"]}
+    return [
+        {
+            "var": ref.var,
+            "pointer": ref.pointer,
+            "has_default": ref.default is not None,
+            "set": ref.var in os.environ,
+        }
+        for ref in scan_env_marker_refs(section)
+    ]
 
 
 @operation(summary="Get the JSON schema for one MCP-config entry", tags=["manifest"])

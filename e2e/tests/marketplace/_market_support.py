@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import yaml
 from fastmcp.client.client import CallToolResult
 
 from tai42_e2e.stack import TaiStack
@@ -147,6 +148,23 @@ async def installed_refs(stack: TaiStack) -> dict[str, dict[str, Any]]:
     return {row["ref"]: row for row in (await installed_payload(stack))["installed"]}
 
 
+def persisted_manifest(stack: TaiStack) -> dict[str, Any]:
+    """The stack's persisted ``manifest.yml`` on disk — the file the installer's
+    config pipeline writes the merged manifest back to and a restart re-reads."""
+    text = (stack.root / "config" / "manifest.yml").read_text(encoding="utf-8")
+    manifest = yaml.safe_load(text)
+    if not isinstance(manifest, dict):
+        raise AssertionError(f"persisted manifest is not a mapping: {manifest!r}")
+    return manifest
+
+
+def manifest_mcp_titles(stack: TaiStack) -> set[str]:
+    """The titles of the persisted manifest's ``mcp`` entries — the rows an
+    mcp-server install appends and an uninstall removes."""
+    entries = persisted_manifest(stack).get("mcp") or []
+    return {entry["title"] for entry in entries}
+
+
 def quarantined_by_name(payload: dict[str, Any]) -> dict[str, str]:
     """The installed body's boot-quarantine entries, name → reason."""
     entries = payload.get("quarantined")
@@ -159,11 +177,16 @@ def quarantined_by_name(payload: dict[str, Any]) -> dict[str, str]:
 
 
 async def uninstall_and_assert_clean(
-    stack: TaiStack, ref: str, *, package: str, tool_name: str, deadline: float = 30.0
+    stack: TaiStack, ref: str, *, package: str, tool_name: str, mcp_title: str | None = None, deadline: float = 30.0
 ) -> None:
     """The lifecycle clean-tail every install spec ends with: uninstall, then wait
     until the tool is gone (MCP + ``/api/tools``), the attribution row is gone, and
     the distribution no longer resolves in the venv.
+
+    For an mcp-server install, pass ``mcp_title``: the mounted tool is gone the same
+    way (the unmount deregisters it from MCP + ``/api/tools``), and the persisted
+    manifest's ``mcp`` entry for that title must have been removed too — the row the
+    install appended.
 
     The uninstall assertion is load-bearing — ``pip install`` mutated the ONE
     shared venv, so a spec that installed must prove it cleaned up (the venv guard
@@ -174,12 +197,15 @@ async def uninstall_and_assert_clean(
     async def gone() -> bool:
         if ref in await installed_refs(stack):
             return False
+        if mcp_title is not None and mcp_title in manifest_mcp_titles(stack):
+            return False
         return distribution_absent(package)
 
     await wait_for_async(
         gone,
         deadline=deadline,
-        message=f"{ref} never fully uninstalled (attribution row or venv distribution {package!r} lingered)",
+        message=f"{ref} never fully uninstalled (attribution row, manifest mcp entry, or venv "
+        f"distribution {package!r} lingered)",
     )
 
 

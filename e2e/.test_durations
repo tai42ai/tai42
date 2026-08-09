@@ -297,6 +297,7 @@
   "tests/marketplace/test_contract_compat.py::test_seed_rejects_contract_requires_dist_mismatch": 1.244,
   "tests/marketplace/test_install_lifecycle.py::test_install_go_live_and_uninstall": 18.597,
   "tests/marketplace/test_install_lifecycle.py::test_prefix_install_survives_a_serve_restart": 30.123,
+  "tests/marketplace/test_install_mcp_server.py::test_install_go_live_and_uninstall_mcp_server": 22.0,
   "tests/marketplace/test_kill_and_outage.py::test_killed_version_refuses_install": 5.002,
   "tests/marketplace/test_kill_and_outage.py::test_registry_outage_fails_loudly_then_recovers": 1.617,
   "tests/marketplace/test_router_merge.py::test_router_and_middleware_merge_persist_then_restart": 16.919,

@@ -270,21 +270,35 @@ def echo_stderr(message: str) -> None:
 def validate_manifest_file(path: str) -> None:
     """Validate a manifest file against the in-repo :class:`Manifest` model, OFFLINE.
 
-    Loads the YAML (expanding ``!ENV`` tags exactly as the runtime read does) and
-    runs ``Manifest.model_validate``, raising a usage error carrying the model's
-    message on any failure. No server, database, or Redis is touched.
+    Loads the YAML (expanding ``!ENV`` tags exactly as the runtime read does), refuses
+    any required ``!ENV`` marker left dangling against the current env (so an offline
+    validation catches the cold-boot phantom ``"N/A"`` naming each var + json-pointer),
+    then runs ``Manifest.model_validate``, raising a usage error carrying the message on
+    any failure. No server, database, or Redis is touched.
     """
+    import os
+
     from pyaml_env import parse_config
     from pydantic import ValidationError
+    from tai42_kit.utils.data import load_manifest
 
+    from tai42_skeleton.config.boundary import refuse_dangling_env_markers
     from tai42_skeleton.manifest import Manifest
 
     try:
-        raw = parse_config(path=path) or {}
+        with open(path) as fh:
+            text = fh.read()
+        raw = parse_config(data=text) or {}
     except Exception as exc:
         raise typer.BadParameter(f"could not read manifest YAML: {exc}", param_hint="FILE") from exc
     if not isinstance(raw, dict):
         raise typer.BadParameter("manifest must be a YAML mapping", param_hint="FILE")
+    try:
+        # Scan the PRESERVED view (markers intact) so a dangling required marker is
+        # named before the expanded projection silently carries an "N/A".
+        refuse_dangling_env_markers(load_manifest(text), os.environ)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="FILE") from exc
     try:
         Manifest.model_validate(raw)
     except ValidationError as exc:

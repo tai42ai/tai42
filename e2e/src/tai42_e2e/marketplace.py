@@ -120,12 +120,22 @@ GAMMA_PACKAGE = "tai-e2e-market-gamma"
 DELTA_PACKAGE = "tai-e2e-market-delta"
 EPSILON_PACKAGE = "tai-e2e-market-epsilon"
 ZETA_PACKAGE = "tai-e2e-market-zeta"
+ETA_PACKAGE = "tai-e2e-market-eta"
 ALPHA_REF = "tai42/e2e-alpha"
 BETA_REF = "tai42/e2e-beta"
 GAMMA_REF = "tai42/e2e-gamma"
 DELTA_REF = "tai42/e2e-delta"
 EPSILON_REF = "tai42/e2e-epsilon"
 ZETA_REF = "tai42/e2e-zeta"
+ETA_REF = "tai42/e2e-eta"
+
+# Eta is the mcp-server fixture: its one provided item is kind ``mcp-server`` whose
+# ``mcp.command`` launches the fixture's own one-tool stdio server. An mcp-server
+# package imports no tai42-contract, so its spec declares NO contract range and the
+# forge stamps none (:func:`forge_fixture_artifacts`). The install writes a manifest
+# ``mcp`` entry titled by the item name, under which the mounted tool binds.
+ETA_MCP_TITLE = "e2e_eta_mcp"
+ETA_MCP_TOOL = "e2e_eta_mcp_ping"
 
 # Zeta is the plugin-compat fixture: two published versions whose DECLARED
 # contract ranges differ. 0.1.0 declares the wide range (it contains the
@@ -150,8 +160,8 @@ DELTA_REPOSITORY_URL = "https://github.com/tai42ai/tai-e2e-market-delta"
 @dataclass(frozen=True)
 class FixtureArtifacts:
     """The forged fixture artifacts a marketplace-area run needs: the pypi-sourced
-    wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0) and the
-    github-sourced delta source tarballs (0.1.0/0.2.0). Immutable and shareable
+    wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0, eta 0.1.0) and
+    the github-sourced delta source tarballs (0.1.0/0.2.0). Immutable and shareable
     across modules — forging is pure and the built files never change."""
 
     alpha_v1: BuiltWheel
@@ -159,6 +169,7 @@ class FixtureArtifacts:
     beta_v1: BuiltWheel
     gamma_v1: BuiltWheel
     epsilon_v1: BuiltWheel
+    eta_v1: BuiltWheel
     delta_v1: BuiltTarball
     delta_v2: BuiltTarball
 
@@ -231,16 +242,19 @@ def contract_facet_probe_versions() -> tuple[str, str]:
 
 
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
-    """Forge every fixture artifact into ``out_dir``: the five wheels and the two
+    """Forge every fixture artifact into ``out_dir``: the six wheels and the two
     delta source tarballs (delta is the github-sourced listing and gets no
     wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
     ``TAI_E2E_MARKETPLACE_FIXTURES``); each build stamps its version into a copy of
     the source, never mutating the source tree.
 
-    Every fixture's declared contract range (and its built ``Requires-Dist``
-    specifier) is stamped to the workspace's own contract band
+    Every CONTRACT-BEARING fixture's declared contract range (and its built
+    ``Requires-Dist`` specifier) is stamped to the workspace's own contract band
     (:func:`_workspace_contract_range`), so the install resolves against the
-    environment's contract at every release-version window."""
+    environment's contract at every release-version window. The eta fixture is the
+    lone exception: its one item is kind ``mcp-server``, so its spec declares no
+    ``contract`` and its package depends on no tai42-contract — it is forged with NO
+    contract stamp (passing a range would fail its all-mcp-server spec validation)."""
     src = _resolve_fixtures_dir(fixtures_dir)
     contract_range = _workspace_contract_range()
     return FixtureArtifacts(
@@ -249,6 +263,7 @@ def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> 
         beta_v1=build_fixture_wheel(src / "beta", "0.1.0", out_dir, contract_range=contract_range),
         gamma_v1=build_fixture_wheel(src / "gamma", "0.1.0", out_dir, contract_range=contract_range),
         epsilon_v1=build_fixture_wheel(src / "epsilon", "0.1.0", out_dir, contract_range=contract_range),
+        eta_v1=build_fixture_wheel(src / "eta", "0.1.0", out_dir),
         delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
         delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),
     )
@@ -703,3 +718,18 @@ async def seed_epsilon_listing(mp: MarketplaceService, index: FixturePackageInde
     index.register(artifacts.epsilon_v1)
     await _admin_seed(mp, ((EPSILON_PACKAGE, artifacts.epsilon_v1.plugin_yml),))
     await _wait_published(mp, EPSILON_REF, "0.1.0")
+
+
+async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:
+    """Stage eta's ``0.1.0`` wheel and drive the real admin-seed + ingest pipeline
+    until it publishes.
+
+    Eta is the mcp-server fixture the install-mcp-server spec installs. Kept OUT of
+    :func:`seed_fixture_catalog` so it never pollutes the shared browse catalog —
+    only the mcp-server spec's own registry carries it, exactly as delta/epsilon are
+    seeded by their own specs rather than the shared seed. Its spec carries no
+    ``contract`` (an all-mcp-server package), so the registry ingests it under the
+    contract-less mcp-server kind branch."""
+    index.register(artifacts.eta_v1)
+    await _admin_seed(mp, ((ETA_PACKAGE, artifacts.eta_v1.plugin_yml),))
+    await _wait_published(mp, ETA_REF, "0.1.0")

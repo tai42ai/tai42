@@ -64,6 +64,20 @@ class RegistryClient:
         data = await self._request("GET", f"/api/v1/plugins/{_seg(namespace)}/{_seg(name)}/versions", ref=ref)
         return _unwrap_list(data, "versions", "versions")
 
+    async def items(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """Every LISTED plugin's provided items, deduped by owning listing — one row
+        per item with ``kind``/``name``/``module`` (nullable, ``null`` for mcp-server)/
+        ``description`` and the owning ``namespace``/``listing``/``package``. The
+        UNCAPPED item enumeration the catalog projects (``GET /api/v1/items``), NOT the
+        page-capped search. An optional ``kind`` filters to one item kind."""
+        params: dict[str, str] = {}
+        if kind is not None:
+            params["kind"] = kind
+        data = await self._request("GET", "/api/v1/items", params=params)
+        rows = _unwrap_list(data, "items", "items")
+        _require_dict_elements(rows, "items")
+        return rows
+
     async def categories(self) -> list[str]:
         """The registry's controlled category vocabulary — a bare list of
         category names, unwrapped from the registry's ``{"categories": [...]}``

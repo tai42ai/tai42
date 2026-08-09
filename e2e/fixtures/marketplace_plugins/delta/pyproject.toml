@@ -20,4 +20,4 @@ where = ["src"]
 include = ["tai_e2e_market_delta*"]
 
 [tool.setuptools.package-data]
-tai_e2e_market_delta = ["tai-plugin.yml"]
+tai_e2e_market_delta = ["tai-plugin.yml", "docs/index.mdx"]

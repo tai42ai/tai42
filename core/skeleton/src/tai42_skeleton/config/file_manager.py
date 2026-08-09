@@ -276,12 +276,28 @@ class FileConfigManager(ConfigManager):
         with open(path) as fh:
             return load_manifest(fh.read())
 
+    def _refuse_dangling_expanded(self, path: str) -> None:
+        """Close the cold-boot silent path before an EXPANDED read returns: load the
+        PRESERVED view and run the shared dangling scan against ``os.environ``, raising
+        loudly naming each ``(var, json-pointer)``. Without it, ``pyaml_env`` would
+        materialize an absent no-default marker to the literal ``"N/A"`` — a phantom
+        value the expanded view must never carry. Delegates to the shared kit scan via
+        the config boundary's refusal (imported locally to keep import order flat)."""
+        from tai42_skeleton.config.boundary import refuse_dangling_env_markers
+
+        refuse_dangling_env_markers(self._load_yaml_preserved(path), os.environ)
+
     def read_manifest(self) -> dict:
-        """Read ``manifest.yml`` with ``!ENV`` tags EXPANDED (runtime view)."""
+        """Read ``manifest.yml`` with ``!ENV`` tags EXPANDED (runtime view). A required
+        marker whose var is absent is refused loudly (never a phantom ``"N/A"``)."""
         path = self._manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
-        return self._load_yaml_expanded(path)
+        # Expand first (a malformed file surfaces its parser error here), then guard
+        # the well-formed document against dangling markers before returning it.
+        expanded = self._load_yaml_expanded(path)
+        self._refuse_dangling_expanded(path)
+        return expanded
 
     def read_manifest_preserved(self) -> dict:
         """Read ``manifest.yml`` with ``!ENV`` tags PRESERVED as ``"!ENV <expr>"``
@@ -301,7 +317,9 @@ class FileConfigManager(ConfigManager):
         path = self._defaults_manifest_path
         if not os.path.exists(path):
             return {}
-        return self._load_yaml_expanded(path)
+        expanded = self._load_yaml_expanded(path)
+        self._refuse_dangling_expanded(path)
+        return expanded
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         """Atomically read-modify-write the manifest under the transaction lock.

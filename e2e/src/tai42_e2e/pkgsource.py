@@ -245,16 +245,36 @@ class _GithubRelease:
     plugin_yaml: bytes
 
 
+# The git object-tree mode for a subdirectory and for a regular (non-executable)
+# file blob. The docs-fetch mode allowlist is 100644/100755 (see W2_CONTRACTS §2);
+# the mock's docs files are regular blobs, so they carry 100644.
+_GIT_TREE_MODE = "040000"
+_GIT_BLOB_MODE = "100644"
+# The subdirectory a plugin's docs tree lives under at the repo root — the segment
+# the docs-fetch walks from the tag's root tree to the docs subtree SHA.
+_DOCS_DIRNAME = "docs"
+
+
+def _git_blob_sha(content: bytes) -> str:
+    """The git blob object id for ``content`` (``sha1("blob <len>\\0<bytes>")``) —
+    a stable, content-addressed id so the tree listing and the ``/git/blobs`` fetch
+    agree on the same sha, exactly as a real repository's do."""
+    header = f"blob {len(content)}\0".encode()
+    return hashlib.sha1(header + content).hexdigest()
+
+
 class FixturePackageIndex:
     """A thread-hosted package index serving forged fixture artifacts.
 
     The PyPI surfaces (``/simple/``, ``/wheels/``, ``/pypi/{project}/json``)
     serve wheels registered via :meth:`register`; the github-shaped surfaces
-    (``/gh-api/repos/{owner}/{repo}`` existence probe and
-    ``/gh-api/repos/{owner}/{repo}/contents/...`` per-tag spec) serve releases
-    staged via :meth:`register_github_release`. Every request path is recorded so
-    a spec can assert the registry actually fetched (and that nothing was fetched
-    after teardown)."""
+    (``/gh-api/repos/{owner}/{repo}`` existence probe,
+    ``/gh-api/repos/{owner}/{repo}/contents/...`` per-tag spec, and the
+    ``/gh-api/repos/{owner}/{repo}/git/trees|blobs/...`` docs-fetch tree the
+    registry's github docs ingest reads) serve releases staged via
+    :meth:`register_github_release` / :meth:`register_github_docs_tree`. Every
+    request path is recorded so a spec can assert the registry actually fetched
+    (and that nothing was fetched after teardown)."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
@@ -266,6 +286,11 @@ class FixturePackageIndex:
         self._wheel_by_filename: dict[str, BuiltWheel] = {}
         # Staged github releases keyed by tag; each serves its own stamped spec.
         self._gh_releases: dict[str, _GithubRelease] = {}
+        # Staged git-data trees keyed by sha (and, for a tag's root, by the tag
+        # itself so the docs fetch can resolve the tag's root tree in one hop);
+        # docs blobs keyed by their git blob sha.
+        self._gh_trees: dict[str, dict[str, object]] = {}
+        self._gh_blobs: dict[str, bytes] = {}
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
     @property
@@ -298,6 +323,40 @@ class FixturePackageIndex:
         """Stage a github release: its tag and the stamped root ``tai-plugin.yml``
         the contents API serves for that tag (honouring ``?ref=<tag>``)."""
         self._gh_releases[tag] = _GithubRelease(tag=tag, plugin_yaml=plugin_yml.encode("utf-8"))
+
+    def register_github_docs_tree(self, tag: str, docs_files: dict[str, str]) -> None:
+        """Stage a tag's ``docs/`` tree on the git-data surfaces (``/git/trees`` +
+        ``/git/blobs``), the shape the registry's github docs ingest fetches.
+
+        ``docs_files`` maps docs-relative posix paths (e.g. ``"index.mdx"``) to
+        their text. Mirrors the pinned PLAN_3 fetch shape (W2_CONTRACTS §2): the
+        tag's root tree carries a single ``docs`` subtree entry; the docs subtree
+        lists each file as a ``100644`` blob; each blob is served base64-encoded by
+        its git object id. The root tree is addressable by BOTH the tag and its own
+        sha, so a fetch resolving the tag's root tree in one hop and one walking a
+        ref → root-sha first both land."""
+        blobs: dict[str, bytes] = {name: text.encode("utf-8") for name, text in docs_files.items()}
+        docs_entries = [
+            {
+                "path": name,
+                "mode": _GIT_BLOB_MODE,
+                "type": "blob",
+                "sha": _git_blob_sha(content),
+                "size": len(content),
+            }
+            for name, content in sorted(blobs.items())
+        ]
+        docs_sha = hashlib.sha1(
+            ("docs-tree:" + tag + ":" + ",".join(f"{e['path']}:{e['sha']}" for e in docs_entries)).encode()
+        ).hexdigest()
+        root_entries = [{"path": _DOCS_DIRNAME, "mode": _GIT_TREE_MODE, "type": "tree", "sha": docs_sha}]
+        root_sha = hashlib.sha1(("root-tree:" + tag + ":" + docs_sha).encode()).hexdigest()
+        root_tree = {"sha": root_sha, "truncated": False, "tree": root_entries}
+        self._gh_trees[tag] = root_tree
+        self._gh_trees[root_sha] = root_tree
+        self._gh_trees[docs_sha] = {"sha": docs_sha, "truncated": False, "tree": docs_entries}
+        for entry in docs_entries:
+            self._gh_blobs[str(entry["sha"])] = blobs[str(entry["path"])]
 
     def _pypi_json(self, project: str) -> dict[str, object]:
         wheels = self._wheels[_normalize_project(project)]
@@ -376,6 +435,31 @@ class FixturePackageIndex:
                     content = base64.b64encode(release.plugin_yaml).decode("ascii")
                     return JSONResponse({"encoding": "base64", "content": content, "path": path})
             return JSONResponse({"error": f"not found: {path} at ref {ref!r}"}, status_code=404)
+
+        @app.get("/gh-api/repos/{owner}/{repo}/git/trees/{tree_sha}")
+        async def gh_tree(owner: str, repo: str, tree_sha: str, recursive: str | None = None) -> JSONResponse:
+            # The docs-fetch resolves the tag's root tree (addressed by the tag or
+            # its root sha), walks the ``docs`` segment to the docs subtree sha, then
+            # makes ONE recursive call on that small subtree. The staged trees are
+            # shallow, so ``?recursive=1`` returns the same stored entry list — the
+            # mock never serves a whole-repo recursive listing (W2_CONTRACTS §2).
+            self.requests.append(f"/gh-api/repos/{owner}/{repo}/git/trees/{tree_sha}")
+            tree = self._gh_trees.get(tree_sha)
+            if tree is None:
+                return JSONResponse({"error": f"not found: tree {tree_sha}"}, status_code=404)
+            return JSONResponse(tree)
+
+        @app.get("/gh-api/repos/{owner}/{repo}/git/blobs/{file_sha}")
+        async def gh_blob(owner: str, repo: str, file_sha: str) -> JSONResponse:
+            # Serve a docs blob base64-encoded by its git object id, the last hop of
+            # the tree-walk docs fetch. Bounded reads are the fetcher's concern; the
+            # mock serves only the harness's own small docs blobs.
+            self.requests.append(f"/gh-api/repos/{owner}/{repo}/git/blobs/{file_sha}")
+            content = self._gh_blobs.get(file_sha)
+            if content is None:
+                return JSONResponse({"error": f"not found: blob {file_sha}"}, status_code=404)
+            encoded = base64.b64encode(content).decode("ascii")
+            return JSONResponse({"sha": file_sha, "encoding": "base64", "content": encoded, "size": len(content)})
 
         @app.get("/gh-api/repos/{owner}/{repo}/readme")
         async def gh_readme(owner: str, repo: str) -> JSONResponse:

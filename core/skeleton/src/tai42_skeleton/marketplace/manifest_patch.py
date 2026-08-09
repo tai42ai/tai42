@@ -23,6 +23,12 @@ The five patch shapes:
   contract rule; the contract binding stays a plain ``module_list``.
 - ``package_list`` (``studio_plugins``) — the plugin's DISTRIBUTION name (not the
   item's module) appended to a package-name list.
+- ``mcp_entry`` (``mcp``) — a ``{title: item.name, config: item.mcp}`` object
+  appended to the manifest ``mcp`` list (an mcp-server item carries transport
+  config in ``item.mcp`` and NO module, so the payload is built from
+  ``item.name``/``item.mcp``, never ``item.module``). Deduped by title; a title
+  already present (hand-written or previously installed) is a collision, never an
+  overwrite; uninstall removes by title, convergently.
 - ``scalar_module`` (``backend_module``, ``storage_module``,
   ``monitoring_module``) — a single-module slot; a second plugin claiming an
   occupied slot is a collision, as is one spec providing two distinct modules for
@@ -48,10 +54,15 @@ from tai42_skeleton.marketplace.errors import ManifestBindingError, ManifestColl
 
 
 class _FieldTargets(NamedTuple):
-    """The patch mode for one manifest field and the distinct values to apply."""
+    """The patch mode for one manifest field and the distinct payloads to apply.
+
+    ``values`` is a per-mode payload union: string modes carry ``list[str]``
+    (module paths or the distribution name); ``mcp_entry`` carries the built
+    ``{title, config}`` dicts. Each writer branches on ``mode`` before reading a
+    payload, so the two shapes never mix at one site."""
 
     mode: str
-    values: list[str]
+    values: list[Any]
 
 
 def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
@@ -72,11 +83,21 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
         field = binding.field
         if field is None:  # pragma: no cover - guarded by the binding invariant
             raise ManifestBindingError(f"binding for kind {item.kind.value!r} names no field but is not env-selected")
-        value = spec.package if binding.mode == "package_list" else item.module
         target = grouped.get(field)
         if target is None:
             target = _FieldTargets(mode=binding.mode, values=[])
             grouped[field] = target
+        if binding.mode == "mcp_entry":
+            # An mcp-server item carries transport config in ``item.mcp`` and no
+            # module — build the ``{title, config}`` payload from ``item.name``/
+            # ``item.mcp`` (markers in ``env``/``headers`` stay as strings), deduped
+            # by title. The contract guarantees ``mcp`` is set for this kind.
+            assert item.mcp is not None
+            payload = {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
+            if not any(existing["title"] == payload["title"] for existing in target.values):
+                target.values.append(payload)
+            continue
+        value = spec.package if binding.mode == "package_list" else item.module
         if value not in target.values:
             target.values.append(value)
     return grouped
@@ -98,7 +119,9 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
     string is already present; a ``scalar_module`` item when the slot is already
     truthy, OR when the spec itself provides two distinct modules for one
     single-module slot (an intra-spec self-conflict a last-write-wins apply would
-    otherwise silently drop). ``env_selected`` (``config``) items never collide.
+    otherwise silently drop). An ``mcp_entry`` item collides when an existing
+    manifest ``mcp`` entry already carries that title (hand-written or previously
+    installed) — never overwritten. ``env_selected`` (``config``) items never collide.
     """
     messages: list[str] = []
     for field, target in _grouped_targets(spec).items():
@@ -113,6 +136,12 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
             for value in target.values:
                 if value in entries:
                     messages.append(f"{field} already contains {value!r}")
+        elif target.mode == "mcp_entry":
+            entries = _existing_list(manifest_dict, field)
+            titles = {entry.get("title") for entry in entries}
+            for payload in target.values:
+                if payload["title"] in titles:
+                    messages.append(f"{field} entry titled {payload['title']!r} already exists")
         elif target.mode == "scalar_module":
             current = manifest_dict.get(field)
             if current:
@@ -162,6 +191,15 @@ def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
                     entries.insert(entries.index(STUDIO_SPA_ROUTER), value)
                 else:
                     entries.append(value)
+        elif target.mode == "mcp_entry":
+            # The collisions() re-check above rejects a title already present, so a
+            # hand-written or previously-installed entry is never overwritten.
+            entries = manifest_dict.get(field)
+            if not isinstance(entries, list):
+                entries = []
+                manifest_dict[field] = entries
+            for payload in target.values:
+                entries.append(payload)
         elif target.mode == "scalar_module":
             # The collisions() re-check above rejects a spec with two distinct
             # modules for one scalar slot, so target.values holds at most one here.
@@ -180,8 +218,9 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
     include/exclude/extensions customization on such an entry is removed with it
     (inherent to uninstalling the plugin). A ``scalar_module`` slot is cleared to
     ``None`` only while it still equals the spec's module — a foreign value means
-    the operator replaced it, so it is left untouched. ``env_selected``
-    (``config``) items remove nothing.
+    the operator replaced it, so it is left untouched. An ``mcp_entry`` item drops
+    the manifest ``mcp`` entry matching its title; a title already gone is skipped
+    (convergent), never an error. ``env_selected`` (``config``) items remove nothing.
     """
     changed = False
     for field, target in _grouped_targets(spec).items():
@@ -196,6 +235,13 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
             entries = _existing_list(manifest_dict, field)
             values = set(target.values)
             kept = [value for value in entries if value not in values]
+            if len(kept) != len(entries):
+                manifest_dict[field] = kept
+                changed = True
+        elif target.mode == "mcp_entry":
+            entries = _existing_list(manifest_dict, field)
+            titles = {payload["title"] for payload in target.values}
+            kept = [entry for entry in entries if entry.get("title") not in titles]
             if len(kept) != len(entries):
                 manifest_dict[field] = kept
                 changed = True
