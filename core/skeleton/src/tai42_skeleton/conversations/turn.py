@@ -75,6 +75,20 @@ _NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is not
 _INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
 
 
+def _checked_params(params: dict[str, str] | None) -> dict[str, str] | None:
+    """Refuse a non-dict or non-str-valued ``params`` loudly, keeping garbage out of the tool
+    payload. The doors validate the bounds (``validate_entry_params``); accept trusts its
+    in-process caller and runs only this cheap isinstance sweep. ``None`` passes through."""
+    if params is None:
+        return None
+    if not isinstance(params, dict):
+        raise ValueError(f"params must be a dict or None, got {type(params).__name__}")
+    for key, value in params.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("params must map str keys to str values")
+    return params
+
+
 class ConversationRouteResolutionError(LookupError):
     """No route matches the inbound message, so it is refused rather than dropped."""
 
@@ -240,7 +254,7 @@ async def _multichannel_context(
 
 
 async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichannel | None, address: str) -> str:
-    """The thread key for this accept. A LINKED person on an AGENT target (D3) keys the
+    """The thread key for this accept. A LINKED person on any multichannel target keys the
     aggregated ``bridge:@person:{person_id}`` thread; everyone else keeps today's
     route-keyed ``bridge:{route}:{address}`` (R10). Read-only: no person row is created here,
     so a redelivered, refused or shed message never mints identity.
@@ -248,7 +262,7 @@ async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichann
     In-flight merge race: a turn admitted under the old key while the merge lands completes
     under that key (its FIFO slot lives there); the NEXT message keys to the person thread.
     Histories are never migrated (linked memory starts at the pairing moment)."""
-    if multichannel is not None and route.target_kind == "agent":
+    if multichannel is not None:
         person = await _person_store().get_person(
             multichannel.target,
             door=multichannel.door,
@@ -386,23 +400,37 @@ def _tool_error(detail: str) -> _ResolvedOutcome:
     return _ResolvedOutcome(answer_status="error", answer=_ERROR_ANSWER_TEXT, error=detail)
 
 
-async def _run_tool_turn(route: ConversationRoute, text: str, client_address: str) -> _ToolOutcome:
+async def _run_tool_turn(
+    route: ConversationRoute,
+    text: str,
+    client_address: str,
+    person: Person | None = None,
+    params: dict[str, str] | None = None,
+) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome
     (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
 
-    Stateless per message — no thread, no conversation memory. The inbound payload maps to
+    Stateless per message — no conversation memory. The inbound payload maps to
     the tool kwargs (``payload_expr`` or a fixed ``{message, sender}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
-    result maps to the reply (``reply_expr`` or a null/string pass-through). A reply that is
-    ``None`` or blank is a deliberate silent outcome; a mapping fault, a denied or failed
-    dispatch, or a wrong-typed result is a client-safe ``error`` outcome whose detail is
-    logged, never delivered."""
-    payload = {
+    result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
+    carries ``person_id`` and ``person_addresses`` IFF the target has multichannel on;
+    ``sender`` stays the sending address either way. Non-empty ``params`` nest under a
+    ``params`` key (never merged into the root); ``None``/empty leave the payload unchanged.
+    A reply that is ``None`` or blank is a deliberate silent outcome; a mapping fault, a
+    denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
+    whose detail is logged, never delivered."""
+    payload: dict[str, object] = {
         "message": text,
         "sender": client_address,
         "our_identity": route.our_identity,
         "channel": route.channel,
     }
+    if person is not None:
+        payload["person_id"] = person.person_id
+        payload["person_addresses"] = [a.model_dump(mode="json") for a in person.addresses]
+    if params:
+        payload["params"] = params
     try:
         kwargs = await _tool_kwargs(route, payload)
     except Exception as exc:
@@ -567,12 +595,19 @@ def _with_api_silent(intake: ConversationRecord) -> ConversationRecord:
     )
 
 
-async def _target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
+async def _target_outcome(
+    route: ConversationRoute,
+    intake: ConversationRecord,
+    text: str,
+    person: Person | None = None,
+    params: dict[str, str] | None = None,
+) -> _ToolOutcome:
     """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
     agent run (always answered/error). The single dispatch both the plain and the
-    multichannel paths route ordinary text to."""
+    multichannel paths route ordinary text to. ``person`` and ``params`` reach only the tool
+    payload; the agent branch ignores both."""
     if route.target_kind == "tool":
-        return await _run_tool_turn(route, text, intake.client_address)
+        return await _run_tool_turn(route, text, intake.client_address, person, params)
     answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id)
     return _ResolvedOutcome(answer_status=answer_status, answer=answer, error=error_detail)
 
@@ -587,7 +622,12 @@ def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> Conver
 
 
 async def _resolve_turn_record(
-    *, route: ConversationRoute, intake: ConversationRecord, text: str, multichannel: _Multichannel | None = None
+    *,
+    route: ConversationRoute,
+    intake: ConversationRecord,
+    text: str,
+    multichannel: _Multichannel | None = None,
+    params: dict[str, str] | None = None,
 ) -> ConversationRecord:
     """Run the route's target (or a pairing turn) and build the completed record the
     transition persists. With ``multichannel`` off this is byte-identical to the target turn
@@ -595,15 +635,16 @@ async def _resolve_turn_record(
     execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
     person WRITE, keying the first-contact greeting and the redeem's own side) → classify
     → dispatch to the pairing turn or the target — and a due first-contact greeting is
-    PREPENDED into the answer before it is persisted."""
+    PREPENDED into the answer before it is persisted. ``params`` reach only a tool target's
+    payload; a pairing turn ignores them."""
     if multichannel is None:
-        return _outcome_record(intake, await _target_outcome(route, intake, text))
+        return _outcome_record(intake, await _target_outcome(route, intake, text, params=params))
 
     person, created = await _person_store().ensure_provisional(multichannel.target, multichannel.address_row())
     greeting, greeting_code = await _greeting_and_code(multichannel) if created else (None, None)
     action = classify(text)
     if isinstance(action, Passthrough):
-        outcome = await _target_outcome(route, intake, text)
+        outcome = await _target_outcome(route, intake, text, person, params)
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that D1 rotation would delete,
@@ -730,7 +771,12 @@ def _link_reply(code: str, expires_at: datetime) -> str:
 
 
 async def _complete_turn(
-    *, route: ConversationRoute, intake: ConversationRecord, text: str, multichannel: _Multichannel | None = None
+    *,
+    route: ConversationRoute,
+    intake: ConversationRecord,
+    text: str,
+    multichannel: _Multichannel | None = None,
+    params: dict[str, str] | None = None,
 ) -> ConversationRecord:
     """Run the turn and move its intake record to its outcome (persist before send);
     delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
@@ -738,7 +784,9 @@ async def _complete_turn(
     transition is guarded on the record still being at intake, so a turn finishing after a
     re-drive resolved its record raises rather than overwriting the outcome the client was
     given."""
-    completed = await _resolve_turn_record(route=route, intake=intake, text=text, multichannel=multichannel)
+    completed = await _resolve_turn_record(
+        route=route, intake=intake, text=text, multichannel=multichannel, params=params
+    )
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await _store().complete_silent(completed)
         verb = "complete_silent"
@@ -851,7 +899,13 @@ async def _shed_silently(
 
 
 async def accept(
-    channel: str, our_identity: str, client_address: str, cap_key: str, text: str, provider_message_id: str
+    channel: str,
+    our_identity: str,
+    client_address: str,
+    cap_key: str,
+    text: str,
+    provider_message_id: str,
+    params: dict[str, str] | None = None,
 ) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its
     ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
@@ -866,9 +920,14 @@ async def accept(
     Both are canonicalized and a blank ``cap_key`` is refused, so a door that omits the
     accountable key fails loudly rather than silently sharing one bucket.
 
+    Non-empty ``params`` reach a tool target's payload under ``params``; ``None``/empty
+    leave the turn byte-identical to today. The door validates their bounds before accept;
+    this seam runs only a cheap isinstance sweep against its in-process caller.
+
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
     any state is written — there is nothing to run a turn on — for the channel adapter to
     drop like an unrouted message."""
+    checked_params = _checked_params(params)
     if not text.strip():
         raise BlankInboundTextError(
             f"channel {channel!r} inbound {provider_message_id!r} carries blank text; nothing to run a turn on"
@@ -928,6 +987,7 @@ async def accept(
         text=text,
         provider_message_id=provider_message_id,
         multichannel=multichannel,
+        params=checked_params,
     )
 
 
@@ -942,6 +1002,7 @@ async def _accept_for_turn(
     text: str,
     provider_message_id: str,
     multichannel: _Multichannel | None = None,
+    params: dict[str, str] | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the
     release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
@@ -1100,6 +1161,7 @@ def _schedule_turn(
     intake_token: str,
     deliver_on_completion: bool,
     multichannel: _Multichannel | None = None,
+    params: dict[str, str] | None = None,
 ) -> asyncio.Task[ConversationRecord]:
     """Schedule ``intake``'s turn as a background task consuming the caller's reservation;
     returns the task whose result is the completed :class:`ConversationRecord`.
@@ -1110,7 +1172,7 @@ def _schedule_turn(
 
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
-            return await _complete_turn(route=route, intake=intake, text=text, multichannel=multichannel)
+            return await _complete_turn(route=route, intake=intake, text=text, multichannel=multichannel, params=params)
 
     task = asyncio.create_task(_run())
     _TURN_TASKS.add(task)

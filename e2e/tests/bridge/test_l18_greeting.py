@@ -28,7 +28,9 @@ from _bridge_support import (
 
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
+    BRIDGE_TWILIO_CLIENT_B,
     BRIDGE_TWILIO_FROM,
+    BRIDGE_TWILIO_FROM_B,
     BRIDGE_WHATSAPP_CLIENT,
     BRIDGE_WHATSAPP_PHONE_ID,
 )
@@ -104,3 +106,49 @@ async def test_greeting_prepends_once_and_its_pairing_code_is_redeemable(
     assert linked_reply["body"].startswith(f"{greet} "), linked_reply["body"]
     # The whatsapp greeting minted its OWN fresh code, not the redeemed one.
     assert extract_pair_code(linked_reply["body"]) != code, linked_reply["body"]
+
+
+async def test_greeting_prepends_once_on_a_tool_target(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    """The greeting path is target-agnostic: a greeting-configured TOOL target prepends the
+    greeting into the SAME turn's tool reply on first contact, and the address's second message
+    carries none. The template is a fixed string (no ``{pairing_code}``), so the first answer is
+    exactly ``{greet}\\n\\n{tool reply}`` and the second the bare tool reply."""
+    port = bridge.stack.port_b
+
+    greet = uniq("l18-tool-greet")
+    await bridge.set_target_config(
+        target_kind="tool", target_name="e2e_echo", multichannel=True, greeting_template=greet
+    )
+    exec_key = uniq("l18-tool-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    route = uniq("l18-tool-route").replace("_", "-")
+    # A distinct deployment number from the agent leg's: one ``(channel, our_identity)`` pair
+    # routes to exactly one route, and the two tests share this module's stack.
+    await bridge.create_tool_channel_route(
+        route_name=route,
+        tool="e2e_echo",
+        execution_key=exec_key,
+        channel="twilio",
+        our_identity=BRIDGE_TWILIO_FROM_B,
+        payload_expr="{payload: .message}",
+    )
+
+    # First contact: the tool echoes the message, and the greeting is PREPENDED into that same
+    # delivered answer.
+    first = uniq("l18-tool-msg1")
+    inbound1 = bridge.twilio_inbound(
+        our_identity=BRIDGE_TWILIO_FROM_B, client=BRIDGE_TWILIO_CLIENT_B, text=first, port=port
+    )
+    assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound1, port=port)).status_code == 204
+    send1 = await wait_twilio_send(bridge.fake_twilio, first)
+    assert send1["body"] == f"{greet}\n\n{first}", send1["body"]
+
+    # Second message from the SAME address: no greeting — just the tool reply.
+    second = uniq("l18-tool-msg2")
+    inbound2 = bridge.twilio_inbound(
+        our_identity=BRIDGE_TWILIO_FROM_B, client=BRIDGE_TWILIO_CLIENT_B, text=second, port=port
+    )
+    assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound2, port=port)).status_code == 204
+    send2 = await wait_twilio_send(bridge.fake_twilio, second)
+    assert send2["body"] == second, send2["body"]
+    assert not send2["body"].startswith(greet)

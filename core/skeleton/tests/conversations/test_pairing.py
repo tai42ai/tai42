@@ -166,12 +166,18 @@ def _seed_config(
     fake._strings[ConversationsSettings().target_config_key(target_kind, target_name)] = config.model_dump_json()
 
 
-def _tool_route(route_name: str = "tool-line", our_identity: str = "+15550001111"):
+def _tool_route(
+    route_name: str = "tool-line",
+    our_identity: str = "+15550001111",
+    *,
+    payload_expr: str | None = None,
+):
     return ConversationRoute(
         route_name=route_name,
         door="channel",
         target_kind="tool",
         target_name="pinger",
+        payload_expr=payload_expr,
         execution_key="svc",
         channel="twilio",
         our_identity=our_identity,
@@ -207,6 +213,7 @@ def _person_store() -> ConversationPersonStore:
 
 
 _TARGET = PairingTarget(target_kind="agent", target_name="concierge")
+_TOOL_TARGET = PairingTarget(target_kind="tool", target_name="pinger")
 
 
 async def _settle(timeout: float = 2.0) -> None:
@@ -735,6 +742,138 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
     assert record is not None
     assert record.answer_status == "error"
     assert record.answer == f"Welcome!\n\n{turn_module._ERROR_ANSWER_TEXT}"
+
+
+# -- the person in the tool payload + tool-target thread keying ---------------
+
+
+async def test_tool_payload_off_carries_no_person_keys(env, monkeypatch):
+    # Multichannel OFF (no config row): the payload the tool sees is exactly today's four
+    # keys — no person_id / person_addresses. ``payload_expr="."`` echoes the whole payload.
+    seen: list[dict] = []
+    _wire(monkeypatch, FakeManager(_tool_route(payload_expr=".")), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
+    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await _settle()
+    assert len(seen) == 1
+    assert set(seen[0]) == {"message", "sender", "our_identity", "channel"}
+
+
+async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):
+    # Multichannel ON: person_id is present from the FIRST message (the provisional person)
+    # and identical on a second message from the same address; sender stays the address.
+    _seed_config(env, target_kind="tool", target_name="pinger")
+    seen: list[dict] = []
+    _wire(monkeypatch, FakeManager(_tool_route(payload_expr=".")), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
+    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await _settle()
+    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi again", "PID-2")
+    await _settle()
+    person = await _person_store().get_person(
+        _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550001111", address="+2000"
+    )
+    assert person is not None
+    assert len(seen) == 2
+    assert seen[0]["person_id"] == person.person_id
+    assert seen[1]["person_id"] == person.person_id
+    assert seen[0]["sender"] == "+2000"
+    assert seen[0]["person_addresses"] == [a.model_dump(mode="json") for a in person.addresses]
+
+
+async def test_payload_expr_can_read_person_id_and_addresses(env, monkeypatch):
+    _seed_config(env, target_kind="tool", target_name="pinger")
+    seen: list[dict] = []
+    route = _tool_route(payload_expr="{guest: .person_id, addrs: .person_addresses}")
+    _wire(monkeypatch, FakeManager(route), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
+    await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
+    await _settle()
+    person = await _person_store().get_person(
+        _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550001111", address="+2000"
+    )
+    assert person is not None
+    assert seen == [{"guest": person.person_id, "addrs": [a.model_dump(mode="json") for a in person.addresses]}]
+
+
+async def test_tool_route_thread_keys_route_then_person_when_linked(env, monkeypatch):
+    # A single-address person keys the ROUTE thread; a linked (>1 address) person keys the
+    # aggregated person thread — for a TOOL target exactly as for an agent one.
+    _seed_config(env, target_kind="tool", target_name="pinger")
+    route_a = _tool_route(route_name="tool-a", our_identity="+15550001111")
+    route_b = _tool_route(route_name="tool-b", our_identity="+15550009999")
+    _wire(monkeypatch, FakeManager(route_a, route_b), FakeChannel())
+    _wire_tool(monkeypatch, lambda kw: "pong")
+
+    # First contact from a single-address person → the route thread.
+    solo_mid = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "hi", "PID-solo")
+    await _settle()
+    solo_record = await _store().get_record(solo_mid)
+    assert solo_record is not None
+    assert solo_record.thread_id == "bridge:tool-a:+1000"
+
+    # addrA mints a link code (the pairing turn intercepts before any dispatch).
+    link_mid = await turn_module.accept("twilio", "+15550001111", "+1000", "+1000", "/link", "PID-link")
+    await _settle()
+    match = _CODE_RE.search(await _answer_of(link_mid))
+    assert match is not None
+    code = match.group(0)
+
+    # addrB redeems on route B → the two addresses merge into one person.
+    await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", code, "PID-redeem")
+    await _settle()
+    person = await _person_store().get_person(
+        _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550009999", address="+2000"
+    )
+    assert person is not None
+    assert {a.address for a in person.addresses} == {"+1000", "+2000"}
+
+    # The NEXT plain message from addrB keys the aggregated person thread.
+    next_mid = await turn_module.accept("twilio", "+15550009999", "+2000", "+2000", "hi again", "PID-next")
+    await _settle()
+    next_record = await _store().get_record(next_mid)
+    assert next_record is not None
+    assert next_record.thread_id == f"bridge:@person:{person.person_id}"
+
+
+async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_address(env, monkeypatch):
+    # The api door reaches the tool payload with door="api", channel/our_identity None, and a
+    # composed client_address (percent-encoded principal / end-user id) as the sender.
+    _seed_config(env, target_kind="tool", target_name="pinger")
+    api_tool_route = ConversationRoute(
+        route_name="tool-api",
+        door="api",
+        target_kind="tool",
+        target_name="pinger",
+        payload_expr=".",
+        execution_key="svc",
+        callback_url="https://cb.example/x",
+        callback_secret="sec-1",
+        execution_key_fingerprint="fp-1",
+    )
+    seen: list[dict] = []
+    _wire(monkeypatch, FakeManager(api_tool_route))
+    _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    client_address = turn_module._api_client_address("alice", "u7")
+    await turn_module.submit_api_message("tool-api", "u7", "hi", "alice", 5)
+    await _settle()
+
+    person = await _person_store().get_person(
+        _TOOL_TARGET, door="api", channel=None, our_identity=None, address=client_address
+    )
+    assert person is not None
+    assert len(seen) == 1
+    assert seen[0]["person_id"] == person.person_id
+    assert seen[0]["person_id"]
+    assert seen[0]["person_addresses"] == [a.model_dump(mode="json") for a in person.addresses]
+    assert len(seen[0]["person_addresses"]) == 1
+    assert seen[0]["person_addresses"][0]["door"] == "api"
+    assert seen[0]["person_addresses"][0]["address"] == client_address
+    assert seen[0]["sender"] == client_address
+    assert seen[0]["channel"] is None
+    assert seen[0]["our_identity"] is None
 
 
 # -- the api door (R1) -------------------------------------------------------

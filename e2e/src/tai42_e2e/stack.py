@@ -889,6 +889,11 @@ class TaiStack:
         """The raw JSON strings ``e2e_record`` RPUSH'd under ``key``."""
         return self.infra.redis.records(key)
 
+    def record_keys(self) -> list[str]:
+        """Every ``e2e_record`` key currently present — for reading back records keyed
+        on a value the test cannot know ahead of the run (a SUT-minted person id)."""
+        return self.infra.redis.record_keys()
+
     def process(self, name: str) -> ProcessHandle:
         return self._procs[name]
 

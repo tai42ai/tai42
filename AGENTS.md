@@ -39,6 +39,15 @@ Terse, constraint-only, present tense. State the constraint and why it holds, no
 what changed. No history notes, no plan/ticket/mission references, no
 cross-repository references.
 
+## Route target kinds
+
+A conversation route targets one of two kinds — `agent` or `tool`. Every
+route-level feature is DESIGNED for both kinds; behavior that differs by kind
+is implemented and tested for each kind. A kind asymmetry may exist only as an
+explicitly documented decision naming both kinds; an undocumented asymmetry is
+a defect. A mechanism identical for both kinds by construction needs no
+per-kind duplicate test.
+
 ## Rules
 
 - No `CHANGELOG.md` edits: notes are generated onto the GitHub Release.

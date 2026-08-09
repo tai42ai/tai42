@@ -415,6 +415,29 @@ async def wait_probe_record(bridge: BridgeHarness, key: str, *, deadline: float 
     return await wait_for_async(probe, deadline=deadline, message=f"no e2e_record side effect under {key!r} recorded")
 
 
+async def wait_record_key_for_value(bridge: BridgeHarness, needle: str, *, deadline: float = 12.0) -> str:
+    """The single ``e2e_record`` KEY whose list holds an entry with ``value == needle``,
+    returned once it appears. A tool keyed on ``person_id`` writes its state under that id,
+    so a marker only one message carried resolves the person id its turn ran under — the
+    read a test needs when the key is a value the SUT minted and the harness cannot know
+    ahead of the run. Raises unless EXACTLY one key matches; a per-fire marker is unique, so
+    two keys would be a cross-turn leak."""
+
+    async def probe() -> str | None:
+        hits = {
+            key
+            for key in bridge.stack.record_keys()
+            for raw in bridge.stack.records(key)
+            if json.loads(raw).get("value") == needle
+        }
+        assert len(hits) <= 1, f"marker {needle!r} landed under multiple keys {hits!r}"
+        return next(iter(hits)) if hits else None
+
+    return await wait_for_async(
+        probe, deadline=deadline, message=f"no e2e_record entry with value {needle!r} was recorded"
+    )
+
+
 async def wait_record_status(
     bridge: BridgeHarness, route_name: str, message_id: str, statuses: set[str], *, deadline: float = 12.0
 ) -> dict:

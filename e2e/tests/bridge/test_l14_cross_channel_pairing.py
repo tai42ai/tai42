@@ -7,10 +7,11 @@ side redeems into a merge and answers ``linked`` ON whatsapp. Each reply stays o
 channel its inbound arrived on — the two conversations are answered independently even as
 the platform folds their two addresses into one person.
 
-The target here is a TOOL (an echo-style e2e tool), which has no thread, so "one person" has
-no behavioral surface to read (D3); this leg pins the HANDSHAKE only — the mint, the neutral
-code reply, the redeem, the linked reply, and the per-channel isolation. The merged-person
-proof lives in the person store's own suite and in L16 (agent memory).
+The target here is a TOOL (an echo-style e2e tool); this leg pins the HANDSHAKE and the
+per-channel reply isolation — the mint, the neutral code reply, the redeem, the linked reply,
+and that each reply stays on its own channel. The merged-person's behavioral surface is pinned
+elsewhere: tool-target continuity (a tool keying its state on the survivor ``person_id`` across
+both channels) by L21, agent memory continuity by L16.
 """
 
 from __future__ import annotations
