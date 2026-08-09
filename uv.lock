@@ -5465,7 +5465,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "1.2.0"
+version = "1.3.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5516,7 +5516,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "1.1.1"
+version = "1.2.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5932,7 +5932,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.3.0"
+version = "1.4.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
