@@ -99,6 +99,113 @@ page, an invite re-pairs a returning visitor in a single load — the counterpar
 the cookie-bound identity in [Limits](#limits): a visitor who cleared cookies is a
 new person until an invite (or a typed code) links them again.
 
+## Link parameters
+
+The chat page URL may carry arbitrary query parameters, and the platform captures
+them with the visitor's session and delivers them to the turn. A route whose target
+is a **tool** receives them on its payload under a `params` key — strings,
+jq-reachable as `.params.<name>`:
+
+```
+https://<your deployment>/api/channels/web/chat/<identity>?topic=onboarding&ref=abc
+```
+
+- The parameters are captured on the navigation that serves the page and stored on
+  the visitor's session registration; every later message's turn carries them, so a
+  route's `payload_expr` can read `.params.topic`.
+- Bounds — a violation is refused as an HTML page, HTTP `400`, carrying
+  `link_params_invalid` in its `<meta name="tai42-refusal-code">` and naming the
+  first bound it broke: at most **16** parameters; each key matches
+  `^[A-Za-z0-9_-]{1,64}$`; each value is at most **512** characters; the whole set
+  serializes to at most **2048** bytes.
+- Reserved names `pair` (invite links) and `tai_entry` (the entry gate) are stripped
+  before any bound is checked, and are never stored or delivered.
+- A later navigation carrying non-empty params **replaces** the stored set (same
+  session, same visitor id); a navigation with no params leaves the stored set
+  untouched; a `session/rotate` mints a clean session with no params.
+- Parameter values never appear in any log line.
+- The `params` key is present on the payload **only** when the entry carried
+  parameters, and is never merged into the payload root.
+
+An **agent** target receives no params: the platform threads them onto a **tool**
+target's payload only. There is no splicing of params into prompt text — that would
+be an injection channel — so an agent turn never sees them.
+
+### Params carry no trust
+
+A link parameter is **transport, nothing more**. The platform carries, nests, caps,
+and never logs it, but attaches **no** trust: no signature, no expiry, no
+interpretation. A param is text anyone can put in a URL. A flow that must *trust* a
+value issues its **own** secret token, delivers it in the link, and checks it in its
+**own** store — where expiry, single-use, and revocation live — from the tool the
+route dispatches (gated in `payload_expr` before the tool runs, or inside the tool
+itself). The platform never verifies a param on the flow's behalf.
+
+## Entry gate
+
+A web route can be **gated**: the chat page is served only to a navigation that
+carries a live entry code on `?tai_entry=<code>`. An ungated route is byte-identical
+to an ungated deployment — the gate is opt-in per identity.
+
+```
+https://<your deployment>/api/channels/web/chat/<identity>?tai_entry=<code>
+```
+
+Entry codes are **operator-minted**, multi-use, optionally expiring, revocable, and
+**hashed at rest** — only a code's SHA-256 is stored; the raw code exists in flight
+only, in the mint response and the visitor's URL. A code is
+`secrets.token_urlsafe(16)`.
+
+- The gate is checked **only where a session would be minted**: the page-door mint
+  path and `session/rotate`. An existing valid session for the identity is admitted
+  without a code — a session is an already-granted capability. Code expiry gates
+  **new** entries; revocation and the session TTL are the hard-cut tools.
+- A missing, unknown, expired, or revoked code — or a throttled client — is refused
+  with **one** HTML page, HTTP `403`, one wording, carrying `entry_refused` in its
+  `<meta name="tai42-refusal-code">`. The five cases are indistinguishable: the gate
+  is **no oracle** for whether a code exists.
+- The navigation guard runs **before** the gate check, so a non-navigation is
+  refused as `not_a_navigation` regardless of any code it presents — no response ever
+  differs by code validity.
+- Guessing is throttled per client bucket (`entry_attempts_per_window` attempts per
+  `entry_throttle_window_seconds`).
+- Every page-door HTML response — the chat page and the refusal pages alike — carries
+  `Referrer-Policy: no-referrer`, so a capability URL never leaks through the
+  `Referer` header.
+
+`session/rotate` on a gated identity requires the code too: its body takes an
+optional `entry_code`, and a missing or dead one is refused `403` with an
+`entry_refused` JSON error. The page bundle sends the URL's `tai_entry` value on
+rotate when one is present.
+
+### The gate admits a bearer, not a person
+
+The gate says only **"someone holding a live code"** — never **who**. Forwarding the
+link forwards entry: anyone who receives the URL enters. It is not identity; identity
+remains the pairing's or the flow's own.
+
+**Revocation cuts new entries only.** Revoking a code (or letting it expire) stops it
+from admitting the **next** visitor, but an already-admitted session stays valid
+until its own TTL lapses — and activity refreshes that TTL. Revocation is not an
+eviction tool; to cut a live visitor off, end the session.
+
+### Managing the gate
+
+Four **authed** management doors administer a route's gate. Unlike the public visitor
+doors below, these require the platform API key:
+
+- `GET /api/channels/web/gates/{identity}` — the gate's state:
+  `{"data": {"enabled": bool, "codes": [{"code_id": <sha256hex>, "label": str|null, "created_at": <iso>, "expires_at": <iso|null>}]}}`.
+  Codes are listed by their hash; a raw code is never re-readable.
+- `PUT /api/channels/web/gates/{identity}` — turn the gate on or off; body
+  `{"enabled": bool}` → `{"data": {"enabled": bool}}`.
+- `POST /api/channels/web/gates/{identity}/codes` — mint a code; body
+  `{"label": str|null, "expires_at": <iso|null>}` →
+  `{"data": {"code": <raw>, "code_id": <sha256hex>, "expires_at": <iso|null>}}`.
+  The raw `code` is returned **once**, here, and never again.
+- `DELETE /api/channels/web/gates/{identity}/codes/{code_id}` — revoke a code by its
+  hash → `{"data": {"status": "revoked"}}`; an unknown id is a `404` envelope error.
+
 ## Configuration
 
 Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
@@ -122,6 +229,8 @@ Settings are read from the `CHANNEL_WEB_` environment group (see `WebSettings` /
 | `CHANNEL_WEB_BACKLOG_BATCH_ENTRIES` | no (200) | Transcript entries read per page when a stream replays its backlog |
 | `CHANNEL_WEB_KEEPALIVE_SECONDS` | no (15) | SSE keepalive cadence and the live-tail block window |
 | `CHANNEL_WEB_BLOCKING_GRACE_SECONDS` | no (5.0) | Grace added to the tail's outer `wait_for`; a stalled Redis XREAD then raises loudly |
+| `CHANNEL_WEB_ENTRY_ATTEMPTS_PER_WINDOW` | no (10) | [Entry gate](#entry-gate): entry-code guesses one client bucket may make per throttle window |
+| `CHANNEL_WEB_ENTRY_THROTTLE_WINDOW_SECONDS` | no (300) | [Entry gate](#entry-gate): the throttle window, seconds |
 
 Flood control on these public doors is **not** this plugin's. Every
 `/api/channels/web/*` door is public, so the app-level rate limiter throttles it as
@@ -195,19 +304,25 @@ unknown token.
 - `GET /api/channels/web/chat/{identity}` — the chat page: the HTML shell plus the
   built bundle's hashed `<link>`/`<script>` tags. Mints and registers a session for
   this route whenever the cookie resolves to none, or to one minted on another route
-  — a navigation only, else `403` + `"code": "not_a_navigation"`. Carries a strict
-  CSP (`default-src 'none'`,
+  — a navigation only, else `403` + `"code": "not_a_navigation"`. On a gated route
+  the mint additionally requires a live entry code (see [Entry gate](#entry-gate)),
+  and the query string's [link parameters](#link-parameters) are captured with the
+  session. Carries a strict CSP (`default-src 'none'`,
   `script-src 'self'`, `connect-src 'self'`, `font-src 'self'`, no framing, no
   inline script; `style-src` admits `'unsafe-inline'` because the bundled
   design-system overlays inject a `<style>` element for their scroll lock).
 
   This door is reached by **navigating** to it, so it never answers JSON: every
-  refusal — `403 not_a_navigation`, `501` with no store configured, `500` with no
-  usable bundle — is a minimal HTML page, with the status unchanged, and the
-  machine-readable code carried in a `<meta name="tai42-refusal-code">` by the two
-  refusals that have one. The `500` has none: it is a server fault with no JSON
-  counterpart and nothing the page could do differently for. Those pages link, run
-  and style nothing, under their own
+  refusal — `403 not_a_navigation`, `403 entry_refused` (a gated route with no live
+  code, or a throttled client), `400 link_params_invalid` (params over a bound),
+  `501` with no store configured, `500` with no usable bundle — is a minimal HTML
+  page, with the status unchanged, and the machine-readable code carried in a
+  `<meta name="tai42-refusal-code">` by every refusal that has one. The `500` has
+  none: it is a server fault with no JSON counterpart and nothing the page could do
+  differently for. Every response from this door — the chat page and the refusal
+  pages alike — carries `Referrer-Policy: no-referrer`, so a capability URL in the
+  query string never leaks through the `Referer` header. Those pages link, run and
+  style nothing, under their own
   `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`.
 - `GET /api/channels/web/assets/{file}` — one file of that bundle. Only names listed
   in the build manifest's integrity map are served (exact-name lookup, explicit
@@ -258,10 +373,12 @@ unknown token.
   answer is not this visitor's). A callback door that refuses the answer → `400`, and
   the record is put back so the visitor can re-answer — up to `MAX_ANSWER_RESTORES`
   times, after which the question is left dropped and the refusal says so.
-- `POST /api/channels/web/session/rotate` — body `{identity}` →
-  `{status: "rotated"}`; unregisters the old session and sets a freshly minted
-  cookie bound to the web route the body names. No session is required to rotate —
-  anyone may open any route's chat page and be minted one there.
+- `POST /api/channels/web/session/rotate` — body `{identity}`, optionally
+  `entry_code` → `{status: "rotated"}`; unregisters the old session and sets a
+  freshly minted cookie bound to the web route the body names, with no link
+  parameters. No session is required to rotate — anyone may open any route's chat
+  page and be minted one there. On a [gated](#entry-gate) identity a rotate carrying
+  a missing or dead `entry_code` is refused `403` + `"code": "entry_refused"`.
 
 Every door but the assets door needs the store, and answers `501` +
 `"code": "web_transcript_store_off"` when none is configured — without one there is
@@ -269,7 +386,8 @@ nowhere to register a session, so nothing downstream can work.
 
 Success bodies are `{"data": {...}}`; failures are `{"error": "<message>"}`, plus a
 `"code"` on the ones a caller must tell apart from the status alone:
-`session_missing` (401), `origin_mismatch` (403), `not_a_navigation` (403) and
+`session_missing` (401), `origin_mismatch` (403), `not_a_navigation` (403),
+`entry_refused` (403, the rotate door on a gated identity) and
 `web_transcript_store_off` (501). The chat page door is the exception — its caller is
 a browser navigation, so it answers those refusals as HTML pages (above).
 
@@ -363,6 +481,8 @@ widget opens one. The channel sends plain text only (no media, no templates).
 | Bounded re-answering | One question is restored at most `MAX_ANSWER_RESTORES` times; after that it is left dropped and resolves by its own timeout |
 | Cookie-bound conversation | A visitor who clears cookies (or opens another browser) starts a new conversation; there is no account to resume from — an invite link (`?pair=`) re-pairs them in one load |
 | Invite links | The chat URL accepts `?pair=<LINK-code>`; the page submits it once as the first message and strips it. A `pair` value that is not a well-formed code is ignored |
+| Link parameters | The chat URL's query params are captured and delivered to a **tool** target under `params` (jq-reachable); over a bound (16 / key 64 / value 512 / 2KB) is a refused page. `pair`/`tai_entry` are reserved. The platform attaches no trust — a flow checks its own token in its own store |
+| Entry gate | A route can require a live `?tai_entry=` code to serve its page; refusal is uniform (no oracle) and guess-throttled. The gate admits a code-**bearer**, not a person; revocation cuts new entries only |
 | One route per session | A session serves the web route it was minted on; a visitor who opens a second route's chat page holds a second, separate conversation |
 | No plugin-side flood control | Abuse control on these public doors is the platform limiter's and the operator's ingress; the plugin caps only concurrent SSE streams |
 | Store required | Every door but the assets door refuses `501` without `CHANNEL_WEB_REDIS_URL` — a session cannot be registered, so nothing downstream can work |
