@@ -1,0 +1,272 @@
+# Local dev infrastructure ONLY. The harness never talks to Docker; it consumes
+# whatever Redis + Postgres these services (or the CI `services:` block) provide
+# and owns only logical isolation on top of them.
+#
+# Four profiles:
+#   core       — always needed: a plain module-free redis:7-alpine (access
+#                control needs only hashes + counters, no modules) +
+#                postgres:16-alpine. This is the default `docker compose up -d`
+#                target.
+#   celery      — opt-in: RabbitMQ for the celery backend leg, which isolates
+#                each stack on its own AMQP vhost (`docker compose --profile
+#                celery up -d`). The arq/rq legs need nothing beyond core.
+#   agents-redis — opt-in: a module-capable Redis (RediSearch + RedisJSON) for
+#                the production-default langgraph redis checkpoint/store agents
+#                leg (`docker compose --profile agents-redis up -d`). The plain
+#                core redis lacks the modules the langgraph-redis saver/store
+#                need, so this is a SEPARATE server on its own port.
+#   storage    — opt-in: a MinIO server for the s3 storage axis
+#                (`docker compose --profile storage up -d`). Its OWN service, not
+#                the monitoring-profile `langfuse-minio` (langfuse-specific
+#                entrypoint + bucket); the axis bucket is created in fixture setup.
+#   monitoring — opt-in: the self-hosted Langfuse stack for the monitoring
+#                suite (`docker compose --profile monitoring up -d`).
+#
+# Every port is env-overridable so a busy host can remap without editing this
+# file.
+
+services:
+  # The core services carry no profile, so a plain `docker compose up -d` starts
+  # them — this is the always-needed default. Only the monitoring stack below is
+  # profile-gated (opt-in).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${TAI_E2E_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${TAI_E2E_PG_USER:-postgres}"
+      POSTGRES_PASSWORD: "${TAI_E2E_PG_PASSWORD:-postgres}"
+      POSTGRES_DB: "${TAI_E2E_PG_ADMIN_DB:-postgres}"
+    ports:
+      - "127.0.0.1:${TAI_E2E_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TAI_E2E_PG_USER:-postgres}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ---- celery profile: RabbitMQ broker ---------------------------------
+  # The celery backend leg's broker. The official image ships
+  # `loopback_users.guest = false`, lifting upstream's loopback-only restriction
+  # so the `guest` user works over the published port (a host connection arrives
+  # from the Docker bridge gateway, not loopback). The harness provisions one
+  # vhost per stack over the management API on 15672.
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    profiles: ["celery"]
+    ports:
+      - "127.0.0.1:${TAI_E2E_RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${TAI_E2E_RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      # Permit celery's transient non-exclusive control queues on RabbitMQ 4
+      # (denied by default). Mounted alongside the image's conf.d defaults.
+      - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  # ---- agents-redis profile: module-capable Redis ----------------------
+  # The langgraph redis checkpoint/store provider builds RediSearch indexes
+  # (FT.CREATE) and RedisJSON documents (JSON.SET) on setup, which the plain
+  # module-free `redis:7-alpine` core service rejects. `redis:8` bundles the
+  # query (RediSearch), JSON, timeseries, and bloom modules integrated into the
+  # server, so it is the module-capable image this leg needs. On its own port so
+  # it never shares the SUT's product/identity state with the core redis (the
+  # RedisJSON-elimination decision for that state stands).
+  redis-agents:
+    image: redis:8
+    profiles: ["agents-redis"]
+    ports:
+      - "127.0.0.1:${TAI_E2E_CHECKPOINT_REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # ---- storage profile: MinIO for the s3 storage axis ------------------
+  # The s3 storage-axis leg's object store. Its OWN service (NOT the
+  # monitoring-profile `langfuse-minio`, which carries a langfuse-specific
+  # entrypoint that pre-creates the `langfuse` bucket). The plain `minio server
+  # /data` command is set here because a GitHub Actions `services:` block cannot
+  # set a container command, so this leg brings MinIO up via the compose path. The
+  # axis bucket is created in fixture setup through the independent client, not
+  # here. Credentials + port are env-overridable and match the s3 variant's
+  # defaults (`TAI_E2E_S3_*`).
+  storage-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["storage"]
+    command: server /data
+    ports:
+      - "127.0.0.1:${TAI_E2E_S3_PORT:-9002}:9000"
+    environment:
+      MINIO_ROOT_USER: "${TAI_E2E_S3_ACCESS_KEY:-minio}"
+      MINIO_ROOT_PASSWORD: "${TAI_E2E_S3_SECRET_KEY:-miniosecret}"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # ---- monitoring profile: self-hosted Langfuse ------------------------
+  # The six services below are Langfuse's OFFICIAL self-hosting compose set
+  # (langfuse/langfuse docker-compose.yml) — the minimum the Langfuse API
+  # supports. Images are pinned to EXACT versions (not floating majors): the
+  # monitoring leg runs on a fresh CI runner that pulls each tag, and a floating
+  # major silently drifts new env/validation requirements into the stack (e.g.
+  # cluster-mode-by-default, strict key-length checks). Pinning keeps a red
+  # monitoring run meaning "the SUT regressed", not "upstream cut a release".
+  # Bump deliberately, re-verifying the stack boots healthy end to end. Ports are
+  # disjoint from the core services; Langfuse's internal redis/postgres are never
+  # shared with the SUT's.
+  langfuse-web:
+    image: langfuse/langfuse:3.172.1
+    profiles: ["monitoring"]
+    # No healthcheck upstream, so a crash-looping web (e.g. a bad ENCRYPTION_KEY)
+    # passed `up --wait` silently. Gate readiness on the health route so a boot
+    # failure surfaces loudly at the compose step, not as a downstream test
+    # timeout. Next.js binds $HOSTNAME (the container id), not localhost.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://$${HOSTNAME}:3000/api/public/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TAI_E2E_LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/langfuse
+      SALT: e2e-salt
+      # Quoted: 64 bare zeros are a YAML integer, so an unquoted value reaches the
+      # container as "0" and fails Langfuse's 64-hex-char (256-bit) key check.
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXTAUTH_SECRET: e2e-nextauth-secret
+      NEXTAUTH_URL: http://localhost:${TAI_E2E_LANGFUSE_PORT:-3000}
+      # Single-node: this is one bare clickhouse with no keeper, so disable
+      # Langfuse's cluster mode (else migrations emit ReplicatedMergeTree ON
+      # CLUSTER and fail with "no Zookeeper configuration").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      # The AWS S3 client demands a region even against a custom minio endpoint;
+      # without it langfuse's OTEL ingestion throws "Region is missing" as an
+      # unhandled rejection and takes the web process down. Any value works with
+      # path-style addressing.
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # Headless initialization — deterministic e2e keys, no secrets.
+      LANGFUSE_INIT_ORG_ID: e2e-org
+      LANGFUSE_INIT_PROJECT_ID: e2e-project
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-e2e0000000000000000000000000000
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-e2e0000000000000000000000000000
+      LANGFUSE_INIT_USER_EMAIL: e2e@example.com
+      LANGFUSE_INIT_USER_PASSWORD: e2e-password-123
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.172.1
+    profiles: ["monitoring"]
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/langfuse
+      SALT: e2e-salt
+      # See langfuse-web: quoted so the key is not YAML-parsed to "0".
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      # See langfuse-web: single-node clickhouse, no keeper.
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      # The AWS S3 client demands a region even against a custom minio endpoint;
+      # without it langfuse's OTEL ingestion throws "Region is missing" as an
+      # unhandled rejection and takes the web process down. Any value works with
+      # path-style addressing.
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    profiles: ["monitoring"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: langfuse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.10.2.80
+    profiles: ["monitoring"]
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    profiles: ["monitoring"]
+    # Pre-create the event-upload bucket as a filesystem dir before minio starts,
+    # exactly as langfuse's official self-hosting compose does. Without it the
+    # LANGFUSE_S3_EVENT_UPLOAD_BUCKET (`langfuse`) never exists, so ingestion
+    # cannot persist events and no traces are ever recorded — a silent no-op.
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse-redis:
+    image: redis:7
+    profiles: ["monitoring"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

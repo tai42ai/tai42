@@ -1,0 +1,132 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One release run at a time; never cancel an in-flight release PR update.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release PR branch; create the tags + GitHub Releases
+      pull-requests: write # open and update the release PR
+    outputs:
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      # The PAT (not GITHUB_TOKEN) is required so the release PR triggers CI and
+      # the tags it creates on merge trigger release.yml — refs written by
+      # GITHUB_TOKEN do not fire workflows. Manifest mode is auto-detected from
+      # release-please-config.json + .release-please-manifest.json.
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+  # release-please bumps [project].version in the changed members' pyproject.toml
+  # but not the root uv.lock, whose workspace entries still record the old
+  # versions, so CI's `uv sync --locked` rejects the release PR. Refresh the one
+  # root lock on the release branch. Workspace siblings resolve in-tree, so there
+  # is nothing to wait for on the index — no ordering wait. Push with the PAT so
+  # CI re-fires on the release PR.
+  sync-lock:
+    needs: release-please
+    if: needs.release-please.outputs.pr != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          fetch-depth: 0 # full history so the release-diff detection below can merge-base main
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      # The committed frontend bundles embed the project version in their
+      # manifests, so a version bump to such a member restales its bundle and
+      # reds the drift check on main. Rebuild only the members this release PR
+      # actually bumps.
+      - name: Detect which frontend-carrying members this release PR bumps
+        id: detect
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          changed=$(git diff --name-only origin/main...HEAD)
+          dirs=''
+          for dir in plugins/accounts-postgres plugins/channel-web; do
+            if grep -qx "$dir/pyproject.toml" <<<"$changed"; then
+              echo "$dir pyproject is in this release PR; will rebuild its bundle."
+              dirs="$dirs $dir"
+            else
+              echo "$dir pyproject not in this release PR; skipping its bundle rebuild."
+            fi
+          done
+          dirs=${dirs# }
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          if [ -n "$dirs" ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Derive first-party tai42-* version ranges (member pyproject specifiers +
+      # tai-plugin.yml contract pins) from the just-bumped member versions, so the
+      # release PR carries versions, ranges, and lock as one consistent unit and
+      # ranges never go stale by hand. Pure-stdlib script; runs before `uv lock`
+      # so the lock reflects any range changes. `--no-project` avoids resolving
+      # the workspace just to run a stdlib script.
+      - name: Range-sync first-party version ranges
+        run: uv run --python 3.13 --no-project python scripts/range_sync.py
+      - name: Refresh uv.lock
+        run: uv lock
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        if: steps.detect.outputs.rebuild == 'true'
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        if: steps.detect.outputs.rebuild == 'true'
+        with:
+          node-version: 22
+      - name: Rebuild the bumped frontend bundles at the release version
+        if: steps.detect.outputs.rebuild == 'true'
+        env:
+          DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          set -euo pipefail
+          for dir in $DIRS; do
+            (cd "$dir" && pnpm install --frozen-lockfile && pnpm run build)
+          done
+      - name: Commit refreshed lockfile and bundle
+        env:
+          BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          REBUILD: ${{ steps.detect.outputs.rebuild }}
+        run: |
+          set -euo pipefail
+          # Stage the range-sync edits (member pyproject.toml + tai-plugin.yml) and
+          # any rebuilt bundle (both live under these roots) as well as the
+          # refreshed lock, so ranges, versions, bundles, and lock land as one
+          # commit on the release PR.
+          git add -- core plugins e2e
+          git add -- uv.lock
+          if git diff --cached --quiet; then
+            echo "Release artifacts already in sync; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$REBUILD" = "true" ]; then
+            git commit -m "chore: sync ranges, uv.lock and frontend bundles for release"
+          else
+            git commit -m "chore: sync ranges and uv.lock for release"
+          fi
+          git push origin "HEAD:$BRANCH"

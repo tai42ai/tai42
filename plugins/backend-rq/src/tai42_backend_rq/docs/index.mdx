@@ -1,0 +1,44 @@
+---
+title: RQ backend
+description: Configure the RQ task backend — the RQ_ env group, the Redis connection, and the worker, scheduler, and dashboard processes.
+---
+
+RQ is Redis-only like arq, with a worker, a scheduler, and the RQ dashboard.
+
+## Enable it
+
+```yaml manifest.yml
+backend_module: tai42_backend_rq
+```
+
+## Configuration
+
+The `RQ_` env group. `RQ_REDIS_URL` falls back to the shared
+`TAI_DEFAULT_REDIS_URL` when unset; a set `RQ_REDIS_URL` always wins.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `RQ_REDIS_URL` | `redis://localhost:6379/0` | Broker and results. |
+| `RQ_RQ_PREFIX` | `rq:` | Key prefix for every RQ structure in Redis. |
+| `RQ_TASK_TIMEOUT` | `300` | Seconds a synchronous dispatch waits for a result. |
+| `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the worker stores the manifest JSON under, inherited by forked work-horses. |
+| `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Queued-job kwarg naming the target tool. |
+
+## Run the processes
+
+```bash
+tai backend worker --pool prefork
+tai backend beat
+tai backend dashboard
+```
+
+## Quirks
+
+- RQ has no disabled-schedule state, so `backend_list_schedules` always reports a
+  schedule as enabled, and disabling one deletes it.
+- `backend_registered_tasks` and `backend_list_failed_tasks` are not implemented.
+
+## See also
+
+- [Backends](/concepts/backends) — the contract all three shipped backends implement.
+- [Schedule a tool](/guides/schedule-a-tool) — putting work on a schedule.

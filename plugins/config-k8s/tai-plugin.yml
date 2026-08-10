@@ -1,0 +1,33 @@
+spec_version: 1
+namespace: tai42
+name: config-k8s
+package: tai42-config-k8s
+version: 0.4.0
+description: >-
+  Kubernetes ConfigManager provider plugin for the TAI ecosystem: env via
+  Secrets, manifest via ConfigMaps.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/config-k8s
+contract: '>=1.6,<2'
+categories:
+  - configuration
+tags:
+  - config
+  - kubernetes
+  - secrets
+  - configmap
+permissions:
+  network: true
+  subprocess: false
+  filesystem: true
+provides:
+  - kind: config
+    name: k8s
+    module: tai42_config_k8s.manager
+    description: >-
+      Kubernetes ConfigManager backing env via Secrets and manifest via
+      ConfigMaps.
+    tags:
+      - kubernetes
+      - config

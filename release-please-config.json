@@ -1,0 +1,491 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "python",
+  "include-component-in-tag": true,
+  "packages": {
+    "core/contract": {
+      "package-name": "tai42-contract",
+      "component": "tai42-contract",
+      "skip-changelog": true
+    },
+    "core/kit": {
+      "package-name": "tai42-kit",
+      "component": "tai42-kit",
+      "skip-changelog": true
+    },
+    "core/cli": {
+      "package-name": "tai42-cli",
+      "component": "tai42-cli",
+      "skip-changelog": true
+    },
+    "core/skeleton": {
+      "package-name": "tai42-skeleton",
+      "component": "tai42-skeleton",
+      "skip-changelog": true
+    },
+    "plugins/accounts-oidc": {
+      "package-name": "tai42-accounts-oidc",
+      "component": "tai42-accounts-oidc",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_accounts_oidc/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/accounts-postgres": {
+      "package-name": "tai42-accounts-postgres",
+      "component": "tai42-accounts-postgres",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_accounts_postgres/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/agents": {
+      "package-name": "tai42-agents",
+      "component": "tai42-agents",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_agents/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/backend-arq": {
+      "package-name": "tai42-backend-arq",
+      "component": "tai42-backend-arq",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_backend_arq/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/backend-celery": {
+      "package-name": "tai42-backend-celery",
+      "component": "tai42-backend-celery",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_backend_celery/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/backend-rq": {
+      "package-name": "tai42-backend-rq",
+      "component": "tai42-backend-rq",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_backend_rq/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/channel-slack": {
+      "package-name": "tai42-channel-slack",
+      "component": "tai42-channel-slack",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_slack/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/channel-telegram": {
+      "package-name": "tai42-channel-telegram",
+      "component": "tai42-channel-telegram",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_telegram/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/channel-twilio": {
+      "package-name": "tai42-channel-twilio",
+      "component": "tai42-channel-twilio",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_twilio/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/channel-web": {
+      "package-name": "tai42-channel-web",
+      "component": "tai42-channel-web",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_web/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/channel-whatsapp": {
+      "package-name": "tai42-channel-whatsapp",
+      "component": "tai42-channel-whatsapp",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_channel_whatsapp/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/config-k8s": {
+      "package-name": "tai42-config-k8s",
+      "component": "tai42-config-k8s",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_config_k8s/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/connector-atlassian": {
+      "package-name": "tai42-connector-atlassian",
+      "component": "tai42-connector-atlassian",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_connector/atlassian/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/connector-google": {
+      "package-name": "tai42-connector-google",
+      "component": "tai42-connector-google",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_connector/google/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/identity-oidc": {
+      "package-name": "tai42-identity-oidc",
+      "component": "tai42-identity-oidc",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_identity_oidc/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/identity-redis": {
+      "package-name": "tai42-identity-redis",
+      "component": "tai42-identity-redis",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_identity_redis/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/monitoring-langfuse": {
+      "package-name": "tai42-monitoring-langfuse",
+      "component": "tai42-monitoring-langfuse",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_monitoring_langfuse/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/storage-github": {
+      "package-name": "tai42-storage-github",
+      "component": "tai42-storage-github",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_storage_github/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/storage-local": {
+      "package-name": "tai42-storage-local",
+      "component": "tai42-storage-local",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_storage_local/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/storage-s3": {
+      "package-name": "tai42-storage-s3",
+      "component": "tai42-storage-s3",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_storage_s3/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/toolbox": {
+      "package-name": "tai42-toolbox",
+      "component": "tai42-toolbox",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_toolbox/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-github": {
+      "package-name": "tai42-tools-github",
+      "component": "tai42-tools-github",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_github/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-stripe": {
+      "package-name": "tai42-tools-stripe",
+      "component": "tai42-tools-stripe",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_stripe/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-twilio": {
+      "package-name": "tai42-tools-twilio",
+      "component": "tai42-tools-twilio",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_twilio/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-whatsapp": {
+      "package-name": "tai42-tools-whatsapp",
+      "component": "tai42-tools-whatsapp",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_whatsapp/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/webhook-verifier-github": {
+      "package-name": "tai42-webhook-verifier-github",
+      "component": "tai42-webhook-verifier-github",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_webhook_verifier_github/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/webhook-verifier-stripe": {
+      "package-name": "tai42-webhook-verifier-stripe",
+      "component": "tai42-webhook-verifier-stripe",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_webhook_verifier_stripe/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "e2e": {
+      "package-name": "tai42-e2e",
+      "component": "tai42-e2e",
+      "skip-changelog": true
+    }
+  }
+}

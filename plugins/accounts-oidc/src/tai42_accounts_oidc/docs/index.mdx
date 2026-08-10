@@ -1,0 +1,73 @@
+---
+title: "OIDC single sign-on accounts"
+description: "Wire the OIDC accounts provider, register providers and the redirect URI, and add sign-in buttons to the login screen."
+---
+
+Adds "sign in with…" buttons to the login screen, backed by your own OIDC providers.
+It runs the authorization-code flow with PKCE, then hands the browser a short-lived
+code the Studio exchanges for a session. The account model stays central; see
+[Accounts](/concepts/accounts).
+
+## accounts-oidc
+
+The identity provider. Mount it with its router and add it to the auth-provider list:
+
+```yaml manifest.yml
+lifecycle_modules:
+  - tai42_accounts_oidc
+routers_modules:
+  - tai42_accounts_oidc.routes
+```
+
+```bash
+ACCESS_CONTROL_AUTH_PROVIDERS=["accounts-postgres","accounts-oidc","redis"]
+TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL=https://tai.example.com
+TAI_ACCOUNTS_OIDC_STATE_KEY=a-random-secret
+TAI_ACCOUNTS_OIDC_PROVIDERS='[{"name":"google","preset":"google","client_id":"...","client_secret":"..."}]'
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_ACCOUNTS_OIDC_PROVIDERS` | `[]` | JSON array of provider rows. |
+| `TAI_ACCOUNTS_OIDC_STATE_KEY` | unset | Key that signs the OAuth `state`. Required. |
+| `TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL` | unset | This deployment's public origin. Required, and https unless it is a loopback host. |
+| `TAI_ACCOUNTS_OIDC_SESSION_IDLE_SECONDS` | `86400` | Sliding idle timeout. |
+| `TAI_ACCOUNTS_OIDC_SESSION_ABSOLUTE_SECONDS` | `2592000` | Hard lifetime from mint. |
+
+Each provider row takes a `name` (lowercase slug, unique) and the client credentials,
+plus optionally `preset`, `issuer`, `scopes`, `claim`, and a `display` label and icon.
+The presets are `google`, `auth0`, `okta`, `keycloak`, `azure`, and `github`; `google`
+and `github` carry fixed endpoints, and the others need a per-tenant `issuer`. A row
+with no `preset` at all is a raw OIDC provider and needs its own `issuer`.
+
+### Register the redirect URI
+
+Every provider row uses one callback URL, built from the public base URL and the row's
+name:
+
+```
+{TAI_ACCOUNTS_OIDC_PUBLIC_BASE_URL}/api/login/oidc/{name}/callback
+```
+
+Register that exact URL in the provider's console. The authorize request always sends
+PKCE with `S256`, and OIDC presets additionally send a nonce.
+
+<Warning>
+Signing in does not create an account. A successful sign-in resolves to the user id
+`oidc:{provider}:{subject}`, and until a policy exists for that id every protected
+route denies the request. Provision the policy first, then invite the person to sign
+in.
+</Warning>
+
+## login
+
+The public `/api/login/*` login-flow routes that drive the sign-in buttons and the
+code hand-back. Both this provider and a password provider mint sessions with the same
+token prefix and are told apart by a store lookup, so the order of
+`ACCESS_CONTROL_AUTH_PROVIDERS` matters: an outage in an earlier member fails closed
+for the members after it.
+
+## See also
+
+- [Accounts](/concepts/accounts) — the model behind these routes.
+- [Access control](/concepts/access-control) — the policy every identity resolves to.

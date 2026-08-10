@@ -1,0 +1,47 @@
+spec_version: 1
+namespace: tai42
+name: tools-twilio
+package: tai42-tools-twilio
+version: 0.1.0
+description: >-
+  Twilio provisioning tools for the TAI ecosystem: manifest-loaded REST tools
+  that list a Twilio account's incoming phone numbers, read a number's
+  inbound-message webhook, and set a number's inbound-message webhook URL.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-twilio
+contract: '>=1.6,<2'
+categories:
+  - communication
+  - utilities
+tags:
+  - twilio
+  - provisioning
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: list_twilio_numbers
+    module: tai42_tools_twilio.tools.list_twilio_numbers
+    description: >-
+      List a Twilio account's incoming phone numbers with their inbound-message
+      webhook.
+    tags:
+      - twilio
+      - provisioning
+  - kind: tool
+    name: get_twilio_number_webhook
+    module: tai42_tools_twilio.tools.get_twilio_number_webhook
+    description: Read one Twilio number's inbound-message webhook URL and method.
+    tags:
+      - twilio
+      - provisioning
+  - kind: tool
+    name: set_twilio_number_webhook
+    module: tai42_tools_twilio.tools.set_twilio_number_webhook
+    description: Set a Twilio number's inbound-message webhook to a given https URL.
+    tags:
+      - twilio
+      - provisioning

@@ -1,0 +1,70 @@
+---
+title: "Atlassian connector"
+description: "Set up the Atlassian 3LO app, granular scopes, and credentials for the Jira, Confluence, and Compass connector."
+---
+
+Registers the `atlassian` connector: one Atlassian OAuth 2.0 (3LO) connection per
+alias, unlocking three services — Jira, Confluence, and Compass. Every service is a
+remote HTTP MCP endpoint hosted by Atlassian, so nothing is launched locally.
+
+Register it in the manifest:
+
+```yaml manifest.yml
+lifecycle_modules:
+  - tai42_connector.atlassian.core.connector
+```
+
+## Create the Atlassian app
+
+Create an **OAuth 2.0 (3LO)** app in the Atlassian developer console, enable the
+products you intend to offer (Jira, Confluence, Compass), and grant the app the
+granular scopes listed below.
+
+Add this exact callback URL, where `{origin}` is your deployment's public origin (or
+`CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared bridge):
+
+```
+{origin}/oauth-bridge.html
+```
+
+Then set the client credentials on the API process:
+
+```bash
+CONNECTORS_ATLASSIAN_CLIENT_ID=...
+CONNECTORS_ATLASSIAN_CLIENT_SECRET=...
+```
+
+The engine-wide `CONNECTORS_*` settings — the key-encryption key, the state HMAC
+key, and the redirect-URI allowlist — are shared by every connector and are
+described in [Connectors](/concepts/connectors).
+
+## Services and scopes
+
+Atlassian refuses an app that mixes classic and granular scopes, so every scope below
+is granular.
+
+| Service | Scopes |
+| --- | --- |
+| `jira` | `offline_access`, `read:issue:jira`, `read:issue-meta:jira`, `read:project:jira`, `read:comment:jira`, `read:attachment:jira`, `read:issue-worklog:jira`, `read:jql:jira`, `read:board-scope:jira-software`, `read:sprint:jira-software`, `write:issue:jira`, `write:comment:jira`, `write:issue-worklog:jira`, `delete:issue:jira`, `write:sprint:jira-software` |
+| `confluence` | `offline_access`, `read:page:confluence`, `read:hierarchical-content:confluence`, `read:comment:confluence`, `read:space:confluence`, `write:page:confluence`, `read:content-details:confluence` |
+| `compass` | `offline_access`, `read:component:compass`, `write:component:compass` |
+
+The authorize request adds `audience=api.atlassian.com` and `prompt=consent`.
+`offline_access` is what makes the refresh token available, so a connection survives
+the access token's expiry.
+
+<Warning>
+Atlassian publishes no 3LO revocation endpoint, so disconnecting removes the stored
+token from this deployment but cannot revoke it at Atlassian. Revoke the app's access
+from the Atlassian account's connected-apps screen when that matters.
+</Warning>
+
+## Connect an account
+
+Each service resolves to Atlassian's hosted MCP endpoint, authorised with the
+connection's own token.
+
+## See also
+
+- [Connectors](/concepts/connectors) — the model, the token lifecycle, and the shared engine settings.
+- [Connect an OAuth provider](/guides/connect-an-oauth-provider) — the end-to-end walkthrough.

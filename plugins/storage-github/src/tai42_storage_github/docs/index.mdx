@@ -1,0 +1,48 @@
+---
+title: "GitHub storage"
+description: "Configure the GitHub-repository storage provider, its token scopes, and the size and CDN caveats."
+---
+
+Stores content as files on a branch of a GitHub repository, which makes every write
+a commit and every version reviewable. Select it in the manifest:
+
+```yaml manifest.yml
+storage_module: tai42_storage_github
+```
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `STORAGE_GITHUB_USERNAME` | unset | Repository owner — a user or an organisation. Required. |
+| `STORAGE_GITHUB_REPO` | unset | Repository name. Required. |
+| `STORAGE_GITHUB_BRANCH` | `main` | Branch read and written. |
+| `STORAGE_GITHUB_TOKEN` | unset | Access token. Omit only for a public repository, which is then read-only in practice. |
+| `STORAGE_GITHUB_TIMEOUT_TOTAL` | `15.0` | Total HTTP timeout in seconds. |
+| `STORAGE_GITHUB_MAX_CONNECTIONS` | `200` | Connection-pool ceiling. |
+| `STORAGE_GITHUB_MAX_KEEPALIVE_CONNECTIONS` | `50` | Keep-alive pool size. |
+| `STORAGE_GITHUB_KEEPALIVE_EXPIRY` | `300.0` | Keep-alive expiry in seconds. |
+
+## Token scopes
+
+A fine-grained token needs **Contents: read and write** on the repository; a classic
+token needs `repo`. Only `STORAGE_GITHUB_TOKEN` is read — an ambient `GITHUB_TOKEN`
+is ignored, as are proxy environment variables.
+
+## Quirks
+
+<Warning>
+Two limits shape what this provider suits. Writes are capped at 1 MiB and a larger
+payload raises before the request. Reads come from the raw content CDN, which can
+serve a stale copy for a few minutes after a write — do not use GitHub storage for
+content a tool writes and immediately reads back.
+</Warning>
+
+Listing uses the recursive tree API and raises on a truncated response rather than
+acting on a partial listing. The API host is fixed, so GitHub Enterprise Server is
+not supported.
+
+## See also
+
+- [Storage and resources](/concepts/storage-and-resources) — the ResourceManager contract this provider backs.
+- [Manage stored content](/guides/manage-stored-content) — the day-to-day commands.

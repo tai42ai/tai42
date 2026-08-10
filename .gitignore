@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+build/
+dist/
+.idea/
+
+# JS toolchain
+node_modules/
+**/ui/test-results/
+**/ui/playwright-report/
+**/ui/.cache/
+
+# e2e workspace artifacts
+junit.xml
+stack-*/
+tai-e2e-studio-*/
+.tai42-e2e-marketplace-*/
+
+# local env / secrets
+.env
+.env.*
+!.env.example
+
+# coverage / tool caches
+.coverage
+.cache/
+site/

@@ -1,0 +1,33 @@
+spec_version: 1
+namespace: tai42
+name: connector-atlassian
+package: tai42-connector-atlassian
+version: 0.3.0
+description: >-
+  Atlassian (Jira, Confluence, Compass) OAuth connector provider for the TAI
+  ecosystem. Pure descriptor data; depends only on tai42-contract.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-atlassian
+contract: '>=1.6,<2'
+categories:
+  - connectors
+tags:
+  - connector
+  - oauth
+  - atlassian
+  - jira
+  - confluence
+  - compass
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: connector
+    name: atlassian
+    module: tai42_connector.atlassian.core.connector
+    description: OAuth connector for Atlassian (Jira, Confluence, Compass).
+    tags:
+      - oauth
+      - atlassian

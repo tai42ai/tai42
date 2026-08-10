@@ -1,0 +1,35 @@
+---
+title: "Local filesystem storage"
+description: "Configure the local-disk storage provider, its root directory, and the escape guard."
+---
+
+Names one directory on the server's own disk as the active storage provider. Every
+stored path resolves under one root, and a path that escapes it raises rather than
+reading outside.
+
+Select it in the manifest:
+
+```yaml manifest.yml
+storage_module: tai42_storage_local
+```
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `STORAGE_LOCAL_ROOT_PATH` | `./templates` | Base directory every stored path resolves under, relative to the process working directory. |
+| `STORAGE_LOCAL_CREATE_DIRS` | `true` | Create parent directories on write. |
+
+## Quirks
+
+Content types are inferred from the path suffix, because a filesystem records none.
+
+<Warning>
+Local storage is per-process state on one machine's disk. A multi-replica fleet
+gives each replica its own copy — use S3 or GitHub instead.
+</Warning>
+
+## See also
+
+- [Storage and resources](/concepts/storage-and-resources) — the ResourceManager contract this provider backs.
+- [Manage stored content](/guides/manage-stored-content) — the day-to-day commands.

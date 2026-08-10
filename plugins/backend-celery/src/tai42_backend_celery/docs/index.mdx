@@ -1,0 +1,59 @@
+---
+title: Celery backend
+description: Configure the Celery task backend — the CELERY_ env group, broker and result store, and the worker, beat, and flower processes.
+---
+
+Choose Celery when you already run RabbitMQ, or when you want beat and flower.
+The broker, result backend, and RedBeat schedule store are configured
+independently.
+
+## Enable it
+
+```yaml manifest.yml
+backend_module: tai42_backend_celery
+```
+
+## Configuration
+
+The `CELERY_` env group. `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, and
+`CELERY_REDBEAT_REDIS_URL` each fall back to the shared `TAI_DEFAULT_REDIS_URL`
+when unset — with the default set and `CELERY_BROKER_URL` unset, the broker
+resolves to Redis (a first-class Celery broker) rather than the AMQP default. An
+operator on RabbitMQ sets `CELERY_BROKER_URL` explicitly.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CELERY_BROKER_URL` | `amqp://localhost:5672//` | The broker. |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/0` | Result backend. |
+| `CELERY_REDBEAT_REDIS_URL` | `redis://localhost:6379/0` | Redis holding the RedBeat schedule store. |
+| `CELERY_REDBEAT_KEY_PREFIX` | `redbeat:` | Key prefix for the schedule store. |
+| `CELERY_BEAT_MAX_LOOP_INTERVAL` | `60` | Maximum seconds between beat ticks. |
+| `CELERY_WORKER_CONCURRENCY` | `1` | Prefork pool size. |
+| `CELERY_TASK_TIMEOUT` | `300` | Seconds a synchronous dispatch waits for a result. |
+| `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the live manifest JSON is written into for prefork inheritance. |
+| `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Dispatch kwarg naming the target tool. |
+
+## Run the processes
+
+```bash
+tai backend worker
+tai backend beat
+tai backend flower
+```
+
+## Quirks
+
+- The concurrency cap of one is load-bearing. Celery's pool restart is advisory,
+  so a wider prefork pool can miss the turnover confirmation that follows a live
+  config change and turn a bus operation into a failure. Raise
+  `CELERY_WORKER_CONCURRENCY` only on a deployment that never live-reloads, or
+  move to a threads or gevent pool.
+- On macOS, prefer the `solo` or `threads` pool — forking around the system
+  resolver deadlocks.
+- `backend_list_failed_tasks` is not implemented: Celery keeps no queryable
+  failed-task index.
+
+## See also
+
+- [Backends](/concepts/backends) — the contract all three shipped backends implement.
+- [Schedule a tool](/guides/schedule-a-tool) — putting work on a schedule.

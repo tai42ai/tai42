@@ -1,0 +1,29 @@
+spec_version: 1
+namespace: tai42
+name: storage-s3
+package: tai42-storage-s3
+version: 0.3.0
+description: >-
+  S3 storage backend for the TAI ecosystem — text, binary, and media content
+  over an S3 bucket.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/storage-s3
+contract: '>=1.6,<2'
+categories:
+  - storage
+tags:
+  - storage
+  - s3
+  - aws
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: storage
+    name: s3
+    module: tai42_storage_s3
+    description: Storage backend serving text, binary, and media content over an S3 bucket.
+    tags:
+      - s3

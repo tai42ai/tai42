@@ -1,0 +1,47 @@
+---
+title: Redis API-key identity
+description: Configure the Redis-backed api-key identity provider — registration, provider selection, and the Redis the key records live in.
+---
+
+This is the default identity provider: it stores api-key hashes in Redis,
+validates inbound tokens, and provisions and revokes keys. Access control is on
+by default and the runtime refuses to boot with no identity provider registered,
+so this plugin is the pairing every access-controlled install starts from.
+
+## Register and select it
+
+```yaml manifest.yml
+lifecycle_modules:
+  - tai42_identity_redis.redis_api_key_provider
+```
+
+The module registers itself as the `redis` provider at import.
+`ACCESS_CONTROL_AUTH_PROVIDERS` (an ordered JSON list, default `["redis"]`) names
+the chain the verifier tries.
+
+## Configuration
+
+The provider reads its connection from the shared access-control settings — it
+owns no `CHANNEL_`/`IDENTITY_` env group of its own.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ACCESS_CONTROL_ENABLE` | `true` | The access-control gate. Turn it off only for local, auth-free work. |
+| `ACCESS_CONTROL_AUTH_PROVIDERS` | `["redis"]` | Ordered provider chain the verifier tries. |
+| `ACCESS_CONTROL_REDIS_URL` | unset | Redis holding the key records and per-user live counters. Falls back to the shared `TAI_DEFAULT_REDIS_URL`; with the gate on, one must be set. |
+
+Any standard `redis-server` works — no RedisJSON module or `redis-stack` image is
+required.
+
+## Provision a key
+
+The raw `sk-…` value is printed once — capture it then.
+
+```bash
+tai keys create --user alice --description 'CI key' --scope read
+```
+
+## See also
+
+- [Access control](/concepts/access-control) — the policy model and the verifier chain.
+- [Set up access control](/guides/access-control) — minting the first key and mapping routes to scopes.

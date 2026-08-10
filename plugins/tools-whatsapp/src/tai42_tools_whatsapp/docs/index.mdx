@@ -1,0 +1,43 @@
+---
+title: "WhatsApp provisioning tools"
+description: "The four Meta Graph provisioning tools and the CHANNEL_WHATSAPP settings that configure them."
+---
+
+Four tools that provision a WhatsApp Business Account through the Meta Graph API: register,
+list and delete message templates, and subscribe the app to the account's webhooks. They talk
+direct Graph REST through tai42-kit's curl client (no vendor SDK); the Graph host and pinned
+API version ride the settings below. This page is the per-tool index and the settings.
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_WHATSAPP_ACCESS_TOKEN` | unset | Graph API bearer token. Missing or empty raises on every tool call. |
+| `CHANNEL_WHATSAPP_WABA_ID` | unset | WhatsApp Business Account id the endpoints hang under. Missing or empty raises on every tool call. |
+| `CHANNEL_WHATSAPP_API_BASE_URL` | `https://graph.facebook.com/v23.0` | Graph API origin with a pinned version. |
+| `CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS` | `30` | Per-request HTTP timeout in seconds. |
+
+The token and WABA id share the `CHANNEL_WHATSAPP_` env group with the rest of the WhatsApp
+deployment; the access token is held as a secret and never appears in a log or a raised error.
+Every non-2xx from Graph raises loudly with Graph's status and body — never a silent default.
+
+## register_whatsapp_template
+
+Registers a message template on the account and returns Graph's response (the template id and
+review status). `components` is the Graph-shaped component list, passed through unchanged; `name`,
+`language`, `category` and `components` are all required and non-empty.
+
+## list_whatsapp_templates
+
+Lists every message template on the account, following Graph's paging cursors to exhaustion, and
+returns the concatenated entries.
+
+## delete_whatsapp_template
+
+Deletes a message template by name (percent-encoded into the query) and returns Graph's response.
+
+## subscribe_whatsapp_app
+
+Subscribes the app to the account's webhooks. With both `callback_uri` and `verify_token` given it
+sends Meta's override pair; with neither it subscribes to the app's configured webhook; supplying
+exactly one of the two raises.

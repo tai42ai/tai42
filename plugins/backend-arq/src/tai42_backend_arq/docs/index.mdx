@@ -1,0 +1,54 @@
+---
+title: arq backend
+description: Configure the arq task backend — the ARQ_ env group, the Redis connection, and the worker process.
+---
+
+The arq backend runs queued tool calls, schedules, and agent turns over a single
+Redis — no separate broker. It is the default the distribution bundle selects.
+
+## Enable it
+
+```yaml manifest.yml
+backend_module: tai42_backend_arq
+```
+
+## Configuration
+
+The `ARQ_` env group. `ARQ_REDIS_URL` and `ARQ_REDIS_MAX_CONNECTIONS` fall back
+to the shared `TAI_DEFAULT_REDIS_URL` / `TAI_DEFAULT_REDIS_MAX_CONNECTIONS`
+namespace when unset; a set `ARQ_` value always wins.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ARQ_REDIS_URL` | `redis://localhost:6379/0` | Queue, results, and the schedule hashes. |
+| `ARQ_REDIS_MAX_CONNECTIONS` | unset | Caps the arq connection pool; uncapped when unset. |
+| `ARQ_CALLBACK_TIMEOUT` | `5` | Seconds a callback job waits for its predecessor to complete. |
+| `ARQ_JOB_COMPLETION_WAIT` | `300` | Seconds a graceful SIGTERM lets in-flight jobs finish before the worker exits (the warm drain). |
+| `ARQ_TASK_TIMEOUT` | `300` | Seconds a synchronous dispatch waits for a job result. |
+| `ARQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the host exports the live manifest JSON under. |
+| `ARQ_TOOL_NAME_ARG` | `backend_tool_name` | Kwargs key carrying the target tool name into a queued job. |
+
+## Run the worker
+
+```bash
+tai backend worker --max-jobs 10 --job-timeout 300
+```
+
+Queue name, burst mode, result retention, and poll delay are worker CLI flags,
+not env vars. `worker` is the only `tai backend` subcommand this backend accepts
+— there is no beat or dashboard process, and anything else exits.
+
+## Quirks
+
+- `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
+  host's own `BACKEND_` group. Change them in lockstep or the worker and the
+  server stop agreeing.
+- `ARQ_JOB_COMPLETION_WAIT` must cover the longest job, and the deployment's
+  termination grace period must be at least as long, or a drain still severs
+  running work. arq cancels running jobs on signal unless this is non-zero.
+
+## See also
+
+- [Backends](/concepts/backends) — the contract all three shipped backends implement.
+- [Manage a fleet](/operate/manage-a-fleet) — reading the live worker census.
+- [Schedule a tool](/guides/schedule-a-tool) — putting work on a schedule.

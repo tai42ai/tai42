@@ -1,0 +1,53 @@
+---
+title: Telegram channel
+description: Configure the Telegram channel — the CHANNEL_TELEGRAM_ env group, the automatic setWebhook registration, and the numeric-id route identity.
+---
+
+Bridge a Telegram bot to an agent, or deliver `ask_user` questions into a chat. A
+message runs an agent turn and the answer comes back in the same chat.
+
+## Enable it
+
+```yaml manifest.yml
+channel_modules:
+  - tai42_channel_telegram
+```
+
+## Configuration
+
+The `CHANNEL_TELEGRAM_` env group. `CHANNEL_TELEGRAM_REDIS_URL` (and the
+inherited connection-tuning fields) point the plugin-owned correlation store.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_TELEGRAM_BOT_TOKEN` | unset | Bot credential from BotFather; the auth for outbound sends. Secret. |
+| `CHANNEL_TELEGRAM_WEBHOOK_SECRET` | unset | Echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token`; the inbound door compares it constant-time and fails closed when unset. Secret. |
+| `CHANNEL_TELEGRAM_PUBLIC_BASE_URL` | unset | This deployment's public origin; the startup hook builds the webhook URL from it. |
+| `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | empty | Whitelist of chats (numeric chat id or `@username`) a caller-supplied recipient may name. Comma-separated or JSON list. |
+| `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` | unset | Chat delivered to when the caller names none; not allowlist-checked. |
+| `CHANNEL_TELEGRAM_HTTP_TIMEOUT_SECONDS` | `30` | Wall-clock budget for one outbound HTTP call. |
+| `CHANNEL_TELEGRAM_REDIS_URL` | unset | Connection for the correlation store. |
+
+## Webhook registration is automatic
+
+Unlike the other channels, Telegram's webhook is registered **automatically**: on
+startup the plugin calls `setWebhook` (idempotent) to point Telegram at
+`{PUBLIC_BASE_URL}/api/channels/telegram/inbound` with the secret token. You do
+not configure it by hand.
+
+## Create a bridge route
+
+A Telegram route's `our_identity` is the bot's **numeric id** — the digits before
+the `:` in the bot token. `client_address` is the numeric chat id, so each chat
+holds its own conversation:
+
+```bash
+tai conversations create tg-chat \
+  --door channel --target-name chat --execution-key chat-bot \
+  --channel telegram --identity 123456
+```
+
+## See also
+
+- [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.
+- [Conversation bridge](/reference/conversation-bridge) — every setting and the authorization model.

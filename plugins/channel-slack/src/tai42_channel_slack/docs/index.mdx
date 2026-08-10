@@ -1,0 +1,56 @@
+---
+title: Slack channel
+description: Configure the Slack channel — the CHANNEL_SLACK_ env group, the Events API Request URL, and the bot-user-id a bridge route needs.
+---
+
+Bridge a Slack app to an agent, or deliver `ask_user` questions into Slack. A
+message runs an agent turn and the answer posts back in the same conversation.
+
+## Enable it
+
+```yaml manifest.yml
+channel_modules:
+  - tai42_channel_slack
+```
+
+## Configuration
+
+The `CHANNEL_SLACK_` env group. `CHANNEL_SLACK_REDIS_URL` (and the inherited
+connection-tuning fields) point the plugin-owned correlation store.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_SLACK_BOT_TOKEN` | unset | Bot token (`xoxb-…`, scope `chat:write`); authorizes outbound posts. Secret. |
+| `CHANNEL_SLACK_SIGNING_SECRET` | unset | Events API signing secret keying the `v0` HMAC the inbound door verifies over the raw body. Secret. |
+| `CHANNEL_SLACK_BOT_USER_ID` | unset | The app's own bot user id (`U…`); a bridge route's `our_identity` and the self-message filter. |
+| `CHANNEL_SLACK_ALLOWED_RECIPIENTS` | empty | Whitelist of conversation ids (`C…`/`D…`) a caller-requested recipient may name; unlisted is refused (fail closed). Comma-separated or JSON list. |
+| `CHANNEL_SLACK_DEFAULT_RECIPIENT` | unset | Conversation a question without a caller-requested recipient goes to; not allowlist-checked. |
+| `CHANNEL_SLACK_HTTP_TIMEOUT_SECONDS` | `30` | Wall-clock budget for one outbound HTTP call. |
+| `CHANNEL_SLACK_REDIS_URL` | unset | Connection for the correlation store. |
+
+`CHANNEL_SLACK_BOT_USER_ID` is **required** for a bridge route — without it, a
+bridge message raises loudly rather than looping the bot on its own posts. An
+`ask_user`-only deployment that runs no bridge route does not need it.
+
+## Point the Events API at the deployment
+
+Slack has no startup hook. Set the **Request URL** once in your Slack app's Event
+Subscriptions to `{public base URL}/api/channels/slack/inbound` and subscribe to
+the message events the bot should hear. Slack verifies the URL against the
+signing secret.
+
+## Create a bridge route
+
+The route's `our_identity` is the bot user id; `client_address` is the Slack
+conversation id:
+
+```bash
+tai conversations create slack-chat \
+  --door channel --target-name chat --execution-key chat-bot \
+  --channel slack --identity U0XXXXXXX
+```
+
+## See also
+
+- [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.
+- [Conversation bridge](/reference/conversation-bridge) — every setting and the authorization model.

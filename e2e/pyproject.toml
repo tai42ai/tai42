@@ -1,0 +1,227 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-e2e"
+version = "1.4.0"
+description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["mcp", "e2e", "integration-tests", "cross-process", "tai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The repos under test. Each floor pins the healed release whose wheel widened
+    # its tai42-contract cap to admit 0.3 — a lower floor lets a pre-0.3 wheel back
+    # in and makes the published harness unresolvable against tai42-contract 0.3.
+    # The workspace sources in [tool.uv.sources] float them at their checkouts.
+    "tai42-contract>=1.6,<2",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=1.5,<2",
+    "tai42-skeleton[toolbox,files]>=1.7,<2",
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.4,<0.5",
+    # The Stripe payment tools plugin (split out of toolbox); its curl backing
+    # dependency for the REST calls is unconditional.
+    "tai42-tools-stripe>=0.5,<0.6",
+    "tai42-agents>=0.6,<0.7",
+    # The default identity-provider plugin; auth stacks need it in the SUT venv.
+    "tai42-identity-redis>=0.3,<0.4",
+    # The accounts + OIDC providers the accounts/oidc auth stacks load: the
+    # Postgres-backed accounts provider (password login, sessions, invites), the
+    # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
+    # provider (issuer-minted machine JWTs).
+    "tai42-accounts-postgres>=1.1,<2",
+    "tai42-accounts-oidc>=0.4,<0.5",
+    "tai42-identity-oidc>=0.3,<0.4",
+    # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
+    "tai42-backend-arq>=0.6,<0.7",
+    "tai42-backend-celery>=0.5,<0.6",
+    "tai42-backend-rq>=0.5,<0.6",
+    # The real Storage plugins: the local filesystem backing plus the S3 and
+    # GitHub object stores the storage-axis variant sweep boots.
+    "tai42-storage-local>=0.3,<0.4",
+    "tai42-storage-s3>=0.3,<0.4",
+    "tai42-storage-github>=0.4,<0.5",
+    # The real webhook verifiers.
+    "tai42-webhook-verifier-github>=0.3,<0.4",
+    "tai42-webhook-verifier-stripe>=0.3,<0.4",
+    # The channel plugins that deliver ask_user questions over a chat transport.
+    "tai42-channel-telegram>=0.8,<0.9",
+    "tai42-channel-slack>=0.8,<0.9",
+    "tai42-channel-twilio>=0.7,<0.8",
+    "tai42-channel-whatsapp>=0.7,<0.8",
+    "tai42-channel-web>=0.6,<0.7",
+    # Loaded only by the monitoring stack's manifest.
+    "tai42-monitoring-langfuse>=0.3,<0.4",
+    # The shipped OAuth connector plugins the shipped-connectors stack boots.
+    "tai42-connector-google>=0.3,<0.4",
+    "tai42-connector-atlassian>=0.3,<0.4",
+    # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
+    # client the K8sConfigManager imports where the provider runs.
+    "tai42-config-k8s[k8s]>=0.4,<0.5",
+
+    # Harness runtime.
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "pytest-timeout>=2.3",
+    "httpx>=0.28",
+    "fastmcp>=3.2,<4",
+    "redis>=5",
+    "psycopg[binary]>=3.2",
+    "prometheus-client>=0.24",
+    # The signing OIDC issuer fixture (``netfixtures.OAuthIdp``) mints RS256
+    # id_tokens and serves a JWK set; joserfc is the same JOSE library the SUT's
+    # ``tai42_kit.net.jwt`` verifier uses, so fixture-signed tokens verify identically.
+    "joserfc>=1.7,<2",
+    "fastapi>=0.135",
+    "uvicorn>=0.43",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.13",
+    "PyYAML>=6.0",
+    # The Celery client library the celery-backend census pings the control plane
+    # with (never tai42_backend_celery — the harness does not import the SUT), plus
+    # the celery-pydantic serializer so the census can deserialize the backend's
+    # ``application/x-pydantic`` control replies.
+    "celery>=5.6,<6",
+    "celery-pydantic>=1.0,<2",
+    # The synchronous S3 read-back client the storage-axis harness asserts stored
+    # objects with, aligned to storage-s3's botocore>=1.40,<1.41 floor.
+    "boto3>=1.40,<1.41",
+    # The langgraph checkpoint savers the checkpoint-axis harness drives directly
+    # (the harness IS the checkpoint client) — the Postgres and SQLite backends plus
+    # the async SQLite driver. Pinned to the installed langgraph-checkpoint 4.x line's
+    # 3.x saver releases; psycopg/psycopg-pool are already present above.
+    "langgraph-checkpoint-postgres>=3,<4",
+    "langgraph-checkpoint-sqlite>=3,<4",
+    "aiosqlite>=0.20",
+    # The dynamic Postgres MCP server the mcp-mount stack mounts as a subprocess
+    # (console script ``tai42-postgres-mcp``). A released PyPI package, never a
+    # workspace sibling — it carries no [tool.uv.sources] override.
+    "tai42-dynamic-postgres-mcp>=0.3,<0.4",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+
+[project.scripts]
+# Boots the studio_stack profile on a fixed port so the Playwright `ui/` suite's
+# webServer can point at a known origin. Not used by the pytest suite.
+tai42-e2e-studio-stack = "tai42_e2e.studio_runner:main"
+
+[project.entry-points.pytest11]
+# Ships the session infra + fresh_stack fixtures and the diagnostics hook to any
+# repo that installs tai42-e2e (external stack suites get them without copying wiring).
+tai42-e2e = "tai42_e2e.pytest_plugin"
+
+[dependency-groups]
+# Dev/CI-only, never in the wheel's Requires-Dist: the static gates plus the
+# studio leg's boot-time plugin prerequisite.
+dev = [
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    # Splits the suite into balanced shards across the CI matrix's shard axis.
+    "pytest-split>=0.10",
+    # The Studio reference/fixture plugin the browser-e2e studio_stack names in its
+    # manifest (studio_plugins + reference_plugin.tools) and serves to the ``ui/``
+    # suite. A boot prerequisite of the studio leg, not imported by harness code;
+    # floated at the tai-studio checkout by the source override below. Kept out of
+    # [project.dependencies] so the published wheel carries no bare, unresolvable
+    # reference-plugin Requires-Dist.
+    "reference-plugin",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_e2e*"]
+
+[tool.setuptools.package-data]
+tai42_e2e = ["py.typed"]
+tai42_e2e_fixtures = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+xfail_strict = true
+timeout = 120
+# A flaky e2e is a real race, never masked; warnings are errors so an
+# un-awaited coroutine or resource leak fails the suite loudly.
+filterwarnings = ["error"]
+markers = [
+    # The stacks these modules boot run no backend worker, so they exercise no
+    # backend seam. Non-default backend legs deselect them with -m "not
+    # backendless" — running them under every backend buys nothing.
+    "backendless: the module's stacks run no backend; skip on non-default backend legs",
+]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+default-groups = ["dev"]
+
+# Resolve the tai42-* packages under test from the in-tree workspace members.
+# The published version floors in [project].dependencies are what a wheel would
+# declare; these source overrides float them at their in-tree working trees.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+tai42-kit = { workspace = true }
+tai42-skeleton = { workspace = true }
+tai42-toolbox = { workspace = true }
+tai42-tools-stripe = { workspace = true }
+tai42-agents = { workspace = true }
+tai42-identity-redis = { workspace = true }
+tai42-accounts-postgres = { workspace = true }
+tai42-accounts-oidc = { workspace = true }
+tai42-identity-oidc = { workspace = true }
+tai42-backend-arq = { workspace = true }
+tai42-backend-celery = { workspace = true }
+tai42-backend-rq = { workspace = true }
+tai42-storage-local = { workspace = true }
+tai42-storage-s3 = { workspace = true }
+tai42-storage-github = { workspace = true }
+tai42-webhook-verifier-github = { workspace = true }
+tai42-webhook-verifier-stripe = { workspace = true }
+tai42-channel-telegram = { workspace = true }
+tai42-channel-slack = { workspace = true }
+tai42-channel-twilio = { workspace = true }
+tai42-channel-whatsapp = { workspace = true }
+tai42-channel-web = { workspace = true }
+tai42-monitoring-langfuse = { workspace = true }
+tai42-connector-google = { workspace = true }
+tai42-connector-atlassian = { workspace = true }
+tai42-config-k8s = { workspace = true }
+reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
+
+[tool.ruff]
+src = ["src", "tests"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+# The ecosystem bar plus TID, which enforces the one-waiting-primitive rule: the
+# banned-api below makes every ad-hoc sleep a lint error (sanctioned internal
+# sleeps carry an explicit noqa).
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"time.sleep".msg = "Blocking sleeps are banned; wait on a condition with tai42_e2e.waiting.wait_for."
+"asyncio.sleep".msg = "Ad-hoc sleeps are banned; wait on a condition with tai42_e2e.waiting.wait_for_async."
+
+[tool.pyright]
+include = ["src", "tests", "fixtures"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai-e2e-market-eta"
+version = "0.0.0"
+description = "Installable marketplace fixture plugin: an mcp-server item launching a one-tool stdio MCP server."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+
+[project.scripts]
+tai-e2e-market-eta-mcp = "tai_e2e_market_eta.server:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai_e2e_market_eta*"]
+
+[tool.setuptools.package-data]
+tai_e2e_market_eta = ["tai-plugin.yml", "docs/index.mdx"]

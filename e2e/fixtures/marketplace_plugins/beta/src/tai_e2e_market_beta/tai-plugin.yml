@@ -1,0 +1,26 @@
+spec_version: 1
+namespace: tai42
+name: e2e-beta
+package: tai-e2e-market-beta
+version: 0.0.0
+description: "Installable marketplace fixture plugin: a probe tool plus a wrapper tool extension."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+contract: ">=0.3,<0.4"
+categories: [productivity]
+tags: [probe, beta]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: e2e_market_beta_probe
+    module: tai_e2e_market_beta.tools
+    description: "Return a fixed marker payload identifying the beta fixture."
+    tags: [probe]
+  - kind: extension
+    name: beta_marker
+    module: tai_e2e_market_beta.extensions
+    description: "Branch a tool into a variant that stamps a beta marker onto its result."
+    tags: [beta]

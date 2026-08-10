@@ -1,0 +1,127 @@
+---
+title: "Postgres accounts"
+description: "Wire the Postgres accounts provider, bind its database, run migrations, bootstrap the first admin, and invite the team."
+---
+
+Provides human logins on Postgres — an email and password, a session, and a role —
+and contributes the Studio's Users screen. The account model itself stays central;
+see [Accounts](/concepts/accounts). This page wires the provider and
+its two routers.
+
+## accounts-postgres
+
+The identity provider. Mount it with both routers and register it as an auth
+provider:
+
+```yaml manifest.yml
+lifecycle_modules:
+  - tai42_accounts_postgres
+routers_modules:
+  - tai42_accounts_postgres.routes_login
+  - tai42_accounts_postgres.routes_users
+studio_plugins:
+  - tai42_accounts_postgres
+```
+
+```bash
+ACCESS_CONTROL_ENABLE=true
+ACCESS_CONTROL_AUTH_PROVIDERS=["accounts-postgres","redis"]
+```
+
+Mounting the routes without registering the provider raises at boot, naming both
+settings — the two halves are never half-wired.
+
+### Connect the database
+
+The provider carries no connection of its own. It binds to a named database through
+`TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES` (default `default`) and uses that database's
+connection, keeping its own tables inside it. A single-database deployment leaves the
+binding unset and configures `TAI_DATABASE_DEFAULT_PG_*`; give accounts its own
+database by binding it to another declared name and configuring that one:
+
+```bash
+# accounts on the default database
+TAI_DATABASE_DEFAULT_PG_HOST=localhost
+TAI_DATABASE_DEFAULT_PG_PORT=5432
+TAI_DATABASE_DEFAULT_PG_DB=tai
+TAI_DATABASE_DEFAULT_PG_USER=postgres
+TAI_DATABASE_DEFAULT_PG_PASSWORD=...
+
+# or accounts on its own database
+TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES=accounts
+TAI_DATABASE_ACCOUNTS_PG_HOST=...
+TAI_DATABASE_ACCOUNTS_PG_PASSWORD=...
+```
+
+The provider is on when its bound database is configured — a non-empty password — and
+cleanly off otherwise. Pool sizes and timeouts are tuned on the database itself
+(`TAI_DATABASE_<NAME>_PG_*`), not a variable of this package's own. Sessions live in
+Postgres; login backoff and the bootstrap token live in Redis, which arrives from the
+access-control configuration.
+
+### Run the migrations
+
+The plugin ships a `migrations/` folder and declares it in its descriptor, so the
+shared runner discovers it as the `tai42-accounts-postgres` component and applies it
+alongside the core chain:
+
+```bash
+tai db migrate
+```
+
+The provider asserts its chain at boot and never applies it for you: with the store
+configured but the chain pending, the process refuses to start, naming `tai db
+migrate`.
+
+### Tune sessions and login limits
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_ACCOUNTS_SESSION_IDLE_SECONDS` | `86400` | Sliding idle timeout. |
+| `TAI_ACCOUNTS_SESSION_ABSOLUTE_SECONDS` | `2592000` | Hard lifetime from mint. |
+| `TAI_ACCOUNTS_INVITE_TTL_SECONDS` | `259200` | Invite validity. |
+| `TAI_ACCOUNTS_LOGIN_BACKOFF_THRESHOLD` | `5` | Consecutive per-account failures before backoff. |
+| `TAI_ACCOUNTS_LOGIN_BACKOFF_CAP_SECONDS` | `900` | Longest backoff lock. |
+| `TAI_ACCOUNTS_LOGIN_IP_MAX_ATTEMPTS` | `30` | Failures allowed per IP per window. |
+| `TAI_ACCOUNTS_LOGIN_IP_WINDOW_SECONDS` | `900` | Length of that window. |
+| `TAI_ACCOUNTS_LOGIN_HASH_CONCURRENCY` | twice the CPU count, floor 2 | Concurrent password hashes before login sheds load. |
+| `TAI_ACCOUNTS_LOGIN_HASH_WAIT_SECONDS` | `2.0` | Wait before shedding. |
+| `TAI_ACCOUNTS_REDIS_KEY_PREFIX` | the database name | Redis namespace for sessions and counters. |
+
+## login
+
+The public `/api/login/*` routes. The first owner is created through `POST
+/api/login/bootstrap`, and the Studio's login screen offers it while no user exists.
+The call is gated by a bootstrap token:
+
+```bash
+TAI_ACCOUNTS_BOOTSTRAP_TOKEN=a-secret-you-choose
+```
+
+Set the token yourself, or leave it unset and let the server mint one at startup — it
+is generated once, stored in Redis, and logged by the process that wins the race, so
+read it from that process's logs. The call creates the owner with the `admin` role and
+refuses with a conflict once any user exists. Passwords are at least ten characters.
+
+<Warning>
+`TAI_ACCOUNTS_BOOTSTRAP_OPEN=true` disables the token gate entirely. It exists for
+local development. Never set it on a reachable deployment.
+</Warning>
+
+## users
+
+The authed `/api/auth/users*` user-administration routes. There is no outbound email —
+creating a user returns a one-time invite link you deliver yourself. `role` names an
+existing access-control role template; an unknown name is rejected and no user is
+created. The response carries an invite token and a `/login?invite=...` path relative
+to your origin; the invitee sets a password through `POST /api/login/invite/accept`,
+which consumes the token and mints a session in one step. Re-issue an invite with
+`POST /api/auth/users/{user_id}/invite` — it refuses once that user has a password.
+
+The Studio's Users screen drives the same routes, and the last enabled admin cannot be
+demoted, disabled, or deleted.
+
+## See also
+
+- [Accounts](/concepts/accounts) — the model behind these routes.
+- [Access control](/concepts/access-control) — the policy every identity resolves to.

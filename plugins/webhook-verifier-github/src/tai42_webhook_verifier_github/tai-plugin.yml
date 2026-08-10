@@ -1,0 +1,35 @@
+spec_version: 1
+namespace: tai42
+name: webhook-verifier-github
+package: tai42-webhook-verifier-github
+version: 0.3.0
+description: >-
+  GitHub webhook-signature verifier plugin for the TAI ecosystem: a per-provider
+  WebhookVerifier that checks each delivery's X-Hub-Signature-256 HMAC before
+  the payload is dispatched.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/webhook-verifier-github
+contract: '>=1.6,<2'
+categories:
+  - webhooks
+  - security
+tags:
+  - webhooks
+  - github
+  - hmac
+  - security
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: webhook-verifier
+    name: github
+    module: tai42_webhook_verifier_github
+    description: >-
+      Verify a GitHub webhook delivery's X-Hub-Signature-256 HMAC before
+      dispatch.
+    tags:
+      - github
+      - hmac

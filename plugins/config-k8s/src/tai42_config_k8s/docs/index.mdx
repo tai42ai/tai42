@@ -1,0 +1,48 @@
+---
+title: Kubernetes config provider
+description: Configure the Kubernetes config provider — the TAI_K8S_ env group naming the Secret and ConfigMap that back env and manifest.
+---
+
+This provider is where the server reads its env and manifest when it runs on
+Kubernetes: env from a Secret, the manifest from a ConfigMap. It replaces the
+default `file` provider, which reads from disk.
+
+## Select it
+
+```bash
+export TAI_CONFIG_MODE=k8s
+```
+
+The provider registers under the mode name `k8s`.
+
+<Warning>
+`TAI_CONFIG_MODE=k8s` requires the [worker bus](/concepts/worker-bus):
+k8s mode exists for multi-pod shared config, and a pod cannot see its own replica
+count, so a busless k8s boot is refused — set `TAI_BUS_REDIS_URL`. The refusal
+names the missing bus, not a later kubeconfig error.
+</Warning>
+
+## Configuration
+
+The `TAI_K8S_` env group locates the Secret and ConfigMap the provider reads and
+writes.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_K8S_NAMESPACE` | auto-detected | Kubernetes namespace. When unset or blank, read from the in-cluster service-account file, falling back to `default`. |
+| `TAI_K8S_SECRET_NAME` | `tai-env` | Secret holding the env. |
+| `TAI_K8S_CONFIGMAP_NAME` | `tai-manifest` | ConfigMap holding the manifest. |
+| `TAI_K8S_MANIFEST_KEY` | `manifest.yml` | Key in the ConfigMap the manifest lives under. |
+| `TAI_K8S_DEFAULTS_MANIFEST_KEY` | `defaults.manifest.yml` | Key in the ConfigMap the defaults manifest lives under. |
+
+## Quirks
+
+- The `TAI_K8S_*` group is a provider-selection seam: the Secret and ConfigMap
+  names and keys locate where a profile's env and manifest live, so none can be
+  carried by a profile. The whole group is excluded from the live-reload
+  boundary, and a profile that tries to carry one is refused.
+
+## See also
+
+- [Config and secrets](/concepts/config-and-secrets) — the config-provider model and named databases.
+- [Deploy](/operate/deploy) — swapping the config provider at deploy time.

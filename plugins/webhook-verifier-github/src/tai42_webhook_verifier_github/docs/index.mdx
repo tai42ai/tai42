@@ -1,0 +1,44 @@
+---
+title: "GitHub webhook verifier"
+description: "Bind the github webhook verifier to a hook topic and name the environment variable that holds the signing secret."
+---
+
+Registers the `github` webhook verifier. It authenticates an inbound delivery's
+`X-Hub-Signature-256` HMAC-SHA256, computed over the exact raw request body and keyed
+by the webhook's shared secret. Bind it to a hook topic to close that topic's door
+against unsigned deliveries.
+
+## Bind it to a topic
+
+A verifier is bound per hook topic. The binding names the environment variable that
+holds the signing secret through `config.secret_env` — the verifier looks that
+variable up at verify time, so the secret itself never lives in the manifest:
+
+```bash
+curl -X PUT .../api/hooks/topics/{topic}/verifier \
+  -d '{"verifier": "github", "config": {"secret_env": "GITHUB_WEBHOOK_SECRET"}}'
+```
+
+Set the same secret you configured on the GitHub webhook in that variable on every
+process that receives deliveries:
+
+```bash
+GITHUB_WEBHOOK_SECRET=...
+```
+
+The variable name is yours to choose — pick a distinct name per topic when one
+deployment verifies several GitHub webhooks with different secrets.
+
+## Behaviour
+
+- **Fails closed.** A missing `secret_env` key, a missing environment variable, or an
+  empty secret raises loudly rather than degrading to an unauthenticated door. A
+  malformed or mismatched signature is an ordinary verification failure.
+- **POST only.** The signature covers the raw body, so a door binding this verifier
+  rejects GET.
+- The comparison is constant-time, and the `sha256=` digest must be exactly 64 hex
+  characters.
+
+## See also
+
+- [Triggers and webhooks](/concepts/triggers-and-webhooks) — the verifier model and the built-in `shared_secret` verifier.

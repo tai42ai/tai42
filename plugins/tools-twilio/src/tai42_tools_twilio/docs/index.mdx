@@ -1,0 +1,44 @@
+---
+title: "Twilio provisioning tools"
+description: "The three Twilio number-provisioning tools and the CHANNEL_TWILIO settings that configure them."
+---
+
+Three tools that provision a Twilio phone number's inbound-message webhook over
+Twilio's REST API: list the account's numbers, read one number's webhook, and set
+a number's webhook URL. They configure the number so an inbound message reaches
+the platform; the message-handling channel is a separate concern.
+
+## Configuration
+
+The tools read the same `CHANNEL_TWILIO_` credentials as the deployment's Twilio
+channel — one account SID, auth token, and REST base configure both.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_TWILIO_ACCOUNT_SID` | unset | Twilio account SID. Missing or empty raises on every tool call. |
+| `CHANNEL_TWILIO_AUTH_TOKEN` | unset | Twilio auth token. Missing or empty raises on every tool call. |
+| `CHANNEL_TWILIO_API_BASE_URL` | `https://api.twilio.com/2010-04-01` | Twilio REST origin (carries the API version prefix). |
+| `CHANNEL_TWILIO_HTTP_TIMEOUT_SECONDS` | `30` | Per-request HTTP timeout in seconds. |
+
+Credentials live only in the environment. A request carries HTTP Basic auth
+(`AccountSid:AuthToken`); the auth header is never echoed into a raised error, and
+redirects are not followed so it cannot reach another host.
+
+## list_twilio_numbers
+
+Lists every incoming phone number on the account, following Twilio's paging to
+exhaustion, and returns each number's `sid`, `phone_number`, `sms_url`, and
+`sms_method`.
+
+## get_twilio_number_webhook
+
+Reads one number's inbound-message webhook. Takes the number's `phone_number_sid`
+(required, non-empty) and returns its `sid`, `phone_number`, `sms_url`, and
+`sms_method`.
+
+## set_twilio_number_webhook
+
+Points a number's inbound-message webhook at a URL. Takes `phone_number_sid`
+(required, non-empty) and `sms_url` (required, non-empty, https) and returns the
+updated `sid`, `phone_number`, and `sms_url`. A non-https or empty URL raises
+before any network call; a Twilio non-2xx propagates unchanged.

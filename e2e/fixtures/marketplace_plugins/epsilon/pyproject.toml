@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai-e2e-market-epsilon"
+version = "0.0.0"
+description = "Installable marketplace fixture plugin: an HTTP router and a response-header middleware."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "tai42-contract>=0.3,<0.4",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai_e2e_market_epsilon*"]
+
+[tool.setuptools.package-data]
+tai_e2e_market_epsilon = ["tai-plugin.yml", "docs/index.mdx"]

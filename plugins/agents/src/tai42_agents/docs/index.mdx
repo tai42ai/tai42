@@ -1,0 +1,73 @@
+---
+title: "Ready-made agents"
+description: "The seven agents this package provides and the shared TAI_AGENTS limits that bound them."
+---
+
+Seven ready-made agent workflows, each loaded by name into a manifest's
+`agents_modules`. The model behind them, how to run one, and how to compose them
+live in the central docs linked below; this page is the per-agent index and the
+shared limits.
+
+## Configuration
+
+Limits shared by every agent in this package:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_MAX_VOTERS` | `16` | Hard ceiling on the voters one voting call may fan out to; an over-limit call raises before any voter runs. |
+| `TAI_AGENTS_VOTER_CONCURRENCY` | `8` | Voters run concurrently within one voting call; the rest queue behind a semaphore. |
+| `TAI_AGENTS_EMBEDDING_DIMS_CACHE_SIZE` | `64` | Bound on the retrieval agent's embedding-dims probe cache (an LRU). |
+| `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
+
+The MCP-backed agents copy named variables from the process environment into each
+MCP server's environment through an `env_allowlist` — a per-manifest list, not a
+fixed variable of this package.
+
+## Tool-error resilience
+
+A tool failure surfaces to the model as an error tool result and the agent loop
+continues, rather than aborting the run: a `ToolException` — which is how an
+in-process tool's own body exception is reported — or a pydantic `ValidationError`
+from a malformed tool call becomes an error result the model can react to. Failures
+outside the tool call (agent machinery, provider or infrastructure errors) still
+abort loudly. This holds across every tool-running agent in this package, including a
+deep agent's explicit and nested subagents. A thread whose previous turn was aborted
+mid-tool-call is repaired at the next turn start — its unanswered tool calls get
+synthetic error results so the provider accepts the thread — while a thread paused on
+a real interrupt is left untouched.
+
+## deep_agent
+
+Runs a deep agent with planning, subagents, skills, and a filesystem backend.
+
+## refine_agent
+
+Runs an Evaluator-Critic refinement loop until the Critic approves or the budget runs
+out.
+
+## voting_agent
+
+Runs a voting workflow — voter LLMs answer in parallel, then a judge LLM decides.
+Bounded by `TAI_AGENTS_MAX_VOTERS` and `TAI_AGENTS_VOTER_CONCURRENCY`.
+
+## retrieval_tools_agent
+
+A tools agent that retrieves its tools on demand from a vector store.
+
+## tools_agent
+
+Runs a LangGraph tools agent over tools loaded by name (and optional presets).
+
+## mcp_tools_agent
+
+Runs a LangGraph tools agent whose tools are loaded from an MCP configuration.
+
+## vqa_agent
+
+Analyzes an image and answers a query about it using a multimodal LLM.
+
+## See also
+
+- [Agents](/concepts/agents) and [Deep agents](/concepts/deep-agents) — the model.
+- [Use the ready-made agents](/guides/use-the-ready-made-agents) — running each of these.
+- [Author an agent](/guides/author-an-agent) — building your own.

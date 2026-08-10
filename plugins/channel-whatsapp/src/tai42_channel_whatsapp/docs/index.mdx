@@ -1,0 +1,94 @@
+---
+title: WhatsApp channel (Meta Cloud API)
+description: Configure the Meta Cloud API WhatsApp channel — the CHANNEL_WHATSAPP_ env group, the single webhook, rich messages, and the template window.
+---
+
+Bridge a WhatsApp number carried by the Meta Cloud API to an agent, or deliver
+`ask_user` questions into it. Unlike Twilio, this channel sends interactive
+controls, media, and pre-approved templates.
+
+## Enable it
+
+```yaml manifest.yml
+channel_modules:
+  - tai42_channel_whatsapp
+```
+
+## Configuration
+
+The `CHANNEL_WHATSAPP_` env group. `CHANNEL_WHATSAPP_REDIS_URL` (and the
+inherited connection-tuning fields) point the plugin-owned correlation store.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CHANNEL_WHATSAPP_ACCESS_TOKEN` | unset | Graph API bearer token for the send (one token serves many numbers). Secret. |
+| `CHANNEL_WHATSAPP_APP_SECRET` | unset | Keys the `X-Hub-Signature-256` HMAC the inbound door checks over the raw body. Secret. |
+| `CHANNEL_WHATSAPP_VERIFY_TOKEN` | unset | Shared secret echoed during Meta's GET webhook verification handshake. Secret. |
+| `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | unset | `phone_number_id` used as the sender for `ask_user` when none is routed. |
+| `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | empty | Whitelist of `wa_id`s a caller-requested recipient must be on (`ask_user` only). Comma-separated or JSON list. |
+| `CHANNEL_WHATSAPP_HTTP_TIMEOUT_SECONDS` | `30` | Timeout for the outbound send and the loopback answer forward. |
+| `CHANNEL_WHATSAPP_DEDUPE_TTL` | `172800` | Seconds a handled `wamid` stays remembered (replay guard). |
+| `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | `30` | Rolling "seen within N days" window for template-send recipient policy; `0` disables known-contact tracking (allowlist-only). |
+| `CHANNEL_WHATSAPP_REDIS_URL` | unset | Connection for the correlation store. |
+
+## Point the webhook at the deployment
+
+Meta uses a **single** webhook endpoint for verification, inbound messages, and
+delivery statuses (configured in the Meta App dashboard):
+
+- Callback URL → `{public base URL}/api/channels/whatsapp/inbound`
+- Verify token → the value of `CHANNEL_WHATSAPP_VERIFY_TOKEN`
+
+On subscribe, Meta sends a `GET` with `hub.challenge`; the door echoes it only
+when the verify token matches. Inbound messages and delivery statuses then arrive
+as signed `POST`s on the same URL.
+
+## Create a bridge route
+
+`our_identity` is the number's **`phone_number_id`** (from the Meta dashboard),
+not the display number:
+
+```bash
+tai conversations create chat-line \
+  --door channel --target-name chat --execution-key chat-bot \
+  --channel whatsapp --identity 109999888877776
+```
+
+## Rich messages
+
+- **Interactive select asks** — when a `select` question is delivered, its
+  options render as native WhatsApp controls: a short set becomes tappable reply
+  buttons, a longer set a list message. Past WhatsApp's row cap, or when an
+  option's text is too long for a button or row, the ask falls back to the
+  numbered-text prompt so the person always sees every option in full. Either way
+  the answer is the option text.
+- **Media on a notification** — `notify_user` can attach media: an image sends as
+  a WhatsApp image message from a public `https` URL with an optional caption (a
+  `data:` URI is refused loudly); a link item is appended to the body. `media`
+  and `template` are mutually exclusive on one send.
+
+## The 24-hour window and templates
+
+WhatsApp delivers freeform messages only inside a **24-hour service window**
+opened by the client's last message. Outside it, a freeform reply is rejected
+(synchronously, or later via a `failed` delivery-status webhook), and the record
+ends `failed` rather than silently vanishing. Read failures with:
+
+```bash
+tai conversations failed
+```
+
+A **pre-approved template** is the one message delivered outside the window. Send
+one with `notify_user`'s `template` input (a `name`, a `language`, and positional
+body-text `parameters`). Because a template is billed and delivered cold, the
+channel fences who may receive one: the recipient must be on
+`CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS`, or be a **known contact** — a number the
+inbound webhook received a message from within
+`CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS`. A template send to a cold,
+unlisted number is refused loudly.
+
+## See also
+
+- [Client conversations](/concepts/client-conversations) — the bridge model and delivery outcomes.
+- [Interactions](/concepts/interactions) — the answer contract for a delivered question.
+- [Conversation bridge](/reference/conversation-bridge) — every setting and the authorization model.

@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-accounts-postgres"
+version = "1.1.0"
+description = "Postgres-backed accounts provider for the TAI ecosystem: an installable plugin that owns user accounts, password login, sessions, and invites, registers itself as the \"accounts-postgres\" provider, and ships a Studio users-admin UI."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["tai", "accounts", "authentication", "login", "sessions", "postgres", "access-control"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract the provider registers through — the accounts
+    # ABCs, the login-method metadata models, and the module-level accounts registry.
+    "tai42-contract>=1.6,<2",
+    # The Postgres and Redis clients plus the session/invite token hash. The
+    # `postgres` extra (psycopg[binary,pool]) backs the user/session/invite store;
+    # the `redis` extra backs the login rate limiter and the shared bootstrap
+    # token. Both are REQUIRED, not optional: the plugin's storage IS Postgres and
+    # its throttle IS Redis, so both client modules must resolve for it to import.
+    "tai42-kit[postgres,redis]>=1.5,<2",
+    # argon2id password hashing (RFC 9106 defaults).
+    "argon2-cffi>=23",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/plugins/accounts-postgres"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/accounts-postgres/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Public dev/test tooling. No live-Postgres test dependency: the store seam is
+# faked in tests, and real-SQL correctness is proven by the ecosystem e2e leg
+# against a live database, so this repo needs no pytest-postgresql.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.3",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    # The plugin-spec test parses tai-plugin.yml.
+    "pyyaml>=6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_accounts_postgres*"]
+
+[tool.setuptools.package-data]
+# The packaged migration chain (discovered and applied by the shared runner), the
+# built Studio bundle (served by the host), and the plugin spec travel in the
+# wheel alongside the typing marker.
+tai42_accounts_postgres = ["py.typed", "tai-plugin.yml", "migrations/*.sql", "studio/*", "docs/*", "docs/images/*"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+
+# The version floors in [project] are the compatibility contract; these sources
+# resolve the tai42-* requirements to the in-tree workspace members instead of
+# the published packages. They are not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+tai42-kit = { workspace = true }
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_skeleton".msg = "tai42-accounts-postgres is a contract-facing plugin: it never imports tai42-skeleton."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["tai42_accounts_postgres"]
+
+[tool.coverage.report]
+fail_under = 95
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
