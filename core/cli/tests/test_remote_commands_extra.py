@@ -14,7 +14,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import Handler, data_response, run_cli
+from tests.remote_harness import Handler, data_response, run_cli, visible
 
 # -- keys --------------------------------------------------------------------
 
@@ -1111,7 +1111,7 @@ def test_config_env_set_env_file_no_equals_line_raises(monkeypatch: pytest.Monke
     env_file.write_text("GOOD=1\nraw_secret_xyz\n")
     result = run_cli(monkeypatch, _capture_env_handler({}), ["config", "env", "set", "--env-file", str(env_file)])
     assert result.exit_code != 0
-    assert "line 2" in result.output
+    assert "line 2" in visible(result.output)
     assert "raw_secret_xyz" not in result.output
 
 
@@ -1122,7 +1122,7 @@ def test_config_env_set_env_file_empty_key_line_raises(monkeypatch: pytest.Monke
     env_file.write_text("=whsec_value\n")
     result = run_cli(monkeypatch, _capture_env_handler({}), ["config", "env", "set", "--env-file", str(env_file)])
     assert result.exit_code != 0
-    assert "line 1" in result.output
+    assert "line 1" in visible(result.output)
     assert "whsec_value" not in result.output
 
 
