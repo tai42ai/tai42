@@ -534,6 +534,64 @@ def test_mcp_set_rejects_wrong_shape(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     assert run_cli(monkeypatch, lambda r: data_response({}), ["mcp", "set", "--file", str(cfg)]).exit_code != 0
 
 
+def test_mcp_add_single_object(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps({"title": "srv"}), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/mcp-config/entries"
+        assert json.loads(request.content) == {"entries": [{"title": "srv"}], "replace": False}
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["mcp", "add", "--file", str(cfg)]).exit_code == 0
+
+
+def test_mcp_add_bare_array_keeps_order(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps([{"title": "a"}, {"title": "b"}]), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"entries": [{"title": "a"}, {"title": "b"}], "replace": False}
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["mcp", "add", "--file", str(cfg)]).exit_code == 0
+
+
+def test_mcp_add_entries_object_with_replace(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps({"entries": [{"title": "srv"}]}), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"entries": [{"title": "srv"}], "replace": True}
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["mcp", "add", "--file", str(cfg), "--replace"]).exit_code == 0
+
+
+def test_mcp_add_rejects_bad_json(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text("{not json", encoding="utf-8")
+    assert run_cli(monkeypatch, lambda r: data_response({}), ["mcp", "add", "--file", str(cfg)]).exit_code != 0
+
+
+def test_mcp_add_rejects_wrong_shape(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps(42), encoding="utf-8")
+    result = run_cli(monkeypatch, lambda r: data_response({}), ["mcp", "add", "--file", str(cfg)])
+    assert result.exit_code != 0
+    assert "entries" in result.output
+
+
+def test_mcp_remove(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/mcp-config/entries/srv"
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["mcp", "remove", "srv"]).exit_code == 0
+
+
 def test_mcp_reload_reload_failed_deregister(monkeypatch: pytest.MonkeyPatch) -> None:
     def reload_handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/mcp-status/srv/reload"
@@ -673,3 +731,85 @@ def test_presets_set_version_tags(monkeypatch: pytest.MonkeyPatch) -> None:
         return data_response({"ok": True})
 
     assert run_cli(monkeypatch, handler, ["presets", "set-version-tags", "p", "2", "stable"]).exit_code == 0
+
+
+# -- manifest (tools/agents entries + api-tools) -----------------------------
+
+
+def test_manifest_tools_add(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps({"title": "grp"}), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/tools-config/entries"
+        assert json.loads(request.content) == {"entries": [{"title": "grp"}], "replace": True}
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["manifest", "tools-add", "--file", str(cfg), "--replace"]).exit_code == 0
+
+
+def test_manifest_tools_remove(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/tools-config/entries/grp"
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["manifest", "tools-remove", "grp"]).exit_code == 0
+
+
+def test_manifest_agents_add(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps([{"title": "grp"}]), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/agents-config/entries"
+        assert json.loads(request.content) == {"entries": [{"title": "grp"}], "replace": False}
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["manifest", "agents-add", "--file", str(cfg)]).exit_code == 0
+
+
+def test_manifest_agents_remove(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/agents-config/entries/grp"
+        return data_response({"ok": True})
+
+    assert run_cli(monkeypatch, handler, ["manifest", "agents-remove", "grp"]).exit_code == 0
+
+
+def test_manifest_api_tools_builds_all_four_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/api-tools"
+        assert json.loads(request.content) == {
+            "include_add": ["echo"],
+            "include_remove": ["status"],
+            "exclude_add": ["alerts"],
+            "exclude_remove": ["events"],
+        }
+        return data_response({"ok": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "manifest",
+            "api-tools",
+            "--include-add",
+            "echo",
+            "--include-remove",
+            "status",
+            "--exclude-add",
+            "alerts",
+            "--exclude-remove",
+            "events",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_manifest_api_tools_requires_a_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run_cli(monkeypatch, lambda r: data_response({}), ["manifest", "api-tools"]).exit_code != 0

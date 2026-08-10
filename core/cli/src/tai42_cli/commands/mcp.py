@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -18,6 +18,24 @@ app = typer.Typer(
     help="Inspect and configure mounted MCP servers.",
     no_args_is_help=True,
 )
+
+
+def _load_add_entries(file: Path) -> list[Any]:
+    """Read an ``add``-file's entries: ONE entry object, a bare JSON array, or an
+    object carrying an ``"entries"`` list. An object is a single entry unless it
+    carries an ``"entries"`` list."""
+    try:
+        parsed = json.loads(file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"file must be valid JSON: {exc}", param_hint="--file") from exc
+    if isinstance(parsed, dict):
+        return parsed.get("entries", [parsed])
+    if isinstance(parsed, list):
+        return parsed
+    raise typer.BadParameter(
+        "file must be one entry object, a JSON array of entries, or an object with an 'entries' list",
+        param_hint="--file",
+    )
 
 
 @app.command("status")
@@ -77,6 +95,54 @@ def set_mcp_config(
         raise typer.BadParameter("file must be a JSON list or an object with an 'mcp' list", param_hint="--file")
     with ctx_obj.client() as client:
         data = client.post("/api/mcp-config", json={"mcp": mcp})
+    emit_result(ctx_obj, data)
+
+
+@app.command("add")
+@covers(("POST", "/api/mcp-config/entries"))
+def add_mcp_entries(
+    ctx: typer.Context,
+    file: Annotated[
+        Path,
+        typer.Option(
+            "--file", exists=True, dir_okay=False, readable=True, help="A JSON file with the MCP entries to add."
+        ),
+    ],
+    replace: Annotated[
+        bool,
+        typer.Option("--replace", help="Replace entries whose title already exists (in place) instead of refusing."),
+    ] = False,
+) -> None:
+    """Add MCP config entries to the manifest and hot-reload.
+
+    The file is ONE entry object, a bare JSON array of entries, or an object
+    carrying an ``"entries"`` list. Without ``--replace`` an entry whose title
+    already exists is refused.
+
+    Example: ``tai mcp add --file entries.json``
+    """
+    ctx_obj = app_context(ctx)
+    entries = _load_add_entries(file)
+    with ctx_obj.client() as client:
+        data = client.post("/api/mcp-config/entries", json={"entries": entries, "replace": replace})
+    emit_result(ctx_obj, data)
+
+
+@app.command("remove")
+@covers(("DELETE", "/api/mcp-config/entries/{title}"))
+def remove_mcp_entry(
+    ctx: typer.Context,
+    title: Annotated[str, typer.Argument(help="MCP server title.")],
+) -> None:
+    """Remove one MCP config entry by title and hot-reload.
+
+    Persisted removal (see `deregister` for runtime-only detach).
+
+    Example: ``tai mcp remove my-server``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.delete(f"/api/mcp-config/entries/{title}")
     emit_result(ctx_obj, data)
 
 
@@ -153,6 +219,8 @@ def deregister_mcp(
     ] = None,
 ) -> None:
     """Detach a single MCP server's tools by title (the removal counterpart of reload).
+
+    Runtime-only detach; for persisted removal see `remove`.
 
     Example: ``tai mcp deregister my-server``
     """
