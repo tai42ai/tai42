@@ -7,9 +7,9 @@ Three refusals guard every env / manifest writer:
 * X-band refusal — no profile or editor may CARRY a deployment / boot-identity
   key. The refusal reads the writer's PAYLOAD keys, never the post-carry
   effective env (a profile apply legitimately carries the whole X band across
-  ``replace_env``). Asserted per writer path (``apply_env_change`` and the C5
+  ``replace_env``). Asserted per writer path (``apply_env_change`` and the
   ``_validate_replace`` entry) and spanning both halves of the union plus the two
-  PLAN_4 deployment keys.
+  deployment keys.
 * Key-material refusal (CHANGE-aware) — no profile or editor may SET a ``key_material``
   field (a KEK / signing key) to a NEW value; these are ``hot``-class (not X-band) yet must
   rotate through their own path. But an UNCHANGED carry is allowed (key material CAN sit in
@@ -77,13 +77,13 @@ def _service(store: FakeConfigStore) -> tuple[ConfigService, FakeReloadAdmin, Re
 
 
 # ---------------------------------------------------------------------------
-# X-band refusal — per writer path, spanning both union halves + the PLAN_4 keys
+# X-band refusal — per writer path, spanning both union halves + the deployment keys
 # ---------------------------------------------------------------------------
 
 # TAI_CONFIG_MODE  = half (a), a registry ``excluded`` field.
 # TAI_MANIFEST_PATH = redundant: registry-excluded AND listed in X_BAND_EXTRA.
 # TAI_RUN_MODE     = half (b), a boot-identity bare read no settings class declares.
-# TAI_SUPERVISED / TAI_READY_SENTINEL_PATH = the two PLAN_4 deployment keys.
+# TAI_SUPERVISED / TAI_READY_SENTINEL_PATH = the two deployment keys.
 _X_KEYS = ["TAI_CONFIG_MODE", "TAI_MANIFEST_PATH", "TAI_RUN_MODE", "TAI_SUPERVISED", "TAI_READY_SENTINEL_PATH"]
 
 
@@ -231,7 +231,7 @@ def test_refuse_key_material_allows_unchanged_and_non_km_payload() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Admin-pair (both-or-neither, per database name) — README D8/D14
+# Admin-pair (both-or-neither, per database name)
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +287,7 @@ async def test_apply_env_change_refuses_half_set_admin_pair(monkeypatch: pytest.
 
 
 def test_validate_replace_refuses_half_set_admin_pair() -> None:
-    # Wired into the C5 profile-apply validate entry: a profile carrying only the admin USER
+    # Wired into the profile-apply validate entry: a profile carrying only the admin USER
     # (no PASSWORD) is refused, naming the incomplete pair.
     store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
     service, _admin, _bus = _service(store)
@@ -306,7 +306,7 @@ def test_validate_replace_allows_complete_admin_pair() -> None:
 
 
 # ---------------------------------------------------------------------------
-# registered_env_var_names — the generated-key shadow-avoidance source (C9c)
+# registered_env_var_names — the generated-key shadow-avoidance source
 # ---------------------------------------------------------------------------
 
 

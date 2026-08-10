@@ -25,8 +25,8 @@ def _route(**overrides: object) -> SimpleNamespace:
     """A stand-in resolved route carrying exactly the fields the helper reads off it."""
     fields: dict[str, object] = {
         "target_kind": "agent",
-        "target_name": "concierge",
-        "route_name": "tg-concierge",
+        "target_name": "assistant",
+        "route_name": "tg-assistant",
         "door": "channel",
         "channel": "telegram",
         "our_identity": "123456",
@@ -96,19 +96,19 @@ def wired(monkeypatch: pytest.MonkeyPatch):
 
 async def test_mints_for_the_resolved_conversation(wired) -> None:
     route = _route()
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True)
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True)
     resolve_calls, config_store, code_store = wired(route=route, config=config)
 
     code, expires_at = await pairing.mint_pairing_code("telegram", "123456", "chat-42")
 
     assert (code, expires_at) == ("LINK-ABCD1234", _EXPIRES_AT)
     assert resolve_calls == [("telegram", "123456")]
-    assert config_store.calls == [("agent", "concierge")]
+    assert config_store.calls == [("agent", "assistant")]
     assert code_store.minted == [
         MintingConversation(
             target_kind="agent",
-            target_name="concierge",
-            route_name="tg-concierge",
+            target_name="assistant",
+            route_name="tg-assistant",
             door="channel",
             channel="telegram",
             our_identity="123456",
@@ -120,7 +120,7 @@ async def test_mints_for_the_resolved_conversation(wired) -> None:
 async def test_our_identity_canonicalized_before_resolution(wired) -> None:
     # A non-canonical (surrounding whitespace) identity resolves by its canonical form, so
     # the resolve seam — which compares canonical forms — matches the route.
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True)
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True)
     resolve_calls, _config_store, _code_store = wired(route=_route(), config=config)
 
     await pairing.mint_pairing_code("telegram", "  123456  ", "chat-42")
@@ -129,7 +129,7 @@ async def test_our_identity_canonicalized_before_resolution(wired) -> None:
 
 
 async def test_sender_stored_canonically(wired) -> None:
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True)
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True)
     _resolve_calls, _config_store, code_store = wired(route=_route(), config=config)
 
     await pairing.mint_pairing_code("telegram", "123456", "  chat-42  ")
@@ -138,7 +138,7 @@ async def test_sender_stored_canonically(wired) -> None:
 
 
 async def test_multichannel_off_refuses(wired) -> None:
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=False)
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=False)
     _resolve_calls, _config_store, code_store = wired(route=_route(), config=config)
 
     with pytest.raises(MultichannelDisabledError, match="multichannel turned off"):
@@ -176,7 +176,7 @@ async def test_blank_or_missing_argument_refuses(wired, channel, our_identity, s
     # signature rejects it first (see test_null_argument_refused_at_input_validation).
     resolve_calls, _config_store, code_store = wired(
         route=_route(),
-        config=TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True),
+        config=TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True),
     )
 
     with pytest.raises(ValueError, match=f"non-blank {field}"):
@@ -186,11 +186,11 @@ async def test_blank_or_missing_argument_refuses(wired, channel, our_identity, s
 
 
 async def test_re_mint_rotates_never_dedupes(wired) -> None:
-    # What this pins is the TOOL's own behaviour (R14): it holds no turn-scoped coalescing,
+    # What this pins is the TOOL's own behaviour: it holds no turn-scoped coalescing,
     # so two calls issue two independent mints — never deduped, never reused. The rotation
     # itself (newest code wins, the previous is invalidated) is ConversationPairCodeStore's
     # guarantee, covered by its own tests, not asserted here.
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True)
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True)
     _resolve_calls, _config_store, code_store = wired(route=_route(), config=config)
 
     await pairing.mint_pairing_code("telegram", "123456", "chat-42")
@@ -213,7 +213,7 @@ async def test_builtin_returns_only_code_and_expires_at(monkeypatch: pytest.Monk
 
     result = await builtin_get_pairing_code.get_pairing_code("telegram", "123456", "chat-42")
 
-    # R8: EXACTLY {code, expires_at} — no links, no wording, no extra keys.
+    # EXACTLY {code, expires_at} — no links, no wording, no extra keys.
     assert result == {"code": "LINK-ZZ990011", "expires_at": _EXPIRES_AT.isoformat()}
     assert set(result) == {"code", "expires_at"}
     assert calls == [("telegram", "123456", "chat-42")]
@@ -221,7 +221,7 @@ async def test_builtin_returns_only_code_and_expires_at(monkeypatch: pytest.Monk
 
 async def test_builtin_propagates_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_mint(channel: str, our_identity: str, sender: str) -> tuple[str, datetime]:
-        raise MultichannelDisabledError("target agent:concierge has multichannel turned off")
+        raise MultichannelDisabledError("target agent:assistant has multichannel turned off")
 
     monkeypatch.setattr(builtin_get_pairing_code, "mint_pairing_code", fake_mint)
 

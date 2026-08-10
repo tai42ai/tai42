@@ -2,7 +2,7 @@
 
 Contributor and agent rules for this repository. Terse by design.
 
-This is one uv workspace: `core/*` (contract, kit, skeleton), `plugins/*`, and
+This is one uv workspace: `core/*` (contract, kit, cli, skeleton), `plugins/*`, and
 `e2e`. Workspace siblings resolve in-tree — never from the index.
 
 ## Commits

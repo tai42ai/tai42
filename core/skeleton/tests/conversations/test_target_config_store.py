@@ -25,13 +25,13 @@ def store(monkeypatch) -> ConversationTargetConfigStore:
 
 
 async def test_upsert_creates_then_replaces(store):
-    created = await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge"))
+    created = await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
     assert created is True
     replaced = await store.upsert(
-        TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True)
+        TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True)
     )
     assert replaced is False
-    got = await store.get("agent", "concierge")
+    got = await store.get("agent", "assistant")
     assert got is not None
     assert got.multichannel is True
 
@@ -41,34 +41,34 @@ async def test_get_missing_is_none(store):
 
 
 async def test_list_returns_every_config_keyed_by_pair(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge"))
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
     await store.upsert(
         TargetConversationConfig(target_kind="tool", target_name="lookup", greeting_template="hi {pairing_code}")
     )
     listed = await store.list()
-    assert set(listed) == {("agent", "concierge"), ("tool", "lookup")}
+    assert set(listed) == {("agent", "assistant"), ("tool", "lookup")}
     assert listed[("tool", "lookup")].greeting_template == "hi {pairing_code}"
 
 
 async def test_delete_removes_row_and_index_member(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge"))
-    assert await store.delete("agent", "concierge") is True
-    assert await store.get("agent", "concierge") is None
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
+    assert await store.delete("agent", "assistant") is True
+    assert await store.get("agent", "assistant") is None
     assert await store.list() == {}
     # ``list() == {}`` alone passes even on a leaked index member (it orphan-skips an
     # indexed-but-rowless member), so assert the names set itself no longer carries the member.
     assert await store.fake.smembers(store.settings.target_config_names_key) == set()
     # A second delete of the now-absent key removes nothing.
-    assert await store.delete("agent", "concierge") is False
+    assert await store.delete("agent", "assistant") is False
 
 
 async def test_list_skips_an_indexed_member_with_no_row(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge"))
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
     # An index member whose row never landed (or was dropped from under it) is logged and
     # skipped, never surfaced as a half-row.
     store.fake.seed_member(store.settings.target_config_names_key, "tool:ghost")
     listed = await store.list()
-    assert set(listed) == {("agent", "concierge")}
+    assert set(listed) == {("agent", "assistant")}
 
 
 async def test_a_target_name_bearing_a_colon_round_trips(store):

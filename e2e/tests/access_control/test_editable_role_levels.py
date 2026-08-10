@@ -1,4 +1,4 @@
-"""M20 F1 — the editable-role LEVEL journey: create → assign → enforce at the grant
+"""The editable-role LEVEL journey: create → assign → enforce at the grant
 level, LIVE role edits, and keys-inherit-owner.
 
 A custom role is a per-tag ACCESS-LEVEL map (``{tag: none|read|write}``) over a base
@@ -13,7 +13,7 @@ The grant map under test is ``{hooks: write, presets: read}``:
 - ``presets: read`` reaches the presets GETs but is DENIED the presets writes;
 - ``config`` is ungranted (absent → ``none``) so its reads are denied.
 Both a directly-assigned user SESSION and an owner-attenuated KEY are asserted, so the
-key-inherits-owner (D9) leg rides the same grant map the session does.
+key-inherits-owner leg rides the same grant map the session does.
 """
 
 from __future__ import annotations

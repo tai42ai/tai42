@@ -49,7 +49,7 @@ def test_env_override(no_web_env, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CHANNEL_WEB_MAX_BODY_BYTES", "2048")
     monkeypatch.setenv("CHANNEL_WEB_MAX_STREAMS_PER_VISITOR", "2")
     monkeypatch.setenv("CHANNEL_WEB_MAX_STREAMS_TOTAL", "7")
-    monkeypatch.setenv("CHANNEL_WEB_PAGE_TITLE", "Support")
+    monkeypatch.setenv("CHANNEL_WEB_PAGE_TITLE", "Console")
     reset_all_settings()
     settings = WebSettings()
     assert settings.max_body_bytes == 2048
@@ -62,7 +62,7 @@ def test_env_override(no_web_env, monkeypatch: pytest.MonkeyPatch):
     assert settings.blocking_grace_seconds == 2.5
     assert settings.session_cookie_secure is False
     assert settings.session_ttl_seconds == 600
-    assert settings.page_title == "Support"
+    assert settings.page_title == "Console"
 
 
 def test_backlog_and_answer_env_override(no_web_env, monkeypatch: pytest.MonkeyPatch):

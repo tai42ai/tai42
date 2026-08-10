@@ -23,18 +23,18 @@ def store(monkeypatch) -> ConversationTargetConfigStore:
 
 
 async def test_export_import_round_trip(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True))
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True))
     await store.upsert(
         TargetConversationConfig(target_kind="tool", target_name="lookup", greeting_template="hi {pairing_code}")
     )
     exported = await export_target_configs()
     assert {(c["target_kind"], c["target_name"]) for c in exported["target_configs"]} == {
-        ("agent", "concierge"),
+        ("agent", "assistant"),
         ("tool", "lookup"),
     }
 
     # Wipe and restore from the export.
-    for kind, name in (("agent", "concierge"), ("tool", "lookup")):
+    for kind, name in (("agent", "assistant"), ("tool", "lookup")):
         await store.delete(kind, name)
     report = await import_target_configs(exported, "skip")
     assert report["created"] == 2
@@ -44,22 +44,22 @@ async def test_export_import_round_trip(store):
 
 
 async def test_skip_leaves_an_existing_config_untouched(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=False))
-    payload = {"target_configs": [{"target_kind": "agent", "target_name": "concierge", "multichannel": True}]}
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=False))
+    payload = {"target_configs": [{"target_kind": "agent", "target_name": "assistant", "multichannel": True}]}
     report = await import_target_configs(payload, "skip")
     assert report["skipped_existing"] == 1
     assert report["created"] == 0
-    kept = await store.get("agent", "concierge")
+    kept = await store.get("agent", "assistant")
     assert kept is not None
     assert kept.multichannel is False
 
 
 async def test_overwrite_replaces_an_existing_config(store):
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=False))
-    payload = {"target_configs": [{"target_kind": "agent", "target_name": "concierge", "multichannel": True}]}
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=False))
+    payload = {"target_configs": [{"target_kind": "agent", "target_name": "assistant", "multichannel": True}]}
     report = await import_target_configs(payload, "overwrite")
     assert report["updated"] == 1
-    updated = await store.get("agent", "concierge")
+    updated = await store.get("agent", "assistant")
     assert updated is not None
     assert updated.multichannel is True
 
@@ -70,14 +70,14 @@ async def test_a_duplicate_pair_in_one_payload_under_skip_is_created_once(store)
     # overwriting the first. The stored row is the FIRST one.
     payload = {
         "target_configs": [
-            {"target_kind": "agent", "target_name": "concierge", "multichannel": True},
-            {"target_kind": "agent", "target_name": "concierge", "multichannel": False},
+            {"target_kind": "agent", "target_name": "assistant", "multichannel": True},
+            {"target_kind": "agent", "target_name": "assistant", "multichannel": False},
         ]
     }
     report = await import_target_configs(payload, "skip")
     assert report["created"] == 1
     assert report["skipped_existing"] == 1
-    stored = await store.get("agent", "concierge")
+    stored = await store.get("agent", "assistant")
     assert stored is not None
     assert stored.multichannel is True
 
@@ -109,7 +109,7 @@ async def test_export_is_empty_without_the_backend(monkeypatch):
 
 async def test_import_with_rows_refuses_without_the_backend(monkeypatch):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
-    payload = {"target_configs": [{"target_kind": "agent", "target_name": "concierge"}]}
+    payload = {"target_configs": [{"target_kind": "agent", "target_name": "assistant"}]}
     with pytest.raises(RuntimeError, match="redis conversations backend"):
         await import_target_configs(payload, "skip")
 

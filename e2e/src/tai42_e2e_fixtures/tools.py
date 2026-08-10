@@ -96,7 +96,7 @@ async def e2e_settings_snapshot() -> dict:
     live process env (the precedence a freshly-constructed singleton reads under — a
     reset cache re-reads it), masking ``secret`` / ``key_material`` fields (value ``None``,
     only a ``set`` flag). ``settings_epoch`` and ``client_pool_epoch`` are the ONE shared
-    process counter (``current_client_epoch``). ``stale_holders`` is PLAN_1's sanctioned
+    process counter (``current_client_epoch``). ``stale_holders`` is the sanctioned
     :func:`sweep_stale_settings` run over every RETIRED epoch — a settings instance of a
     retired epoch a holder still keeps alive; a clean flip leaves ZERO. ``stale_pool_epochs``
     are retired client-pool epochs still present (a clean retire drains + detaches them);
@@ -109,7 +109,7 @@ async def e2e_settings_snapshot() -> dict:
     # Settings + client pools share ONE monotonic counter; read it once.
     current = current_client_epoch()
 
-    # Stale settings holders: sweep every retired epoch (< current) through PLAN_1's
+    # Stale settings holders: sweep every retired epoch (< current) through the
     # sanctioned sweep. ``sweep_stale_settings`` rejects the current/future epoch, so the
     # range stops one short of ``current``.
     stale_holders: list[dict] = []

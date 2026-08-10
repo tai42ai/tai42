@@ -204,7 +204,7 @@ async def test_secret_env_dangling_marker_elsewhere_is_400_naming_var(fake, monk
 
 
 async def test_secret_env_explicit_key_collision_different_value_is_400(fake):
-    # C9c: an EXPLICIT `key` colliding with an existing stored key holding a DIFFERENT value is
+    # an EXPLICIT `key` colliding with an existing stored key holding a DIFFERENT value is
     # refused with a loud 400 naming the key — never a silent overwrite of a live secret.
     fake.cm._env = {"GITHUB_TOKEN": "the-live-secret"}
     fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
@@ -277,7 +277,7 @@ async def test_secret_env_requires_exactly_one_of_key_or_hint(fake):
 
 
 async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
-    # C9c shadow-avoidance: even with the stored env FREE of the candidate, a generated key that
+    # shadow-avoidance: even with the stored env FREE of the candidate, a generated key that
     # would match a REGISTERED settings env_var is skipped — the generator mints a fresh,
     # non-shadowing key (suffix). Uses a REAL registered, non-X-band var as the target so the op
     # must consult registered_env_var_names() (the X band alone would not carry it).
@@ -302,7 +302,7 @@ async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
 
 
 async def test_secret_env_marks_appended_not_clobbered_reads_stored_env(fake):
-    # C9d: the op APPENDS the new key to the marks read from the STORED env (never the settings
+    # The op APPENDS the new key to the marks read from the STORED env (never the settings
     # cache), so a pre-existing stored mark survives and the new key joins it.
     fake.cm._env = {"DB_SECRET": "v", "TAI_ENV_SECRET_KEYS": "DB_SECRET"}
     fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}

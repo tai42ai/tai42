@@ -1,5 +1,5 @@
 /**
- * Config / settings editing (Mission 9 settings UI). The pytest side proves the
+ * Config / settings editing. The pytest side proves the
  * flock'd config lost-update seam (`tests/crossworker/test_file_config_race.py`);
  * the browser never edited config. Here the Environment tab of `/settings` sets a
  * UNIQUE env key, persists it (asserted through the API AND a browser reload),

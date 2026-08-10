@@ -14,7 +14,7 @@ async function createEchoPreset(page: Page, name: string, payload: string): Prom
   await page.getByRole('button', { name: 'Create preset' }).click();
   const dialog = page.getByRole('dialog', { name: 'Create preset' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
-  // Description is REQUIRED (R16) and gates submit; the bound tool's LLM-facing docstring.
+  // Description is REQUIRED and gates submit; the bound tool's LLM-facing docstring.
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`echo preset ${name}`);
   const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });
   // The picker is disabled ("Loading tools…") until the tools query resolves;
@@ -142,7 +142,7 @@ test('validate reports a clean bind, and no conflicted section when none is quar
   await page.getByRole('button', { name: 'Create preset' }).click();
   const dialog = page.getByRole('dialog', { name: 'Create preset' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill(uniq('draft'));
-  // Description is REQUIRED (R16): the validate door mirrors the create rule and
+  // Description is REQUIRED: the validate door mirrors the create rule and
   // rejects an empty one, so the draft must carry it to bind cleanly.
   await dialog.getByRole('textbox', { name: 'Description' }).fill('a draft that binds cleanly');
   const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });

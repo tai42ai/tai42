@@ -3,11 +3,11 @@
 Three invariants the intercept must hold, none of which is a happy-path link:
 
 - On a target with multichannel OFF, ``/link`` and a pair code are ORDINARY TEXT — they
-  route to the target untouched, byte-identical to a deployment that never heard of pairing
-  (R10). Read through an echo tool: what comes back is exactly what was sent.
+  route to the target untouched, byte-identical to a deployment that never heard of pairing.
+  Read through an echo tool: what comes back is exactly what was sent.
 
 - On a multichannel target, an unknown / malformed / already-spent code answers ONE uniform
-  refusal (D11) — no oracle distinguishing "never existed" from "expired" from "used".
+  refusal — no oracle distinguishing "never existed" from "expired" from "used".
 
 - A REDELIVERED redeem webhook (the provider re-POSTs the same message id) has NO second
   effect: idempotency on ``(channel, provider_message_id)`` returns the first turn's id and
@@ -41,7 +41,7 @@ from tai42_e2e.settings import HarnessSettings
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host (PLAN_2 §F)",
+    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
 )
 
 _OFF_TOOL = "e2e_echo"

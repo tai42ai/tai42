@@ -416,7 +416,7 @@ async def test_silent_worker_reports_missing_then_converges(
 # ---- stale worker (SIGSTOP, presence row decays past the freshness bound) -------------
 
 # The stale envelope: a REPLICAS(2) fleet on a 30s heartbeat TTL. A SIGSTOPped replica
-# renews no presence key, so its remaining PTTL decays below the D5 freshness bound
+# renews no presence key, so its remaining PTTL decays below the freshness bound
 # (``ttl - 2*interval`` = ``ttl/3`` = 10s) at ~``2*ttl/3`` = 20s while the row is STILL
 # present (it expires only at ``ttl`` = 30s). That ~10s window — row present but past the
 # freshness gate — is where a ``ready`` row reads STALE. A NEW builder rather than a TTL
@@ -450,7 +450,7 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
     """One REPLICAS master SIGSTOPped renews no presence key: its row decays past the
     server-computed freshness bound while STILL present (30s TTL), so the fleet listing
     flags it ``stale``. A broadcast fired the instant the flag flips reports that worker
-    ``outcome=stale`` — a quiet ``ready`` row past the D5 gate, never silently skipped.
+    ``outcome=stale`` — a quiet ``ready`` row past the freshness gate, never silently skipped.
     A flag-poll makes the exact moment deterministic (no fixed-sleep window). After
     SIGCONT a fleet reload converges the resumed replica."""
     stack = fresh_stack(build_stale_stack)
@@ -486,7 +486,7 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(
             b_is_stale, deadline=60.0, message="the SIGSTOPped replica's stale flag never flipped while present"
         )
 
-        # Broadcast IMMEDIATELY, while the stale row is still present: it fails the D5
+        # Broadcast IMMEDIATELY, while the stale row is still present: it fails the
         # freshness gate as a quiet ``ready`` row, so the report names it ``stale`` (never a
         # silent skip, never ``missing`` — that verdict needs a FRESH key).
         title = uniq("stale_mcp")

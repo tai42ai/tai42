@@ -34,7 +34,7 @@ from tai42_e2e.webchat import SESSION_COOKIE, WebChatClient, mint_unregistered_t
 # channel itself has no vendor and so no real/mock split — it is always real.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm"),
-    reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="scripted-LLM turns are the 'llm' mock leg; the real leg runs on the creds host",
 )
 
 # Room for the JSON envelope around a message text, so a body sized off the byte cap

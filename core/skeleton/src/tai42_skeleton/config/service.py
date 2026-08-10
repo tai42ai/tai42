@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 
 
 class OrphanEnvWriteError(RuntimeError):
-    """A combined env+manifest op (C9a) whose manifest persist FAILED after the env
+    """A combined env+manifest op whose manifest persist FAILED after the env
     write already landed.
 
     Env-first/manifest-second ordering: on a manifest-persist failure there is NO
@@ -197,7 +197,7 @@ class ConfigService:
     with the config manager, the reload seam, and the worker bus for testing.
     """
 
-    # Process-wide C9 env-write lock (C9d). ``from_app`` builds a FRESH ConfigService per
+    # Process-wide env-write lock. ``from_app`` builds a FRESH ConfigService per
     # call, so this is CLASS-level (not per-instance) — otherwise concurrent combined-op
     # calls would each hold their own lock and never serialize. It serializes the combined
     # op's READ→derive→WRITE span so the secret-marks append (and the generated-key
@@ -217,7 +217,7 @@ class ConfigService:
 
     @classmethod
     def _env_lock(cls) -> asyncio.Lock:
-        """The process-wide C9 env-write lock bound to the running serving loop, created on
+        """The process-wide env-write lock bound to the running serving loop, created on
         first use and rebound only if the running loop differs from the bound one (a loop
         swap — there is never a second live loop in the same process). Mirrors
         :meth:`ReloadGate._serving_lock`, keeping the singleton correct across loops rather
@@ -294,16 +294,16 @@ class ConfigService:
         *,
         manifest_pointer: str | None = None,
     ) -> ApplyResult:
-        """Combined env-write + manifest-mutate as ONE consistent unit (C9).
+        """Combined env-write + manifest-mutate as ONE consistent unit.
 
         The ``set_mcp_secret_env`` door writes a secret VALUE to the env store and a
         matching ``!ENV ${KEY}`` MARKER into the manifest; the two must stay consistent.
-        ``prepare`` receives the CURRENT stored env (read once under the C9d lock) and
+        ``prepare`` receives the CURRENT stored env (read once under the lock) and
         returns ``(changes, mutator)`` — it derives the generated/explicit key, the
         appended secret marks, and the marker-writing mutator FROM that snapshot. Running
-        it inside the lock is what makes the read→derive→write span atomic (C9d).
+        it inside the lock is what makes the read→derive→write span atomic.
 
-        Ordering keeps env + manifest consistent, all under the C9d env-write lock so
+        Ordering keeps env + manifest consistent, all under the env-write lock so
         concurrent combined ops cannot interleave their read→write (a lost secret-marks
         append, or two ops minting the same generated key):
 
@@ -317,7 +317,7 @@ class ConfigService:
         3. Persist the manifest with the PURE ``mutator`` — it only edits the passed
            document, so the k8s optimistic-concurrency REPLAY (re-read + re-run on a
            409) is side-effect-free and never double-writes the env, which is not
-           inside the replayed span. C9a partial-failure contract: a manifest-persist
+           inside the replayed span. Partial-failure contract: a manifest-persist
            failure (retries exhausted) performs **NO rollback** — the env write STANDS
            (inert, re-runnable orphan) — and raises :class:`OrphanEnvWriteError` naming
            the orphan env key(s) and the manifest pointer. Rolling the env back would
@@ -331,7 +331,7 @@ class ConfigService:
         ``manifest_pointer`` is the caller's target pointer, named in the orphan report
         when it is known (``set_mcp_secret_env`` supplies it).
         """
-        # STEP 0-3 run under the C9d env-write lock: the stored read, the caller's derive,
+        # STEP 0-3 run under the env-write lock: the stored read, the caller's derive,
         # and both persists are one atomic span so a concurrent combined op cannot read the
         # same marks/keys and clobber this op's write. The reload tail (STEP 4) is OUTSIDE
         # the lock so ``reload_gate`` is never acquired while this lock is held.
@@ -361,7 +361,7 @@ class ConfigService:
             # ``apply_change`` — a mutator can never bake a resolved secret to disk), and it edits
             # only the passed document, so the k8s optimistic-concurrency REPLAY (re-read + re-run
             # on a 409) is side-effect-free and never double-writes the env, which is outside the
-            # replayed span. C9a: a persist failure performs NO rollback — the env write STANDS as
+            # replayed span. A persist failure performs NO rollback — the env write STANDS as
             # an inert, re-runnable orphan — and raises loudly naming the orphan key(s) + pointer.
             def guarded(document: dict[str, Any]) -> None:
                 current = copy.deepcopy(document)
@@ -411,7 +411,7 @@ class ConfigService:
         2. Snapshot the current stored env as the reserved ``@previous`` version.
         3. ``build_and_swap_epoch(profile_env, drain_tolerate_driver=driven)`` holding the
            reload gate — ``driven`` excuses THIS door's own still-admitted request from
-           the retire drain (the PLAN_2 self-deadlock fix); a build failure re-raises and
+           the retire drain (else it self-deadlocks); a build failure re-raises and
            this method returns nothing persisted.
         4. ``replace_env`` — the LAST env write, reached only after a successful build.
         5. Broadcast the reload to the fleet, then roll a recycle across it for the
@@ -440,8 +440,7 @@ class ConfigService:
         # "Serve-affecting" is UNDEFINED in code (design seam 2): the CONSERVATIVE default
         # is that ANY recycle-class diff on a recycle-supported shape affects the serve
         # surface, so the applier self-exits. This over-fires on a purely backend-only diff
-        # (an unnecessary serve respawn) but always converges; PLAN_4 firms it up with a
-        # per-owning-group serve-vs-backend classification. (Bare shape was refused above,
+        # (an unnecessary serve respawn) but always converges. (Bare shape was refused above,
         # so a non-empty recycle diff here is always on a supported shape.)
         serve_affecting = bool(recycle_diff_keys)
 
@@ -459,7 +458,7 @@ class ConfigService:
         # HOLD the reload gate across the swap: the op is reload_gated (which only rejects
         # a CONCURRENT reload at the route edge), but a direct build_and_swap needs the
         # serving-loop-owned lock HELD. ``drain_tolerate_driver=driven`` excuses this
-        # door's own admitted request from the retire's in-flight drain (PLAN_2 fix); a
+        # door's own admitted request from the retire's in-flight drain; a
         # build failure re-raises here (env restored, store untouched) — STEP 4 never runs.
         async with reload_gate.lock:
             # Release the loop-bound langgraph checkpoint/store pools BEFORE the build's
@@ -555,7 +554,7 @@ class ConfigService:
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
 
     def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> None:
-        """Validate a combined env-write + manifest-mutate (C9) before it persists.
+        """Validate a combined env-write + manifest-mutate before it persists.
 
         Refuses an X-band key in the env change PAYLOAD, resolves the MUTATED manifest's
         ``!ENV`` markers against the post-change effective env (so the marker the mutator

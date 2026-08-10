@@ -295,7 +295,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
     """A stream that exempted itself from its generation's in-flight drain (the interactions
     inbox SSE — it never completes on its own) does not hold the generation in-flight, so a
     bus-driven retire reads it idle and returns promptly, and the session-manager close still
-    fires SYNCHRONOUSLY (D13a). (This test admits then exempts, so the epoch is idle by the
+    fires SYNCHRONOUSLY. (This test admits then exempts, so the epoch is idle by the
     retire — it pins that the exemption RELEASED the slot; it does NOT by itself distinguish a
     synchronous drain from a deferred one. That ordering — a NON-exempt request is WAITED for
     before ``aclose`` — is pinned by ``test_a_non_exempt_in_flight_request_is_drained_before_aclose``.)"""
@@ -332,7 +332,8 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain() -> None:
         drain_tolerate_driver=False,  # bus-driven (fleet sibling)
     )
     # The retire read the generation idle (the exempt slot was released) and returned promptly;
-    # a still-counted in-flight request would instead be WAITED for (next test). D13a fired sync.
+    # a still-counted in-flight request would instead be WAITED for (next test). The
+    # session-manager close fired sync.
     assert loop.time() - start < 1.0, "the drain-exempt stream stalled the retire"
     assert closed == ["closed"], "the retire did not close the old lifespan synchronously"
 

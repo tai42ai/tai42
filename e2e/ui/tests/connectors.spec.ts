@@ -1,5 +1,5 @@
 /**
- * Connectors OAuth flow (Mission 9 connectors UI). The pytest twin proves
+ * Connectors OAuth flow. The pytest twin proves
  * connect-on-A / complete-on-B + token-encrypted-at-rest against the fixture
  * provider + stub IdP (`tests/connectors/test_oauth_and_refresh.py`); the browser
  * never clicked through it. The studio stack carries the same fixture connector

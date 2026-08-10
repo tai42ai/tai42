@@ -100,7 +100,7 @@ def _wire_router(monkeypatch) -> None:
 
     async def _resolve(token):
         return ResolvedTrigger(
-            topic="orders",
+            topic="events",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
             require_api_key=token == "api-key-token",
@@ -219,19 +219,19 @@ def test_list_verifiers_rejected_without_auth(boundary_client):
 
 
 def test_set_topic_verifier_rejected_without_auth(boundary_client):
-    resp = boundary_client.put("/api/hooks/topics/orders/verifier", json={"verifier": "shared_secret", "config": {}})
+    resp = boundary_client.put("/api/hooks/topics/events/verifier", json={"verifier": "shared_secret", "config": {}})
     assert resp.status_code in (401, 403)
 
 
 def test_delete_topic_verifier_rejected_without_auth(boundary_client):
-    assert boundary_client.delete("/api/hooks/topics/orders/verifier").status_code in (401, 403)
+    assert boundary_client.delete("/api/hooks/topics/events/verifier").status_code in (401, 403)
 
 
 def test_webhook_ingress_reachable_unauthenticated(boundary_client):
     # The public ingress is reached (handler runs) with no credential.
-    resp = boundary_client.get("/universal_webhook/orders")
+    resp = boundary_client.get("/universal_webhook/events")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "accepted", "topic": "orders"}
+    assert resp.json() == {"status": "accepted", "topic": "events"}
 
 
 def test_create_trigger_link_rejected_without_auth(boundary_client):
@@ -282,7 +282,7 @@ def test_set_topic_verifier_refused_for_an_authenticated_non_admin(credentialed_
     # A verifier binding is the topic's only ingress lock and binding REPLACES it, so
     # the door is admin-only even for a principal that may register hooks.
     resp = credentialed_client.put(
-        "/api/hooks/topics/orders/verifier",
+        "/api/hooks/topics/events/verifier",
         json={"verifier": "shared_secret", "config": {}},
         headers={"X-Api-Key": _VALID_KEY},
     )
@@ -292,7 +292,7 @@ def test_set_topic_verifier_refused_for_an_authenticated_non_admin(credentialed_
 def test_delete_topic_verifier_refused_for_an_authenticated_non_admin(credentialed_client):
     # Unbinding reopens the topic's webhook to anyone, and its hooks then fire under
     # keys this caller could never pass the bind gate to delegate.
-    resp = credentialed_client.delete("/api/hooks/topics/orders/verifier", headers={"X-Api-Key": _VALID_KEY})
+    resp = credentialed_client.delete("/api/hooks/topics/events/verifier", headers={"X-Api-Key": _VALID_KEY})
     assert resp.status_code == 403
 
 
@@ -306,8 +306,8 @@ def test_topic_verifier_routes_are_fenced_at_every_grant_level():
 
     reset_route_index()
     for method in ("PUT", "DELETE"):
-        meta = resolve_route_meta("/api/hooks/topics/orders/verifier", method)
-        assert meta is not None, f"{method} /api/hooks/topics/orders/verifier did not resolve"
+        meta = resolve_route_meta("/api/hooks/topics/events/verifier", method)
+        assert meta is not None, f"{method} /api/hooks/topics/events/verifier did not resolve"
         assert meta.action == "fenced"
         # No per-tag level opens a fence — ``hooks: write`` included.
         for level in ("none", "read", "write"):

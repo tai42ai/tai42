@@ -1,5 +1,5 @@
 /**
- * Settings profiles (Mission 31) through the Studio Profiles tab over the REAL
+ * Settings profiles through the Studio Profiles tab over the REAL
  * stack. The pytest side proves the profile store / diff / apply pipeline
  * (`tests/config_profiles/*`, `operations/test_profile_ops.py`); here the browser
  * drives the tab end to end and asserts through BOTH the UI and the API.

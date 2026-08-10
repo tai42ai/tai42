@@ -1,4 +1,4 @@
-"""PLAN_2 — ``callback_origin`` binds a signed inbound to the RIGHT base URL.
+"""``callback_origin`` binds a signed inbound to the RIGHT base URL.
 
 The signed-URL medium (twilio) computes its X-Twilio-Signature over the origin the
 inbound door reconstructs. Mock legs reach the door over replica-B loopback; a real

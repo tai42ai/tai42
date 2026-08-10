@@ -3,8 +3,8 @@
 Implements the ``tai42-contract`` protocols (manifest loading, the ``tai42_app``
 handle, provider/connector wiring) as a runnable MCP application, composed from
 the generic leaf helpers, factories, and clients provided by ``tai42-kit``. This
-is the engine that plugins plug into; it depends on ``tai42-contract`` and
-``tai42-kit`` only.
+is the engine that plugins plug into; among tai-* packages it depends on
+``tai42-contract``, ``tai42-kit``, and ``tai42-cli`` only.
 
 Deliberately light: nothing is re-exported here, so ``import tai42_skeleton``
 constructs no app singleton and reads no settings. Import the subpackage you

@@ -8,7 +8,7 @@ An mcp-server install routes through the COMBINED env+manifest pipeline: the req
 * the happy combined transaction (values + entry land together);
 * a manifest-persist failure leaves NO orphan env write of either kind (the
   installer-unwind deletes exactly the value keys this install wrote AND restores the
-  ``TAI_ENV_SECRET_KEYS`` marks var to its prior value, atop the pipeline's C9a orphan
+  ``TAI_ENV_SECRET_KEYS`` marks var to its prior value, atop the pipeline's orphan
   contract);
 * an upgrade to a version adding a required var is refused unless supplied;
 * uninstall LEAVES the stored env values and surfaces the orphaned vars via the notes.
@@ -137,7 +137,7 @@ class _FakeSvc:
     installer's combined-pipeline routing + unwind: ``apply_env_and_change`` validates
     the mutated manifest against the effective env (dangling → ValueError), writes the
     env FIRST, then persists the manifest — raising :class:`OrphanEnvWriteError` on a
-    persist failure with the env write STANDING (C9a)."""
+    persist failure with the env write STANDING."""
 
     def __init__(self, cm: _FakeCM) -> None:
         self._cm = cm
@@ -207,15 +207,15 @@ class Harness:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("M34_PG_PW", raising=False)
-    monkeypatch.delenv("M34_PG_USER", raising=False)
+    monkeypatch.delenv("GUARD_PG_PW", raising=False)
+    monkeypatch.delenv("GUARD_PG_USER", raising=False)
 
 
 async def test_install_missing_required_var_is_a_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
-    with pytest.raises(InstallEnvError, match=r"M34_PG_PW.*/mcp/0/config/env/PGPASSWORD"):
+    with pytest.raises(InstallEnvError, match=r"GUARD_PG_PW.*/mcp/0/config/env/PGPASSWORD"):
         await h.installer().install(spec.ref)
     # Nothing persisted: no env key, no manifest entry, no attribution row.
     assert h.cm._env == {}
@@ -224,26 +224,26 @@ async def test_install_missing_required_var_is_a_typed_error(monkeypatch: pytest
 
 
 async def test_combined_transaction_lands_values_and_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
-    result = await h.installer().install(spec.ref, env={"M34_PG_PW": "s3cret"}, secret_keys=["M34_PG_PW"])
+    result = await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
     # The value landed in the env store, marked secret; the entry landed in the manifest.
-    assert h.cm._env["M34_PG_PW"] == "s3cret"
-    assert h.cm._env["TAI_ENV_SECRET_KEYS"] == "M34_PG_PW"
+    assert h.cm._env["GUARD_PG_PW"] == "s3cret"
+    assert h.cm._env["TAI_ENV_SECRET_KEYS"] == "GUARD_PG_PW"
     assert h.cm._manifest["mcp"][0]["title"] == "postgres"
     assert h.store.rows[spec.ref].version == "1.0.0"
     assert any("mounted MCP server 'postgres'" in note for note in result["notes"])
 
 
 async def test_manifest_persist_failure_leaves_no_orphan_env_write(monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
     h.svc.fail_persist = True
     with pytest.raises(OrphanEnvWriteError):
-        await h.installer().install(spec.ref, env={"M34_PG_PW": "s3cret"})
-    # The pipeline's C9a leaves the env standing, but the installer-unwind deletes
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"})
+    # The pipeline leaves the env standing, but the installer-unwind deletes
     # exactly the keys THIS install wrote — no orphan remains at the installer layer.
     assert h.cm._env == {}
     assert h.store.rows == {}
@@ -254,14 +254,14 @@ async def test_persist_failure_restores_prior_secret_marks(monkeypatch: pytest.M
     # either kind: the secret VALUE key deleted AND the TAI_ENV_SECRET_KEYS marks var back
     # to its PRIOR value — restoring an operator's OTHER marks, never leaving this install's
     # appended key standing.
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness(env={"TAI_ENV_SECRET_KEYS": "OTHER_KEY"})
     h.registry.resolved = make_resolved(spec)
     h.svc.fail_persist = True
     with pytest.raises(OrphanEnvWriteError):
-        await h.installer().install(spec.ref, env={"M34_PG_PW": "s3cret"}, secret_keys=["M34_PG_PW"])
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
     # The secret value key is gone; the marks var is back to exactly the operator's prior
-    # mark (this install's appended M34_PG_PW is not left behind).
+    # mark (this install's appended GUARD_PG_PW is not left behind).
     assert h.cm._env == {"TAI_ENV_SECRET_KEYS": "OTHER_KEY"}
     assert h.store.rows == {}
 
@@ -269,12 +269,12 @@ async def test_persist_failure_restores_prior_secret_marks(monkeypatch: pytest.M
 async def test_persist_failure_deletes_marks_var_absent_before(monkeypatch: pytest.MonkeyPatch) -> None:
     # When TAI_ENV_SECRET_KEYS did not exist before the install, a persist failure deletes
     # the marks var this install created outright — no orphan marks var left standing.
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
     h.svc.fail_persist = True
     with pytest.raises(OrphanEnvWriteError):
-        await h.installer().install(spec.ref, env={"M34_PG_PW": "s3cret"}, secret_keys=["M34_PG_PW"])
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
     assert h.cm._env == {}
     assert h.store.rows == {}
 
@@ -285,14 +285,14 @@ async def test_persist_failure_restores_prior_store_value_not_this_installs(monk
     # on a manifest-persist failure, be restored to its PRIOR store value — never blind-
     # deleted (which would lose the operator's pre-existing value) and never left at this
     # install's value.
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
-    h = Harness(env={"M34_PG_PW": "prior-value"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    h = Harness(env={"GUARD_PG_PW": "prior-value"})
     h.registry.resolved = make_resolved(spec)
     h.svc.fail_persist = True
     with pytest.raises(OrphanEnvWriteError):
-        await h.installer().install(spec.ref, env={"M34_PG_PW": "new-value"})
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "new-value"})
     # The operator's prior store value survives the unwind — not "", not "new-value".
-    assert h.cm._env == {"M34_PG_PW": "prior-value"}
+    assert h.cm._env == {"GUARD_PG_PW": "prior-value"}
     assert h.store.rows == {}
 
 
@@ -301,11 +301,11 @@ async def test_pre_persist_refusal_writes_nothing_and_broadcasts_nothing(monkeyp
     # marker validation step BEFORE anything persists. The unwind must not fire a fleet
     # broadcast on that no-op: nothing landed in the store, so the env-revert diff is empty
     # and no apply_env_change runs.
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}", "PGUSER": "!ENV ${M34_PG_USER}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}", "PGUSER": "!ENV ${GUARD_PG_USER}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
-    with pytest.raises(InstallEnvError, match="M34_PG_USER"):
-        await h.installer().install(spec.ref, env={"M34_PG_PW": "s3cret"}, secret_keys=["M34_PG_PW"])
+    with pytest.raises(InstallEnvError, match="GUARD_PG_USER"):
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
     # Byte-identical store (nothing written) AND zero env-change broadcasts.
     assert h.cm._env == {}
     assert h.cm._manifest.get("mcp", []) == []
@@ -329,27 +329,27 @@ async def test_non_mcp_spec_with_env_is_a_loud_input_error(monkeypatch: pytest.M
 
 async def test_upgrade_adding_a_required_var_is_refused_without_it(monkeypatch: pytest.MonkeyPatch) -> None:
     old = _mcp_spec(version="1.0.0")  # no markers
-    new = _mcp_spec(version="2.0.0", env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
+    new = _mcp_spec(version="2.0.0", env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness(manifest={"mcp": [{"title": "postgres", "config": {"command": "pg-mcp-server"}}]})
     h.store.preload(old)
     h.registry.resolved = make_resolved(new, version="2.0.0")
-    with pytest.raises(InstallEnvError, match="M34_PG_PW"):
+    with pytest.raises(InstallEnvError, match="GUARD_PG_PW"):
         await h.installer().update(old.ref)
     # Refused before persist: the manifest still carries the OLD entry, the row is unchanged.
     assert h.store.rows[old.ref].version == "1.0.0"
 
 
 async def test_uninstall_leaves_env_and_surfaces_orphans(monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW}"})
-    entry = {"title": "postgres", "config": {"command": "pg-mcp-server", "env": {"PGPASSWORD": "!ENV ${M34_PG_PW}"}}}
-    h = Harness(manifest={"mcp": [entry]}, env={"M34_PG_PW": "s3cret"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    entry = {"title": "postgres", "config": {"command": "pg-mcp-server", "env": {"PGPASSWORD": "!ENV ${GUARD_PG_PW}"}}}
+    h = Harness(manifest={"mcp": [entry]}, env={"GUARD_PG_PW": "s3cret"})
     h.store.preload(spec)
     result = await h.installer().uninstall(spec.ref)
     # The entry is gone from the manifest, but the stored secret is LEFT untouched.
     assert h.cm._manifest["mcp"] == []
-    assert h.cm._env["M34_PG_PW"] == "s3cret"
+    assert h.cm._env["GUARD_PG_PW"] == "s3cret"
     assert h.store.rows == {}
-    assert any("M34_PG_PW" in note for note in result["notes"])
+    assert any("GUARD_PG_PW" in note for note in result["notes"])
 
 
 def test_sanity_apply_provides_entry_validates() -> None:
@@ -360,7 +360,7 @@ def test_sanity_apply_provides_entry_validates() -> None:
     from pyaml_env import parse_config
     from tai42_kit.utils.data import dump_manifest
 
-    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${M34_PG_PW:x}"})
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW:x}"})
     manifest: dict = {}
     apply_provides(manifest, spec)
     resolved = parse_config(data=dump_manifest(cast("Any", manifest))) or {}

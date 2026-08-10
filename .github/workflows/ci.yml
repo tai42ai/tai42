@@ -47,6 +47,7 @@ jobs:
             core: [core/**, e2e/**, uv.lock, pyproject.toml, tests/**, .github/**]
             contract: [core/contract/**]
             kit: [core/kit/**]
+            cli: [core/cli/**]
             skeleton: [core/skeleton/**]
             accounts-oidc: [plugins/accounts-oidc/**]
             accounts-postgres: [plugins/accounts-postgres/**]
@@ -69,7 +70,10 @@ jobs:
             storage-local: [plugins/storage-local/**]
             storage-s3: [plugins/storage-s3/**]
             toolbox: [plugins/toolbox/**]
+            tools-github: [plugins/tools-github/**]
             tools-stripe: [plugins/tools-stripe/**]
+            tools-twilio: [plugins/tools-twilio/**]
+            tools-whatsapp: [plugins/tools-whatsapp/**]
             webhook-verifier-github: [plugins/webhook-verifier-github/**]
             webhook-verifier-stripe: [plugins/webhook-verifier-stripe/**]
             e2e: [e2e/**]
@@ -102,6 +106,7 @@ jobs:
           read -r -d '' TABLE <<'EOF' || true
           contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
           kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres|arq,celery,rq|cov
+          cli|core/cli|tai42-cli||--extra dev|arq,celery,rq|cov
           skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
           accounts-oidc|plugins/accounts-oidc|tai42-accounts-oidc|tai42_accounts_oidc|--extra dev|arq|cov
           accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
@@ -124,7 +129,10 @@ jobs:
           storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov
           storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3||arq|cov
           toolbox|plugins/toolbox|tai42-toolbox|tai42_toolbox|--extra dev|arq|cov
+          tools-github|plugins/tools-github|tai42-tools-github|tai42_tools_github|--extra dev|arq|cov
           tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
+          tools-twilio|plugins/tools-twilio|tai42-tools-twilio|tai42_tools_twilio|--extra dev|arq|cov
+          tools-whatsapp|plugins/tools-whatsapp|tai42-tools-whatsapp|tai42_tools_whatsapp|--extra dev|arq|cov
           webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
           webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov
           e2e|e2e|tai42-e2e|||arq|collect

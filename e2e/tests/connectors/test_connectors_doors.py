@@ -1,4 +1,4 @@
-"""PLAN_10 §C — connector door hardening.
+"""Connector door hardening.
 
 A syntactically malformed connection id (not a UUID) keys no record, so the read and
 delete doors answer a plain 404 — never a 500 that would leak the store's shape as an

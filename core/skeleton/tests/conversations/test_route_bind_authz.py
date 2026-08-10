@@ -49,7 +49,7 @@ class _DictManager(BaseConversationsManager):
 
 class _FakeAgents:
     def all_agents(self):
-        return {"triage": object()}
+        return {"relay": object()}
 
 
 class _FakeApp:
@@ -135,10 +135,10 @@ def _as_caller(monkeypatch, user_id: str) -> None:
 
 async def _create(execution_key: str) -> dict:
     return await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key=execution_key,
         callback_url="https://cb.example/x",
     )
@@ -151,7 +151,7 @@ async def test_binds_a_key_the_caller_owns(env, monkeypatch):
     _as_caller(monkeypatch, "alice")
     result = await _create("k-owned")
     assert result["created"] is True
-    assert "support" in env.rows
+    assert "chat" in env.rows
 
 
 async def test_rejects_a_key_the_caller_does_not_own(env, monkeypatch):
@@ -159,7 +159,7 @@ async def test_rejects_a_key_the_caller_does_not_own(env, monkeypatch):
     with pytest.raises(ForbiddenError, match="only bind your own identity or an execution key you own"):
         await _create("k-other")
     # A refused bind leaves NO row behind.
-    assert "support" not in env.rows
+    assert "chat" not in env.rows
 
 
 async def test_admin_may_bind_a_key_it_does_not_own(env, monkeypatch):
@@ -177,4 +177,4 @@ async def test_rejects_a_token_dependent_condition_key(env, monkeypatch):
     # carrying its raw diagnostic, which she may read.
     with pytest.raises(BadRequestError, match="condition reads an identity claim beyond"):
         await _create("k-cond")
-    assert "support" not in env.rows
+    assert "chat" not in env.rows

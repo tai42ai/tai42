@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-tools-twilio"
+version = "0.1.0"
+description = "Twilio provisioning tools for the TAI ecosystem: manifest-loaded REST tools that list a Twilio account's incoming phone numbers, read a number's inbound-message webhook, and set a number's inbound-message webhook URL."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["tai", "tools", "twilio", "provisioning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Communications :: Telephony",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract these tools register through — the tai42_app
+    # handle and the tool facet.
+    "tai42-contract>=1.5,<2",
+    # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
+    # curl client the Twilio REST module wires to.
+    "tai42-kit[curl]>=1.4,<2",
+    # Imported directly in the settings class: field/secret modelling.
+    "pydantic>=2.12",
+    "pydantic-settings>=2.11",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/plugins/tools-twilio"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/tools-twilio/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Public dev/test tooling.
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+    # The plugin-spec test parses tai-plugin.yml.
+    "pyyaml>=6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_tools_twilio*"]
+
+[tool.setuptools.package-data]
+tai42_tools_twilio = ["py.typed", "tai-plugin.yml", "docs/*", "docs/images/*"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+
+# The version floors in [project] are the compatibility contract; these sources
+# resolve the tai42-* requirements to the in-tree workspace members instead of
+# the published packages. They are not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+tai42-kit = { workspace = true }
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_skeleton".msg = "tai42-tools-twilio is contract-facing: it never imports tai42-skeleton."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+# Turn warnings into errors so a real defect that only surfaces as a warning
+# (e.g. a missing await -> "coroutine was never awaited") fails the suite loudly
+# instead of passing green.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["tai42_tools_twilio"]
+
+[tool.coverage.report]
+fail_under = 95
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"

@@ -1,5 +1,5 @@
 /**
- * Author + run an agent (Mission 9 PLAN_4 UI). The LLM is the scripted stub:
+ * Author + run an agent. The LLM is the scripted stub:
  * turn 1 calls the baked tool `e2e_echo`, turn 2 returns the final content. Via
  * the compose UI: author an agent over the spec-runnable `tools_agent` with
  * `e2e_echo` as a baked tool, then run it from the UI and assert the streamed

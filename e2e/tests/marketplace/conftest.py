@@ -69,7 +69,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     ``TAI_E2E_REAL=marketplace-pypi`` ``_service_env`` drops ``MP_PYPI_BASE_URL``, so the
     registry resolves wheels from live pypi.org — where the forged packages do not exist — and
     the shared fixture ERRORS at setup, false-failing every marketplace module (not just the
-    webhook-ingest one). The real marketplace-pypi leg is PLAN_2 §F creds-host work. Inert when
+    webhook-ingest one). The real marketplace-pypi leg is creds-host work. Inert when
     marketplace-pypi is not real: the suite still runs normally behind ``TAI_E2E_MARKETPLACE=1``
     (and this conftest never loads at all when that opt-in is unset). ``marketplace-github``
     keeps its fixture pypi override, so only its github-ingest leg steps aside — that stays
@@ -77,7 +77,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     if not HarnessSettings().is_real("marketplace-pypi"):
         return
     skip = pytest.mark.skip(
-        reason="forged fixtures can't resolve from real pypi; real marketplace-pypi leg on the creds host (PLAN_2 §F)"
+        reason="forged fixtures can't resolve from real pypi; real marketplace-pypi leg on the creds host"
     )
     for item in items:
         try:

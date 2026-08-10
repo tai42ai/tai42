@@ -373,12 +373,12 @@ def test_the_run_tool_refuses_a_reserved_bridge_thread():
             with pytest.raises(ReservedThreadNamespaceError, match="thread_id"):
                 await app.tools.run_tool(
                     "config_fields",
-                    {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "bridge:support:+15550001111"}}},
+                    {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "bridge:chat:+15550001111"}}},
                 )
             with pytest.raises(ReservedThreadNamespaceError, match="checkpoint_id"):
                 await app.tools.run_tool(
                     "config_fields",
-                    {"text": "hi", "langgraph_config": {"configurable": {"checkpoint_id": "bridge:support:x"}}},
+                    {"text": "hi", "langgraph_config": {"configurable": {"checkpoint_id": "bridge:chat:x"}}},
                 )
 
     asyncio.run(run())

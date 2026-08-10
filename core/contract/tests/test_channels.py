@@ -282,13 +282,13 @@ def test_notification_media_rejects_present_but_empty_list():
 def test_template_roundtrips_on_a_notification():
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
-    template = ChannelTemplate(name="order_update", language="en_US", parameters=["#1234", "shipped"])
-    notification = ChannelNotification(message="Your order shipped", template=template)
+    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42", "done"])
+    notification = ChannelNotification(message="Your item is done", template=template)
     assert notification.template is not None
     assert notification.template == template
-    assert notification.template.name == "order_update"
+    assert notification.template.name == "status_update"
     assert notification.template.language == "en_US"
-    assert notification.template.parameters == ["#1234", "shipped"]
+    assert notification.template.parameters == ["A-42", "done"]
     # parameters is optional — a template with no body placeholders is valid.
     assert ChannelTemplate(name="ping", language="en").parameters == []
 
@@ -298,7 +298,7 @@ def test_template_is_frozen():
 
     from tai42_contract.channels import ChannelTemplate
 
-    template = ChannelTemplate(name="order_update", language="en_US")
+    template = ChannelTemplate(name="status_update", language="en_US")
     with pytest.raises(ValidationError):
         template.name = "changed"
 
@@ -320,7 +320,7 @@ def test_template_rejects_blank_language(blank: str):
     from tai42_contract.channels import ChannelTemplate
 
     with pytest.raises(ValidationError, match="non-blank"):
-        ChannelTemplate(name="order_update", language=blank)
+        ChannelTemplate(name="status_update", language=blank)
 
 
 def test_notification_media_and_template_are_mutually_exclusive():
@@ -332,7 +332,7 @@ def test_notification_media_and_template_are_mutually_exclusive():
         ChannelNotification(
             message="both set",
             media=[_image_item()],
-            template=ChannelTemplate(name="order_update", language="en_US"),
+            template=ChannelTemplate(name="status_update", language="en_US"),
         )
 
 

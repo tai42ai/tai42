@@ -84,7 +84,7 @@ def _api_route(name: str, secret: str, execution_key: str = "svc") -> Conversati
         route_name=name,
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key=execution_key,
         callback_url="https://example.com/cb",
         execution_key_fingerprint="fp-1",
@@ -97,7 +97,7 @@ def _channel_route(name: str) -> ConversationRoute:
         route_name=name,
         door="channel",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
@@ -106,9 +106,9 @@ def _channel_route(name: str) -> ConversationRoute:
 
 
 async def test_export_excludes_the_callback_secret(wired):
-    await wired.put_route(_api_route("support", "live-secret"))
+    await wired.put_route(_api_route("chat", "live-secret"))
     payload = await backup.export_conversation_routes()
-    assert payload["routes"][0]["route_name"] == "support"
+    assert payload["routes"][0]["route_name"] == "chat"
     assert "callback_secret" not in payload["routes"][0]
     # The fingerprint IS exported (import re-asserts the live key against it).
     assert payload["routes"][0]["execution_key_fingerprint"] == "fp-1"
@@ -116,7 +116,7 @@ async def test_export_excludes_the_callback_secret(wired):
 
 async def test_import_remints_secret_and_surfaces_it(wired):
     # The export shape carries no secret.
-    row = _api_route("support", "old").model_dump(mode="json")
+    row = _api_route("chat", "old").model_dump(mode="json")
     del row["callback_secret"]
     payload = {"routes": [row]}
 
@@ -124,9 +124,9 @@ async def test_import_remints_secret_and_surfaces_it(wired):
     assert report["created"] == 1
     assert len(report["new_callback_secrets"]) == 1
     entry = report["new_callback_secrets"][0]
-    assert entry["route_name"] == "support"
+    assert entry["route_name"] == "chat"
     # The re-minted secret is now the stored one.
-    assert wired.rows["support"].callback_secret == entry["callback_secret"]
+    assert wired.rows["chat"].callback_secret == entry["callback_secret"]
     assert entry["callback_secret"]
 
 
@@ -140,7 +140,7 @@ async def test_import_channel_row_carries_no_secret(wired):
 
 async def test_round_trip_preserves_every_field_but_the_secret(monkeypatch):
     source = _DictManager()
-    await source.put_route(_api_route("support", "live-secret"))
+    await source.put_route(_api_route("chat", "live-secret"))
     monkeypatch.setattr(backup, "ExecutionKeyScan", _NoopScan)
     monkeypatch.setattr(backup, "get_conversations_manager", lambda: source)
     payload = await backup.export_conversation_routes()
@@ -151,8 +151,8 @@ async def test_round_trip_preserves_every_field_but_the_secret(monkeypatch):
     report = await backup.import_conversation_routes(payload)
 
     assert report["created"] == 1
-    row = restored.rows["support"]
-    assert row.target_name == "triage"
+    row = restored.rows["chat"]
+    assert row.target_name == "relay"
     assert row.execution_key == "svc"
     assert row.callback_url == "https://example.com/cb"
     # The secret is a fresh mint, not the pre-export one.
@@ -169,10 +169,10 @@ async def test_import_rejects_a_malformed_envelope(wired):
 
 async def test_import_rejects_a_row_missing_its_fingerprint(wired):
     bad = {
-        "route_name": "support",
+        "route_name": "chat",
         "door": "api",
         "target_kind": "agent",
-        "target_name": "triage",
+        "target_name": "relay",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         # execution_key_fingerprint missing
@@ -180,7 +180,7 @@ async def test_import_rejects_a_row_missing_its_fingerprint(wired):
     report = await backup.import_conversation_routes({"routes": [bad]})
     assert report["skipped"] == 1
     assert report["errors"]
-    assert "support" not in wired.rows
+    assert "chat" not in wired.rows
 
 
 async def test_export_empty_without_a_backend(monkeypatch):
@@ -229,8 +229,8 @@ async def test_import_skips_a_row_whose_bound_execution_key_is_no_longer_live(wi
     # rejected on its own while its live-key sibling still restores.
     scan = _RefusingScan()
     _use_scan(monkeypatch, scan)
-    dead = _api_route("billing", "old", execution_key=_RefusingScan.refused).model_dump(mode="json")
-    live = _api_route("support", "old").model_dump(mode="json")
+    dead = _api_route("account", "old", execution_key=_RefusingScan.refused).model_dump(mode="json")
+    live = _api_route("chat", "old").model_dump(mode="json")
     for row in (dead, live):
         del row["callback_secret"]
 
@@ -238,19 +238,19 @@ async def test_import_skips_a_row_whose_bound_execution_key_is_no_longer_live(wi
 
     assert report["skipped"] == 1
     assert report["created"] == 1
-    assert any("billing" in error and "has no policy" in error for error in report["errors"])
-    assert "billing" not in wired.rows  # the refused row was never written
-    assert "support" in wired.rows
+    assert any("account" in error and "has no policy" in error for error in report["errors"])
+    assert "account" not in wired.rows  # the refused row was never written
+    assert "chat" in wired.rows
     # Only the restored row got a secret, and each row was asserted against the
     # fingerprint the backup pinned for it.
-    assert [entry["route_name"] for entry in report["new_callback_secrets"]] == ["support"]
+    assert [entry["route_name"] for entry in report["new_callback_secrets"]] == ["chat"]
     assert scan.seen == [(_RefusingScan.refused, "fp-1"), ("svc", "fp-1")]
 
 
 async def test_import_skips_a_row_whose_key_condition_no_background_turn_can_evaluate(wired, monkeypatch):
     scan = _ConditionRefusingScan()
     _use_scan(monkeypatch, scan)
-    row = _api_route("billing", "old", execution_key=_ConditionRefusingScan.refused).model_dump(mode="json")
+    row = _api_route("account", "old", execution_key=_ConditionRefusingScan.refused).model_dump(mode="json")
     del row["callback_secret"]
 
     report = await backup.import_conversation_routes({"routes": [row]})
@@ -269,7 +269,7 @@ async def test_import_propagates_a_scan_failure_that_is_not_the_rows_own_defect(
             raise RuntimeError("the policy store is unreachable")
 
     _use_scan(monkeypatch, _BrokenScan())
-    row = _api_route("support", "old").model_dump(mode="json")
+    row = _api_route("chat", "old").model_dump(mode="json")
     del row["callback_secret"]
 
     with pytest.raises(RuntimeError, match="policy store is unreachable"):
@@ -322,8 +322,8 @@ async def test_import_replaces_a_row_on_the_identity_it_already_holds(wired):
 async def test_import_under_skip_leaves_existing_route_and_its_secret_untouched(wired):
     # An unchanged re-import under skip (the default) must NOT re-mint an existing
     # route's callback secret — re-minting would break every live signer.
-    await wired.put_route(_api_route("support", "live-secret"))
-    row = _api_route("support", "ignored").model_dump(mode="json")
+    await wired.put_route(_api_route("chat", "live-secret"))
+    row = _api_route("chat", "ignored").model_dump(mode="json")
     del row["callback_secret"]
 
     report = await backup.import_conversation_routes({"routes": [row]})
@@ -333,14 +333,14 @@ async def test_import_under_skip_leaves_existing_route_and_its_secret_untouched(
     assert report["skipped_existing"] == 1
     assert report["new_callback_secrets"] == []
     # The live secret is preserved verbatim, not re-minted.
-    assert wired.rows["support"].callback_secret == "live-secret"
+    assert wired.rows["chat"].callback_secret == "live-secret"
 
 
 async def test_import_under_overwrite_replaces_route_and_remints_secret(wired):
     # Overwrite is the deliberate replace: the row is rewritten and its api secret
     # re-minted, surfaced in new_callback_secrets for redistribution.
-    await wired.put_route(_api_route("support", "live-secret"))
-    row = _api_route("support", "ignored").model_dump(mode="json")
+    await wired.put_route(_api_route("chat", "live-secret"))
+    row = _api_route("chat", "ignored").model_dump(mode="json")
     del row["callback_secret"]
 
     report = await backup.import_conversation_routes({"routes": [row]}, "overwrite")
@@ -349,5 +349,5 @@ async def test_import_under_overwrite_replaces_route_and_remints_secret(wired):
     assert report["skipped_existing"] == 0
     assert len(report["new_callback_secrets"]) == 1
     new_secret = report["new_callback_secrets"][0]["callback_secret"]
-    assert wired.rows["support"].callback_secret == new_secret
+    assert wired.rows["chat"].callback_secret == new_secret
     assert new_secret != "live-secret"

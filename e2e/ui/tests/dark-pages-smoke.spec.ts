@@ -1,5 +1,5 @@
 /**
- * The dark-pages browser smoke (Mission 19 PLAN_3). The route-coverage guard
+ * The dark-pages browser smoke. The route-coverage guard
  * (`tests/routing/test_default_router_coverage.py`) already proves every default
  * router answers non-404 at the API level; this is the UI-level companion. The
  * studio stack now serves the REAL default surface (`build_studio_stack` runs

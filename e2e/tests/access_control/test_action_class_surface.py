@@ -1,4 +1,4 @@
-"""M20 F1 — the action-class surface, end-to-end (the runtime-reachable half of the
+"""The action-class surface, end-to-end (the runtime-reachable half of the
 boot gate).
 
 Every AUTHED route DECLARES its authorization action-class explicitly
@@ -8,7 +8,7 @@ route whose class disagrees with its HTTP method, fails boot loudly). That boot-
 INJECTION cannot be driven through this harness — the route surface is fixed importable
 router modules, with no seam to register a synthetic bad route into a real boot — so it
 is covered at the skeleton unit level (``tests/app/test_route_registry.py`` +
-``tests/access_control/test_roles.py``, PLAN_2 Task 10). What the e2e leg CAN assert is
+``tests/access_control/test_roles.py``). What the e2e leg CAN assert is
 the runtime-reachable OUTCOME of that gate: a booted stack SERVES a fully-classified
 action surface through ``GET /api/auth/routes`` — every gated route carries one of the
 four valid classes, and the fence classes land on the routes the design fences.

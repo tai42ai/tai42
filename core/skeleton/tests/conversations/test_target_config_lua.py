@@ -48,27 +48,27 @@ async def test_upsert_keys_and_indexes_the_row_atomically(store, lua_redis):
     # A fresh create returns True and the SADD indexes the member; a replace returns False and
     # leaves exactly one index member.
     settings = store.settings
-    assert await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge")) is True
-    assert await lua_redis.exists(settings.target_config_key("agent", "concierge")) == 1
-    assert await lua_redis.smembers(settings.target_config_names_key) == {_member("agent", "concierge")}
+    assert await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant")) is True
+    assert await lua_redis.exists(settings.target_config_key("agent", "assistant")) == 1
+    assert await lua_redis.smembers(settings.target_config_names_key) == {_member("agent", "assistant")}
 
     assert (
-        await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge", multichannel=True))
+        await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant", multichannel=True))
         is False
     )
-    assert await lua_redis.smembers(settings.target_config_names_key) == {_member("agent", "concierge")}
-    got = await store.get("agent", "concierge")
+    assert await lua_redis.smembers(settings.target_config_names_key) == {_member("agent", "assistant")}
+    got = await store.get("agent", "assistant")
     assert got is not None
     assert got.multichannel is True
 
 
 async def test_delete_removes_the_row_and_unindexes_it_atomically(store, lua_redis):
     settings = store.settings
-    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="concierge"))
+    await store.upsert(TargetConversationConfig(target_kind="agent", target_name="assistant"))
 
-    assert await store.delete("agent", "concierge") is True
-    assert await lua_redis.exists(settings.target_config_key("agent", "concierge")) == 0
-    assert _member("agent", "concierge") not in await lua_redis.smembers(settings.target_config_names_key)
+    assert await store.delete("agent", "assistant") is True
+    assert await lua_redis.exists(settings.target_config_key("agent", "assistant")) == 0
+    assert _member("agent", "assistant") not in await lua_redis.smembers(settings.target_config_names_key)
     assert await lua_redis.smembers(settings.target_config_names_key) == set()
     # A second delete removes nothing and says so, and the SREM is harmless on an absent member.
-    assert await store.delete("agent", "concierge") is False
+    assert await store.delete("agent", "assistant") is False

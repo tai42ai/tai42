@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 
 import typer
+from tai42_cli.commands._common import app_context
+from tai42_cli.render import print_json, render_table
 from tai42_kit.db import (
     AdminIdentityIncompleteError,
     AppliedMigration,
@@ -29,8 +31,6 @@ from tai42_kit.db import (
     migration_status,
 )
 
-from tai42_skeleton.cli.commands._common import app_context
-from tai42_skeleton.cli.render import print_json, render_table
 from tai42_skeleton.db import SKELETON_COMPONENT, all_migration_entries
 
 app = typer.Typer(

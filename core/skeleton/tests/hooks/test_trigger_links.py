@@ -105,7 +105,7 @@ async def test_fake_mget_and_paging_scan(fake_redis) -> None:
 
 async def test_create_timed_roundtrip_with_tool_kwargs(store) -> None:
     result = await create_trigger_link(
-        topic="orders",
+        topic="events",
         name="link1",
         ttl_seconds=3600,
         tool_kwargs={"a": 1},
@@ -115,16 +115,16 @@ async def test_create_timed_roundtrip_with_tool_kwargs(store) -> None:
         created_by="alice",
     )
     assert result["name"] == "link1"
-    assert result["topic"] == "orders"
+    assert result["topic"] == "events"
     assert result["trigger_path"] == f"/trigger/{result['token']}"
     assert result["expires_at"] is not None
     resolved = await resolve_trigger_token(result["token"])
-    assert (resolved.topic, resolved.tool_kwargs, resolved.execution_key) == ("orders", {"a": 1}, "k-fire")
+    assert (resolved.topic, resolved.tool_kwargs, resolved.execution_key) == ("events", {"a": 1}, "k-fire")
 
 
 async def test_create_permanent_roundtrip_without_tool_kwargs(store) -> None:
     result = await create_trigger_link(
-        topic="orders",
+        topic="events",
         name="perm",
         ttl_seconds=None,
         tool_kwargs=None,
@@ -135,7 +135,7 @@ async def test_create_permanent_roundtrip_without_tool_kwargs(store) -> None:
     )
     assert result["expires_at"] is None
     resolved = await resolve_trigger_token(result["token"])
-    assert (resolved.topic, resolved.tool_kwargs) == ("orders", None)
+    assert (resolved.topic, resolved.tool_kwargs) == ("events", None)
 
 
 async def test_create_empty_tool_kwargs_stored_verbatim(store) -> None:
@@ -797,7 +797,7 @@ async def test_a_verifier_bound_topic_reports_its_links_out_of_service(store) ->
     # A topic verifier binding takes the topic's links out of service without touching
     # a record, so the listing reports the door's live behavior, not the stored flag.
     minted = await create_trigger_link(
-        topic="orders",
+        topic="events",
         name="qr",
         ttl_seconds=None,
         tool_kwargs=None,
@@ -809,7 +809,7 @@ async def test_a_verifier_bound_topic_reports_its_links_out_of_service(store) ->
     (before,) = (await list_trigger_links())["items"]
     assert before["trigger_auth"] == "token+api_key"
 
-    await store.manager.set_topic_verifier("orders", {"verifier": "github", "config": {}})
+    await store.manager.set_topic_verifier("events", {"verifier": "github", "config": {}})
 
     (after,) = (await list_trigger_links())["items"]
     assert after["trigger_auth"] == "out-of-service"

@@ -44,7 +44,7 @@ from tai42_e2e.settings import HarnessSettings
 # directly, and the pairing turns never reach a target), so the 'llm' seam is not exercised.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host (PLAN_2 §F)",
+    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
 )
 
 _TOOL = "e2e_echo"

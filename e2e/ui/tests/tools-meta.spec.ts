@@ -1,5 +1,5 @@
 /**
- * The Studio TOOLS screen tool_meta surface (PLAN_3), driven over the real
+ * The Studio TOOLS screen tool_meta surface, driven over the real
  * multi-worker stack and DOUBLE-ASSERTED through the same-origin tool-meta API the
  * app itself uses. The screen merges each tool's native tags (`/api/tools/tags`)
  * with its overlay row (`/api/tool-meta`): a display name over the real name, a flat

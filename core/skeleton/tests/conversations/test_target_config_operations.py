@@ -42,7 +42,7 @@ class _FakeApp:
 
 @pytest.fixture
 def wired(monkeypatch) -> FakeConfigRedis:
-    """Backend ON, config store over a fake redis, an agent ``concierge`` and a tool
+    """Backend ON, config store over a fake redis, an agent ``assistant`` and a tool
     ``lookup`` registered — the standard happy-path environment."""
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
     fake = FakeConfigRedis()
@@ -50,24 +50,24 @@ def wired(monkeypatch) -> FakeConfigRedis:
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: object())
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(instance, "app", _FakeApp({"concierge"}, {"lookup"}), raising=False)
+    monkeypatch.setattr(instance, "app", _FakeApp({"assistant"}, {"lookup"}), raising=False)
     return fake
 
 
 async def test_set_creates_then_upserts(wired):
-    created = await ops.set_conversation_config("agent", "concierge")
+    created = await ops.set_conversation_config("agent", "assistant")
     assert created["created"] is True
     assert created["config"] == {
         "target_kind": "agent",
-        "target_name": "concierge",
+        "target_name": "assistant",
         "multichannel": False,
         "greeting_template": None,
     }
     replaced = await ops.set_conversation_config(
-        "agent", "concierge", multichannel=True, greeting_template="hi {pairing_code}"
+        "agent", "assistant", multichannel=True, greeting_template="hi {pairing_code}"
     )
     assert replaced["created"] is False
-    got = await ops.get_conversation_config("agent", "concierge")
+    got = await ops.get_conversation_config("agent", "assistant")
     assert got["multichannel"] is True
     assert got["greeting_template"] == "hi {pairing_code}"
 
@@ -78,12 +78,12 @@ async def test_set_on_a_tool_target(wired):
 
 
 async def test_list_returns_items_and_total(wired):
-    await ops.set_conversation_config("agent", "concierge")
+    await ops.set_conversation_config("agent", "assistant")
     await ops.set_conversation_config("tool", "lookup")
     listed = await ops.list_conversation_configs()
     assert listed["total"] == 2
     assert {(item["target_kind"], item["target_name"]) for item in listed["items"]} == {
-        ("agent", "concierge"),
+        ("agent", "assistant"),
         ("tool", "lookup"),
     }
 
@@ -100,35 +100,35 @@ async def test_set_refuses_an_unknown_tool(wired):
 
 async def test_set_refuses_an_unknown_placeholder(wired):
     with pytest.raises(BadRequestError, match="pairing_code"):
-        await ops.set_conversation_config("agent", "concierge", greeting_template="hi {name}")
+        await ops.set_conversation_config("agent", "assistant", greeting_template="hi {name}")
 
 
 async def test_set_refuses_a_blank_greeting(wired):
     with pytest.raises(BadRequestError, match="greeting_template"):
-        await ops.set_conversation_config("agent", "concierge", greeting_template="   ")
+        await ops.set_conversation_config("agent", "assistant", greeting_template="   ")
 
 
 async def test_set_refuses_an_unknown_target_kind(wired):
     with pytest.raises(BadRequestError):
-        await ops.set_conversation_config("robot", "concierge")
+        await ops.set_conversation_config("robot", "assistant")
 
 
 async def test_get_unknown_is_404(wired):
     with pytest.raises(NotFoundError, match="conversation config not found"):
-        await ops.get_conversation_config("agent", "concierge")
+        await ops.get_conversation_config("agent", "assistant")
 
 
 async def test_get_malformed_kind_is_400(wired):
     with pytest.raises(BadRequestError, match="target_kind"):
-        await ops.get_conversation_config("robot", "concierge")
+        await ops.get_conversation_config("robot", "assistant")
 
 
 async def test_delete_removes_then_404s(wired):
-    await ops.set_conversation_config("agent", "concierge")
-    removed = await ops.delete_conversation_config("agent", "concierge")
-    assert removed == {"removed": True, "target_kind": "agent", "target_name": "concierge"}
+    await ops.set_conversation_config("agent", "assistant")
+    removed = await ops.delete_conversation_config("agent", "assistant")
+    assert removed == {"removed": True, "target_kind": "agent", "target_name": "assistant"}
     with pytest.raises(NotFoundError):
-        await ops.delete_conversation_config("agent", "concierge")
+        await ops.delete_conversation_config("agent", "assistant")
 
 
 @pytest.fixture
@@ -145,18 +145,18 @@ async def test_list_gated_off_is_501(gated_off):
 
 async def test_get_gated_off_is_501(gated_off):
     with pytest.raises(NotSupportedError):
-        await ops.get_conversation_config("agent", "concierge")
+        await ops.get_conversation_config("agent", "assistant")
 
 
 async def test_set_gated_off_is_501(gated_off, monkeypatch):
     # The model validates fine; the 501 is the backend gate, raised before the store.
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(instance, "app", _FakeApp({"concierge"}, set()), raising=False)
+    monkeypatch.setattr(instance, "app", _FakeApp({"assistant"}, set()), raising=False)
     with pytest.raises(NotSupportedError):
-        await ops.set_conversation_config("agent", "concierge")
+        await ops.set_conversation_config("agent", "assistant")
 
 
 async def test_delete_gated_off_is_501(gated_off):
     with pytest.raises(NotSupportedError):
-        await ops.delete_conversation_config("agent", "concierge")
+        await ops.delete_conversation_config("agent", "assistant")

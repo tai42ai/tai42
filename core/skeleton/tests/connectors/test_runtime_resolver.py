@@ -497,7 +497,7 @@ async def test_force_refresh_still_refreshes_when_token_unchanged(wiring, monkey
     assert auth.access_token == "forced-at"
 
 
-# -- refresh cooldown / circuit breaker (M14) --------------------------------
+# -- refresh cooldown / circuit breaker --------------------------------------
 
 
 async def test_exhausted_budget_opens_cooldown_breaker(wiring, monkeypatch):

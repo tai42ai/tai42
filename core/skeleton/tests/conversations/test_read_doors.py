@@ -28,10 +28,10 @@ from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 #: The one route the fake routing table holds, so a read on any other name is a 404.
 _ROUTE = ConversationRoute(
-    route_name="support",
+    route_name="chat",
     door="channel",
     target_kind="agent",
-    target_name="triage",
+    target_name="relay",
     execution_key="svc",
     channel="twilio",
     our_identity="+15550001111",
@@ -42,10 +42,10 @@ _ROUTE = ConversationRoute(
 #: The same route name as an ``api`` row. A transcript's reader is authorized from the
 #: thread's identity, and only an api-door route's threads name a principal that can own one.
 _API_ROUTE = ConversationRoute(
-    route_name="support",
+    route_name="chat",
     door="api",
     target_kind="agent",
-    target_name="triage",
+    target_name="relay",
     execution_key="svc",
     callback_url="https://cb.example/x",
     execution_key_fingerprint="fp",
@@ -97,9 +97,9 @@ def _record(
     return ConversationRecord(
         error=error,
         message_id=message_id,
-        route_name="support",
+        route_name="chat",
         door=door,  # type: ignore[arg-type]
-        thread_id=thread_id or f"bridge:support:{message_id}",
+        thread_id=thread_id or f"bridge:chat:{message_id}",
         client_address="user-7",
         inbound_text=f"ask {message_id}",
         channel="twilio" if door == "channel" else None,
@@ -134,7 +134,7 @@ def _as_caller(monkeypatch, caller: _Caller) -> None:
 
 
 def _as_api_route(monkeypatch) -> None:
-    """Make ``support`` an ``api`` row, so its threads are ones a caller can own."""
+    """Make ``chat`` an ``api`` row, so its threads are ones a caller can own."""
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: _DictManager(_API_ROUTE))
 
 
@@ -144,7 +144,7 @@ def _as_api_route(monkeypatch) -> None:
 async def test_api_record_readable_by_its_invoking_caller(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
-    view = await ops.get_conversation_message("support", "m1")
+    view = await ops.get_conversation_message("chat", "m1")
     assert view["message_id"] == "m1"
     assert view["caller_principal"] == "alice"
 
@@ -153,13 +153,13 @@ async def test_api_record_hidden_from_another_caller(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     with pytest.raises(ForbiddenError, match="only read conversation records from turns you invoked"):
-        await ops.get_conversation_message("support", "m1")
+        await ops.get_conversation_message("chat", "m1")
 
 
 async def test_api_record_readable_by_admin(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    view = await ops.get_conversation_message("support", "m1")
+    view = await ops.get_conversation_message("chat", "m1")
     assert view["message_id"] == "m1"
 
 
@@ -173,28 +173,28 @@ _INTERNAL_FIELDS = ("error", "attempts", "outbound_message_ids", "callback_url",
 async def test_a_non_admin_caller_never_reads_the_internal_turn_detail(store, monkeypatch):
     # A denied turn stores the raw refusal, which names the route key's grants; the
     # caller reads the outcome and nothing about that principal.
-    denial = "turn denied: access denied: POST /api/agents/foo/runs is not permitted for 'finance-svc'"
+    denial = "turn denied: access denied: POST /api/agents/foo/runs is not permitted for 'metrics-svc'"
     await store.create_record(
         _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
     )
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
-    view = await ops.get_conversation_message("support", "m1")
+    view = await ops.get_conversation_message("chat", "m1")
 
     assert view["message_id"] == "m1"
     assert view["answer"] == "the answer"
     assert view["delivery_status"] == "failed"
     for field in _INTERNAL_FIELDS:
         assert field not in view
-    assert "finance-svc" not in repr(view)
+    assert "metrics-svc" not in repr(view)
 
 
 async def test_an_admin_reads_the_whole_record_including_the_internal_detail(store, monkeypatch):
-    denial = "turn denied: access denied for 'finance-svc'"
+    denial = "turn denied: access denied for 'metrics-svc'"
     await store.create_record(
         _record("m1", door="api", caller_principal="alice", status=DeliveryStatus.FAILED, error=denial)
     )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    view = await ops.get_conversation_message("support", "m1")
+    view = await ops.get_conversation_message("chat", "m1")
 
     assert view["error"] == denial
     for field in _INTERNAL_FIELDS:
@@ -208,13 +208,13 @@ async def test_channel_record_is_admin_only(store, monkeypatch):
     await store.create_record(_record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(ForbiddenError, match="only read conversation records from turns you invoked"):
-        await ops.get_conversation_message("support", "c1")
+        await ops.get_conversation_message("chat", "c1")
 
 
 async def test_channel_record_readable_by_admin(store, monkeypatch):
     await store.create_record(_record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    view = await ops.get_conversation_message("support", "c1")
+    view = await ops.get_conversation_message("chat", "c1")
     assert view["message_id"] == "c1"
 
 
@@ -222,7 +222,7 @@ async def test_unknown_or_cross_route_record_is_404(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation record not found"):
-        await ops.get_conversation_message("support", "missing")
+        await ops.get_conversation_message("chat", "missing")
     # A record that exists under a DIFFERENT route is a 404 (not a 403) — it is not this
     # route's record to reveal even the existence of.
     with pytest.raises(NotFoundError, match="conversation record not found"):
@@ -235,9 +235,9 @@ async def test_unknown_or_cross_route_record_is_404(store, monkeypatch):
 async def test_both_projections_carry_the_inbound_text(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
-    assert (await ops.get_conversation_message("support", "m1"))["inbound_text"] == "ask m1"
+    assert (await ops.get_conversation_message("chat", "m1"))["inbound_text"] == "ask m1"
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    assert (await ops.get_conversation_message("support", "m1"))["inbound_text"] == "ask m1"
+    assert (await ops.get_conversation_message("chat", "m1"))["inbound_text"] == "ask m1"
 
 
 # -- list_conversation_threads: admin-tier ------------------------------------
@@ -247,7 +247,7 @@ async def test_thread_listing_is_admin_only(store, monkeypatch):
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(ForbiddenError, match="restricted to administrators"):
-        await ops.list_conversation_threads("support")
+        await ops.list_conversation_threads("chat")
 
 
 async def test_thread_listing_summarizes_and_pages(store, monkeypatch):
@@ -259,22 +259,22 @@ async def test_thread_listing_summarizes_and_pages(store, monkeypatch):
                 door="channel",
                 caller_principal=None,
                 status=DeliveryStatus.DELIVERED,
-                thread_id=f"bridge:support:+1555000{index}",
+                thread_id=f"bridge:chat:+1555000{index}",
                 created_at=now + index,
             )
         )
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
-    first = await ops.list_conversation_threads("support", page=1, page_size=2)
+    first = await ops.list_conversation_threads("chat", page=1, page_size=2)
     assert first["total"] == 3
     assert first["next_page"] == 2
-    assert [item["thread_id"] for item in first["items"]] == ["bridge:support:+15550002", "bridge:support:+15550001"]
+    assert [item["thread_id"] for item in first["items"]] == ["bridge:chat:+15550002", "bridge:chat:+15550001"]
     assert first["items"][0]["message_count"] == 1
     assert first["items"][0]["last_delivery_status"] == "delivered"
     assert first["items"][0]["client_address"] == "user-7"
 
-    last = await ops.list_conversation_threads("support", page=2, page_size=2)
-    assert [item["thread_id"] for item in last["items"]] == ["bridge:support:+15550000"]
+    last = await ops.list_conversation_threads("chat", page=2, page_size=2)
+    assert [item["thread_id"] for item in last["items"]] == ["bridge:chat:+15550000"]
     assert last["next_page"] is None
 
 
@@ -283,20 +283,20 @@ async def test_thread_listing_refuses_an_unknown_route_and_a_bad_page(store, mon
     with pytest.raises(NotFoundError, match="conversation route not found"):
         await ops.list_conversation_threads("other-route")
     with pytest.raises(BadRequestError, match="must be >= 1"):
-        await ops.list_conversation_threads("support", page=0)
+        await ops.list_conversation_threads("chat", page=0)
     with pytest.raises(BadRequestError, match="must be >= 1"):
-        await ops.list_conversation_threads("support", page=1, page_size=0)
+        await ops.list_conversation_threads("chat", page=1, page_size=0)
 
 
 async def test_a_page_size_above_the_cap_is_capped_not_refused(store, monkeypatch):
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    listed = await ops.list_conversation_threads("support", page=1, page_size=10_000)
+    listed = await ops.list_conversation_threads("chat", page=1, page_size=10_000)
     assert listed["page_size"] == ops.MAX_THREAD_PAGE_SIZE
 
 
 # -- get_conversation_thread: the transcript ----------------------------------
 
-_THREAD = "bridge:support:alice/user-7"
+_THREAD = "bridge:chat:alice/user-7"
 
 
 async def _seed_thread(store, *, caller_principal: str | None, door: str = "api") -> None:
@@ -319,7 +319,7 @@ async def test_a_thread_reads_oldest_first_for_its_owning_caller(store, monkeypa
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
 
-    read = await ops.get_conversation_thread("support", _THREAD)
+    read = await ops.get_conversation_thread("chat", _THREAD)
 
     assert [item["message_id"] for item in read["items"]] == ["t0", "t1"]
     assert read["total"] == 2
@@ -334,7 +334,7 @@ async def test_an_admin_reads_the_whole_record_of_every_thread(store, monkeypatc
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
-    read = await ops.get_conversation_thread("support", _THREAD)
+    read = await ops.get_conversation_thread("chat", _THREAD)
 
     assert "error" in read["items"][0]
     assert "attempts" in read["items"][0]
@@ -347,7 +347,7 @@ async def test_a_thread_is_refused_to_a_caller_that_did_not_invoke_it(store, mon
     # The SAME answer an absent thread gets: a 403 here would tell bob that alice has a
     # thread on this route, which is the fact the door exists to protect.
     with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("support", _THREAD)
+        await ops.get_conversation_thread("chat", _THREAD)
 
 
 async def test_a_channel_thread_is_admin_only(store, monkeypatch):
@@ -356,7 +356,7 @@ async def test_a_channel_thread_is_admin_only(store, monkeypatch):
     await _seed_thread(store, caller_principal=None, door="channel")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("support", _THREAD)
+        await ops.get_conversation_thread("chat", _THREAD)
 
 
 async def test_an_empty_page_of_a_foreign_thread_discloses_nothing(store, monkeypatch):
@@ -369,7 +369,7 @@ async def test_an_empty_page_of_a_foreign_thread_discloses_nothing(store, monkey
 
     for page in (1, 2, 99):
         with pytest.raises(NotFoundError, match="conversation thread not found"):
-            await ops.get_conversation_thread("support", _THREAD, page=page, page_size=1)
+            await ops.get_conversation_thread("chat", _THREAD, page=page, page_size=1)
 
 
 async def test_an_empty_page_of_a_channel_thread_discloses_nothing(store, monkeypatch):
@@ -378,7 +378,7 @@ async def test_an_empty_page_of_a_channel_thread_discloses_nothing(store, monkey
 
     for page in (1, 2, 99):
         with pytest.raises(NotFoundError, match="conversation thread not found"):
-            await ops.get_conversation_thread("support", _THREAD, page=page, page_size=1)
+            await ops.get_conversation_thread("chat", _THREAD, page=page, page_size=1)
 
 
 async def test_an_owner_reading_past_the_end_gets_an_empty_page_not_a_refusal(store, monkeypatch):
@@ -387,7 +387,7 @@ async def test_an_owner_reading_past_the_end_gets_an_empty_page_not_a_refusal(st
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
 
-    read = await ops.get_conversation_thread("support", _THREAD, page=9, page_size=1)
+    read = await ops.get_conversation_thread("chat", _THREAD, page=9, page_size=1)
 
     assert read["items"] == []
     assert read["total"] == 2
@@ -399,19 +399,19 @@ async def test_a_principal_that_is_not_url_safe_still_owns_its_thread(store, mon
     # ownership is decided on that same encoded form, so the caller reads its own thread.
     _as_api_route(monkeypatch)
     principal = "oidc:google:1234"
-    thread = "bridge:support:oidc%3Agoogle%3A1234/user-7"
+    thread = "bridge:chat:oidc%3Agoogle%3A1234/user-7"
     await store.create_record(
         _record("t0", door="api", caller_principal=principal, status=DeliveryStatus.DELIVERED, thread_id=thread)
     )
     _as_caller(monkeypatch, _Caller(principal, is_admin=False))
 
-    read = await ops.get_conversation_thread("support", thread)
+    read = await ops.get_conversation_thread("chat", thread)
 
     assert [item["message_id"] for item in read["items"]] == ["t0"]
     # And the encoded principal is not a prefix anyone else inherits.
     _as_caller(monkeypatch, _Caller("oidc", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("support", thread)
+        await ops.get_conversation_thread("chat", thread)
 
 
 @pytest.mark.parametrize(
@@ -446,7 +446,7 @@ async def test_the_thread_id_a_turn_mints_is_the_one_its_caller_owns(store, monk
     _as_caller(monkeypatch, _Caller(principal, is_admin=False))
 
     assert await ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(principal)) is True
-    read = await ops.get_conversation_thread("support", thread_id)
+    read = await ops.get_conversation_thread("chat", thread_id)
     assert [item["message_id"] for item in read["items"]] == ["t0"]
 
     # And nobody else keys it — not even a principal the encoded form starts with.
@@ -460,7 +460,7 @@ async def test_an_unknown_thread_is_404_before_any_authorization(store, monkeypa
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("support", "bridge:support:nobody")
+        await ops.get_conversation_thread("chat", "bridge:chat:nobody")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="conversation route not found"):
         await ops.get_conversation_thread("other-route", _THREAD)
@@ -483,15 +483,15 @@ async def test_the_thread_listing_authorizes_before_it_looks_the_route_up(store,
     with pytest.raises(ForbiddenError, match="restricted to administrators"):
         await ops.list_conversation_threads("other-route")
     with pytest.raises(ForbiddenError, match="restricted to administrators"):
-        await ops.list_conversation_threads("support")
+        await ops.list_conversation_threads("chat")
 
 
 async def test_the_transcript_pages(store, monkeypatch):
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
-    first = await ops.get_conversation_thread("support", _THREAD, page=1, page_size=1)
-    second = await ops.get_conversation_thread("support", _THREAD, page=2, page_size=1)
+    first = await ops.get_conversation_thread("chat", _THREAD, page=1, page_size=1)
+    second = await ops.get_conversation_thread("chat", _THREAD, page=2, page_size=1)
 
     assert [item["message_id"] for item in first["items"]] == ["t0"]
     assert first["next_page"] == 2
@@ -505,8 +505,8 @@ async def test_the_transcript_tails_newest_first_on_request(store, monkeypatch):
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
-    first = await ops.get_conversation_thread("support", _THREAD, page=1, page_size=1, order="desc")
-    second = await ops.get_conversation_thread("support", _THREAD, page=2, page_size=1, order="desc")
+    first = await ops.get_conversation_thread("chat", _THREAD, page=1, page_size=1, order="desc")
+    second = await ops.get_conversation_thread("chat", _THREAD, page=2, page_size=1, order="desc")
 
     assert [item["message_id"] for item in first["items"]] == ["t1"]
     assert first["order"] == "desc"
@@ -519,7 +519,7 @@ async def test_the_transcript_refuses_an_unknown_order(store, monkeypatch):
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(BadRequestError, match="order must be one of"):
-        await ops.get_conversation_thread("support", _THREAD, order="newest")
+        await ops.get_conversation_thread("chat", _THREAD, order="newest")
 
 
 async def test_the_transcript_refuses_a_blank_thread_id(store, monkeypatch):
@@ -528,7 +528,7 @@ async def test_the_transcript_refuses_a_blank_thread_id(store, monkeypatch):
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     for blank in ("", "   "):
         with pytest.raises(BadRequestError, match="thread_id must be a non-blank"):
-            await ops.get_conversation_thread("support", blank)
+            await ops.get_conversation_thread("chat", blank)
 
 
 async def test_the_transcript_refuses_a_page_past_the_served_maximum(store, monkeypatch):
@@ -537,16 +537,16 @@ async def test_the_transcript_refuses_a_page_past_the_served_maximum(store, monk
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(BadRequestError, match="page must be <="):
-        await ops.get_conversation_thread("support", _THREAD, page=2**62)
+        await ops.get_conversation_thread("chat", _THREAD, page=2**62)
     with pytest.raises(BadRequestError, match="page must be <="):
-        await ops.list_conversation_threads("support", page=2**62)
+        await ops.list_conversation_threads("chat", page=2**62)
 
 
 async def test_the_transcript_refuses_a_bad_page(store, monkeypatch):
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(BadRequestError, match="must be >= 1"):
-        await ops.get_conversation_thread("support", _THREAD, page=0)
+        await ops.get_conversation_thread("chat", _THREAD, page=0)
 
 
 # -- list_failed_conversations: admin-tier ------------------------------------

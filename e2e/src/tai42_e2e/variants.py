@@ -669,7 +669,7 @@ class GithubStorage(StorageVariant):
             raise AssertionError(f"object still present at {url}: HTTP {resp.status_code}")
 
 
-# ---- real-vendor storage siblings (PLAN_2) ------------------------------
+# ---- real-vendor storage siblings ---------------------------------------
 # The real siblings of the hermetic ``s3`` / ``github`` legs: they talk to a LIVE
 # bucket / repo from the operator-supplied ``STORAGE_*`` credentials (the same var
 # names the plugin reads), NEVER a harness stand-in — the plugin's own defaults

@@ -1,4 +1,4 @@
-"""Shared arrange helpers for the editable-RBAC (M20 F1) level journeys.
+"""Shared arrange helpers for the editable-RBAC level journeys.
 
 The skeleton's editable RBAC is a per-tag ACCESS-LEVEL map on top of a base tier: a
 role is ``{feature-tag: none|read|write}`` (the editable ``grants``) intersected with a

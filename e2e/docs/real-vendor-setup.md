@@ -21,7 +21,7 @@ that reads outbound traffic off an in-process stub (scripted `llm_stub`,
 guard (or, where a spec is parametrized across channels, a per-param skip), so
 naming that seam real deselects the mock leg rather than running it against a live
 vendor it was never written to reach. The real leg for these is demonstrated on
-the dedicated e2e creds host per PLAN_2 §F, not in CI. The seams that step aside:
+the dedicated e2e creds host, not in CI. The seams that step aside:
 
 - `llm`, `embeddings` — scripted-stub determinism legs.
 - `stripe` — the `FakeStripe` mint / webhook / reconcile legs.

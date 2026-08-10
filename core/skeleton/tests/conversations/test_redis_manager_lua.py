@@ -47,12 +47,12 @@ def manager(lua_redis: aioredis.FakeRedis) -> RedisConversationsManager:
     return RedisConversationsManager(ConversationsSettings())
 
 
-def _api_route(name: str = "support", **over: Any) -> ConversationRoute:
+def _api_route(name: str = "chat", **over: Any) -> ConversationRoute:
     fields: dict[str, Any] = {
         "route_name": name,
         "door": "api",
         "target_kind": "agent",
-        "target_name": "triage",
+        "target_name": "relay",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         "execution_key_fingerprint": "fp-1",
@@ -66,12 +66,12 @@ async def test_put_keys_and_indexes_the_row_atomically(manager, lua_redis):
     # A fresh create returns True and the SADD indexes the name; a replace returns False and
     # leaves exactly one index member.
     assert await manager.put_route(_api_route()) is True
-    assert await lua_redis.smembers(_NAMES_KEY) == {"support"}
-    assert await lua_redis.get(ConversationsSettings().route_key("support")) is not None
+    assert await lua_redis.smembers(_NAMES_KEY) == {"chat"}
+    assert await lua_redis.get(ConversationsSettings().route_key("chat")) is not None
 
     assert await manager.put_route(_api_route(target_kind="agent", target_name="other")) is False
-    assert await lua_redis.smembers(_NAMES_KEY) == {"support"}
-    got = await manager.get_route("support")
+    assert await lua_redis.smembers(_NAMES_KEY) == {"chat"}
+    got = await manager.get_route("chat")
     assert got is not None
     assert got.target_name == "other"
 
@@ -79,11 +79,11 @@ async def test_put_keys_and_indexes_the_row_atomically(manager, lua_redis):
 async def test_delete_removes_the_row_and_unindexes_it_atomically(manager, lua_redis):
     await manager.put_route(_api_route())
 
-    assert await manager.delete_route("support") is True
-    assert await lua_redis.exists(ConversationsSettings().route_key("support")) == 0
+    assert await manager.delete_route("chat") is True
+    assert await lua_redis.exists(ConversationsSettings().route_key("chat")) == 0
     assert await lua_redis.smembers(_NAMES_KEY) == set()
     # A second delete removes nothing and says so, and the SREM is harmless on an absent name.
-    assert await manager.delete_route("support") is False
+    assert await manager.delete_route("chat") is False
 
 
 async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_count(manager, lua_redis):
@@ -95,7 +95,7 @@ async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_coun
 
     settings = ConversationsSettings()
     await manager.put_route(_api_route())
-    await lua_redis.zadd(settings.route_threads_key("support"), {"bridge:support:alice/user-1": 1.0})
+    await lua_redis.zadd(settings.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
 
     with pytest.raises(DoorFlipRefused) as refused:
         await manager.put_route(
@@ -106,7 +106,7 @@ async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_coun
     assert refused.value.to_door == "channel"
     assert refused.value.held == 1
     # Nothing was written: the row still routes exactly as it did.
-    stored = await manager.get_route("support")
+    stored = await manager.get_route("chat")
     assert stored is not None
     assert stored.door == "api"
 
@@ -121,7 +121,7 @@ async def test_the_door_of_a_route_holding_no_thread_is_still_written(manager, l
         )
         is False
     )
-    stored = await manager.get_route("support")
+    stored = await manager.get_route("chat")
     assert stored is not None
     assert stored.door == "channel"
 
@@ -129,10 +129,10 @@ async def test_the_door_of_a_route_holding_no_thread_is_still_written(manager, l
 async def test_a_route_holding_threads_is_still_editable_on_every_other_field(manager, lua_redis):
     settings = ConversationsSettings()
     await manager.put_route(_api_route())
-    await lua_redis.zadd(settings.route_threads_key("support"), {"bridge:support:alice/user-1": 1.0})
+    await lua_redis.zadd(settings.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
 
     assert await manager.put_route(_api_route(target_name="other")) is False
-    stored = await manager.get_route("support")
+    stored = await manager.get_route("chat")
     assert stored is not None
     assert stored.target_name == "other"
 

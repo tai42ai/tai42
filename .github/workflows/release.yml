@@ -3,7 +3,7 @@ name: release
 on:
   push:
     # Component tags only: tai42-<package>-v<version> (incl. tai42-e2e-v*). A
-    # bare v* tag never matches — 27 packages cannot share one bare v* scheme.
+    # bare v* tag never matches — 32 packages cannot share one bare v* scheme.
     tags: ["tai42-*-v*"]
 
 permissions:

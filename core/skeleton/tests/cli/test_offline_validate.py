@@ -9,9 +9,9 @@ settings resolve. No client, database, or Redis is touched.
 from __future__ import annotations
 
 import pytest
+import typer
 from click.testing import CliRunner
-
-from tai42_skeleton.cli import app as app_module
+from tai42_cli import app as app_module
 
 _VALID_MANIFEST = """
 tools:
@@ -47,6 +47,26 @@ def test_manifest_validate_rejects_broken(tmp_path) -> None:
 def test_manifest_validate_missing_file() -> None:
     result = CliRunner().invoke(app_module.app, ["manifest", "validate", "/no/such/manifest.yml"])
     assert result.exit_code != 0
+    assert "does not exist" in result.output
+
+
+def test_offline_leaves_have_no_completion_flags() -> None:
+    # The offline holders are built with completion disabled, so these leaves do not
+    # advertise ``--install-completion``/``--show-completion``.
+    for path in (["config", "lint", "--help"], ["manifest", "validate", "--help"]):
+        result = CliRunner().invoke(app_module.app, path)
+        assert result.exit_code == 0, result.output
+        assert "--install-completion" not in result.output
+        assert "--show-completion" not in result.output
+
+
+def test_offline_leaves_have_no_json_flag() -> None:
+    # The offline validators emit human diagnostics and an exit code only; they never
+    # honor ``--json``, so the flag must not be advertised on their help.
+    for path in (["config", "lint", "--help"], ["manifest", "validate", "--help"]):
+        result = CliRunner().invoke(app_module.app, path)
+        assert result.exit_code == 0, result.output
+        assert "--json" not in result.output
 
 
 def test_config_lint_accepts_valid(tmp_path) -> None:
@@ -66,6 +86,13 @@ def test_config_lint_rejects_broken_manifest(tmp_path) -> None:
     result = CliRunner().invoke(app_module.app, ["config", "lint", str(path)])
     assert result.exit_code != 0
     assert "invalid manifest" in result.output
+
+
+def test_config_lint_missing_file_is_usage_error(tmp_path) -> None:
+    missing = tmp_path / "nope.yml"
+    result = CliRunner().invoke(app_module.app, ["config", "lint", str(missing)])
+    assert result.exit_code != 0
+    assert "not found" in result.output
 
 
 def test_config_lint_without_manifest_still_checks_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,12 +118,41 @@ def test_config_lint_flags_unresolved_required_setting(monkeypatch: pytest.Monke
     )
     group = SettingsClassInfo(name="LintProbe", module="probe", qualname="probe.LintProbe", fields=[field])
 
-    import tai42_skeleton.cli.commands.config as config_cmd
+    import tai42_skeleton.cli.offline as offline_cmd
 
-    monkeypatch.setattr(config_cmd, "registered_settings", lambda: [group])
-    monkeypatch.setattr(config_cmd, "load_api_routes", list)
+    monkeypatch.setattr(offline_cmd, "registered_settings", lambda: [group])
+    monkeypatch.setattr(offline_cmd, "load_api_routes", list)
     monkeypatch.delenv("TAI_LINT_TEST_REQUIRED", raising=False)
 
     result = CliRunner().invoke(app_module.app, ["config", "lint"])
     assert result.exit_code != 0
     assert "required settings do not resolve" in result.output
+
+
+def test_validate_manifest_file_rejects_unreadable_yaml(tmp_path) -> None:
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    bad = tmp_path / "manifest.yml"
+    bad.write_text("key: [unterminated\n", encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="could not read manifest YAML"):
+        validate_manifest_file(str(bad))
+
+
+def test_validate_manifest_file_rejects_non_mapping(tmp_path) -> None:
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    scalar = tmp_path / "manifest.yml"
+    scalar.write_text("- just\n- a\n- list\n", encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="YAML mapping"):
+        validate_manifest_file(str(scalar))
+
+
+def test_validate_manifest_file_rejects_invalid_manifest_shape(tmp_path) -> None:
+    # A well-formed YAML mapping that violates the ``Manifest`` model surfaces the
+    # model's validation error, not a raw traceback.
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    invalid = tmp_path / "manifest.yml"
+    invalid.write_text("mcp: not-a-list\n", encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="invalid manifest"):
+        validate_manifest_file(str(invalid))

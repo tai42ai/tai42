@@ -22,16 +22,21 @@ that hosts a capability and supplies the operational layer around it (manifest
 loading, access control, OAuth connectors, background execution, monitoring,
 storage, and human-in-the-loop steps).
 
-Three packages; each depends only on the ones to its left:
+Four packages; each depends only on the ones to its left:
 
 ```
-tai42-contract  <--  tai42-kit  <--  tai42-skeleton
-(interfaces)      (helpers)     (the server)
+                     tai42-kit  <--.
+                   /  (helpers)     \
+tai42-contract  <-+                  +--  tai42-skeleton
+  (interfaces)     \                /    (the server)
+                     tai42-cli  <--'
+               (the remote client)
 ```
 
-`tai42-skeleton` is the server at the end of the chain: it depends on **only**
-`tai42-contract` (the pure interface package) and `tai42-kit` (generic leaf
-helpers). It is the runnable body every plugin plugs into.
+`tai42-skeleton` is the server at the end of the chain: it depends on
+`tai42-contract` (the pure interface package), `tai42-kit` (generic leaf
+helpers), and `tai42-cli` (the terminal client whose `tai` command it extends).
+It is the runnable body every plugin plugs into.
 
 ## Install
 
@@ -153,11 +158,11 @@ or tool target to exist):
 
 ```bash
 # PUT /api/conversation-configs/{target_kind}/{target_name}
-tai conversations config-set agent concierge --multichannel \
+tai conversations config-set agent assistant --multichannel \
   --greeting-template 'Hi! Pair another channel with {pairing_code}'
 tai conversations config-list                  # GET /api/conversation-configs
-tai conversations config-get agent concierge   # GET .../{target_kind}/{target_name}
-tai conversations config-delete agent concierge # DELETE .../{target_kind}/{target_name}
+tai conversations config-get agent assistant   # GET .../{target_kind}/{target_name}
+tai conversations config-delete agent assistant # DELETE .../{target_kind}/{target_name}
 ```
 
 ### Pairing protocol

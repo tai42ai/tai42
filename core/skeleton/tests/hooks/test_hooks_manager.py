@@ -33,18 +33,18 @@ async def test_in_memory_register_list_unregister():
     manager = InMemoryHooksManager(_settings())
     hook = HookParams(
         name="h1",
-        topic="orders",
-        tool="ship",
+        topic="events",
+        tool="forward",
         execution_key="k-fire",
         execution_key_fingerprint="fp-fire",
-        condition='.status == "paid"',
+        condition='.status == "ready"',
     )
 
     assert await manager.register(hook) is True
 
     assert set((await manager.list_hooks()).keys()) == {"h1"}
-    by_topic = await manager.list_hooks_by_topic("orders")
-    assert by_topic["h1"].tool == "ship"
+    by_topic = await manager.list_hooks_by_topic("events")
+    assert by_topic["h1"].tool == "forward"
     assert await manager.list_hooks_by_topic("other") == {}
 
     assert await manager.unregister("h1") is True

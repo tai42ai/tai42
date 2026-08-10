@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai42-cli"
+version = "1.0.0"
+description = "Command-line client for operating a tai42 server over its HTTP API."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "tai42", email = "oss@tai42.ai" },
+]
+keywords = ["cli", "mcp", "client", "http", "operator"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The pure interface contract — combo-element and channel/interaction models the
+    # remote commands round-trip to the wire.
+    "tai42-contract>=1.5,<2",
+    "typer>=0.12",
+    # Imported directly (TyperGroup/TyperOption plumbing, click.shell_completion).
+    "click>=8.3",
+    # The one HTTP client the remote commands talk through.
+    "httpx>=0.28",
+    # The notifications command adapts channel/interaction payloads through pydantic.
+    "pydantic>=2.12",
+    # Bootstraps a local ``.env`` for the CLI (skipped under k8s config).
+    "python-dotenv>=1.2",
+]
+
+[project.urls]
+Homepage = "https://tai42.ai"
+Repository = "https://github.com/tai42ai/tai42/tree/main/core/cli"
+Issues = "https://github.com/tai42ai/tai42/issues"
+Changelog = "https://github.com/tai42ai/tai42/blob/main/core/cli/CHANGELOG.md"
+
+[project.entry-points.console_scripts]
+# `tai` is the documented command. `tai42` is an alias so a deployment that
+# already has an unrelated `tai` on PATH still has an unambiguous entry point.
+tai = "tai42_cli.app:app"
+tai42 = "tai42_cli.app:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "pyright>=1.1.389",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai42_cli*"]
+
+[tool.setuptools.package-data]
+tai42_cli = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+# Warnings are errors so a real defect that only surfaces as a warning fails the
+# suite loudly instead of passing green.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["tai42_cli"]
+
+[tool.coverage.report]
+fail_under = 97
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }]
+
+# The version floors in [project] are the compatibility contract; this source
+# resolves the tai42-contract requirement to the in-tree workspace member instead
+# of the published package. It is not part of wheel metadata.
+[tool.uv.sources]
+tai42-contract = { workspace = true }
+
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"tai42_skeleton".msg = "tai42-cli is the standalone remote client: it never imports tai42-skeleton."
+"tai42_kit".msg = "tai42-cli is the standalone remote client: it never imports tai42-kit."
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"

@@ -19,10 +19,10 @@ from pydantic import ValidationError
 
 def _route_kwargs(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "route_name": "support-sms",
+        "route_name": "chat-sms",
         "door": "channel",
         "target_kind": "agent",
-        "target_name": "concierge",
+        "target_name": "assistant",
         "execution_key": "svc-bridge",
         "channel": "twilio",
         "our_identity": "+15550001111",
@@ -223,7 +223,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
         route_name="api-desk",
         door="api",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         execution_key="svc-bridge",
         callback_url="https://host.example/hook",
     )
@@ -234,7 +234,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             route_name="api-desk",
             door="api",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             execution_key="svc-bridge",
             callback_url="http://host.example/hook",
         )
@@ -244,7 +244,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             route_name="api-desk",
             door="api",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             execution_key="svc-bridge",
             callback_url="https://user@evil.example/hook",
         )
@@ -254,7 +254,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             route_name="api-desk",
             door="api",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             execution_key="svc-bridge",
             callback_url="https://[::1/hook",
         )
@@ -264,7 +264,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             route_name="api-desk",
             door="api",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             execution_key="svc-bridge",
             callback_url="https://host.example/hook",
             channel="twilio",
@@ -274,7 +274,7 @@ def test_api_route_requires_https_callback_and_forbids_channel_fields():
             route_name="api-desk",
             door="api",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             execution_key="svc-bridge",
             callback_url="https://host.example/hook",
             our_identity="+15550001111",
@@ -466,14 +466,14 @@ def test_person_requires_at_least_one_address_and_serializes_sortable_created_at
         Person(
             person_id="p1",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             created_at=datetime(2026, 8, 8, 12, 0, tzinfo=UTC),
             addresses=[],
         )
     person = Person(
         person_id="p1",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         created_at=datetime(2026, 8, 8, 12, 0, tzinfo=UTC),
         addresses=[PersonAddress(**_address_kwargs())],
     )
@@ -491,7 +491,7 @@ def test_person_created_at_rejects_naive_and_normalizes_non_utc_to_offset():
         Person(
             person_id="p1",
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             created_at=datetime(2026, 8, 8, 12, 0),  # naive
             addresses=[PersonAddress(**_address_kwargs())],
         )
@@ -501,7 +501,7 @@ def test_person_created_at_rejects_naive_and_normalizes_non_utc_to_offset():
     person = Person(
         person_id="p1",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         created_at=datetime(2026, 8, 8, 7, 0, tzinfo=eastern),  # == 12:00 UTC
         addresses=[PersonAddress(**_address_kwargs())],
     )
@@ -540,7 +540,7 @@ def test_pairing_errors_are_distinct_named_types():
 def test_target_config_defaults_and_frozen():
     from tai42_contract.conversations import TargetConversationConfig
 
-    config = TargetConversationConfig(target_kind="agent", target_name="concierge")
+    config = TargetConversationConfig(target_kind="agent", target_name="assistant")
     assert config.multichannel is False
     assert config.greeting_template is None
     with pytest.raises(ValidationError):

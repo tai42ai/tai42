@@ -28,7 +28,7 @@ def _store(monkeypatch, fake: FakeRecordRedis) -> ConversationPersonStore:
     return ConversationPersonStore(ConversationsSettings())
 
 
-_TARGET = PairingTarget(target_kind="agent", target_name="concierge")
+_TARGET = PairingTarget(target_kind="agent", target_name="assistant")
 
 
 async def _channel_person(store: ConversationPersonStore, address: str):
@@ -362,7 +362,7 @@ async def test_index_naming_a_missing_row_raises_on_lookup_and_ensure(monkeypatc
     settings = ConversationsSettings()
     # A dangling index entry (no such row) is corruption — both readers raise, never swallow.
     dak = _door_address_key(door="channel", channel="twilio", our_identity="+15550001111", address="+1000")
-    fake._hashes.setdefault(settings.person_index_key("agent", "concierge"), {})[dak] = "p-gone"
+    fake._hashes.setdefault(settings.person_index_key("agent", "assistant"), {})[dak] = "p-gone"
 
     with pytest.raises(RuntimeError):
         await _channel_person(store, "+1000")

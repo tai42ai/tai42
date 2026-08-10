@@ -94,7 +94,7 @@ async def mint_pairing_code(channel: str, our_identity: str, sender: str) -> tup
         ValueError: A blank-string ``channel``, ``our_identity``, or ``sender`` (and,
             defensively on a direct call, a bare ``None``).
         ConversationRouteResolutionError: No channel route matches ``(channel, our_identity)``.
-        MultichannelDisabledError: The resolved target has multichannel turned off (D11).
+        MultichannelDisabledError: The resolved target has multichannel turned off.
     """
     # Imported inside the call to break a module-level cycle: the turn engine imports
     # ``classify`` from this module, so this module must not import turn at load time.

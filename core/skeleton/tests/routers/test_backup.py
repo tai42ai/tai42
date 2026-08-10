@@ -564,13 +564,13 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     monkeypatch.setattr(management, "client_ctx", make_client_ctx(source))
     # The export enumerates tokens through the provider, so point it at the fake too.
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source))
-    await management.add_url_to_scope("scope-a", "/orders/{id}", pattern=r"/orders/\d+")
+    await management.add_url_to_scope("scope-a", "/events/{id}", pattern=r"/events/\d+")
 
     _install(monkeypatch)
     doc = _json(await export_backup(_post_req({"sections": ["access_control"]})))
     section = doc["sections"]["access_control"]
-    assert section["scopes"] == {"/orders/{id}": "scope-a"}
-    assert section["patterns"] == {"/orders/{id}": r"/orders/\d+"}
+    assert section["scopes"] == {"/events/{id}": "scope-a"}
+    assert section["patterns"] == {"/events/{id}": r"/events/\d+"}
 
     # Restore into a fresh (wiped) store — the dynamic pattern comes back so a
     # pattern-scoped route re-authorizes exactly as before the backup.
@@ -582,8 +582,8 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(target))
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True
-    assert await management.get_all_existing_scopes() == {"/orders/{id}": "scope-a"}
-    assert await management.get_all_existing_patterns() == {"/orders/{id}": r"/orders/\d+"}
+    assert await management.get_all_existing_scopes() == {"/events/{id}": "scope-a"}
+    assert await management.get_all_existing_patterns() == {"/events/{id}": r"/events/\d+"}
 
 
 async def test_access_control_public_route_round_trips(monkeypatch):

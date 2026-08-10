@@ -433,7 +433,7 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
 
 
 # ---------------------------------------------------------------------------
-# apply_env_and_change (C9 combined env-write + manifest-mutate)
+# apply_env_and_change (combined env-write + manifest-mutate)
 # ---------------------------------------------------------------------------
 
 
@@ -483,7 +483,7 @@ async def test_apply_env_and_change_writes_env_and_mutates_manifest_consistently
 async def test_apply_env_and_change_manifest_failure_leaves_orphan_no_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # C9a partial-failure contract (PLAN_3:257-264): env-FIRST/manifest-SECOND; a manifest
+    # partial-failure contract: env-FIRST/manifest-SECOND; a manifest
     # persist failure AFTER the env write does NOT roll the env back — the env write STANDS as
     # an inert, re-runnable orphan — and the op raises loudly (OrphanEnvWriteError) NAMING the
     # orphan env key AND the manifest pointer, stating the env write stands / re-run.
@@ -570,7 +570,7 @@ async def test_apply_env_and_change_refuses_dangling_marker_before_any_write(
 def _marks_appending_prepare(
     key: str,
 ) -> Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]]:
-    """A ``prepare`` that mirrors the C9d read→append→write hazard: it reads the stored marks,
+    """A ``prepare`` that mirrors the read→append→write hazard: it reads the stored marks,
     YIELDS (``await asyncio.sleep(0)``) to force a concurrent op to try to interleave, THEN
     appends its own key. Under the env-write lock the yield cannot let the other op read stale
     marks; without it, both would read the same marks and the second write would lose the first."""
@@ -588,7 +588,7 @@ def _marks_appending_prepare(
 async def test_apply_env_and_change_lock_serializes_concurrent_marks_append(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # C9d: two concurrent combined ops each APPEND their secret mark. Each prepare reads the
+    # Two concurrent combined ops each APPEND their secret mark. Each prepare reads the
     # stored marks, YIELDS to force interleave, then appends — so without serialization both
     # read the same marks and the second write clobbers the first (a lost append). The
     # process-wide (CLASS-level) env-write lock must serialize the read→write span so BOTH
@@ -836,7 +836,7 @@ async def test_env_change_keeping_bus_with_backend_is_allowed(monkeypatch: pytes
 
 
 async def test_env_change_with_backend_and_default_namespace_bus_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # D9: the bus configured ONLY through the shared TAI_DEFAULT_REDIS_URL (no
+    # The bus configured ONLY through the shared TAI_DEFAULT_REDIS_URL (no
     # TAI_BUS_REDIS_URL) resolves as ENABLED through BusSettings, so an unrelated env
     # edit on a backend deployment is NOT falsely rejected (a raw TAI_BUS_REDIS_URL
     # read would have missed the default and rejected every edit).

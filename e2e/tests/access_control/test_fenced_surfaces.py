@@ -1,4 +1,4 @@
-"""M20 F1 — the fenced surfaces: ``fenced``/``secret`` routes are NEVER grantable.
+"""The fenced surfaces: ``fenced``/``secret`` routes are NEVER grantable.
 
 The route action-class is the load-bearing admin-only fence: a ``fenced`` mutation or a
 ``secret`` bulk-read is denied to any non-admin no matter what per-tag level a role

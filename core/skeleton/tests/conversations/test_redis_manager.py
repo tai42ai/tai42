@@ -19,12 +19,12 @@ def _manager(monkeypatch, fake) -> RedisConversationsManager:
     return RedisConversationsManager(ConversationsSettings())
 
 
-def _api_route(name: str = "support", **over) -> ConversationRoute:
+def _api_route(name: str = "chat", **over) -> ConversationRoute:
     fields: dict[str, Any] = {
         "route_name": name,
         "door": "api",
         "target_kind": "agent",
-        "target_name": "triage",
+        "target_name": "relay",
         "execution_key": "svc",
         "callback_url": "https://example.com/cb",
         "execution_key_fingerprint": "fp-1",
@@ -39,7 +39,7 @@ def _channel_route(name: str = "line", **over) -> ConversationRoute:
         "route_name": name,
         "door": "channel",
         "target_kind": "agent",
-        "target_name": "triage",
+        "target_name": "relay",
         "execution_key": "svc",
         "channel": "twilio",
         "our_identity": "+15550001111",
@@ -56,11 +56,11 @@ async def test_put_creates_then_replaces(monkeypatch):
     assert await manager.put_route(_api_route()) is True  # newly created
     assert await manager.put_route(_api_route(target_kind="agent", target_name="other")) is False  # replace
 
-    got = await manager.get_route("support")
+    got = await manager.get_route("chat")
     assert got is not None
     assert got.target_name == "other"
     # The name index and the per-route key stay in lockstep.
-    assert fake._sets["conversations:route_names"] == {"support"}
+    assert fake._sets["conversations:route_names"] == {"chat"}
 
 
 async def test_get_returns_none_for_unknown(monkeypatch):
@@ -71,7 +71,7 @@ async def test_get_returns_none_for_unknown(monkeypatch):
 async def test_get_carries_the_callback_secret_for_internal_consumers(monkeypatch):
     manager = _manager(monkeypatch, FakeRedis())
     await manager.put_route(_api_route(callback_secret="the-secret"))
-    got = await manager.get_route("support")
+    got = await manager.get_route("chat")
     assert got is not None
     assert got.callback_secret == "the-secret"
 
@@ -81,9 +81,9 @@ async def test_delete_removes_and_reports(monkeypatch):
     manager = _manager(monkeypatch, fake)
     await manager.put_route(_api_route())
 
-    assert await manager.delete_route("support") is True
-    assert await manager.get_route("support") is None
-    assert await manager.delete_route("support") is False
+    assert await manager.delete_route("chat") is True
+    assert await manager.get_route("chat") is None
+    assert await manager.delete_route("chat") is False
     assert fake._sets["conversations:route_names"] == set()
 
 

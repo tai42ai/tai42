@@ -139,7 +139,7 @@ async def test_notify_none_return_becomes_empty_id_list(register_channel):
 
 
 _IMAGE = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/photo.png", caption="a photo")
-_TEMPLATE = ChannelTemplate(name="order_update", language="en_US", parameters=["A-42"])
+_TEMPLATE = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
 
 
 async def test_notify_threads_media_to_a_capable_channel(register_channel):
@@ -153,9 +153,9 @@ async def test_notify_threads_media_to_a_capable_channel(register_channel):
 async def test_notify_threads_template_to_a_capable_channel(register_channel):
     channel = register_channel("rich", RichChannel())
 
-    await notify_user("your order shipped", channel="rich", template=_TEMPLATE)
+    await notify_user("your item is done", channel="rich", template=_TEMPLATE)
 
-    assert channel.notifications == [ChannelNotification(message="your order shipped", template=_TEMPLATE)]
+    assert channel.notifications == [ChannelNotification(message="your item is done", template=_TEMPLATE)]
 
 
 async def test_media_to_channel_without_capability_is_not_implemented(register_channel):
@@ -330,12 +330,12 @@ async def test_channel_with_audience_records_in_app_and_sends(register_channel, 
     # the record lands in ``audience``'s in-app feed (an identity).
     channel = register_channel("fake", RecordingChannel())
 
-    await notify_user("shipped", channel="fake", recipient="123", audience="alice")
+    await notify_user("done", channel="fake", recipient="123", audience="alice")
 
-    assert channel.notifications == [ChannelNotification(message="shipped", recipient="123")]
+    assert channel.notifications == [ChannelNotification(message="done", recipient="123")]
     own = await notifications_sink.read_notifications(audience="alice")
     assert len(own) == 1
-    assert own[0]["message"] == "shipped"
+    assert own[0]["message"] == "done"
     assert own[0]["audience"] == "alice"
     assert own[0]["recipient"] == "123"
 

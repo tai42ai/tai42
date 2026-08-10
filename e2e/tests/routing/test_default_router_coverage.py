@@ -124,8 +124,8 @@ async def test_default_manifest_mounts_studio_route(
     default_router_stack: TaiStack, router: str, method: str, path: str, json: dict | None
 ) -> None:
     """PRIMARY independent guard: on the DEFAULT manifest, every Studio feature route
-    answers non-404. A 404 means the router went dark — the exact regression M19
-    fixed."""
+    answers non-404. A 404 means the router went dark — a Studio feature route dropped
+    from the default manifest."""
     resp = await _status(default_router_stack, method, path, json)
     assert resp.status_code != 404, (
         f"{router} is dark: {method} {path} -> 404 on the default manifest; body: {resp.text}"

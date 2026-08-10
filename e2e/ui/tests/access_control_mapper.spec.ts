@@ -1,5 +1,5 @@
 /**
- * Scope ↔ URL mapping enforces (Mission 9 PLAN_2 UI). The mapper is a SUB-VIEW
+ * Scope ↔ URL mapping enforces. The mapper is a SUB-VIEW
  * of `/settings` (the "API keys" tab), not its own route. Via the mapper: create
  * a scope and assign `/api/templates` to it (the click-based, non-DnD path).
  * Asserts the UI shows the route under the scope and `GET /api/auth/scopes`

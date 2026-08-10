@@ -402,7 +402,7 @@ async def _retire(old: Epoch, retired: int, deadline: float | None, *, tolerate_
     in-flight drain and the session-manager close) are DEFERRED to a background task on the
     serving loop: ``build_and_swap`` returns at once, the driver finishes and flushes its
     response on the still-live session manager, then the task drains the old epoch and
-    ``aclose``s it (D13a for every OTHER session, a beat later, off the reload's hot path —
+    ``aclose``s it (for every OTHER session, a beat later, off the reload's hot path —
     so long-lived streamable-http streams no longer gate reload latency either). A bus-driven
     reload (``tolerate_driver=False``) serves no in-flight request that needs its response
     delivered, so it drains + closes synchronously.
@@ -474,7 +474,7 @@ async def _deferred_drain_and_close(old: Epoch, budget: float) -> None:
     """Background tail of a door-driven reload's retire: wait (bounded by the drain budget)
     for the old generation's in-flight requests — including the driver, whose response then
     flushes on the still-live session manager — to finish, then ``aclose`` its FastMCP
-    lifespan (D13a for every remaining/streaming session). Runs on the serving loop (the
+    lifespan (for every remaining/streaming session). Runs on the serving loop (the
     supervisor's owner loop), so the lifespan close stays loop-correct."""
     try:
         await old._drain_in_flight(budget)

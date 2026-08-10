@@ -87,7 +87,7 @@ def build_backup_source_stack(res: StackResources, variants: Variants) -> StackC
 def build_backup_populated_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A SINGLE-worker, access-control-ON backup stack that can hold a REAL conversation
     route (its ``callback_secret``) AND a REAL api-key token — the populated source for the
-    two mode-less skip-only legs PLAN_10 §C pins at e2e:
+    two mode-less skip-only legs pinned at e2e:
 
     * the ``conversations`` section, over the redis conversations backend
       (``CONVERSATIONS_REDIS_URL``), so an ``api``-door route row persists and carries a

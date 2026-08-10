@@ -89,7 +89,7 @@ async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: Tai
             )
 
     # A prior test's fleet reload can retire a freshly-opened MCP session mid-call
-    # (D13a: a swap terminates sessions); ``McpClient`` re-initialises transparently and
+    # (a swap terminates sessions); ``McpClient`` re-initialises transparently and
     # returns the real result, so the bogus-target verdict is asserted on a plain call.
     result = await _call_bogus_tool()
     assert result.is_error, f"a bogus target must fail the tool loudly: {result}"

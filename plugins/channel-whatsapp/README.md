@@ -122,7 +122,7 @@ fully out-of-band: any reply (typed or tapped) from the recipient resolves the
 `(phone_number_id, wa_id)` pair's pending question, so one question can be pending
 per pair at a time; a second concurrent one is rejected loudly.
 
-An agent notification (`notify_user`) may also carry **media** — product photos
+An agent notification (`notify_user`) may also carry **media** — images
 sent as image messages, links appended to the message text — or, for a send
 outside the 24-hour window, a pre-approved **template** referenced by name. Media
 and template are mutually exclusive on one notification.

@@ -4,7 +4,7 @@ Runs against the agents stack (auth OFF), which carries the skeleton component s
 profile documents persist in — the same store the preset doors exercise. The apply
 pipeline itself is certified by ``test_flip``; this suite drives the CRUD / versioning /
 diff / refusal contracts the doors declare, plus the resolved-manifest no-leak posture
-(``GET /api/manifest`` serves the PRESERVED view after PLAN_3's retighten).
+(``GET /api/manifest`` serves the PRESERVED view).
 
 The action-class fence each profile route declares (list ``read``; get/version/diff
 ``secret``; put/delete/rollback/apply ``fenced``) is certified over an auth-ON stack by
@@ -179,7 +179,7 @@ async def test_key_material_key_refused(agents_stack: TaiStack, uniq: Callable[[
 
 
 async def test_manifest_preserved_posture(agents_stack: TaiStack) -> None:
-    """After PLAN_3's retighten, ``GET /api/manifest`` serves the PRESERVED ``{mcp,
+    """``GET /api/manifest`` serves the PRESERVED ``{mcp,
     user_tools}`` view (``!ENV`` markers intact, no resolved plaintext) — the SAME view the
     explicit ``/api/manifest/preserved`` door reads."""
     api = agents_stack.api()
@@ -198,7 +198,7 @@ async def test_manifest_preserved_posture(agents_stack: TaiStack) -> None:
 @pytest.mark.timeout(300)
 async def test_previous_revert_round_trip(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """Applying a profile snapshots the pre-apply stored env into the reserved ``@previous``;
-    applying ``@previous`` reverts the whole band — the D15 rollback anchor."""
+    applying ``@previous`` reverts the whole band — the rollback anchor."""
     api = agents_stack.api()
     before = (await api.get("/api/config/env"))["env"]
     marker = uniq("E2E_PREV").upper()

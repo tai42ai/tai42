@@ -161,15 +161,15 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
     helper = _RecordingHelper()
     monkeypatch.setattr(notifications_ops, "_notify_user", helper)
     media = [MediaItem(kind=MediaKind.IMAGE, url="https://example.com/a.png")]
-    template = ChannelTemplate(name="order_update", language="en_US", parameters=["A-42"])
+    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
 
     await notifications_ops.notify_user("hi", channel="whatsapp", media=media)
-    await notifications_ops.notify_user("shipped", channel="whatsapp", template=template)
+    await notifications_ops.notify_user("done", channel="whatsapp", template=template)
 
     assert helper.calls == [
         (("hi",), {"channel": "whatsapp", "recipient": None, "audience": None, "media": media, "template": None}),
         (
-            ("shipped",),
+            ("done",),
             {"channel": "whatsapp", "recipient": None, "audience": None, "media": None, "template": template},
         ),
     ]

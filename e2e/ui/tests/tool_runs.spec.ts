@@ -1,5 +1,5 @@
 /**
- * Background tool-runs view (Mission 9 tools UI). The pytest twin proves a
+ * Background tool-runs view. The pytest twin proves a
  * background run reaches a terminal state cross-worker
  * (`tests/tool_runs/test_background_runs.py`); the browser never opened the runs
  * surface. The runs surface is the `BackgroundRuns` PANEL inside the `/tools`

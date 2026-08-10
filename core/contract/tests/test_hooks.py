@@ -15,8 +15,8 @@ from tai42_contract.hooks import HookRegister, TopicVerifierBinding
 
 def _valid_register(**overrides: object) -> dict[str, object]:
     body: dict[str, object] = {
-        "name": "on-order",
-        "topic": "orders",
+        "name": "on-event",
+        "topic": "events",
         "tool": "notify",
         "execution_key": "k-fire",
     }
@@ -60,7 +60,7 @@ def test_binding_rejects_non_dict_config():
         TopicVerifierBinding.model_validate({"verifier": "github", "config": "nope"})
 
 
-@pytest.mark.parametrize("value", ["orders", "on-order", "hook_42", "t1", "a", "0abc"])
+@pytest.mark.parametrize("value", ["events", "on-event", "hook_42", "t1", "a", "0abc"])
 def test_register_accepts_url_safe_name_and_topic(value: str):
     # A single lowercase URL path segment (letters/digits leading, then ``-``/``_``)
     # is the routable shape, so it is accepted for both name and topic.
@@ -73,9 +73,9 @@ def test_register_accepts_url_safe_name_and_topic(value: str):
     "value",
     [
         "a/b",  # the path separator: a topic with ``/`` never routes via the webhook URL
-        "orders/",  # trailing separator
-        "Orders",  # uppercase is outside the segment charset
-        "on order",  # whitespace
+        "events/",  # trailing separator
+        "Events",  # uppercase is outside the segment charset
+        "on event",  # whitespace
         "topic.name",  # dot
         "café",  # non-ascii
         "-lead",  # must lead with a letter or digit

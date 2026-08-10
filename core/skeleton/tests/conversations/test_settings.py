@@ -26,13 +26,13 @@ def test_keyspace_helpers_are_distinct_greppable_segments():
     assert s.dedupe_key("twilio", "SM:1") == "conversations:dedupe:twilio:SM:1"
     assert s.record_key("m-1") == "conversations:record:m-1"
     assert s.outbound_index_key("twilio", "OB:2") == "conversations:outbound:twilio:OB:2"
-    assert s.route_key("support-line") == "conversations:route:support-line"
+    assert s.route_key("chat-line") == "conversations:route:chat-line"
     assert s.route_names_key == "conversations:route_names"
     assert s.route_key_prefix == "conversations:route:"
-    assert s.thread_index_key("support-line", "bridge:support-line:+1555") == (
-        "conversations:thread:support-line:bridge:support-line:+1555"
+    assert s.thread_index_key("chat-line", "bridge:chat-line:+1555") == (
+        "conversations:thread:chat-line:bridge:chat-line:+1555"
     )
-    assert s.route_threads_key("support-line") == "conversations:route_threads:support-line"
+    assert s.route_threads_key("chat-line") == "conversations:route_threads:chat-line"
     # Person-linking keyspaces: the uuid4/hex ids sit LAST; the charset-unconstrained
     # target_name sits TERMINAL under a ``:``-free target_kind.
     assert s.person_key("p-1") == "conversations:person:p-1"
@@ -57,7 +57,7 @@ def test_new_keyspace_blank_segments_are_refused():
     with pytest.raises(ValueError, match="target_name must be a non-blank string"):
         s.person_index_key("agent", "")
     with pytest.raises(ValueError, match="target_kind must not contain ':'"):
-        s.person_index_key("ag:ent", "concierge")
+        s.person_index_key("ag:ent", "assistant")
     with pytest.raises(ValueError, match="code_hash must be a non-blank string"):
         s.pair_code_key("")
 
@@ -78,7 +78,7 @@ def test_a_blank_provider_supplied_segment_is_refused():
         with pytest.raises(ValueError, match="channel must be a non-blank string"):
             s.outbound_index_key(blank, "OB1")
         with pytest.raises(ValueError, match="thread_id must be a non-blank string"):
-            s.thread_index_key("support-line", blank)
+            s.thread_index_key("chat-line", blank)
         with pytest.raises(ValueError, match="route_name must be a non-blank string"):
             s.route_threads_key(blank)
 

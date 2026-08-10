@@ -1,5 +1,5 @@
 /**
- * Agent-run error state (Mission 9 agents UI, run-view.tsx). The registered
+ * Agent-run error state (run-view.tsx). The registered
  * `tools_agent` is run against the scripted LLM stub with an EMPTY script: the
  * stub answers the model call with a loud 500 ("no scripted turn"), by design.
  * The run view must surface a terminal, loud error state — never an eternal

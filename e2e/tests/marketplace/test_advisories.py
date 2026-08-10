@@ -21,7 +21,7 @@ pytestmark = pytest.mark.backendless
 
 _TOOL = "e2e_market_probe"
 
-# The install POST runs pip install + a heavier PLAN_2 build_and_swap reload; at the
+# The install POST runs pip install + a heavier build_and_swap reload; at the
 # interleaved full-suite loaded tail it completes but exceeds the 60s default client read
 # timeout, so this ONE slow install path is given a defensible ceiling (not a global slacken).
 _INSTALL_TIMEOUT = 180.0

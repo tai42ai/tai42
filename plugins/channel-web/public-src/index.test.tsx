@@ -38,7 +38,7 @@ function shell(attributes: Record<string, string>): void {
 
 beforeEach(() => {
   document.body.innerHTML = '';
-  document.title = 'Support';
+  document.title = 'Chat';
   vi.resetModules();
   roots.length = 0;
 });
@@ -60,7 +60,7 @@ describe('the page entry', () => {
     });
 
     expect(document.querySelector('.tcw-app')).not.toBeNull();
-    expect(document.querySelector('h1')?.textContent).toBe('Support');
+    expect(document.querySelector('h1')?.textContent).toBe('Chat');
   });
 
   it('refuses a shell with no root element', async () => {

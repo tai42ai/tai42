@@ -96,16 +96,16 @@ async def test_accepts_parsed_payload_and_schedules_event(monkeypatch: pytest.Mo
 
     # starlette's Request is a concrete class the handler only reads
     # ``path_params`` off; it can't be matched structurally, so cast the stand-in.
-    response = await hooks.universal_webhook(cast(Request, _FakeRequest("orders")))
+    response = await hooks.universal_webhook(cast(Request, _FakeRequest("events")))
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 200
-    assert _body(response) == {"status": "accepted", "topic": "orders"}
+    assert _body(response) == {"status": "accepted", "topic": "events"}
 
     # The manager is invoked via the response's background task.
     assert response.background is not None
     await response.background()
-    assert manager.events == [("orders", {"hello": "world"})]
+    assert manager.events == [("events", {"hello": "world"})]
 
 
 async def test_rejects_unparseable_payload_with_400(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,13 +117,13 @@ async def test_rejects_unparseable_payload_with_400(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
 
     # See the note above: cast the structural stand-in to the concrete Request.
-    response = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"{bad")))
+    response = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"{bad")))
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
     body = _body(response)
     assert body["status"] == "rejected"
-    assert body["topic"] == "orders"
+    assert body["topic"] == "events"
     assert "bad body" in body["error"]
     # A parse rejection dispatches nothing — no background task, no event fired.
     assert response.background is None
@@ -189,7 +189,7 @@ class _DelReq:
 def _hooks_fixture() -> dict[str, HookParams]:
     return {
         "a": HookParams(
-            name="a", topic="orders", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+            name="a", topic="events", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp-fire"
         ),
         "b": HookParams(
             name="b", topic="alerts", tool="page", execution_key="k-fire", execution_key_fingerprint="fp-fire"
@@ -198,14 +198,14 @@ def _hooks_fixture() -> dict[str, HookParams]:
 
 
 async def test_list_hooks_returns_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = _MgmtManager(_hooks_fixture(), verifiers={"orders": {"verifier": "shared_secret", "config": {}}})
+    manager = _MgmtManager(_hooks_fixture(), verifiers={"events": {"verifier": "shared_secret", "config": {}}})
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     response = await hooks.list_hooks(cast(Request, _GetReq()))
     body = _body(response)
     assert body["data"]["total"] == 2
     assert {item["name"] for item in body["data"]["items"]} == {"a", "b"}
     # The GET response carries the per-topic verifier bindings.
-    assert body["data"]["topic_verifiers"] == {"orders": {"verifier": "shared_secret", "config": {}}}
+    assert body["data"]["topic_verifiers"] == {"events": {"verifier": "shared_secret", "config": {}}}
 
 
 async def test_list_hooks_filters_by_topic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,7 +220,7 @@ async def test_list_hooks_filters_by_topic(monkeypatch: pytest.MonkeyPatch) -> N
 async def test_register_hook_validates_and_registers(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    payload = {"name": "c", "topic": "orders", "tool": "notify", "execution_key": "k-fire"}
+    payload = {"name": "c", "topic": "events", "tool": "notify", "execution_key": "k-fire"}
     response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
     assert response.status_code == 200
     assert _body(response)["data"] == {"registered": True, "name": "c"}
@@ -240,7 +240,7 @@ async def test_register_hook_rejects_invalid_params(monkeypatch: pytest.MonkeyPa
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     # Missing the required ``tool`` field.
-    response = await hooks.register_hook(cast(Request, _JsonReq({"name": "c", "topic": "orders"})))
+    response = await hooks.register_hook(cast(Request, _JsonReq({"name": "c", "topic": "events"})))
     assert response.status_code == 400
     assert "invalid hook params" in _body(response)["error"]
     assert manager.registered == []
@@ -252,7 +252,7 @@ async def test_register_hook_rejects_bad_charset_naming_the_rule(field: str, mon
     # charset guard rejects it at the registration door with a 400 that names the rule.
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    payload = {"name": "c", "topic": "orders", "tool": "notify", "execution_key": "k-fire"}
+    payload = {"name": "c", "topic": "events", "tool": "notify", "execution_key": "k-fire"}
     payload[field] = "bad/segment"
     response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
     assert response.status_code == 400
@@ -278,7 +278,7 @@ async def test_register_hook_maps_manager_jq_error_to_400(monkeypatch: pytest.Mo
 
     manager = _RaisingManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    payload = {"name": "c", "topic": "orders", "tool": "notify", "execution_key": "k-fire", "condition": "{{bad"}
+    payload = {"name": "c", "topic": "events", "tool": "notify", "execution_key": "k-fire", "condition": "{{bad"}
     response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
     assert response.status_code == 400
     assert "not valid jq" in _body(response)["error"]
@@ -360,26 +360,26 @@ async def test_put_binding_sets_and_get_reflects(monkeypatch: pytest.MonkeyPatch
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
 
-    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("orders", {"verifier": "prov", "config": {"k": "v"}})))
+    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "prov", "config": {"k": "v"}})))
     assert resp.status_code == 200
-    assert _body(resp)["data"] == {"topic": "orders", "verifier": "prov"}
+    assert _body(resp)["data"] == {"topic": "events", "verifier": "prov"}
     # GET now reflects it under topic_verifiers.
     listed = await hooks.list_hooks(cast(Request, _GetReq()))
-    assert _body(listed)["data"]["topic_verifiers"] == {"orders": {"verifier": "prov", "config": {"k": "v"}}}
+    assert _body(listed)["data"]["topic_verifiers"] == {"events": {"verifier": "prov", "config": {"k": "v"}}}
 
 
 async def test_put_binding_replaces(monkeypatch: pytest.MonkeyPatch, registry) -> None:
     registry.register("prov", _FakeVerifier())
-    manager = _MgmtManager(verifiers={"orders": {"verifier": "prov", "config": {"old": 1}}})
+    manager = _MgmtManager(verifiers={"events": {"verifier": "prov", "config": {"old": 1}}})
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    await hooks.set_topic_verifier(cast(Request, _PutReq("orders", {"verifier": "prov", "config": {"new": 2}})))
-    assert manager._verifiers["orders"] == {"verifier": "prov", "config": {"new": 2}}
+    await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "prov", "config": {"new": 2}})))
+    assert manager._verifiers["events"] == {"verifier": "prov", "config": {"new": 2}}
 
 
 async def test_put_binding_unknown_verifier_rejected_at_bind_time(monkeypatch: pytest.MonkeyPatch, registry) -> None:
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("orders", {"verifier": "nope", "config": {}})))
+    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "nope", "config": {}})))
     assert resp.status_code == 400
     assert "unknown webhook verifier" in _body(resp)["error"]
     assert manager._verifiers == {}
@@ -389,7 +389,7 @@ async def test_put_binding_malformed_body_400(monkeypatch: pytest.MonkeyPatch, r
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     for bad in ([1, 2], {"config": {}}, {"verifier": "prov", "config": "x"}, ValueError("bad json")):
-        resp = await hooks.set_topic_verifier(cast(Request, _PutReq("orders", bad)))
+        resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", bad)))
         assert resp.status_code == 400
     assert manager._verifiers == {}
 
@@ -400,19 +400,19 @@ async def test_put_binding_empty_verifier_400_not_500(monkeypatch: pytest.Monkey
     # the backing guarantee; the router surfaces it as a client error here.
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("orders", {"verifier": "", "config": {}})))
+    resp = await hooks.set_topic_verifier(cast(Request, _PutReq("events", {"verifier": "", "config": {}})))
     assert resp.status_code == 400
     assert "non-empty 'verifier'" in _body(resp)["error"]
     assert manager._verifiers == {}
 
 
 async def test_delete_binding_removes_and_missing_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = _MgmtManager(verifiers={"orders": {"verifier": "prov", "config": {}}})
+    manager = _MgmtManager(verifiers={"events": {"verifier": "prov", "config": {}}})
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
-    resp = await hooks.delete_topic_verifier(cast(Request, _TopicDelReq("orders")))
+    resp = await hooks.delete_topic_verifier(cast(Request, _TopicDelReq("events")))
     assert resp.status_code == 200
     assert _body(resp)["data"]["removed"] is True
-    missing = await hooks.delete_topic_verifier(cast(Request, _TopicDelReq("orders")))
+    missing = await hooks.delete_topic_verifier(cast(Request, _TopicDelReq("events")))
     assert missing.status_code == 404
 
 
@@ -441,9 +441,9 @@ async def test_unbound_topic_ingress_unchanged(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b'{"hello":"world"}')))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b'{"hello":"world"}')))
     assert resp.status_code == 200
-    assert _body(resp) == {"status": "accepted", "topic": "orders"}
+    assert _body(resp) == {"status": "accepted", "topic": "events"}
     # nosniff + no-store on the ingress response.
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["Cache-Control"] == "no-store"
@@ -460,7 +460,7 @@ async def test_bound_topic_verifies_before_parse(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b'{"hello":"world"}')))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b'{"hello":"world"}')))
     assert resp.status_code == 200
     # Verify ran, and it ran BEFORE the parse.
     assert order == ["verify", "parse"]
@@ -479,7 +479,7 @@ async def test_bound_topic_verify_failure_401_nothing_dispatched(monkeypatch: py
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"x")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 401
     assert _body(resp)["error"] == "webhook verification failed"
     # Nothing parsed, nothing dispatched (no background task).
@@ -501,7 +501,7 @@ async def test_bound_post_only_verifier_strips_query_from_payload(monkeypatch: p
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b'{"hello":"world"}')))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b'{"hello":"world"}')))
     assert resp.status_code == 200
     assert seen["include_query"] is False
 
@@ -519,7 +519,7 @@ async def test_bound_header_verifier_keeps_query_in_payload(monkeypatch: pytest.
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"x")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 200
     assert seen["include_query"] is True
 
@@ -528,7 +528,7 @@ async def test_bound_post_only_verifier_rejects_get(monkeypatch: pytest.MonkeyPa
     registry.register("body-sig", _FakeVerifier(post_only=True))
     manager = _FakeManager(verifier_binding={"verifier": "body-sig", "config": {}})
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", method="GET")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", method="GET")))
     assert resp.status_code == 405
 
 
@@ -543,7 +543,7 @@ async def test_bound_missing_secret_fails_closed_500(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"x")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
     assert parsed["called"] is False
 
@@ -561,7 +561,7 @@ async def test_bound_unresolvable_verifier_fails_closed_500(monkeypatch: pytest.
 
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"x")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
     assert resp.status_code == 500
     assert parsed["called"] is False
     assert resp.background is None
@@ -571,7 +571,7 @@ async def test_over_cap_body_413(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _FakeManager()
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
     monkeypatch.setattr(hooks, "webhook_ingress_settings", lambda: SimpleNamespace(max_body_bytes=8))
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", body=b"0123456789")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"0123456789")))
     assert resp.status_code == 413
 
 
@@ -579,7 +579,7 @@ async def test_over_cap_query_413(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _FakeManager()
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
     monkeypatch.setattr(hooks, "webhook_ingress_settings", lambda: SimpleNamespace(max_body_bytes=8))
-    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("orders", query="a=0123456789")))
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", query="a=0123456789")))
     assert resp.status_code == 413
 
 
@@ -606,7 +606,7 @@ async def _parse_empty(request, include_query=True) -> dict:
     return {}
 
 
-def _wire_resolver(monkeypatch, manager, *, topic="orders", tool_kwargs=None, require_api_key=False, resolve_exc=None):
+def _wire_resolver(monkeypatch, manager, *, topic="events", tool_kwargs=None, require_api_key=False, resolve_exc=None):
     from tai42_skeleton.hooks.trigger_links import TriggerLinkError
 
     async def _resolve(token):
@@ -627,7 +627,7 @@ def _wire_resolver(monkeypatch, manager, *, topic="orders", tool_kwargs=None, re
 
 async def test_trigger_get_dispatches_payload_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _ResolverManager()
-    _wire_resolver(monkeypatch, manager, topic="orders", tool_kwargs={"a": 1})
+    _wire_resolver(monkeypatch, manager, topic="events", tool_kwargs={"a": 1})
 
     async def fake_parse(request, include_query=True):
         return {"x": "1"}
@@ -640,7 +640,7 @@ async def test_trigger_get_dispatches_payload_and_override(monkeypatch: pytest.M
     assert resp.headers["Cache-Control"] == "no-store"
     assert resp.background is not None
     await resp.background()
-    assert manager.events == [("orders", {"x": "1"}, {"a": 1})]
+    assert manager.events == [("events", {"x": "1"}, {"a": 1})]
 
 
 async def test_trigger_none_override_for_paramless_link(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -741,7 +741,7 @@ async def test_api_key_link_403s_an_unauthenticated_token_holder(monkeypatch: py
     # The control firing leaves its own server-side record, naming the cause — the
     # resolver's preceding line reports only that the token resolved.
     assert any(
-        "cause=api-key-required" in record.getMessage() and "orders" in record.getMessage()
+        "cause=api-key-required" in record.getMessage() and "events" in record.getMessage()
         for record in caplog.records
         if record.levelno == logging.WARNING
     )
@@ -749,7 +749,7 @@ async def test_api_key_link_403s_an_unauthenticated_token_holder(monkeypatch: py
 
 async def test_api_key_link_fires_for_an_authenticated_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _ResolverManager()
-    _wire_resolver(monkeypatch, manager, topic="orders", require_api_key=True)
+    _wire_resolver(monkeypatch, manager, topic="events", require_api_key=True)
 
     async def fake_parse(request, include_query=True):
         return {"x": 1}
@@ -760,14 +760,14 @@ async def test_api_key_link_fires_for_an_authenticated_caller(monkeypatch: pytes
     assert resp.status_code == 200
     assert resp.background is not None
     await resp.background()
-    assert manager.events == [("orders", {"x": 1}, None)]
+    assert manager.events == [("events", {"x": 1}, None)]
 
 
 async def test_token_only_link_needs_no_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     # The default door is token-only — the QR-on-a-wall case — so an unauthenticated
     # holder still fires it. The requirement is per-record, not per-route.
     manager = _ResolverManager()
-    _wire_resolver(monkeypatch, manager, topic="orders", require_api_key=False)
+    _wire_resolver(monkeypatch, manager, topic="events", require_api_key=False)
 
     async def fake_parse(request, include_query=True):
         return {}
@@ -778,7 +778,7 @@ async def test_token_only_link_needs_no_credential(monkeypatch: pytest.MonkeyPat
     assert resp.status_code == 200
     assert resp.background is not None
     await resp.background()
-    assert manager.events == [("orders", {}, None)]
+    assert manager.events == [("events", {}, None)]
 
 
 def test_the_route_gate_derives_the_door_level_from_the_method() -> None:
@@ -846,7 +846,7 @@ async def test_api_key_link_fires_on_a_gate_off_deployment(monkeypatch: pytest.M
     # With access control disabled the request carries no ``user`` attribute at all; a
     # ``require_api_key`` link still fires rather than 403ing or raising.
     manager = _ResolverManager()
-    _wire_resolver(monkeypatch, manager, topic="orders", require_api_key=True)
+    _wire_resolver(monkeypatch, manager, topic="events", require_api_key=True)
     monkeypatch.setattr(hooks, "access_control_settings", lambda: AccessControlSettings(enable=False))
     monkeypatch.setattr(hooks, "parse_any_payload", _parse_empty)
 
@@ -855,7 +855,7 @@ async def test_api_key_link_fires_on_a_gate_off_deployment(monkeypatch: pytest.M
     assert resp.status_code == 200
     assert resp.background is not None
     await resp.background()
-    assert manager.events == [("orders", {}, None)]
+    assert manager.events == [("events", {}, None)]
 
 
 # -- the LINK-level execution binding (access control ON) ---------------------
@@ -891,7 +891,7 @@ async def test_a_live_link_key_is_bound_around_the_whole_fan_out(monkeypatch: py
     pg.add_policy("k-fire", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-fire"})
     _wire_access_control(monkeypatch, pg)
     manager = _BindingManager()
-    _wire_resolver(monkeypatch, manager, topic="orders")
+    _wire_resolver(monkeypatch, manager, topic="events")
     monkeypatch.setattr(hooks, "parse_any_payload", _parse_empty)
 
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
@@ -900,7 +900,7 @@ async def test_a_live_link_key_is_bound_around_the_whole_fan_out(monkeypatch: py
     await resp.background()
 
     # The fan-out ran AS the link's key, and the binding is released with the task.
-    assert manager.events == [("orders", "k-fire")]
+    assert manager.events == [("events", "k-fire")]
     assert get_execution_identity() is None
 
 
@@ -922,7 +922,7 @@ async def test_a_killed_link_key_refuses_the_dispatch_before_any_hook_runs(
         pg.add_policy("k-fire", **policy_fields)
     _wire_access_control(monkeypatch, pg)
     manager = _BindingManager()
-    _wire_resolver(monkeypatch, manager, topic="orders")
+    _wire_resolver(monkeypatch, manager, topic="events")
     monkeypatch.setattr(hooks, "parse_any_payload", _parse_empty)
 
     resp = await hooks.trigger_link(cast(Request, _trig_req("tok", method="GET")))
@@ -937,7 +937,7 @@ async def test_a_killed_link_key_refuses_the_dispatch_before_any_hook_runs(
     assert manager.events == []
     assert get_execution_identity() is None
     assert any(
-        "orders" in message and "k-fire" in message and reason in message
+        "events" in message and "k-fire" in message and reason in message
         for message in (record.getMessage() for record in caplog.records if record.levelno == logging.ERROR)
     )
 
@@ -1052,8 +1052,8 @@ async def test_topic_with_newline_does_not_break_log(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
     with caplog.at_level("INFO"):
-        await hooks.universal_webhook(cast(Request, _FakeRequest("orders\r\ninjected", body=b"{}")))
+        await hooks.universal_webhook(cast(Request, _FakeRequest("events\r\ninjected", body=b"{}")))
     # The CR/LF are stripped from the interpolated topic in the log line.
     logged = "".join(rec.getMessage() for rec in caplog.records)
-    assert "ordersinjected" in logged
+    assert "eventsinjected" in logged
     assert "\n" not in logged.split("INCOMING EVENT ON TOPIC:")[-1].split("---")[0]

@@ -80,7 +80,7 @@ function pendingQuestion(): ChatItem {
 }
 
 function app(): ReactElement {
-  return <ChatApp identity="site-alpha" title="Support" />;
+  return <ChatApp identity="site-alpha" title="Chat" />;
 }
 
 beforeEach(() => {

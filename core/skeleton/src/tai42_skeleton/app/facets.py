@@ -251,7 +251,7 @@ class AccountsFacet(_Facet):
     def active_provider(self, name: str) -> IdentityProvider | None:
         # Resolve the CURRENT (live) epoch's provider, never the generation under
         # construction — a failed build's provider instances must never bind into a
-        # surviving epoch's memoized verifier (the D4 zero-mutation invariant). See
+        # surviving epoch's memoized verifier (the zero-mutation invariant). See
         # ``TaiMCP._live_serving_core``.
         return self._app._live_serving_core.active_auth_providers.get(name)
 

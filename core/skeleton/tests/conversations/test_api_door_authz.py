@@ -32,7 +32,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWar
 _MESSAGES_PATTERN = r"/api/conversations/.+/messages"
 _TEMPLATE = "conversations-messages"
 _SCOPE = "conversations-protected"
-_PATH = "/api/conversations/support/messages"
+_PATH = "/api/conversations/chat/messages"
 # The two credentials, and the principals the identity store resolves them to.
 _SENDER_KEY = "sender-key"
 _STRANGER_KEY = "stranger-key"
@@ -143,4 +143,4 @@ def test_an_authorized_caller_is_admitted_and_invokes_the_turn_as_itself(client,
     assert response.json()["data"]["message_id"] == "m-1"
     # The turn carries the authorized CALLER — the principal the caller-scoped read door
     # later matches on — not the route's execution key.
-    assert turns.calls == [("support", "u-7", "sender")]
+    assert turns.calls == [("chat", "u-7", "sender")]

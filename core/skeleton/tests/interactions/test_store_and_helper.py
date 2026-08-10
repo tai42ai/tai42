@@ -74,7 +74,7 @@ async def test_media_round_trips_through_store(fake_redis):
     store = InteractionStore("t:")
     media = [
         MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png", caption="A product"),
-        MediaItem(kind=MediaKind.LINK, url="https://shop.example/p"),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.example/p"),
     ]
     with_media = _request("i1", "g1", store).model_copy(update={"media": media})
     without_media = _request("i2", "g2", store)

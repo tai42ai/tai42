@@ -528,10 +528,10 @@ def test_authored_run_invalid_input_omits_input_values(pg, emit):
             # The baked spec can carry credentials; the runner is not necessarily the
             # author, so a validation error on the combined input must name the failing
             # field WITHOUT echoing input values back (which would leak the baked spec).
-            await _author("support_bot", fixed_kwargs={"system_prompt": "s3cr3t-prompt"})
+            await _author("assistant_bot", fixed_kwargs={"system_prompt": "s3cr3t-prompt"})
 
             # Field-level failure: the offending REQUEST value must not be echoed.
-            field_err = (await _run_authored("support_bot", {"count": "not-an-int"}))[0]
+            field_err = (await _run_authored("assistant_bot", {"count": "not-an-int"}))[0]
             assert field_err["__status__"] == 400
             assert "count" in field_err["__error__"]
             assert "not-an-int" not in field_err["__error__"]
@@ -540,7 +540,7 @@ def test_authored_run_invalid_input_omits_input_values(pg, emit):
             # including the baked ``system_prompt`` — so this is the shape that would
             # leak the baked secret if the error echoed input. The failure is surfaced
             # (its validator message) but the baked secret is NOT.
-            model_err = (await _run_authored("support_bot", {"user_message": "boom-model-error"}))[0]
+            model_err = (await _run_authored("assistant_bot", {"user_message": "boom-model-error"}))[0]
             assert model_err["__status__"] == 400
             assert "model-level rejection" in model_err["__error__"]
             assert "s3cr3t-prompt" not in model_err["__error__"]

@@ -9,7 +9,7 @@ address the attacker can rotate per attempt) — a run of INVALID redeems escala
 exponential backoff, and while locked a redeem is refused WITHOUT touching the code store —
 so a lucky guess made under the lock is never burned. A VALID redeem clears the counter, so
 an honest user is never blocked, and a throttled redeem returns the platform's SAME uniform
-invalid-code reply (D11 no-oracle: the lock is invisible, it never reveals whether a code
+invalid-code reply (no-oracle: the lock is invisible, it never reveals whether a code
 was real).
 
 Same posture and shape as the login-failure throttle: Redis-backed (durable and shared

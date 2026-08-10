@@ -1,0 +1,47 @@
+spec_version: 1
+namespace: tai42
+name: tools-github
+package: tai42-tools-github
+version: 0.1.0
+description: >-
+  GitHub provisioning tools for the TAI ecosystem: manifest-loaded
+  repository-webhook setup tools that create a repository webhook, list a
+  repository's webhooks with Link-header pagination, and delete a repository
+  webhook — the provider-side counterpart to the runtime signature verifier.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-github
+contract: '>=1.5,<2'
+categories:
+  - provisioning
+  - utilities
+tags:
+  - github
+  - provisioning
+  - webhooks
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: create_github_webhook
+    module: tai42_tools_github.tools.create_github_webhook
+    description: Create a repository webhook and return its id, url, events, and active flag.
+    tags:
+      - github
+      - provisioning
+  - kind: tool
+    name: list_github_webhooks
+    module: tai42_tools_github.tools.list_github_webhooks
+    description: List a repository's webhooks, following Link-header pagination to exhaustion.
+    tags:
+      - github
+      - provisioning
+  - kind: tool
+    name: delete_github_webhook
+    module: tai42_tools_github.tools.delete_github_webhook
+    description: Delete a repository webhook by id.
+    tags:
+      - github
+      - provisioning

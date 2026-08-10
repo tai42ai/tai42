@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 
 from click.testing import CliRunner
-
-from tai42_skeleton.cli import app as app_module
+from tai42_cli import app as app_module
 
 
 def test_version_lists_skeleton_and_deps() -> None:

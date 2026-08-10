@@ -3,7 +3,7 @@
 Every registered ``/api/*`` route the server exposes must be reachable from the
 terminal. This asserts ``registered_routes - allowlist`` is a subset of
 ``covered_routes``, where the covered set is built from the ``@covers(...)``
-attribution every remote command declares and the registered set comes from WP4's
+attribution every remote command declares and the registered set comes from the
 shared enumeration primitive
 :func:`load_api_routes` — the SAME primitive the OpenAPI coverage gate uses.
 
@@ -16,9 +16,10 @@ it serves assets — not an operator function).
 from __future__ import annotations
 
 # Importing the app imports every remote command module, populating COVERED_ROUTES.
-import tai42_skeleton.cli.app  # noqa: F401
+import tai42_cli.app  # noqa: F401
+from tai42_cli.commands._common import COVERED_ROUTES
+
 from tai42_skeleton.app.route_registry import load_api_routes
-from tai42_skeleton.cli.commands._common import COVERED_ROUTES
 
 # Routes intentionally not CLI-exposed: their caller is a browser or an external
 # non-operator party, or they serve assets — none are operator functions. Each entry

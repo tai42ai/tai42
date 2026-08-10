@@ -106,7 +106,7 @@ def warn_if_rate_limiting_off(log: logging.Logger) -> None:
     warning is a no-op after its first firing and when Redis IS configured, so a
     Redis-less deployment warns exactly once across boots/reloads and a configured
     deployment never warns. WARNING, not a boot refusal — public doors merely go
-    unthrottled (R2)."""
+    unthrottled."""
     global _RATE_LIMIT_OFF_WARNED
     # Read both fresh (not the cached singletons) so they reflect the live env at this
     # boot/reload, and before the once-per-process OFF guard so the roster validator
@@ -267,7 +267,7 @@ class RateLimitMiddleware:
         # No Redis configured → rate limiting is OFF for EVERY door: the counters have
         # nowhere to live, so every request flows straight through. The
         # once-per-process boot WARNING is where an operator learns the public doors
-        # are unthrottled — never a boot refusal (R2).
+        # are unthrottled — never a boot refusal.
         if not settings.redis.redis_url:
             await self.app(scope, receive, send)
             return

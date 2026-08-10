@@ -14,9 +14,9 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
+from tai42_cli import app as app_module
 from tai42_contract.plugins import PluginItemKind
 
-from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import catalog
 from tai42_skeleton.marketplace.errors import RegistryResponseError, RegistryUnreachableError
 
@@ -251,7 +251,7 @@ def test_catalog_table_renders_builtin_source(monkeypatch: pytest.MonkeyPatch) -
 
 def test_offline_registry_is_a_loud_cli_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A dead registry surfaces as the uniform CLI error line — never a silent empty
-    # list or a cached fallback (R3), and never a raw traceback.
+    # list or a cached fallback, and never a raw traceback.
     _patch_client(monkeypatch, error=RegistryUnreachableError("marketplace registry unreachable at https://x"))
     result = CliRunner().invoke(app_module.app, ["catalog"])
     assert result.exit_code != 0

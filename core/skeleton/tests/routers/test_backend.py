@@ -217,8 +217,9 @@ async def test_reload_unknown_target_400_names_target(install):
 def test_tai_backend_still_resolves_to_launcher():
     # The ``fleet`` group name (not ``backend``) exists so the runtime launcher
     # mounted as ``tai backend`` is not clobbered — assert both stand.
+    from tai42_cli.app import app
+
     from tai42_skeleton.cli import backend as backend_launcher
-    from tai42_skeleton.cli.app import app
 
     assert app.commands["backend"] is backend_launcher.main
     fleet_subcommands = getattr(app.commands["fleet"], "commands", None)

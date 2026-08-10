@@ -66,12 +66,12 @@ _ERROR_ANSWER_TEXT = "Sorry, something went wrong handling your message. Please 
 _SLOW_DOWN_TEXT = "You are sending messages faster than I can answer. Please wait a moment and try again."
 
 # Fixed, generic pairing-turn replies — no channel names, no links (operators who want
-# richer wording compose it from the pairing tool + their own flow, R8).
+# richer wording compose it from the pairing tool + their own flow).
 _LINKED_TEXT = "Done — this conversation is now linked to your other one."
 _UNLINKED_TEXT = "Done — this conversation is no longer linked."
 _NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is nothing to unlink."
 # The UNIFORM redeem refusal: an unknown/expired/already-redeemed code, a cross-target code,
-# or a throttled attempt all read the same, so the reply reveals no oracle (D11).
+# or a throttled attempt all read the same, so the reply reveals no oracle.
 _INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
 
 
@@ -176,7 +176,7 @@ class _Multichannel:
     target, the sending address in the door's own terms, the accountable party the redeem
     throttle keys on, and the first-contact greeting template. ``None`` everywhere
     multichannel is OFF, which is what keeps an unconfigured or unlinked conversation
-    byte-identical to today (R10).
+    byte-identical to today.
 
     ``address`` is the PERSON IDENTITY (the thread, the transcript, the pair-code's stored
     conversation); ``accountable`` is the rotation-resistant party the brute-force throttle
@@ -233,8 +233,8 @@ async def _multichannel_context(
     accountable: str,
 ) -> _Multichannel | None:
     """The multichannel context for ``route``, or ``None`` when the target has no config row
-    or its ``multichannel`` is off (D6 default-false). Read once per accept, BEFORE the gates:
-    it decides the thread key (C3) and, later, the pairing turn and greeting.
+    or its ``multichannel`` is off (default-false). Read once per accept, BEFORE the gates:
+    it decides the thread key and, later, the pairing turn and greeting.
 
     ``address`` is the conversation identity; ``accountable`` is the rotation-resistant party
     the redeem throttle scopes to (the caller of the door, the same key its rate cap uses)."""
@@ -256,7 +256,7 @@ async def _multichannel_context(
 async def _resolve_thread_id(route: ConversationRoute, multichannel: _Multichannel | None, address: str) -> str:
     """The thread key for this accept. A LINKED person on any multichannel target keys the
     aggregated ``bridge:@person:{person_id}`` thread; everyone else keeps today's
-    route-keyed ``bridge:{route}:{address}`` (R10). Read-only: no person row is created here,
+    route-keyed ``bridge:{route}:{address}``. Read-only: no person row is created here,
     so a redelivered, refused or shed message never mints identity.
 
     In-flight merge race: a turn admitted under the old key while the merge lands completes
@@ -639,8 +639,8 @@ async def _resolve_turn_record(
     params: dict[str, str] | None = None,
 ) -> ConversationRecord:
     """Run the route's target (or a pairing turn) and build the completed record the
-    transition persists. With ``multichannel`` off this is byte-identical to the target turn
-    (R10). With it on, the canonical per-accept order runs at the HEAD of this scheduled
+    transition persists. With ``multichannel`` off this is byte-identical to the target turn.
+    With it on, the canonical per-accept order runs at the HEAD of this scheduled
     execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
     person WRITE, keying the first-contact greeting and the redeem's own side) → classify
     → dispatch to the pairing turn or the target — and a due first-contact greeting is
@@ -656,7 +656,7 @@ async def _resolve_turn_record(
         outcome = await _target_outcome(route, intake, text, person, params)
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
-        # ``/link`` reuses it rather than minting a SECOND code that D1 rotation would delete,
+        # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
         # leaving the greeting carrying a now-dead code (a Redeem/Unlink ignore it).
         outcome = await _run_pairing_turn(multichannel, person, action, greeting_code)
     return _outcome_record(intake, _with_greeting(outcome, greeting))
@@ -671,7 +671,7 @@ def _template_references_code(template: str) -> bool:
 async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _MintedCode | None]:
     """The rendered first-contact greeting for a created-now person and the code it minted, or
     ``(None, None)`` when the target configures no template. ``{pairing_code}`` is substituted
-    with a freshly minted code (rotating any open one, D1) that is RETURNED so a same-turn
+    with a freshly minted code (rotating any open one) that is RETURNED so a same-turn
     ``/link`` can present that SAME live code instead of minting a second one; a template with
     no placeholder mints nothing and returns no code."""
     template = multichannel.greeting_template
@@ -685,7 +685,7 @@ async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _
 
 def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
     """Prepend a due greeting into the turn's answer. A silent outcome due a greeting becomes
-    an answered greeting-only reply — a greeting, once due, is never silently dropped (D11);
+    an answered greeting-only reply — a greeting, once due, is never silently dropped;
     an error outcome keeps the greeting prefixed to its client-safe text."""
     if greeting is None:
         return outcome
@@ -711,7 +711,7 @@ async def _run_pairing_turn(
 
     Error scoping: ONLY the named pairing domain errors (``PairCodeInvalidError``,
     ``CrossTargetMergeError``, ``NotLinkedError``) become the uniform answered refusal — it
-    IS the answer, detail logged (D11). ANY other exception (a redis fault, a reset) takes
+    IS the answer, detail logged. ANY other exception (a redis fault, a reset) takes
     the platform's standard client-safe ``error`` outcome, so an infra fault never
     masquerades as an invalid code."""
     try:

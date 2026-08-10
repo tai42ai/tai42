@@ -11,16 +11,16 @@
 import { expect, test, type Page } from '@playwright/test';
 import { MP_URL, MP_WEB_URL, mpAdminHeaders, uniq } from './helpers';
 
-// Publish-circular: the marketplace-web frontend (M34 PLAN_5) renders against the
-// M34 marketplace backend's browse contract (kind facet / nullable updated_at /
-// premium / docs_url), but the e2e installs the backend at the pre-M34
-// _MARKETPLACE_PIN. Un-skipped post-release after the pin bump (see MISSION_END_TASKS).
+// Publish-circular: the marketplace-web frontend renders against the published
+// marketplace backend's browse contract (kind facet / nullable updated_at /
+// premium / docs_url), but the e2e installs the backend at the older
+// `_MARKETPLACE_PIN`. Un-skipped once the pin is bumped to that published backend.
 test.skip(
   true,
-  'Publish-circular: the marketplace-web frontend (M34 PLAN_5) renders against the M34 ' +
+  'Publish-circular: the marketplace-web frontend renders against the published ' +
     'marketplace backend browse contract (kind facet / nullable updated_at / premium / ' +
-    'docs_url), but the e2e installs the backend at the pre-M34 _MARKETPLACE_PIN. ' +
-    'Un-skipped post-release after the pin bump (see MISSION_END_TASKS).',
+    'docs_url), but the e2e installs the backend at the older `_MARKETPLACE_PIN`. ' +
+    'Un-skipped once the pin is bumped to that published backend.',
 );
 
 test.skip(
@@ -146,7 +146,7 @@ test('browse, facet, and the detail readme/items/versions + advisory-withdrawn a
 test('the Kind facet is server-driven and a router/middleware listing browses + filters', async ({ page }) => {
   // The served item-kind vocabulary comes verbatim from the contract enum
   // (`PluginItemKind`), so `GET /api/v1/kinds` is the source of truth for the facet
-  // — a new contract kind flows through with zero web changes (R14). The envelope is
+  // — a new contract kind flows through with zero web changes. The envelope is
   // `{"data":{"kinds":[...]}}`. Never assert against a hardcoded kind list here.
   const served = await page.request.get(`${MP_URL}/api/v1/kinds`);
   expect(served.ok(), await served.text()).toBeTruthy();
@@ -165,7 +165,7 @@ test('the Kind facet is server-driven and a router/middleware listing browses + 
 
   // The Kind facet's rows ARE the served vocabulary: the group renders one button
   // per served kind in the contract's declaration order, so asserting the exact,
-  // ordered button text against `GET /api/v1/kinds` is the R14 server-driven
+  // ordered button text against `GET /api/v1/kinds` is the server-driven
   // contract (count and order both, never a literal list). Scope to the Kind group
   // — `storage`/`monitoring` are also Category rows, so the page holds those names
   // twice.

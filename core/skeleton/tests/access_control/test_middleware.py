@@ -344,7 +344,7 @@ async def test_websocket_protected_route_unauthenticated_closes():
 
 
 async def test_public_and_protected_route_denies_unauthenticated_end_to_end(monkeypatch):
-    # M3 end-to-end through the REAL verifier: a path that is both a public exact
+    # End-to-end through the REAL verifier: a path that is both a public exact
     # match and covered by a protected dynamic pattern resolves to both ids, so the
     # guard keeps it protected and challenges the unauthenticated request with 401.
     settings = AccessControlSettings()

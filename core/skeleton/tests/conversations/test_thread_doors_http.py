@@ -26,7 +26,7 @@ from .test_read_doors import _Caller, _DictManager
 
 #: An OIDC-minted principal — the case a path-borne id cannot carry at all.
 _PRINCIPAL = "oidc:google:1234"
-_THREAD = f"bridge:support:{quote(_PRINCIPAL, safe='')}/user-7"
+_THREAD = f"bridge:chat:{quote(_PRINCIPAL, safe='')}/user-7"
 
 
 def _router():
@@ -49,7 +49,7 @@ def client(monkeypatch) -> TestClient:
     # imports at call time).
     fake = FakeRecordRedis()
     # The create writes the thread indexes only while the route still routes.
-    fake.seed_route("support")
+    fake.seed_route("chat")
     monkeypatch.setattr(
         importlib.import_module("tai42_skeleton.conversations.records"),
         "client_ctx",
@@ -77,7 +77,7 @@ async def _seed() -> None:
     await store_cls(ConversationsSettings()).create_record(
         ConversationRecord(
             message_id="t0",
-            route_name="support",
+            route_name="chat",
             door="api",
             thread_id=_THREAD,
             client_address=f"{quote(_PRINCIPAL, safe='')}/user-7",
@@ -96,7 +96,7 @@ async def _seed() -> None:
 async def test_a_thread_id_holding_an_encoded_principal_round_trips_the_query(client):
     await _seed()
 
-    response = client.get("/api/conversations/support/transcript", params={"thread_id": _THREAD})
+    response = client.get("/api/conversations/chat/transcript", params={"thread_id": _THREAD})
 
     assert response.status_code == 200
     assert [item["message_id"] for item in response.json()["data"]["items"]] == ["t0"]
@@ -105,21 +105,21 @@ async def test_a_thread_id_holding_an_encoded_principal_round_trips_the_query(cl
 async def test_the_transcript_serves_the_tail_order(client):
     await _seed()
 
-    response = client.get("/api/conversations/support/transcript", params={"thread_id": _THREAD, "order": "desc"})
+    response = client.get("/api/conversations/chat/transcript", params={"thread_id": _THREAD, "order": "desc"})
 
     assert response.status_code == 200
     assert response.json()["data"]["order"] == "desc"
 
 
 async def test_a_missing_thread_id_is_a_loud_400(client):
-    response = client.get("/api/conversations/support/transcript")
+    response = client.get("/api/conversations/chat/transcript")
 
     assert response.status_code == 400
     assert "thread_id is required" in response.json()["error"]
 
 
 async def test_a_blank_thread_id_is_a_loud_400(client):
-    response = client.get("/api/conversations/support/transcript", params={"thread_id": ""})
+    response = client.get("/api/conversations/chat/transcript", params={"thread_id": ""})
 
     assert response.status_code == 400
     assert "non-blank" in response.json()["error"]
@@ -128,7 +128,7 @@ async def test_a_blank_thread_id_is_a_loud_400(client):
 async def test_an_unknown_order_is_a_loud_400(client):
     await _seed()
 
-    response = client.get("/api/conversations/support/transcript", params={"thread_id": _THREAD, "order": "newest"})
+    response = client.get("/api/conversations/chat/transcript", params={"thread_id": _THREAD, "order": "newest"})
 
     assert response.status_code == 400
     assert "order must be one of" in response.json()["error"]
@@ -137,7 +137,7 @@ async def test_an_unknown_order_is_a_loud_400(client):
 async def test_the_thread_listing_answers_the_envelope(client):
     await _seed()
 
-    response = client.get("/api/conversations/support/threads?page=1&pageSize=1")
+    response = client.get("/api/conversations/chat/threads?page=1&pageSize=1")
 
     assert response.status_code == 200
     body = response.json()["data"]
@@ -148,21 +148,21 @@ async def test_the_thread_listing_answers_the_envelope(client):
 
 @pytest.mark.parametrize("query", ["?page=nope", "?pageSize=many"])
 async def test_a_non_integer_page_is_a_loud_400(client, query):
-    response = client.get(f"/api/conversations/support/threads{query}")
+    response = client.get(f"/api/conversations/chat/threads{query}")
 
     assert response.status_code == 400
     assert "must be integers" in response.json()["error"]
 
 
 async def test_a_page_below_one_is_a_loud_400(client):
-    response = client.get("/api/conversations/support/threads?page=0")
+    response = client.get("/api/conversations/chat/threads?page=0")
 
     assert response.status_code == 400
     assert "must be >= 1" in response.json()["error"]
 
 
 async def test_a_page_past_the_maximum_is_a_loud_400(client):
-    response = client.get(f"/api/conversations/support/threads?page={2**62}")
+    response = client.get(f"/api/conversations/chat/threads?page={2**62}")
 
     assert response.status_code == 400
     assert "page must be <=" in response.json()["error"]

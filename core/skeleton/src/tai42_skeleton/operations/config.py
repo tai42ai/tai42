@@ -218,7 +218,7 @@ _PROFILE_STORE_CODE = "versioning-not-configured"
 # excluded from the listing.
 _RESERVED_PREFIX = "@"
 
-# The reserved D15 rollback snapshot the apply pipeline saves the pre-apply stored env
+# The reserved rollback snapshot the apply pipeline saves the pre-apply stored env
 # into, so an operator can roll back a bad apply by applying ``@previous``.
 _PREVIOUS_NAME = "@previous"
 
@@ -446,7 +446,7 @@ async def rollback_profile(name: str, version: int) -> dict[str, Any]:
 
 
 async def _save_previous_version(stored_env: dict[str, str]) -> None:
-    """Snapshot the CURRENT stored env into the reserved ``@previous`` profile (D15).
+    """Snapshot the CURRENT stored env into the reserved ``@previous`` profile.
 
     Creates ``@previous`` on the first apply, appends a new version thereafter — the apply
     pipeline's rollback anchor. Carries the current display secret-marks so a rollback
@@ -500,7 +500,7 @@ async def apply_profile(name: str) -> OperationResponse:
     # Read the reload-driving flag in THIS request context (``EpochAdmissionApp`` set it
     # True for the admitted request): a door-driven apply MUST pass it so the retire
     # excuses this still-admitted request from its in-flight drain rather than self-waiting
-    # the full drain budget on it (the PLAN_2 self-deadlock fix).
+    # the full drain budget on it.
     driven = _reload_driven_by_request.get()
     try:
         outcome = await ConfigService.from_app().apply_replace_env(

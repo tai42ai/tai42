@@ -169,7 +169,7 @@ def backup_populated_stack(
 async def test_skip_import_preserves_conversation_secret_and_token(
     backup_populated_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    """PLAN_10 §C — a ``skip`` re-import over a POPULATED instance re-mints NOTHING.
+    """A ``skip`` re-import over a POPULATED instance re-mints NOTHING.
 
     The instance holds an existing ``api``-door conversation route (its ``callback_secret``
     minted on the host) and an existing api-key token (the route's execution key). Both
@@ -257,7 +257,7 @@ async def test_skip_import_preserves_conversation_secret_and_token(
 async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[..., TaiStack]) -> None:
     """A crafted backup whose env section carries a deployment X-band key (``TAI_SUPERVISED``)
     is REFUSED loudly: backup env restore rides ``apply_env_change`` (``backup/sections.py``),
-    so PLAN_3 C6's shared boundary validator fires there with no backup-specific code. The
+    so the shared boundary validator fires there with no backup-specific code. The
     section report carries the error naming the offending key, and nothing lands — the X-band
     value never reaches the store, nor does the sibling key in the same (atomically refused)
     section (validate-before-write)."""

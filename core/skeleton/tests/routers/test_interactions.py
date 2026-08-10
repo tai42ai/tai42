@@ -793,12 +793,12 @@ async def test_stream_tail_forwards_add(wired):
 
 _MEDIA_ITEMS: list[MediaItem] = [
     MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png", caption="A product"),
-    MediaItem(kind=MediaKind.LINK, url="https://shop.example/p"),
+    MediaItem(kind=MediaKind.LINK, url="https://docs.example/p"),
 ]
 # The wire form is exclude_none: the caption-less link carries no ``caption`` key.
 _EXPECTED_MEDIA_FRAME = [
     {"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"},
-    {"kind": "link", "url": "https://shop.example/p"},
+    {"kind": "link", "url": "https://docs.example/p"},
 ]
 
 
@@ -925,7 +925,7 @@ async def test_ask_user_media_persists_and_frame_carries_it(wired):
 
     media: list[MediaItem | dict[str, Any]] = [
         {"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"},
-        {"kind": "link", "url": "https://shop.example/p"},
+        {"kind": "link", "url": "https://docs.example/p"},
     ]
     answerer = asyncio.create_task(answer_when_asked())
     result = await ask_user("Pick a product", answer_format="text", media=media, timeout=5)

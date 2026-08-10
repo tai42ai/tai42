@@ -156,7 +156,7 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
     ``app._building`` (``probe_identity_provider``); a request-path reader (the verifier's
     factory) resolves it through ``tai42_app.accounts.active_provider``. That accessor MUST
     return the live instance so a build that then FAILS can never leave a surviving epoch's
-    memoized verifier bound onto the discarded generation's provider (the D4 zero-mutation
+    memoized verifier bound onto the discarded generation's provider (the zero-mutation
     invariant). Drives the ``build_and_swap_epoch`` primitive directly with a
     ``build_serving_app`` seam that captures what a request-path read sees at the exact
     ``_building``-is-set window, then fails the build to take the discard branch."""

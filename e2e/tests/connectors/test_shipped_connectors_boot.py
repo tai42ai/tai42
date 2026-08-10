@@ -14,7 +14,7 @@ descriptor modules (``tai42_connector.google.core.connector`` +
 Scope ENDS there. The real descriptors hardcode the vendor authorize/token URLs with no
 env indirection, so a stub IdP cannot intercept the token exchange and a probe launches
 the sub-service then calls the real vendor: token/refresh/probe against live vendors is
-PLAN_2's real-connector leg, deliberately NOT exercised here.
+the real-connector leg, deliberately NOT exercised here.
 """
 
 from __future__ import annotations
@@ -47,11 +47,11 @@ async def test_shipped_connector_descriptors_are_registered(shipped_connectors_s
 
 # The launch-URL assertion pins the fixture client_id (``GOOGLE_CLIENT_ID``); under
 # TAI_E2E_REAL=connector-google the real CONNECTORS_GOOGLE_CLIENT_ID replaces it, so this is
-# the connector-google mock leg — the real token/probe leg is PLAN_2's, on the creds host.
+# the connector-google mock leg — the real token/probe leg runs on the creds host.
 # Inert while TAI_E2E_REAL is empty.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-google"),
-    reason="fixture client_id is the connector-google mock leg; the real leg on the creds host (PLAN_2 §F)",
+    reason="fixture client_id is the connector-google mock leg; the real leg on the creds host",
 )
 async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)
@@ -80,7 +80,7 @@ async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> No
 # which the real CONNECTORS_ATLASSIAN_CLIENT_ID replaces under TAI_E2E_REAL=connector-atlassian.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-atlassian"),
-    reason="fixture client_id is the connector-atlassian mock leg; the real leg on the creds host (PLAN_2 §F)",
+    reason="fixture client_id is the connector-atlassian mock leg; the real leg on the creds host",
 )
 async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
     api = shipped_connectors_stack.api(port=shipped_connectors_stack.port_a)

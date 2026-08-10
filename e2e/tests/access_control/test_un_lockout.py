@@ -1,4 +1,4 @@
-"""M20 F1 — the un-lockout guards: the reserved ``admin`` role is permanent, an assigned
+"""The un-lockout guards: the reserved ``admin`` role is permanent, an assigned
 role cannot be deleted, and the LAST enabled admin can never be removed.
 
 Two fences keep a deployment from locking itself out of the control plane:

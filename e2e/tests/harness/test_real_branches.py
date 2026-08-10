@@ -1,4 +1,4 @@
-"""PLAN_2 — the per-service REAL legs are SELECTED at manifest/variant build time.
+"""The per-service REAL legs are SELECTED at manifest/variant build time.
 
 The engine's loud-fail-at-collection is proven in ``test_real_switch.py``; these
 tests prove the other half: with a seam named on ``TAI_E2E_REAL`` (and its operator

@@ -641,8 +641,8 @@ def test_media_image_data_uri_valid():
 
 
 def test_media_link_https_valid():
-    item = MediaItem(kind=MediaKind.LINK, url="https://shop.example/p/1", caption="Buy")
-    assert item.caption == "Buy"
+    item = MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Open")
+    assert item.caption == "Open"
 
 
 def test_media_link_http_valid():

@@ -54,7 +54,7 @@ that answers it.
 
 ```bash
 tai conversations create web-desk \
-  --door channel --target-name support --execution-key support-bot \
+  --door channel --target-name chat --execution-key chat-bot \
   --channel web --identity desk
 ```
 
@@ -76,7 +76,7 @@ its payload under a `params` key — string values, reachable from `payload_expr
 as `.params.<name>`:
 
 ```
-https://<your deployment>/api/channels/web/chat/desk?topic=support&ref=abc
+https://<your deployment>/api/channels/web/chat/desk?topic=news&ref=abc
 ```
 
 Bounds are enforced at the door — **at most 16** parameters, each key matching

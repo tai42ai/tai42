@@ -98,7 +98,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
         # Prime the SDK's per-session tool-output-schema cache (ClientSession
         # ._tool_output_schemas) so the post-call result validation
         # (_validate_tool_result) does not issue a follow-up tools/list: reload_config
-        # retires this session (D13a — the swapped-in epoch serves a new session-id
+        # retires this session (the swapped-in epoch serves a new session-id
         # space), so that follow-up would hit the orphaned session and raise
         # "Session terminated" even though the tool result was already delivered.
         await mcp.list_tools()

@@ -1,6 +1,6 @@
-"""The unified ``tai`` app: every group is registered, the launchers are
-re-homed as subcommands, the root callback builds the shared context, and a
-raised :class:`ApiError` surfaces as a clean CLI error.
+"""The assembled ``tai`` app with the server installed: the ``tai.commands`` entry
+point contributes the local Typer commands, the runtime launchers, and the offline
+validators attached onto the client's own ``config``/``manifest`` groups.
 """
 
 from __future__ import annotations
@@ -8,12 +8,9 @@ from __future__ import annotations
 import click
 import pytest
 from click.testing import CliRunner
+from tai42_cli import app as app_module
 
-from tai42_skeleton.cli import app as app_module
-from tai42_skeleton.cli.client import ApiError
-from tai42_skeleton.cli.context import AppContext
-
-# Every command group / command that must render under ``tai --help``.
+# Remote client groups (owned by tai42-cli) that must render under ``tai --help``.
 _REMOTE_GROUPS = {
     "tools",
     "presets",
@@ -33,28 +30,32 @@ _REMOTE_GROUPS = {
     "obs",
     "traces",
     "interactions",
+    # cli-native, always present.
+    "completion",
+    "version",
 }
-_NATIVE = {"db", "completion", "doctor", "catalog", "openapi", "version"}
+# Contributed by the server through the entry point.
+_NATIVE = {"db", "doctor", "catalog", "openapi"}
 _LAUNCHERS = {"serve", "backend", "metrics"}
 
 
-def test_help_renders_every_registered_group() -> None:
+def test_help_renders_client_and_contributed_commands() -> None:
     result = CliRunner().invoke(app_module.app, ["--help"])
 
     assert result.exit_code == 0, result.output
     for name in _REMOTE_GROUPS | _NATIVE | _LAUNCHERS:
-        assert name in result.output, f"missing group in --help: {name}"
+        assert name in result.output, f"missing command in --help: {name}"
 
 
-def test_compiled_group_exposes_every_command() -> None:
+def test_compiled_group_exposes_contributed_commands() -> None:
     commands = set(app_module.app.commands)
     assert commands.issuperset(_REMOTE_GROUPS)
     assert commands.issuperset(_NATIVE)
     assert commands.issuperset(_LAUNCHERS)
 
 
-def test_rehomed_launchers_are_the_original_commands() -> None:
-    # The re-homed launcher subcommands are the existing click launcher
+def test_contributed_launchers_are_the_original_commands() -> None:
+    # The contributed launcher subcommands are the existing click launcher
     # commands, only renamed to their ``tai`` subcommand names.
     from tai42_skeleton.cli import backend, mcp_app, metrics
 
@@ -70,102 +71,40 @@ def test_serve_help_renders() -> None:
     assert "--transport" in result.output
 
 
-@pytest.mark.parametrize("command", ["version"])
-def test_native_command_runs_offline(command: str) -> None:
-    # ``version`` reads only installed metadata, so it succeeds on a bare install with
-    # no server, DB, or network. (``catalog`` now queries the marketplace registry — it
-    # is deliberately network-required, offline = loud error, so it is NOT offline-safe.)
-    result = CliRunner().invoke(app_module.app, [command])
-
+def test_version_runs_offline() -> None:
+    # ``version`` reads only installed metadata, so it succeeds with no server.
+    result = CliRunner().invoke(app_module.app, ["version"])
     assert result.exit_code == 0, result.output
 
 
 def test_doctor_command_is_registered() -> None:
     result = CliRunner().invoke(app_module.app, ["doctor", "--help"])
-
     assert result.exit_code == 0, result.output
 
 
-def test_callback_populates_app_context(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    from tai42_skeleton.cli import context
-
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.setenv(context.SERVER_URL_ENV, "http://probe-host")
-
-    group = app_module._build_app()
-    captured: dict[str, object] = {}
-
-    @click.command("probe")
-    @click.pass_context
-    def probe(ctx: click.Context) -> None:
-        captured["obj"] = ctx.obj
-
-    group.add_command(probe, "probe")
-    result = CliRunner().invoke(group, ["--json", "probe"])
-
-    assert result.exit_code == 0, result.output
-    obj = captured["obj"]
-    assert isinstance(obj, AppContext)
-    assert obj.json_output is True
-    assert obj.server_url == "http://probe-host"
+def test_offline_validators_attach_onto_client_groups() -> None:
+    # The server contributes ``config lint`` and ``manifest validate`` onto the
+    # client's own ``config``/``manifest`` groups, so both render.
+    config_lint = CliRunner().invoke(app_module.app, ["config", "lint", "--help"])
+    assert config_lint.exit_code == 0, config_lint.output
+    manifest_validate = CliRunner().invoke(app_module.app, ["manifest", "validate", "--help"])
+    assert manifest_validate.exit_code == 0, manifest_validate.output
 
 
-def test_trailing_json_flag_on_remote_leaf_renders_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ``tai tools list --json`` (flag AFTER the leaf command) must render JSON just
-    # like the flag-first ``tai --json tools list`` form.
-    import json
+def test_attach_offline_raises_naming_missing_group() -> None:
+    # A root group lacking the client's ``config``/``manifest`` groups is a wiring
+    # error: the attach must raise loudly, naming the group it could not find.
+    from tai42_skeleton.cli import offline
+    from tai42_skeleton.cli.local import _attach_offline
 
-    import httpx
-
-    from tai42_skeleton.cli.client import ApiClient
-
-    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": ["alpha", "beta"]}))
-    monkeypatch.setattr(
-        AppContext,
-        "client",
-        lambda self: ApiClient(self.server_url, self.api_key, transport=transport),
-    )
-    monkeypatch.setenv("TAI_API_KEY", "test-key")
-    monkeypatch.setenv("TAI_SERVER_URL", "http://testserver")
-
-    result = CliRunner().invoke(app_module.app, ["tools", "list", "--json"])
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == ["alpha", "beta"]
+    with pytest.raises(RuntimeError, match="manifest"):
+        _attach_offline(click.Group("tai"), "manifest", offline.manifest_validate, "validate")
 
 
-def test_trailing_no_json_flag_forces_table(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The trailing ``--no-json`` overrides a flag-first ``--json`` back to the table.
-    import httpx
+def test_register_raises_when_client_groups_absent() -> None:
+    # ``register`` attaches the offline validators onto the client's own groups;
+    # running it against a root group without them fails loudly, never silently.
+    from tai42_skeleton.cli.local import register
 
-    from tai42_skeleton.cli.client import ApiClient
-
-    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": ["alpha"]}))
-    monkeypatch.setattr(
-        AppContext,
-        "client",
-        lambda self: ApiClient(self.server_url, self.api_key, transport=transport),
-    )
-    monkeypatch.setenv("TAI_API_KEY", "test-key")
-    monkeypatch.setenv("TAI_SERVER_URL", "http://testserver")
-
-    result = CliRunner().invoke(app_module.app, ["--json", "tools", "list", "--no-json"])
-
-    assert result.exit_code == 0, result.output
-    # A table has a header/separator, not a JSON array.
-    assert "name" in result.output
-    assert not result.output.lstrip().startswith("[")
-
-
-def test_api_error_renders_as_clean_cli_error() -> None:
-    group = app_module._build_app()
-
-    @click.command("boom")
-    def boom() -> None:
-        raise ApiError("server refused the request", status_code=409)
-
-    group.add_command(boom, "boom")
-    result = CliRunner().invoke(group, ["boom"])
-
-    assert result.exit_code != 0
-    assert "server refused the request" in result.output
+    with pytest.raises(RuntimeError, match="config"):
+        register(click.Group("tai"))

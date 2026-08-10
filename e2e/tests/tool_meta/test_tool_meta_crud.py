@@ -199,7 +199,7 @@ async def test_preset_rename_rekeys_overlay_row(core_stack: TaiStack, uniq: Call
 async def test_dangling_overlay_row_survives(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = core_stack.api()
     # A row keyed by a tool name that is NOT a live tool (the plugin-uninstall shape:
-    # R5 keeps the row so it returns on reinstall; the UI hides the dangling tool).
+    # the row is kept so it returns on reinstall; the UI hides the dangling tool).
     ghost = uniq("uninstalled_tool")
     await _upsert(api, ghost, {"tags": ["orphan"], "display_name": "Orphan"})
 

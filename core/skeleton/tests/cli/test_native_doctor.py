@@ -15,10 +15,10 @@ import psycopg
 import pytest
 from click.testing import CliRunner
 from redis.exceptions import ConnectionError as RedisConnectionError
+from tai42_cli import app as app_module
 from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import AdminIdentityIncompleteError, DatabaseNotConfiguredError
 
-from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import doctor
 from tai42_skeleton.cli.native.doctor import Check
 

@@ -274,9 +274,9 @@ async def test_template_allowlist_padded_entry_matches_unpadded_recipient(
     fake_httpx.responses.append(_accepted())
     await WhatsAppChannel().notify(
         ChannelNotification(
-            message="Your order shipped.",
+            message="Your item is done.",
             recipient=ALLOWED_A,
-            template=ChannelTemplate(name="order_update", language="en_US"),
+            template=ChannelTemplate(name="status_update", language="en_US"),
         )
     )
 
@@ -561,17 +561,17 @@ async def test_send_template_builder_with_and_without_parameters(fake_redis: Fak
     await send_template(
         PHONE_NUMBER_ID,
         ALLOWED_A,
-        ChannelTemplate(name="order_update", language="en_US", parameters=["Jane", "SHIP-1"]),
+        ChannelTemplate(name="status_update", language="en_US", parameters=["Jane", "A-42"]),
     )
     assert fake_httpx.calls[0]["json"] == {
         "messaging_product": "whatsapp",
         "to": ALLOWED_A,
         "type": "template",
         "template": {
-            "name": "order_update",
+            "name": "status_update",
             "language": {"code": "en_US"},
             "components": [
-                {"type": "body", "parameters": [{"type": "text", "text": "Jane"}, {"type": "text", "text": "SHIP-1"}]}
+                {"type": "body", "parameters": [{"type": "text", "text": "Jane"}, {"type": "text", "text": "A-42"}]}
             ],
         },
     }
@@ -617,7 +617,7 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
             recipient=ALLOWED_A,
             media=[
                 MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg", caption="Front"),
-                MediaItem(kind=MediaKind.LINK, url="https://shop.example/p/1", caption="Product page"),
+                MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page"),
                 MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.jpg"),
             ],
         )
@@ -626,7 +626,7 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
     assert ids == ["wamid.BODY", "wamid.IMG1", "wamid.IMG2"]  # every wamid, in send order
     # Body first, with the link item appended as a text line.
     assert fake_httpx.calls[0]["json"]["type"] == "text"
-    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Here are the photos.\nProduct page: https://shop.example/p/1"
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Here are the photos.\nDetails page: https://docs.example/p/1"
     # Then each image as its own image message, in order.
     assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg", "caption": "Front"}
     assert fake_httpx.calls[2]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
@@ -676,9 +676,9 @@ async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_
 
     ids = await WhatsAppChannel().notify(
         ChannelNotification(
-            message="Order shipped.",
+            message="Item done.",
             recipient=ALLOWED_A,
-            template=ChannelTemplate(name="order_update", language="en_US", parameters=["Jane", "SHIP-1"]),
+            template=ChannelTemplate(name="status_update", language="en_US", parameters=["Jane", "A-42"]),
         )
     )
 
@@ -686,7 +686,7 @@ async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_
     payload = fake_httpx.calls[0]["json"]
     assert payload["type"] == "template"
     assert payload["template"]["components"] == [
-        {"type": "body", "parameters": [{"type": "text", "text": "Jane"}, {"type": "text", "text": "SHIP-1"}]}
+        {"type": "body", "parameters": [{"type": "text", "text": "Jane"}, {"type": "text", "text": "A-42"}]}
     ]
 
 

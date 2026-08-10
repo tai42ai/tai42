@@ -1,4 +1,4 @@
-"""Unit oracles for the C5 settings-profile APPLY pipeline
+"""Unit oracles for the settings-profile APPLY pipeline
 (:meth:`~tai42_skeleton.config.service.ConfigService.apply_replace_env`) and its
 dedicated response builder
 (:func:`~tai42_skeleton.operations._broadcast.profile_apply_response`).
@@ -182,7 +182,7 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
 
 
 # ---------------------------------------------------------------------------
-# Drain — no self-deadlock (PLAN_2 fix)
+# Drain — no self-deadlock
 # ---------------------------------------------------------------------------
 
 

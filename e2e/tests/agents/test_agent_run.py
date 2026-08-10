@@ -19,12 +19,12 @@ from tai42_e2e.stack import TaiStack
 pytestmark = [
     pytest.mark.backendless,
     # The scripted llm_stub round-trips (script + assert on llm_stub.requests) are the LLM
-    # MOCK leg; a real-provider leg is exercised on the e2e creds host (PLAN_2 §F), not in CI,
+    # MOCK leg; a real-provider leg is exercised on the e2e creds host, not in CI,
     # so the stub-bound module steps aside when the 'llm' seam is real. Inert in the default
     # mock run — is_real("llm") is False, so collection is byte-for-byte today's.
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host (PLAN_2 §F)",
+        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
     ),
 ]
 

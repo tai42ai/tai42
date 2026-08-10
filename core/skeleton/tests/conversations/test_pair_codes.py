@@ -33,7 +33,7 @@ def _store(monkeypatch, fake: FakeRecordRedis) -> ConversationPairCodeStore:
 def _conversation(**over) -> MintingConversation:
     base = {
         "target_kind": "agent",
-        "target_name": "concierge",
+        "target_name": "assistant",
         "route_name": "line-a",
         "door": "channel",
         "channel": "twilio",
@@ -84,7 +84,7 @@ async def test_redeem_burns_single_use(monkeypatch):
     await store.redeem(code)
     with pytest.raises(PairCodeInvalidError) as exc:
         await store.redeem(code)
-    # The already-redeemed reply is byte-identical to the unknown/expired one (D11 no oracle).
+    # The already-redeemed reply is byte-identical to the unknown/expired one (no oracle).
     assert str(exc.value) == _INVALID_CODE
 
 
@@ -104,7 +104,7 @@ async def test_second_mint_rotates_and_invalidates_the_first(monkeypatch):
     with pytest.raises(PairCodeInvalidError):
         await store.redeem(first)
     # The newest code still redeems.
-    assert (await store.redeem(second)).target_name == "concierge"
+    assert (await store.redeem(second)).target_name == "assistant"
 
 
 @pytest.mark.asyncio
@@ -156,7 +156,7 @@ async def test_expired_code_redeems_as_invalid(monkeypatch):
     fake.advance(settings.pair_code_ttl_seconds + 1)
     with pytest.raises(PairCodeInvalidError) as exc:
         await store.redeem(code)
-    # The expired reply is byte-identical to the unknown/already-redeemed one (D11 no oracle).
+    # The expired reply is byte-identical to the unknown/already-redeemed one (no oracle).
     assert str(exc.value) == _INVALID_CODE
 
 
@@ -166,7 +166,7 @@ async def test_unknown_code_redeems_as_invalid(monkeypatch):
     store = _store(monkeypatch, fake)
     with pytest.raises(PairCodeInvalidError) as exc:
         await store.redeem("LINK-ZZZZZZZZ")
-    # The unknown reply is byte-identical to the expired/already-redeemed one (D11 no oracle).
+    # The unknown reply is byte-identical to the expired/already-redeemed one (no oracle).
     assert str(exc.value) == _INVALID_CODE
 
 

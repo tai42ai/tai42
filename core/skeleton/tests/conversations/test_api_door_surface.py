@@ -21,7 +21,7 @@ from tai42_skeleton.conversations.turn import ApiSubmitResult, ConversationRoute
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.errors import NotSupportedError
 
-_PATH = "/api/conversations/support/messages"
+_PATH = "/api/conversations/chat/messages"
 
 
 def _router():
@@ -235,7 +235,7 @@ def test_invalid_params_are_a_400_that_never_echoes_the_value(monkeypatch):
 # -- the route-create body extractor ------------------------------------------
 
 
-def _create_request(body: bytes, route_name: str = "support") -> Request:
+def _create_request(body: bytes, route_name: str = "chat") -> Request:
     async def _receive():
         return {"type": "http.request", "body": body, "more_body": False}
 
@@ -253,10 +253,10 @@ async def test_extract_route_create_injects_the_path_route_name():
     router = _router()
     fields = await router._extract_route_create(
         _create_request(
-            b'{"door": "api", "target_kind": "agent", "target_name": "triage", "execution_key": "svc", "callback_url": "https://cb.example/x"}'
+            b'{"door": "api", "target_kind": "agent", "target_name": "relay", "execution_key": "svc", "callback_url": "https://cb.example/x"}'
         )
     )
-    assert fields["route_name"] == "support"
+    assert fields["route_name"] == "chat"
     assert fields["door"] == "api"
 
 
@@ -278,7 +278,7 @@ async def test_extract_route_create_rejects_a_body_route_name_disagreeing_with_t
         await router._extract_route_create(
             _create_request(
                 b'{"route_name": "other", "door": "api", "target_kind": "agent", '
-                b'"target_name": "triage", "execution_key": "svc"}'
+                b'"target_name": "relay", "execution_key": "svc"}'
             )
         )
 

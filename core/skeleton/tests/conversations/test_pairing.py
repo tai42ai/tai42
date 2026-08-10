@@ -1,5 +1,5 @@
 """The pairing turn kind: intercept classification, link/redeem/unlink INSIDE the accept
-lifecycle, the first-contact greeting, the redeem brute-force throttle, and the R10 pin that
+lifecycle, the first-contact greeting, the redeem brute-force throttle, and the pin that
 a multichannel-off target is byte-identical to today.
 
 Run e2e-in-unit over the faked redis stores (records + persons + pair codes + config +
@@ -93,7 +93,7 @@ def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_iden
         route_name=route_name,
         door="channel",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         execution_key="svc",
         channel=channel,
         our_identity=our_identity,
@@ -101,12 +101,12 @@ def _channel_route(route_name: str = "line-a", channel: str = "twilio", our_iden
     )
 
 
-def _api_route(route_name: str = "support"):
+def _api_route(route_name: str = "chat"):
     return ConversationRoute(
         route_name=route_name,
         door="api",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         execution_key="svc",
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
@@ -149,14 +149,14 @@ def _wire(monkeypatch, manager: FakeManager, channel: FakeChannel | None = None,
     monkeypatch.setattr(delivery_module, "get_conversations_manager", lambda: manager)
     if channel is not None:
         monkeypatch.setattr(delivery_module, "tai42_app", _FakeApp(channel))
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"concierge": agent or EchoAgent()})
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent or EchoAgent()})
 
 
 def _seed_config(
     fake: FakeRecordRedis,
     *,
     target_kind: ConversationTargetKind = "agent",
-    target_name: str = "concierge",
+    target_name: str = "assistant",
     multichannel: bool = True,
     greeting_template: str | None = None,
 ) -> None:
@@ -212,7 +212,7 @@ def _person_store() -> ConversationPersonStore:
     return ConversationPersonStore(ConversationsSettings())
 
 
-_TARGET = PairingTarget(target_kind="agent", target_name="concierge")
+_TARGET = PairingTarget(target_kind="agent", target_name="assistant")
 _TOOL_TARGET = PairingTarget(target_kind="tool", target_name="pinger")
 
 
@@ -474,7 +474,7 @@ async def test_greeting_with_placeholder_mints_a_live_code(env, monkeypatch):
 
 
 async def test_first_contact_redeem_greets_and_links_in_one_reply(env, monkeypatch):
-    # R15: a first admitted message that is itself a redeem greets AND links.
+    # A first admitted message that is itself a redeem greets AND links.
     _seed_config(env, greeting_template="Welcome!")
     route_a = _channel_route(route_name="line-a", our_identity="+15550001111")
     route_b = _channel_route(route_name="line-b", our_identity="+15550009999")
@@ -501,7 +501,7 @@ async def test_a_redeem_of_a_tool_minted_code_ensures_the_minting_side(env, monk
     code, _expires = await ConversationPairCodeStore(ConversationsSettings()).mint(
         MintingConversation(
             target_kind="agent",
-            target_name="concierge",
+            target_name="assistant",
             route_name="line-a",
             door="channel",
             channel="twilio",
@@ -550,7 +550,7 @@ async def test_a_locked_source_does_not_burn_a_valid_code_and_leaks_no_oracle(en
 
 
 async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external_user_id(env, monkeypatch):
-    # R6 bypass regression: the api door's redeem throttle SOURCE is the authenticated
+    # Bypass regression: the api door's redeem throttle SOURCE is the authenticated
     # ``caller_principal``, NOT the caller-composed ``client_address`` (which embeds the FREE
     # ``external_user_id``). An attacker with ONE principal who supplies a FRESH
     # external_user_id per attempt must NOT get a fresh throttle bucket each time — the lock
@@ -561,7 +561,7 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     monkeypatch.setenv("CONVERSATIONS_REDEEM_BACKOFF_THRESHOLD", "2")
     _seed_config(env)
     channel_route = _channel_route(route_name="line-a", our_identity="+15550001111")
-    api_route = _api_route("support")
+    api_route = _api_route("chat")
     good_code = await _mint_via_link(monkeypatch, env, channel_route, address="+1000", provider="PID-A")
     _wire(monkeypatch, FakeManager(channel_route, api_route))
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
@@ -569,7 +569,7 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     # Three invalid redeems from ONE caller "mallory", each under a DIFFERENT external_user_id
     # (one past the threshold of 2 → the lock arms on the caller, if the source is the caller).
     for index in range(3):
-        res = await turn_module.submit_api_message("support", f"victim-{index}", "LINK-QQQQQQQQ", "mallory", 5)
+        res = await turn_module.submit_api_message("chat", f"victim-{index}", "LINK-QQQQQQQQ", "mallory", 5)
         await _settle()
         assert res.answer is not None
         assert res.answer.answer == turn_module._INVALID_CODE_TEXT
@@ -577,7 +577,7 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     # The lock is now ARMED on the caller: a GENUINELY VALID redeem from mallory (under YET
     # another external_user_id) is refused with the SAME uniform reply and does NOT consume
     # the live code — proving external_user_id rotation no longer evades the throttle.
-    locked = await turn_module.submit_api_message("support", "victim-final", good_code, "mallory", 5)
+    locked = await turn_module.submit_api_message("chat", "victim-final", good_code, "mallory", 5)
     await _settle()
     assert locked.answer is not None
     assert locked.answer.answer == turn_module._INVALID_CODE_TEXT
@@ -587,7 +587,7 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
 async def test_first_contact_link_greeting_and_reply_share_one_live_code(env, monkeypatch):
     # A first-contact /link with a {pairing_code} greeting must mint EXACTLY ONE code: the
     # greeting and the link reply present the SAME code, and it stays LIVE (redeemable). Pre-fix
-    # the greeting minted code A and the Link branch minted code B, D1 rotation deleted A, and
+    # the greeting minted code A and the Link branch minted code B, rotation deleted A, and
     # the greeting showed a now-dead code — so this test fails against the pre-fix code (two
     # distinct codes appear in the one reply).
     _seed_config(env, greeting_template="Welcome! Pair with {pairing_code}")
@@ -614,13 +614,13 @@ async def test_first_contact_link_greeting_and_reply_share_one_live_code(env, mo
     assert "linked" in (await _answer_of(redeem)).lower()
 
 
-# -- R10: multichannel OFF is byte-identical ---------------------------------
+# -- multichannel OFF is byte-identical --------------------------------------
 
 
 @pytest.mark.parametrize("text", ["/link", "/unlink", "LINK-ABCD1234"])
 async def test_multichannel_off_passes_pairing_syntax_through_as_plain_text(env, monkeypatch, text):
-    # No config row → multichannel OFF (D6 default-false): every pairing form reaches the
-    # target agent verbatim and NO person row is created (R10).
+    # No config row → multichannel OFF (default-false): every pairing form reaches the
+    # target agent verbatim and NO person row is created.
     agent = EchoAgent()
     _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel(), agent=agent)
     mid = await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", text, "PID-1")
@@ -784,7 +784,7 @@ async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):
 async def test_payload_expr_can_read_person_id_and_addresses(env, monkeypatch):
     _seed_config(env, target_kind="tool", target_name="pinger")
     seen: list[dict] = []
-    route = _tool_route(payload_expr="{guest: .person_id, addrs: .person_addresses}")
+    route = _tool_route(payload_expr="{who: .person_id, addrs: .person_addresses}")
     _wire(monkeypatch, FakeManager(route), FakeChannel())
     _wire_tool(monkeypatch, lambda kw: seen.append(kw) or "pong")
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
@@ -793,7 +793,7 @@ async def test_payload_expr_can_read_person_id_and_addresses(env, monkeypatch):
         _TOOL_TARGET, door="channel", channel="twilio", our_identity="+15550001111", address="+2000"
     )
     assert person is not None
-    assert seen == [{"guest": person.person_id, "addrs": [a.model_dump(mode="json") for a in person.addresses]}]
+    assert seen == [{"who": person.person_id, "addrs": [a.model_dump(mode="json") for a in person.addresses]}]
 
 
 async def test_tool_route_thread_keys_route_then_person_when_linked(env, monkeypatch):
@@ -876,22 +876,22 @@ async def test_tool_payload_on_the_api_door_carries_the_person_and_composed_addr
     assert seen[0]["our_identity"] is None
 
 
-# -- the api door (R1) -------------------------------------------------------
+# -- the api door ------------------------------------------------------------
 
 
 async def test_api_door_join_discovers_the_person_thread_key(env, monkeypatch):
     _seed_config(env)
     channel_route = _channel_route(route_name="line-a", our_identity="+15550001111")
-    api_route = _api_route("support")
+    api_route = _api_route("chat")
     code = await _mint_via_link(monkeypatch, env, channel_route, address="+1000", provider="PID-A")
 
     _wire(monkeypatch, FakeManager(channel_route, api_route))
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
 
     # The redeem submit's OWN response carries the PRE-merge route key (fixed at accept).
-    redeem = await turn_module.submit_api_message("support", "u7", code, "alice", 5)
+    redeem = await turn_module.submit_api_message("chat", "u7", code, "alice", 5)
     await _settle()
-    assert redeem.thread_id == "bridge:support:alice/u7"
+    assert redeem.thread_id == "bridge:chat:alice/u7"
     assert redeem.answer is not None
     assert "linked" in (redeem.answer.answer or "").lower()
 
@@ -900,8 +900,8 @@ async def test_api_door_join_discovers_the_person_thread_key(env, monkeypatch):
     assert {a.address for a in person.addresses} == {"+1000", "alice/u7"}
     assert person.addresses[0].door in {"api", "channel"}
 
-    # The NEXT submit RETURNS the person thread key — the R13 discovery vehicle at the door.
-    nxt = await turn_module.submit_api_message("support", "u7", "hi", "alice", 5)
+    # The NEXT submit RETURNS the person thread key — the discovery vehicle at the door.
+    nxt = await turn_module.submit_api_message("chat", "u7", "hi", "alice", 5)
     await _settle()
     assert nxt.thread_id == f"bridge:@person:{person.person_id}"
 
@@ -909,7 +909,7 @@ async def test_api_door_join_discovers_the_person_thread_key(env, monkeypatch):
 async def test_api_door_concurrent_double_redeem_has_exactly_one_winner(env, monkeypatch):
     _seed_config(env)
     channel_route = _channel_route(route_name="line-a", our_identity="+15550001111")
-    api_route = _api_route("support")
+    api_route = _api_route("chat")
     code = await _mint_via_link(monkeypatch, env, channel_route, address="+1000", provider="PID-A")
     _wire(monkeypatch, FakeManager(channel_route, api_route))
     monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
@@ -917,8 +917,8 @@ async def test_api_door_concurrent_double_redeem_has_exactly_one_winner(env, mon
     # Two callers redeem the SAME code at once: the atomic GETDEL admits exactly one winner
     # (the api door has no claim_inbound dedupe of its own).
     first, second = await asyncio.gather(
-        turn_module.submit_api_message("support", "u-a", code, "alice", 5),
-        turn_module.submit_api_message("support", "u-b", code, "bob", 5),
+        turn_module.submit_api_message("chat", "u-a", code, "alice", 5),
+        turn_module.submit_api_message("chat", "u-b", code, "bob", 5),
     )
     await _settle()
     answers = sorted(
@@ -959,7 +959,7 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
         '{"user_message":"m"}': StructuredFinal(data=_EchoInput(user_message="m")),  # model_dump_json
     }
     for expected, event in cases.items():
-        monkeypatch.setattr(turn_module, "_agent_registry", lambda event=event: {"concierge": _StreamAgent(event)})
+        monkeypatch.setattr(turn_module, "_agent_registry", lambda event=event: {"assistant": _StreamAgent(event)})
         status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
         assert status == "answered"
         assert answer == expected
@@ -969,7 +969,7 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
 async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env, monkeypatch):
     route = _api_route()
     agent = _StreamAgent(InterruptFinal(interrupt_id="i1", payload={"q": "?"}, reason="needs input"))
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"concierge": agent})
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent})
     status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
     assert status == "error"
     assert answer == turn_module._ERROR_ANSWER_TEXT
@@ -979,7 +979,7 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
 
 async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatch):
     route = _api_route()
-    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"concierge": _StreamAgent()})  # no events
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": _StreamAgent()})  # no events
     status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
     assert status == "error"
     assert error == "agent produced an empty answer"

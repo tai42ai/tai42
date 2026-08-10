@@ -60,7 +60,7 @@ from tests.conftest import APP as RECORDING_APP
 # One agents entry: the real generic tools-agent, gated in by its registration name.
 _MANIFEST = {"agents": [{"title": "tai42-agents", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]}]}
 
-_BAKED_SYSTEM_PROMPT = "You are a helpdesk agent."
+_BAKED_SYSTEM_PROMPT = "You are an assistant."
 
 
 # -- request / response helpers (mirror the skeleton router test harness) ------
@@ -255,16 +255,16 @@ def test_tools_agent_authored_and_streamed_through_the_skeleton(skeleton: Any, m
             #    suite; this cross-repo test targets the streaming seam, so it registers
             #    directly on the process manager the run path reads and needs no store.
             await instance.app.preset_manager.register(
-                "support_bot",
+                "assistant_bot",
                 "tools_agent",
                 {"system_prompt": _BAKED_SYSTEM_PROMPT},
                 [],
-                "A helpdesk agent.",
+                "An assistant.",
             )
 
             # 4. Stream a run: the request supplies only the non-baked user_message.
             run_resp = await skeleton.agents.run_authored_agent(
-                _run_request("support_bot", {"user_message": "my order is late"})
+                _run_request("assistant_bot", {"user_message": "what's the status of my request?"})
             )
             assert isinstance(run_resp, StreamingResponse)
             frames = await _collect_frames(run_resp)
@@ -276,7 +276,7 @@ def test_tools_agent_authored_and_streamed_through_the_skeleton(skeleton: Any, m
             assert frames[0]["text"] == f"system={_BAKED_SYSTEM_PROMPT}"
             assert captured["system_message"] == _BAKED_SYSTEM_PROMPT
             assert "system_prompt" not in captured
-            assert captured["user_message"] == ["my order is late"]
+            assert captured["user_message"] == ["what's the status of my request?"]
 
     asyncio.run(run())
 
@@ -306,7 +306,7 @@ def test_tools_agent_response_format_streams_structured_through_the_skeleton(
                 "tools_agent",
                 {"system_prompt": _BAKED_SYSTEM_PROMPT},
                 [],
-                "A structured helpdesk agent.",
+                "A structured assistant.",
             )
 
             run_resp = await skeleton.agents.run_authored_agent(
@@ -329,7 +329,7 @@ def test_an_authored_preset_does_not_reach_a_later_test(skeleton: Any) -> None:
     the fixture build its own app, and the ``PresetManager`` and the tool registry both
     hang off that app. This test is what holds that invariant up.
 
-    The preceding tests author ``support_bot`` and ``struct_bot`` and never remove them.
+    The preceding tests author ``assistant_bot`` and ``struct_bot`` and never remove them.
     Entering here on a fresh app, neither the spec map nor the live tool registry may
     carry either leaked preset; the fresh app carries the manifest's own ``tools_agent``.
     Drop ``monkeypatch.setattr(instance, "_app", None)``
@@ -345,7 +345,7 @@ def test_an_authored_preset_does_not_reach_a_later_test(skeleton: Any) -> None:
             assert list(manager.registered_names()) == []
             assert list(manager.quarantined_names()) == []
             tools = await instance.app.tools.get_tools()
-            assert "support_bot" not in tools
+            assert "assistant_bot" not in tools
             assert "struct_bot" not in tools
             assert "tools_agent" in tools
 

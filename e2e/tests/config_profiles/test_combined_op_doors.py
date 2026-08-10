@@ -1,6 +1,6 @@
 """F3 — combined-op (``apply_env_and_change``) doors over the REAL store.
 
-The ``POST /api/mcp-config/secret-env`` door (PLAN_3 C9) writes a secret VALUE to the env
+The ``POST /api/mcp-config/secret-env`` door writes a secret VALUE to the env
 store AND an ``!ENV ${KEY}`` MARKER into the manifest as ONE consistent unit, then reloads
 the fleet. These doors drive its landed contracts over the agents stack (auth OFF) — the
 same real component store the profile/preset doors exercise:
@@ -8,12 +8,12 @@ same real component store the profile/preset doors exercise:
 * (a) ATOMIC SUCCESS — env + manifest land together, the manifest carries the marker (no
   plaintext leak), the value is effective, one reload;
 * (c) EXPLICIT-KEY COLLISION — an explicit ``key`` colliding with a stored key holding a
-  DIFFERENT value is a loud 400 naming the key; nothing written (C9c);
+  DIFFERENT value is a loud 400 naming the key; nothing written;
 * (d) GENERATED-KEY COLLISION mint-fresh — a stored key that collides with the generator's
   first candidate makes the op mint a fresh, non-colliding key; the seeded key's value is
-  untouched (C9c);
+  untouched;
 * (f) SECRET MARKS APPENDED — a second op APPENDS its key to ``TAI_ENV_SECRET_KEYS`` read
-  from the STORED env, never clobbering the first op's mark (C9d).
+  from the STORED env, never clobbering the first op's mark.
 
 The remaining F3 combined-op items are authoritative at skeleton-unit level, where the
 required fault injection lives (not reproducible over the live file-mode store):
@@ -138,7 +138,7 @@ async def test_combined_op_secret_marks_appended_not_clobbered(
     )
     first_key = _marker_key(await _authorization_marker(agents_stack))
 
-    # Second op APPENDS its key — reading the marks from the STORED env (C9d), so the first
+    # Second op APPENDS its key — reading the marks from the STORED env, so the first
     # op's mark survives rather than being clobbered by a stale settings-cache read.
     await api.post(
         "/api/mcp-config/secret-env",

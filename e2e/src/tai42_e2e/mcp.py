@@ -1,7 +1,7 @@
 """Thin wrapper over ``fastmcp.Client`` for calling tools and listing them over
 ``POST /mcp`` (and the ``/app/<slug>`` sub-MCP mounts) against a running server.
 
-The wrapper is transparently robust to D13a session termination. A config reload
+The wrapper is transparently robust to epoch-swap session termination. A config reload
 swaps the serving epoch, which by design retires every live MCP session (the
 swapped-in epoch serves a NEW session-id space; the old session manager is closed
 on a deferred task once the driving call's result is delivered). A tool call or a
@@ -37,11 +37,11 @@ from tai42_e2e.waiting import wait_for_async
 _RELOADING_MARKER = "reloading"
 
 # The SDK's ``McpError`` message for a request that landed on a session the server
-# already retired (a D13a epoch swap: the streamable-http transport answers ``404``,
+# already retired (an epoch swap: the streamable-http transport answers ``404``,
 # which ``mcp.client.streamable_http`` maps to a "Session terminated" JSONRPCError).
 _SESSION_TERMINATED_MARKER = "Session terminated"
 
-# Ceiling for transparently recovering from a D13a session swap: re-opening a fresh
+# Ceiling for transparently recovering from a session swap: re-opening a fresh
 # session (polling past a reload-gate handshake rejection on the fresh initialize) and
 # re-issuing. A swap window settles in seconds; this is only the safety bound.
 _SESSION_REINIT_DEADLINE = 15.0
@@ -59,7 +59,7 @@ def _is_reloading(result: CallToolResult) -> bool:
 
 
 def _is_session_terminated(exc: BaseException) -> bool:
-    """Whether ``exc`` is the SDK's D13a session-swap rejection (a retired session)."""
+    """Whether ``exc`` is the SDK's session-swap rejection (a retired session)."""
     return isinstance(exc, McpError) and _SESSION_TERMINATED_MARKER in str(exc)
 
 
@@ -67,7 +67,7 @@ class McpClient:
     """A short-lived fastmcp client bound to one MCP endpoint. Use as an async
     context manager; each ``async with`` opens one streamable-http session.
 
-    Session termination from a D13a epoch swap is handled transparently: the
+    Session termination from an epoch swap is handled transparently: the
     listing/tool-call surface re-initialises a fresh session and re-issues (bounded
     by :data:`_SESSION_REINIT_DEADLINE`), returning the call's real result."""
 
@@ -88,7 +88,7 @@ class McpClient:
     def session_id(self) -> str | None:
         """The current streamable-http session id (the ``mcp-session-id`` the server minted
         for this session), or ``None`` before the initialize handshake completes. It CHANGES
-        when a D13a epoch swap retires the session and this client transparently
+        when an epoch swap retires the session and this client transparently
         re-initialises a fresh one — the direct, observable signal of the session break."""
         return self._client.transport.get_session_id()
 
@@ -101,13 +101,13 @@ class McpClient:
 
     async def _close(self) -> None:
         """Close the underlying session, best-effort: a session the server already
-        retired (D13a), or a torn transport, can raise on close — the session is gone
+        retired, or a torn transport, can raise on close — the session is gone
         regardless, so a close failure must not mask the caller's own outcome."""
         with contextlib.suppress(Exception):
             await self._client.__aexit__(None, None, None)
 
     async def _reinit(self) -> None:
-        """Re-open a fresh session after the server retired the current one (D13a).
+        """Re-open a fresh session after the server retired the current one.
 
         Polls past a reload-gate rejection of the fresh ``initialize`` handshake (the
         swapped-in worker may still briefly hold its reload gate — the client raises
@@ -138,7 +138,7 @@ class McpClient:
             await self._client.list_tools()
 
     async def _with_session_reinit[T](self, op: Callable[[], Awaitable[T]]) -> T:
-        """Run ``op`` on the current session; if the server retired it mid-call (D13a),
+        """Run ``op`` on the current session; if the server retired it mid-call,
         re-open a fresh session and re-run, bounded by the reinit deadline. Any OTHER
         error — and ``op``'s real return value — passes through untouched, so no test
         assertion (a falsy predicate, an ``is_error`` result) is ever masked."""
@@ -178,7 +178,7 @@ class McpClient:
         retry every real client applies to the retriable ``reloading`` rejection. A
         non-reload error is returned/raised at once (never retried).
 
-        A D13a session termination (the call's own reload, or a prior reload's
+        A session termination (the call's own reload, or a prior reload's
         deferred close, retiring this session) is handled underneath both paths: the
         session re-initialises and the call re-issues, so the caller sees the real
         result — the ``reloading`` retry and ``raise_on_error`` semantics are

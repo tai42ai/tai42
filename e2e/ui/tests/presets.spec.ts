@@ -1,5 +1,5 @@
 /**
- * Create a versioned preset (Mission 9 PLAN_3 UI). Via the presets page: create
+ * Create a versioned preset. Via the presets page: create
  * a preset over base `e2e_echo` baking a unique payload. Asserts the new row in
  * the UI, that the API list carries it, and that it is a LIVE tool on the real
  * stack (running it returns the baked payload) — not just a stored row.
@@ -17,7 +17,7 @@ test('create a preset over e2e_echo; UI row + API list + live tool', async ({ pa
   await page.getByRole('button', { name: 'Create preset' }).click();
   const dialog = page.getByRole('dialog', { name: 'Create preset' });
   await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
-  // Description is REQUIRED (R16) and gates submit; the bound tool's LLM-facing docstring.
+  // Description is REQUIRED and gates submit; the bound tool's LLM-facing docstring.
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`echo preset ${name}`);
   // The base-tool listbox holds 40+ tools in a Radix Select whose content sets no
   // max-height/scroll, so an option below the fold (e2e_echo is ~18th) is off

@@ -12,7 +12,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
-_TARGET = PairingTarget(target_kind="agent", target_name="concierge")
+_TARGET = PairingTarget(target_kind="agent", target_name="assistant")
 _SOURCE = '["twilio","+15550001111","+2000"]'
 
 
@@ -47,7 +47,7 @@ async def test_crossing_the_threshold_locks_then_clear_resets(monkeypatch):
     # A valid redeem clears BOTH the counter and the lock.
     await throttle.clear(_TARGET, _SOURCE)
     assert await throttle.is_locked(_TARGET, _SOURCE) is False
-    assert ConversationsSettings().redeem_fail_key("agent", "concierge", _SOURCE) not in fake._strings
+    assert ConversationsSettings().redeem_fail_key("agent", "assistant", _SOURCE) not in fake._strings
 
 
 async def test_backoff_is_capped_and_scoped_per_source(monkeypatch):
@@ -57,7 +57,7 @@ async def test_backoff_is_capped_and_scoped_per_source(monkeypatch):
     throttle = _throttle(monkeypatch, fake)
     for _ in range(6):
         await throttle.record_failure(_TARGET, _SOURCE)
-    lock_key = ConversationsSettings().redeem_lock_key("agent", "concierge", _SOURCE)
+    lock_key = ConversationsSettings().redeem_lock_key("agent", "assistant", _SOURCE)
     assert await throttle.is_locked(_TARGET, _SOURCE) is True
     # The exponential lock never exceeds the cap.
     assert fake.ttl_ms[lock_key] <= 4000
@@ -72,7 +72,7 @@ async def test_backoff_escalates_exponentially_from_one_second_then_caps(monkeyp
     monkeypatch.setenv("CONVERSATIONS_REDEEM_BACKOFF_CAP_SECONDS", "16")
     fake = FakeRecordRedis()
     throttle = _throttle(monkeypatch, fake)
-    lock_key = ConversationsSettings().redeem_lock_key("agent", "concierge", _SOURCE)
+    lock_key = ConversationsSettings().redeem_lock_key("agent", "assistant", _SOURCE)
 
     # At and below the threshold nothing locks.
     for _ in range(3):
@@ -98,12 +98,12 @@ def test_throttle_refuses_without_the_redis_backend(monkeypatch):
 
 def test_redeem_keyspace_is_source_scoped_and_opaque():
     settings = ConversationsSettings()
-    fail_a = settings.redeem_fail_key("agent", "concierge", _SOURCE)
-    lock_a = settings.redeem_lock_key("agent", "concierge", _SOURCE)
+    fail_a = settings.redeem_fail_key("agent", "assistant", _SOURCE)
+    lock_a = settings.redeem_lock_key("agent", "assistant", _SOURCE)
     # The fail and lock keys are distinct namespaces over the same opaque scope.
     assert fail_a != lock_a
     assert fail_a.rsplit(":", 1)[1] == lock_a.rsplit(":", 1)[1]
     # A different source, target, or kind hashes to a different scope.
-    assert settings.redeem_fail_key("agent", "concierge", "other") != fail_a
+    assert settings.redeem_fail_key("agent", "assistant", "other") != fail_a
     assert settings.redeem_fail_key("agent", "other", _SOURCE) != fail_a
-    assert settings.redeem_fail_key("tool", "concierge", _SOURCE) != fail_a
+    assert settings.redeem_fail_key("tool", "assistant", _SOURCE) != fail_a

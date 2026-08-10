@@ -210,7 +210,7 @@ async def _send_template(
 class WhatsAppChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol."""
 
-    # This channel sends product photos and out-of-window templates; the central
+    # This channel sends images and out-of-window templates; the central
     # notify_user capability guard reads these before dispatching either.
     supports_media_notifications: ClassVar[bool] = True
     supports_template_notifications: ClassVar[bool] = True

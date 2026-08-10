@@ -944,29 +944,33 @@ async def test_envelope_non_mapping_topic_verifiers_whole_section_refusal_zero_w
 async def test_verifier_binding_round_trips_so_a_verified_topic_stays_verified(store) -> None:
     # A binding is the topic's ingress lock: dropping it on restore would bring the
     # topic's hooks back on a door anyone may ring unsigned.
-    await store.manager.set_topic_verifier("payments", {"verifier": "github", "config": {"secret_env": "GH_SECRET"}})
+    await store.manager.set_topic_verifier(
+        "notifications", {"verifier": "github", "config": {"secret_env": "GH_SECRET"}}
+    )
     await store.manager.register(
-        HookParams(name="pay", topic="payments", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp")
+        HookParams(
+            name="n1", topic="notifications", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp"
+        )
     )
 
     doc = await sections._export_webhooks()
-    assert doc["topic_verifiers"] == {"payments": {"verifier": "github", "config": {"secret_env": "GH_SECRET"}}}
+    assert doc["topic_verifiers"] == {"notifications": {"verifier": "github", "config": {"secret_env": "GH_SECRET"}}}
 
     _wipe(store)
     report = await sections._import_webhooks(doc)
     assert report["errors"] == []
     assert report["created"] == 2  # the binding + the hook
-    assert await store.manager.get_topic_verifier("payments") == {
+    assert await store.manager.get_topic_verifier("notifications") == {
         "verifier": "github",
         "config": {"secret_env": "GH_SECRET"},
     }
 
 
 async def test_replacing_a_live_binding_counts_updated(store) -> None:
-    await store.manager.set_topic_verifier("payments", {"verifier": "github", "config": {}})
+    await store.manager.set_topic_verifier("notifications", {"verifier": "github", "config": {}})
     doc = {
         "hooks": [],
-        "topic_verifiers": {"payments": {"verifier": "hmac", "config": {}}},
+        "topic_verifiers": {"notifications": {"verifier": "hmac", "config": {}}},
         "trigger_links": [],
         "tombstones": [],
     }
@@ -975,14 +979,14 @@ async def test_replacing_a_live_binding_counts_updated(store) -> None:
         report = await sections._import_webhooks(doc)
     assert report["errors"] == []
     assert (report["updated"], report["created"]) == (1, 0)
-    assert (await store.manager.get_topic_verifier("payments"))["verifier"] == "hmac"
+    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "hmac"
 
 
 async def test_skip_leaves_a_live_binding_untouched(store) -> None:
-    await store.manager.set_topic_verifier("payments", {"verifier": "github", "config": {}})
+    await store.manager.set_topic_verifier("notifications", {"verifier": "github", "config": {}})
     doc = {
         "hooks": [],
-        "topic_verifiers": {"payments": {"verifier": "hmac", "config": {}}},
+        "topic_verifiers": {"notifications": {"verifier": "hmac", "config": {}}},
         "trigger_links": [],
         "tombstones": [],
     }
@@ -991,7 +995,7 @@ async def test_skip_leaves_a_live_binding_untouched(store) -> None:
     report = await sections._import_webhooks(doc)
     assert report["errors"] == []
     assert (report["updated"], report["created"], report["skipped_existing"]) == (0, 0, 1)
-    assert (await store.manager.get_topic_verifier("payments"))["verifier"] == "github"
+    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "github"
 
 
 @pytest.mark.parametrize("binding", [{"config": {}}, {"verifier": "", "config": {}}, "hmac", {"verifier": 1}])
@@ -1047,8 +1051,8 @@ async def test_records_on_a_topic_whose_lock_failed_are_refused(store) -> None:
     doc = {
         "hooks": [
             {
-                "name": "pay",
-                "topic": "payments",
+                "name": "n1",
+                "topic": "notifications",
                 "tool": "notify",
                 "execution_key": "k-fire",
                 "execution_key_fingerprint": "fp",
@@ -1061,9 +1065,13 @@ async def test_records_on_a_topic_whose_lock_failed_are_refused(store) -> None:
                 "execution_key_fingerprint": "fp",
             },
         ],
-        "topic_verifiers": {"payments": {"verifier": "", "config": {}}},
+        "topic_verifiers": {"notifications": {"verifier": "", "config": {}}},
         "trigger_links": [
-            {"name": "paylink", "token_hash": "a" * 64, "record": _link_record("paylink", "k-fire", topic="payments")},
+            {
+                "name": "eventlink",
+                "token_hash": "a" * 64,
+                "record": _link_record("eventlink", "k-fire", topic="notifications"),
+            },
             {"name": "otherlink", "token_hash": "b" * 64, "record": _link_record("otherlink", "k-fire")},
         ],
         "tombstones": [],
@@ -1101,14 +1109,14 @@ async def test_binding_naming_an_unregistered_verifier_is_restored_not_dropped(s
     # denies what it cannot resolve, whereas refusing here would restore a PUBLIC topic.
     doc = {
         "hooks": [],
-        "topic_verifiers": {"payments": {"verifier": "not-installed-here", "config": {}}},
+        "topic_verifiers": {"notifications": {"verifier": "not-installed-here", "config": {}}},
         "trigger_links": [],
         "tombstones": [],
     }
     report = await sections._import_webhooks(doc)
     assert report["errors"] == []
     assert report["created"] == 1
-    assert (await store.manager.get_topic_verifier("payments"))["verifier"] == "not-installed-here"
+    assert (await store.manager.get_topic_verifier("notifications"))["verifier"] == "not-installed-here"
 
 
 # -- restore into a now-verified topic (fire-time enforcement) -------------

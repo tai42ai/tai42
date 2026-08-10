@@ -41,7 +41,7 @@ _UNREACHABLE_CALLBACK = "https://127.0.0.1:9/callback"
 
 @pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
 )
 async def test_tool_target_echoes_a_reply_and_maps_null_to_silence(
     bridge: BridgeHarness, uniq: Callable[[str], str]

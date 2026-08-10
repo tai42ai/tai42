@@ -1,12 +1,12 @@
 """L18 — the first-contact greeting: prepended once, and its ``{pairing_code}`` is live.
 
 A greeting-configured AGENT target. The FIRST admitted inbound from an address gets the
-configured greeting PREPENDED into that same turn's delivered answer (D7 — there is no
+configured greeting PREPENDED into that same turn's delivered answer (there is no
 separate greeting chunk; the greeting is the opening of the one answer). A SECOND inbound
 from that address carries no greeting — first contact is the person-row creation, and the row
 now exists. When the template references ``{pairing_code}``, a fresh code is minted at
 greeting time and rendered into the greeting; that code is a real, live pair code — redeeming
-it from another channel links the two (R15: a greeting code can chain another channel).
+it from another channel links the two (a greeting code can chain another channel).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from tai42_e2e.settings import HarnessSettings
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host (PLAN_2 §F)",
+    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
 )
 
 _AGENT = "tools_agent"
@@ -96,7 +96,7 @@ async def test_greeting_prepends_once_and_its_pairing_code_is_redeemable(
     assert "LINK-" not in send2["body"]
 
     # The greeting's minted code is a real, live pair code: redeeming it from whatsapp links
-    # the two conversations. The whatsapp side is itself a first contact, so R15 also fires its
+    # the two conversations. The whatsapp side is itself a first contact, so it also fires its
     # greeting here — the redeem answer is the greeting PLUS ``linked``, with a fresh code of
     # its own (which could chain a third channel). So the reply ENDS WITH the linked text.
     redeem = bridge.whatsapp_inbound(phone_number_id=BRIDGE_WHATSAPP_PHONE_ID, wa_id=BRIDGE_WHATSAPP_CLIENT, text=code)

@@ -9,7 +9,7 @@ Three landed contracts of ``config/service.py::apply_replace_env`` + ``app/epoch
   eagerly (``server.py::_build_serving_core`` reads ``access_control_settings()`` regardless
   of whether the gate is enabled), so a non-integer passes ``_validate_replace`` (no
   singleton construction) and raises a ``ValidationError`` deep in the rebuild.
-* MCP SESSION D13a: the swap ``aclose``s the old epoch's FastMCP session manager, so a
+* MCP SESSION: the swap ``aclose``s the old epoch's FastMCP session manager, so a
   stateful session is retired (fresh session-id space) and the client cleanly re-initialises
   — the SAME ``McpClient`` handle transparently re-opens and serves the NEW epoch.
 * IN-FLIGHT BACKEND WORK: a hot in-process swap does not lose an in-flight backend job — its
@@ -159,7 +159,7 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
 async def test_hot_apply_breaks_and_reinitializes_stateful_mcp_session(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    """D13a: a swap retires the old epoch's FastMCP session manager, so a stateful session is
+    """A swap retires the old epoch's FastMCP session manager, so a stateful session is
     TERMINATED (fresh session-id space) and the client cleanly re-initialises. The break is
     proven by the streamable-http SESSION ID changing across the apply — the old session was
     retired and ``McpClient`` transparently re-opened a fresh one. (``settings_epoch`` alone
@@ -185,7 +185,7 @@ async def test_hot_apply_breaks_and_reinitializes_stateful_mcp_session(
         await wait_for_async(
             session_reinitialised,
             deadline=45.0,
-            message="the stateful MCP session id never changed — the D13a break did not happen",
+            message="the stateful MCP session id never changed — the break did not happen",
         )
         # The break is explicit: a NEW session id (old terminated + re-initialised), now
         # serving the swapped-in epoch.

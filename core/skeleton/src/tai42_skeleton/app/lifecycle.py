@@ -166,7 +166,7 @@ class TaiMCPLifecycleMixin(ABC):
         so a request that interleaves with an in-flight build's serving-app enter sees the
         LIVE core and NEVER the generation under construction — a build that then FAILS can
         never leave a surviving epoch's memoized verifier bound onto the discarded
-        generation's provider instances (the D4 zero-mutation invariant). Before the boot
+        generation's provider instances (the zero-mutation invariant). Before the boot
         epoch is installed there is no live generation, so this falls back to the sole
         pre-boot core (``_building``), which registration and the pre-boot harness read;
         no request is served in that window, so the being-built generation is never

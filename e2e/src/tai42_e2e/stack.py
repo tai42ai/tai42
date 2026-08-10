@@ -128,7 +128,7 @@ async def _probe_tolerating_reloading[T](open_and_call: Callable[[], Awaitable[T
         raise
     except McpError as exc:
         # A worker that swaps its epoch mid-probe (a reload / targeted deregister settling)
-        # terminates the just-opened MCP session — D13a: the fresh epoch serves a NEW
+        # terminates the just-opened MCP session — the fresh epoch serves a NEW
         # session-id space, so the session opened against the old epoch is retired and the
         # SDK raises "Session terminated". Treat it as "not settled yet" so the enclosing
         # wait re-polls on a fresh session against the new epoch (exactly what a real client

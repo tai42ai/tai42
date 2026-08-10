@@ -18,10 +18,10 @@ from click.testing import CliRunner
 from jsonschema import Draft202012Validator, ValidationError
 from openapi_spec_validator import validate
 from pydantic import BaseModel
+from tai42_cli import app as app_module
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes, method_to_action
-from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.openapi import (
     _STATUS_DESCRIPTIONS,
     _assign_component,

@@ -1,4 +1,4 @@
-"""L17 — the web invite: a pair code carried into the web chat by the ``?pair=`` URL (R3/D12).
+"""L17 — the web invite: a pair code carried into the web chat by the ``?pair=`` URL.
 
 One AGENT target reachable on a channel route (twilio) and a web route. The person mints a
 code on the channel side (``/link``), then opens the web chat at ``?pair=<code>``. The chat
@@ -39,7 +39,7 @@ from tai42_e2e.webchat import WebChatClient
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
 )
 
 _AGENT = "tools_agent"

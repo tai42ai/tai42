@@ -540,7 +540,7 @@ _CALLBACK_SECRET = "sec-1"
 
 def _api_route() -> ConversationRoute:
     return ConversationRoute(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
         target_name="echo",
@@ -563,9 +563,9 @@ def _api_record(message_id: str, answer: str) -> ConversationRecord:
     now = time.time()
     return ConversationRecord(
         message_id=message_id,
-        route_name="support",
+        route_name="chat",
         door="api",
-        thread_id="bridge:support:alice/user-7",
+        thread_id="bridge:chat:alice/user-7",
         client_address="alice/user-7",
         caller_principal="alice",
         callback_url=_CALLBACK_URL,
@@ -721,7 +721,7 @@ async def test_the_api_retry_extends_the_lease_over_its_own_backoff(monkeypatch,
 
 async def test_the_api_retry_stops_when_it_loses_the_lease_during_backoff(monkeypatch, fake, store):
     """Another worker takes the record over while this one is holding a 500. It must not
-    wake up and POST a SECOND callback the customer's endpoint has already been sent."""
+    wake up and POST a SECOND callback the caller's endpoint has already been sent."""
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS", "0.01")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS", "0.01")
     store = ConversationRecordStore(ConversationsSettings())

@@ -28,20 +28,20 @@ async def test_on_event_fires_tool_with_merged_expr_and_kwargs(make_app):
     manager = InMemoryHooksManager(_settings())
     await manager.register(
         HookParams(
-            name="ship",
-            topic="orders",
-            tool="ship_tool",
+            name="forward",
+            topic="events",
+            tool="forward_tool",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "paid"',
+            condition='.status == "ready"',
             expr="{id: .id}",
             tool_kwargs={"extra": 1},
         )
     )
 
-    await manager.on_event("orders", {"id": 7, "status": "paid"})
+    await manager.on_event("events", {"id": 7, "status": "ready"})
 
-    assert app.tools.runs == [("ship_tool", {"id": 7, "extra": 1})]
+    assert app.tools.runs == [("forward_tool", {"id": 7, "extra": 1})]
 
 
 async def test_on_event_without_expr_uses_tool_kwargs_only(make_app):
@@ -73,11 +73,11 @@ async def test_on_event_skips_hook_when_condition_false(make_app):
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "paid"',
+            condition='.status == "ready"',
         )
     )
 
-    await manager.on_event("t", {"status": "unpaid"})
+    await manager.on_event("t", {"status": "waiting"})
 
     assert app.tools.runs == []
 

@@ -24,8 +24,8 @@ async def test_register_writes_hook_and_topic_map(monkeypatch, fake_redis):
         await manager.register(
             HookParams(
                 name="h1",
-                topic="orders",
-                tool="ship",
+                topic="events",
+                tool="forward",
                 execution_key="k-fire",
                 execution_key_fingerprint="fp-fire",
                 condition=".ok",
@@ -34,8 +34,8 @@ async def test_register_writes_hook_and_topic_map(monkeypatch, fake_redis):
         is True
     )
 
-    by_topic = await manager.list_hooks_by_topic("orders")
-    assert by_topic["h1"].tool == "ship"
+    by_topic = await manager.list_hooks_by_topic("events")
+    assert by_topic["h1"].tool == "forward"
     assert await manager.list_hooks_by_topic("empty") == {}
 
 
@@ -79,12 +79,14 @@ async def test_list_hooks_empty_when_no_map(monkeypatch, fake_redis):
 async def test_unregister_removes_hook_and_returns_true(monkeypatch, fake_redis):
     manager = _manager(monkeypatch, fake_redis)
     await manager.register(
-        HookParams(name="h1", topic="orders", tool="ship", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+        HookParams(
+            name="h1", topic="events", tool="forward", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+        )
     )
 
     assert await manager.unregister("h1") is True
     assert await manager.list_hooks() == {}
-    assert await manager.list_hooks_by_topic("orders") == {}
+    assert await manager.list_hooks_by_topic("events") == {}
 
 
 async def test_unregister_unknown_returns_false(monkeypatch, fake_redis):

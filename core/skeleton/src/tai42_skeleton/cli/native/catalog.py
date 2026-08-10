@@ -3,7 +3,7 @@
 The 6 tai42-skeleton builtins are a static table colocated here (the core is not a
 marketplace listing, so nothing else carries them); every other row is queried live
 from the marketplace registry's item-enumeration route. The network is REQUIRED —
-offline is a loud error, never a silent empty or cached fallback (R3).
+offline is a loud error, never a silent empty or cached fallback.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from typing import Any
 
 import click
 import typer
+from tai42_cli.commands._common import app_context
+from tai42_cli.render import print_records
 
-from tai42_skeleton.cli.commands._common import app_context
-from tai42_skeleton.cli.render import print_records
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.errors import MarketplaceError, RegistryResponseError
 
@@ -116,7 +116,7 @@ def load_catalog() -> list[dict[str, Any]]:
 
     The network is required — a dead or garbled registry raises a
     :class:`~tai42_skeleton.marketplace.errors.MarketplaceError`, never a silent empty
-    list or a cached snapshot (R3)."""
+    list or a cached snapshot."""
     items = asyncio.run(RegistryClient().items())
     return [*_BUILTIN_ROWS, *(_project(item) for item in items)]
 

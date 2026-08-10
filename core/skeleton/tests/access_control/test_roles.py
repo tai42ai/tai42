@@ -263,11 +263,11 @@ async def test_topic_verifier_binding_doors_are_admin_only(mem: _MemStore):
     reset_route_index()
     await seed_default_roles()
     for method in ("PUT", "DELETE"):
-        meta = resolve_route_meta("/api/hooks/topics/orders/verifier", method)
-        assert meta is not None, f"{method} /api/hooks/topics/orders/verifier did not resolve"
+        meta = resolve_route_meta("/api/hooks/topics/events/verifier", method)
+        assert meta is not None, f"{method} /api/hooks/topics/events/verifier did not resolve"
         assert meta.action == "fenced"
         for role in ("editor", "viewer"):
-            allowed, cause = await _level_allows(role, "/api/hooks/topics/orders/verifier", method)
+            allowed, cause = await _level_allows(role, "/api/hooks/topics/events/verifier", method)
             assert allowed is False, f"{method} on a topic verifier must be admin-only for {role}"
             assert cause is DenialCause.HARD_FENCE
 
@@ -303,7 +303,7 @@ _GRANTABLE_WRITE_DOORS = [
     ("/api/tools/shout/extensions", "POST"),
     ("/api/tool-meta/tools/shout", "PATCH"),
     ("/api/hooks", "POST"),
-    ("/api/hooks/orders-hook", "DELETE"),
+    ("/api/hooks/events-hook", "DELETE"),
 ]
 
 

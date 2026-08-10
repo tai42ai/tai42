@@ -75,9 +75,9 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
             manager = get_hooks_manager()
             await manager.register(
                 HookParams(
-                    name="on-order",
-                    topic="orders",
-                    tool="run_order_flow",
+                    name="on-event",
+                    topic="events",
+                    tool="run_event_flow",
                     execution_key="k-fire",
                     execution_key_fingerprint="fp-fire",
                     expr=".payload",
@@ -85,12 +85,12 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
                 )
             )
 
-            resp = await universal_webhook(_request("orders", {"payload": {"id": 7}}))
-            assert json.loads(bytes(resp.body)) == {"status": "accepted", "topic": "orders"}
+            resp = await universal_webhook(_request("events", {"payload": {"id": 7}}))
+            assert json.loads(bytes(resp.body)) == {"status": "accepted", "topic": "events"}
 
             assert resp.background is not None
             await resp.background()
-            run_tool.assert_awaited_once_with("run_order_flow", {"id": 7, "source": "webhook"}, offload_sync=False)
+            run_tool.assert_awaited_once_with("run_event_flow", {"id": 7, "source": "webhook"}, offload_sync=False)
 
     asyncio.run(run())
 
@@ -124,11 +124,11 @@ def test_malformed_body_is_rejected_with_400() -> None:
     scope = {
         "type": "http",
         "method": "POST",
-        "path": "/universal_webhook/orders",
-        "raw_path": b"/universal_webhook/orders",
+        "path": "/universal_webhook/events",
+        "raw_path": b"/universal_webhook/events",
         "query_string": b"",
         "headers": [(b"content-type", b"application/json")],
-        "path_params": {"topic": "orders"},
+        "path_params": {"topic": "events"},
         "app": None,
     }
 

@@ -229,7 +229,7 @@ def bare_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterat
 
 @pytest.fixture(scope="module")
 def off_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    """The all-features-OFF profile (D8): the whole default router surface mounted
+    """The all-features-OFF profile: the whole default router surface mounted
     but no feature Redis and no default PG, so every DB-backed feature is
     unconfigured. The doctrine spec in ``tests/off`` pins the whole OFF matrix
     against it. No backend, so the module is ``backendless`` (default leg only)."""
@@ -360,7 +360,7 @@ def payments_stack(
         "bridge_callback_secret": secrets.token_hex(16),
         "stripe_stub_base": fake_stripe.api_base_url,
     }
-    root = tmp_path_factory.mktemp("payments")
+    root = tmp_path_factory.mktemp("notifications")
     resources, config = _allocate_and_build(infra, root, build_payments_stack, resource_kwargs, False)
     stack = TaiStack(config, infra, resources, root)
     try:

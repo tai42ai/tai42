@@ -133,7 +133,7 @@ def registry():
 async def test_register_then_list_and_unregister(manager: InMemoryHooksManager) -> None:
     # Flat fields in, {"registered", "name"} out.
     assert await hooks_ops.register_hook(
-        name="h1", topic="orders", tool="ship", execution_key="k-fire", condition='.status == "paid"'
+        name="h1", topic="events", tool="forward", execution_key="k-fire", condition='.status == "ready"'
     ) == {
         "registered": True,
         "name": "h1",
@@ -145,8 +145,8 @@ async def test_register_then_list_and_unregister(manager: InMemoryHooksManager) 
     assert {item["name"] for item in listed["items"]} == {"h1"}
     assert listed["topic_verifiers"] == {}
 
-    by_topic = await hooks_ops.list_hooks(topic="orders")
-    assert by_topic["items"][0]["tool"] == "ship"
+    by_topic = await hooks_ops.list_hooks(topic="events")
+    assert by_topic["items"][0]["tool"] == "forward"
     assert (await hooks_ops.list_hooks(topic="other"))["items"] == []
 
     # {"removed", "name"} out.
@@ -180,13 +180,13 @@ async def test_unregister_missing_is_not_found(manager: InMemoryHooksManager) ->
 
 async def test_set_topic_verifier_binds_and_lists(manager: InMemoryHooksManager, registry) -> None:
     registry.register("prov", _FakeVerifier())
-    assert await hooks_ops.set_topic_verifier(topic="orders", verifier="prov", config={"k": "v"}) == {
-        "topic": "orders",
+    assert await hooks_ops.set_topic_verifier(topic="events", verifier="prov", config={"k": "v"}) == {
+        "topic": "events",
         "verifier": "prov",
     }
     # The bound verifier now rides list_hooks' topic_verifiers.
     listed = await hooks_ops.list_hooks()
-    assert listed["topic_verifiers"] == {"orders": {"verifier": "prov", "config": {"k": "v"}}}
+    assert listed["topic_verifiers"] == {"events": {"verifier": "prov", "config": {"k": "v"}}}
 
 
 async def test_listed_trigger_auth_is_derived_from_the_live_verifier_bindings(
@@ -195,31 +195,31 @@ async def test_listed_trigger_auth_is_derived_from_the_live_verifier_bindings(
     # ``public`` until a verifier is bound, then ``verifier`` — derived at every read
     # from the bindings just fetched, never stored (the binding mutates independently).
     registry.register("prov", _FakeVerifier())
-    await hooks_ops.register_hook(name="h", topic="orders", tool="ship", execution_key="k-fire")
-    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"orders": "public"}
+    await hooks_ops.register_hook(name="h", topic="events", tool="forward", execution_key="k-fire")
+    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"events": "public"}
 
-    await hooks_ops.set_topic_verifier(topic="orders", verifier="prov")
-    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"orders": "verifier"}
+    await hooks_ops.set_topic_verifier(topic="events", verifier="prov")
+    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"events": "verifier"}
 
     # A topic carrying a binding but no hook yet is still reported — the door exists.
     await hooks_ops.set_topic_verifier(topic="alerts", verifier="prov")
-    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"alerts": "verifier", "orders": "verifier"}
+    assert (await hooks_ops.list_hooks())["trigger_auth"] == {"alerts": "verifier", "events": "verifier"}
 
-    await hooks_ops.delete_topic_verifier(topic="orders")
-    assert (await hooks_ops.list_hooks())["trigger_auth"]["orders"] == "public"
+    await hooks_ops.delete_topic_verifier(topic="events")
+    assert (await hooks_ops.list_hooks())["trigger_auth"]["events"] == "public"
 
 
 async def test_set_topic_verifier_unknown_name_is_bad_request(manager: InMemoryHooksManager, registry) -> None:
     with pytest.raises(BadRequestError, match="unknown webhook verifier"):
-        await hooks_ops.set_topic_verifier(topic="orders", verifier="nope")
+        await hooks_ops.set_topic_verifier(topic="events", verifier="nope")
 
 
 async def test_delete_topic_verifier_removes_and_missing_is_404(manager: InMemoryHooksManager, registry) -> None:
     registry.register("prov", _FakeVerifier())
-    await hooks_ops.set_topic_verifier(topic="orders", verifier="prov")
-    assert await hooks_ops.delete_topic_verifier(topic="orders") == {"removed": True, "topic": "orders"}
+    await hooks_ops.set_topic_verifier(topic="events", verifier="prov")
+    assert await hooks_ops.delete_topic_verifier(topic="events") == {"removed": True, "topic": "events"}
     with pytest.raises(NotFoundError, match="no verifier bound to topic"):
-        await hooks_ops.delete_topic_verifier(topic="orders")
+        await hooks_ops.delete_topic_verifier(topic="events")
 
 
 async def test_list_verifiers_returns_sorted_names(registry) -> None:

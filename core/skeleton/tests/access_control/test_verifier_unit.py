@@ -186,19 +186,19 @@ async def test_always_public_path_short_circuits_without_store_query(monkeypatch
 async def test_resolve_exact_route_match(monkeypatch):
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()
-    pg.add_route("/orders", "orders")
+    pg.add_route("/events", "events")
     _wire(monkeypatch, pg)
     v = _verifier(settings)
-    assert await v.resolve_resource_ids("/orders") == ["orders"]
+    assert await v.resolve_resource_ids("/events") == ["events"]
 
 
 async def test_resolve_strips_trailing_slash(monkeypatch):
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()
-    pg.add_route("/orders", "orders")
+    pg.add_route("/events", "events")
     _wire(monkeypatch, pg)
     v = _verifier(settings)
-    assert await v.resolve_resource_ids("/orders/") == ["orders"]
+    assert await v.resolve_resource_ids("/events/") == ["events"]
 
 
 async def test_resolve_auto_normalizes_uuid_and_digit(monkeypatch):

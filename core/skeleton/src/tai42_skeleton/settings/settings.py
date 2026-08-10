@@ -1,5 +1,6 @@
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_cli.context import DEFAULT_LOCAL_PORT
 from tai42_kit.settings import TaiBaseSettings
 
 
@@ -49,7 +50,9 @@ class AppArgsSettings(TaiBaseSettings):
     # boundary. The metrics exporter and the serve socket are pinned the same way.
     transport: str = Field(default="http", json_schema_extra={"reload": "excluded"})
     host: str = Field(default="127.0.0.1", json_schema_extra={"reload": "excluded"})
-    port: int = Field(default=8000, json_schema_extra={"reload": "excluded"})
+    # The CLI's default ``--server`` URL binds the same constant, so a default
+    # ``tai serve`` and the default remote target cannot drift.
+    port: int = Field(default=DEFAULT_LOCAL_PORT, json_schema_extra={"reload": "excluded"})
     uds: str | None = Field(default=None, json_schema_extra={"reload": "excluded"})
 
     # uvicorn's graceful-shutdown budget (seconds): on SIGTERM uvicorn force-

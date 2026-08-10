@@ -15,6 +15,7 @@ from typing import cast
 import psycopg
 import pytest
 from click.testing import CliRunner
+from tai42_cli import app as app_module
 from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import (
     AppliedMigration,
@@ -24,7 +25,6 @@ from tai42_kit.db import (
     MigrationScript,
 )
 
-from tai42_skeleton.cli import app as app_module
 from tai42_skeleton.cli.native import db
 
 _TARGET = cast("PostgresConnectionSettings", SimpleNamespace(pg_host="db", pg_port=5432, pg_db="tai"))

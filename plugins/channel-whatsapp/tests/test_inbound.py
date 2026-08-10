@@ -836,11 +836,11 @@ async def test_stale_tap_restores_pending_and_bridges_title(
 
 async def test_tap_with_no_pending_bridges_title(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # A tap with no pending question at all bridges the tap's human-readable title.
-    result = await handler(signed_request(interactive_payload(reply_id="int-1:0", title="Priority Mail")))
+    result = await handler(signed_request(interactive_payload(reply_id="int-1:0", title="Express Option")))
 
     assert result.status_code == 200
     assert not fake_httpx.calls
-    assert stub_app.conversations.accept_calls[0]["text"] == "Priority Mail"
+    assert stub_app.conversations.accept_calls[0]["text"] == "Express Option"
     assert _SEEN_KEY in fake_redis.store
 
 

@@ -122,7 +122,7 @@ def infra(harness_settings: HarnessSettings) -> Iterator[Infra]:
 @pytest.fixture
 def fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Callable[..., TaiStack]]:
     """A function-scoped factory for tests that mutate global stack state
-    (restarts, config races, the M3 CWD variants). Every stack it builds is torn
+    (restarts, config races, the CWD variants). Every stack it builds is torn
     down when the test ends."""
     booted: list[TaiStack] = []
 

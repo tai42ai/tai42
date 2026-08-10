@@ -1,4 +1,4 @@
-"""PLAN_10 §C — the template-directory delete door (``POST /api/delete-template-dir``).
+"""The template-directory delete door (``POST /api/delete-template-dir``).
 
 Unlike the idempotent single-template delete (an absent key is a no-op 200), a directory
 that matches nothing is a loud 404; and a key resolving to the template ROOT — which would

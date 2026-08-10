@@ -207,7 +207,7 @@ def test_family_of_derives_the_door_stem(path: str, expected: str):
 
 def test_webhook_family_limited_after_burst(monkeypatch):
     client = _build_client(monkeypatch, _settings(), FakeRedis())
-    statuses = [client.get("/universal_webhook/orders").status_code for _ in range(3)]
+    statuses = [client.get("/universal_webhook/events").status_code for _ in range(3)]
     assert statuses[0] == 200
     assert statuses[-1] == 429
 
@@ -241,7 +241,7 @@ def test_a_new_public_door_has_its_own_budget(monkeypatch):
     for _ in range(3):
         client.post("/api/channels/newvendor/inbound")
     assert client.post("/api/channels/newvendor/inbound").status_code == 429
-    assert client.get("/universal_webhook/orders").status_code == 200
+    assert client.get("/universal_webhook/events").status_code == 200
 
 
 def test_public_health_door_is_throttled(monkeypatch):
@@ -435,8 +435,8 @@ def test_web_chat_family_shares_one_budget_across_its_doors(monkeypatch):
 def test_families_have_disjoint_budgets(monkeypatch):
     client = _build_client(monkeypatch, _settings(), FakeRedis())
     for _ in range(3):
-        client.get("/universal_webhook/orders")
-    assert client.get("/universal_webhook/orders").status_code == 429
+        client.get("/universal_webhook/events")
+    assert client.get("/universal_webhook/events").status_code == 429
     # The callback family still has its own budget.
     assert client.post("/api/interactions/callback/TKT").status_code == 200
 
@@ -448,7 +448,7 @@ def test_disabled_family_passes_through(monkeypatch):
     client = _build_client(
         monkeypatch, _settings(families={"universal_webhook": FamilyOverride(enabled=False)}), FakeRedis()
     )
-    statuses = [client.get("/universal_webhook/orders").status_code for _ in range(10)]
+    statuses = [client.get("/universal_webhook/events").status_code for _ in range(10)]
     assert set(statuses) == {200}
     # Disabling one family leaves every other one charged.
     assert [client.get("/trigger/tok").status_code for _ in range(3)][-1] == 429
@@ -456,14 +456,14 @@ def test_disabled_family_passes_through(monkeypatch):
 
 def test_default_enabled_false_turns_every_family_off(monkeypatch):
     client = _build_client(monkeypatch, _settings(default_enabled=False), FakeRedis())
-    for path in ("/universal_webhook/orders", "/trigger/tok", "/health"):
+    for path in ("/universal_webhook/events", "/trigger/tok", "/health"):
         assert {client.get(path).status_code for _ in range(10)} == {200}
 
 
 def test_operator_override_widens_one_family_only(monkeypatch):
     client = _build_client(monkeypatch, _settings(families={"trigger": FamilyOverride(burst=20)}), FakeRedis())
     assert [client.get("/trigger/tok").status_code for _ in range(6)][-1] == 200
-    assert [client.get("/universal_webhook/orders").status_code for _ in range(3)][-1] == 429
+    assert [client.get("/universal_webhook/events").status_code for _ in range(3)][-1] == 429
 
 
 def test_override_field_falls_through_to_the_default():
@@ -588,7 +588,7 @@ def test_retry_after_header_present_on_429(monkeypatch):
     client = _build_client(monkeypatch, _settings(), FakeRedis())
     resp = None
     for _ in range(3):
-        resp = client.get("/universal_webhook/orders")
+        resp = client.get("/universal_webhook/events")
     assert resp is not None
     assert resp.status_code == 429
     assert "retry-after" in resp.headers
@@ -598,9 +598,9 @@ def test_minute_window_trips_with_bounded_retry_after(monkeypatch):
     # A low per-minute limit under a high burst ceiling trips the MINUTE window (not
     # the burst), returning 429 with a Retry-After bounded by the 60s window.
     client = _build_client(monkeypatch, _settings(default_limit=3, default_burst=100), FakeRedis())
-    statuses = [client.get("/universal_webhook/orders").status_code for _ in range(4)]
+    statuses = [client.get("/universal_webhook/events").status_code for _ in range(4)]
     assert statuses[:3] == [200, 200, 200]
-    resp = client.get("/universal_webhook/orders")
+    resp = client.get("/universal_webhook/events")
     assert resp.status_code == 429
     assert 0 < int(resp.headers["retry-after"]) <= 60
 

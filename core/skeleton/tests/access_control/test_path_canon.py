@@ -27,7 +27,7 @@ def test_no_second_decode_plain_path_is_identity():
 def test_no_second_decode_bare_percent_kept_literal():
     # A lone ``%`` that is NOT a valid ``%XX`` escape is ordinary data — it is neither
     # decoded nor rejected (the router sees the same literal).
-    assert canonicalize_path("/discount/50%") == "/discount/50%"
+    assert canonicalize_path("/segment/50%") == "/segment/50%"
     assert canonicalize_path("/x/%zz") == "/x/%zz"
 
 

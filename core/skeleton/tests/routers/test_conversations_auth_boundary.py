@@ -71,37 +71,37 @@ def test_list_failed_rejected_without_auth(monkeypatch):
 
 def test_get_route_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get("/api/conversations/support").status_code in (401, 403)
+    assert client.get("/api/conversations/chat").status_code in (401, 403)
 
 
 def test_create_route_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.post("/api/conversations/support", json={}).status_code in (401, 403)
+    assert client.post("/api/conversations/chat", json={}).status_code in (401, 403)
 
 
 def test_delete_route_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.delete("/api/conversations/support").status_code in (401, 403)
+    assert client.delete("/api/conversations/chat").status_code in (401, 403)
 
 
 def test_send_message_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.post("/api/conversations/support/messages", json={}).status_code in (401, 403)
+    assert client.post("/api/conversations/chat/messages", json={}).status_code in (401, 403)
 
 
 def test_get_message_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get("/api/conversations/support/messages/m1").status_code in (401, 403)
+    assert client.get("/api/conversations/chat/messages/m1").status_code in (401, 403)
 
 
 def test_list_threads_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get("/api/conversations/support/threads").status_code in (401, 403)
+    assert client.get("/api/conversations/chat/threads").status_code in (401, 403)
 
 
 def test_get_transcript_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get("/api/conversations/support/transcript").status_code in (401, 403)
+    assert client.get("/api/conversations/chat/transcript").status_code in (401, 403)
 
 
 def test_list_configs_rejected_without_auth(monkeypatch):
@@ -111,17 +111,17 @@ def test_list_configs_rejected_without_auth(monkeypatch):
 
 def test_get_config_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get("/api/conversation-configs/agent/concierge").status_code in (401, 403)
+    assert client.get("/api/conversation-configs/agent/assistant").status_code in (401, 403)
 
 
 def test_set_config_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.put("/api/conversation-configs/agent/concierge", json={}).status_code in (401, 403)
+    assert client.put("/api/conversation-configs/agent/assistant", json={}).status_code in (401, 403)
 
 
 def test_delete_config_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.delete("/api/conversation-configs/agent/concierge").status_code in (401, 403)
+    assert client.delete("/api/conversation-configs/agent/assistant").status_code in (401, 403)
 
 
 # The REAL authed stance of each registered conversations route, keyed by (path, methods).

@@ -1,5 +1,5 @@
 /**
- * Session expiry (Mission 9 shell auth). A logged-in session whose key is
+ * Session expiry (shell auth). A logged-in session whose key is
  * revoked server-side must not render broken authed pages — the first failing
  * authed call clears the optimistic token and bounces to `/login?redirect=…`
  * (the same idiom `login.spec.ts` proves for a bad key at sign-in). A DISPOSABLE

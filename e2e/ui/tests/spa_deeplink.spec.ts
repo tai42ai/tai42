@@ -1,5 +1,5 @@
 /**
- * The SPA deep-link regression (Mission 20 Feature 2, needs PLAN_7). With access
+ * The SPA deep-link regression. With access
  * control ON and the Studio SPA served by the skeleton, bookmarking or refreshing an
  * inner client route (`/agents`) WITHOUT a session must serve the dataless SPA shell
  * (`index.html`, HTTP 200) — not a 403 — so the app can then render its login gate
@@ -11,8 +11,8 @@
  * point is the UNauthenticated deep link, so no credential is seeded — the browser hits
  * `/agents` cold, exactly as a bookmark does.
  *
- * PLAN_7 is landed in the skeleton the studio stack boots, so this runs un-skipped. If
- * PLAN_7 ever regresses, the deep link would 403 here rather than serve the 200 shell.
+ * The SPA-shell fallback is landed in the skeleton the studio stack boots, so this runs
+ * un-skipped. If it ever regresses, the deep link would 403 here rather than serve the 200 shell.
  */
 import { expect, test } from '@playwright/test';
 

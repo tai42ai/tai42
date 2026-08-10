@@ -22,11 +22,11 @@ from tai42_e2e.stack import TaiStack
 # signed-callback chain + the bad-signature/expired negatives via the stub's knobs). Under
 # TAI_E2E_REAL=oidc build_oidc_stack renames the provider e2e→auth0 and points it at live
 # Auth0, so /oidc/e2e/... no longer exists and the stub knobs don't apply — this is the oidc
-# mock leg. The real Auth0 leg runs on the dedicated e2e creds host (PLAN_2 §F), not in CI.
+# mock leg. The real Auth0 leg runs on the dedicated e2e creds host, not in CI.
 # Inert while TAI_E2E_REAL is empty — is_real("oidc") is False, so collection is unchanged.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("oidc"),
-    reason="OAuthIdp-stub e2e login is the oidc mock leg; the real Auth0 leg on the creds host (PLAN_2 §F)",
+    reason="OAuthIdp-stub e2e login is the oidc mock leg; the real Auth0 leg on the creds host",
 )
 
 # The pinned provider slug the oidc stack configures (see build_oidc_stack).

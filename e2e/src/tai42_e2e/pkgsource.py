@@ -246,7 +246,7 @@ class _GithubRelease:
 
 
 # The git object-tree mode for a subdirectory and for a regular (non-executable)
-# file blob. The docs-fetch mode allowlist is 100644/100755 (see W2_CONTRACTS §2);
+# file blob. The docs-fetch mode allowlist is 100644/100755;
 # the mock's docs files are regular blobs, so they carry 100644.
 _GIT_TREE_MODE = "040000"
 _GIT_BLOB_MODE = "100644"
@@ -329,7 +329,7 @@ class FixturePackageIndex:
         ``/git/blobs``), the shape the registry's github docs ingest fetches.
 
         ``docs_files`` maps docs-relative posix paths (e.g. ``"index.mdx"``) to
-        their text. Mirrors the pinned PLAN_3 fetch shape (W2_CONTRACTS §2): the
+        their text. Mirrors the pinned fetch shape: the
         tag's root tree carries a single ``docs`` subtree entry; the docs subtree
         lists each file as a ``100644`` blob; each blob is served base64-encoded by
         its git object id. The root tree is addressable by BOTH the tag and its own
@@ -442,7 +442,7 @@ class FixturePackageIndex:
             # its root sha), walks the ``docs`` segment to the docs subtree sha, then
             # makes ONE recursive call on that small subtree. The staged trees are
             # shallow, so ``?recursive=1`` returns the same stored entry list — the
-            # mock never serves a whole-repo recursive listing (W2_CONTRACTS §2).
+            # mock never serves a whole-repo recursive listing.
             self.requests.append(f"/gh-api/repos/{owner}/{repo}/git/trees/{tree_sha}")
             tree = self._gh_trees.get(tree_sha)
             if tree is None:

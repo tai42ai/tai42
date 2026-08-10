@@ -3,8 +3,8 @@ required-non-empty create door, and the per-version editable description
 (None-carry-forward on save, restored on rollback).
 
 ``description`` is the bound tool's LLM-facing docstring — a REQUIRED non-empty
-field on every create path (R16), and a versioned, editable ``save_version`` field
-(R17): an omitted value carries the active text forward, an explicit string sets
+field on every create path, and a versioned, editable ``save_version`` field:
+an omitted value carries the active text forward, an explicit string sets
 it, and a rollback restores the older version's text. It is never conflated with
 the tool_meta ``display_name`` organizational overlay."""
 

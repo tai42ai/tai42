@@ -32,17 +32,17 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(make_app, mon
             tool="noop",
             execution_key="k-fire",
             execution_key_fingerprint="fp-fire",
-            condition='.status == "paid"',
+            condition='.status == "ready"',
             expr="{id: .id}",
         )
     )
 
-    await manager.on_event("t", {"id": 3, "status": "paid"})
+    await manager.on_event("t", {"id": 3, "status": "ready"})
 
     # Same result the inline eval produced, now via the off-loop helper.
     assert app.tools.runs == [("noop", {"id": 3})]
-    assert ('.status == "paid"', {"id": 3, "status": "paid"}) in calls
-    assert ("{id: .id}", {"id": 3, "status": "paid"}) in calls
+    assert ('.status == "ready"', {"id": 3, "status": "ready"}) in calls
+    assert ("{id: .id}", {"id": 3, "status": "ready"}) in calls
 
 
 async def test_fire_time_jq_error_is_not_swallowed(make_app):

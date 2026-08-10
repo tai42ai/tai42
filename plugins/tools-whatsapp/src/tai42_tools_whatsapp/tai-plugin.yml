@@ -1,0 +1,55 @@
+spec_version: 1
+namespace: tai42
+name: tools-whatsapp
+package: tai42-tools-whatsapp
+version: 0.1.0
+description: >-
+  WhatsApp provisioning tools for the TAI ecosystem: manifest-loaded Meta Graph
+  tools that register a WhatsApp message template, list the account's message
+  templates, delete a message template by name, and subscribe the app to a
+  WhatsApp Business Account's webhooks.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-whatsapp
+contract: '>=1.5,<2'
+categories:
+  - provisioning
+  - utilities
+tags:
+  - whatsapp
+  - provisioning
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: register_whatsapp_template
+    module: tai42_tools_whatsapp.tools.register_whatsapp_template
+    description: Register a WhatsApp message template on the business account and return Graph's id and status.
+    tags:
+      - whatsapp
+      - provisioning
+  - kind: tool
+    name: list_whatsapp_templates
+    module: tai42_tools_whatsapp.tools.list_whatsapp_templates
+    description: List every WhatsApp message template on the business account, following Graph's paging to exhaustion.
+    tags:
+      - whatsapp
+      - provisioning
+  - kind: tool
+    name: delete_whatsapp_template
+    module: tai42_tools_whatsapp.tools.delete_whatsapp_template
+    description: Delete a WhatsApp message template by name and return Graph's response.
+    tags:
+      - whatsapp
+      - provisioning
+  - kind: tool
+    name: subscribe_whatsapp_app
+    module: tai42_tools_whatsapp.tools.subscribe_whatsapp_app
+    description: >-
+      Subscribe the app to the business account's webhooks, optionally overriding
+      the callback URI and verify token, and return Graph's response.
+    tags:
+      - whatsapp
+      - provisioning

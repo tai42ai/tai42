@@ -4,7 +4,7 @@ A profile whose diff carries a RECYCLE-class key on a SUPERVISED shape rolls a f
 recycle (``config/service.py::apply_replace_env`` STEP 5 → ``orchestrate_recycle``): each
 targeted sibling replies ``applied`` then gracefully self-exits, an external supervisor
 respawns it, and its replacement rejoins the bus census under the SAME stable slot name at
-a bumped generation. Recycle is confirmed on REALITY (D7): each recycled row carries its
+a bumped generation. Recycle is confirmed on REALITY: each recycled row carries its
 pre-recycle ``generation_before``, the recycled targets' old lives leave presence, and the
 response ``fresh`` list counts NEW READY capacity per kind. The applying serve worker's OWN
 recycle is a deferred post-response self-exit it reports as ``self-deferred``. On a BARE
@@ -34,7 +34,7 @@ _RECYCLE_VAR = "BACKEND_MANIFEST_KEY"
 
 
 def _lives(stack: TaiStack, kind: str) -> dict[str, int]:
-    """The live ``{name: generation}`` of a kind on the bus census — the snapshot the D7
+    """The live ``{name: generation}`` of a kind on the bus census — the snapshot the
     recycle convergence proof reads (old lives gone + fresh capacity, both keyed on the
     stable slot name and its monotonic generation, never a fresh identity string)."""
     return {worker.name: worker.generation for worker in stack.census() if worker.kind == kind}
@@ -87,7 +87,7 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
         f"the applier self-defer row does not carry its own current generation: {applier} vs {before_serve}"
     )
 
-    # D7 reality — OLD lives gone: each recycled backend target's pre-recycle life has left
+    # Reality — OLD lives gone: each recycled backend target's pre-recycle life has left
     # presence (its name absent, or a higher generation on that name). The orchestrator
     # confirmed this before responding; assert it directly against the census.
     recycled_backends = {e["name"]: e["generation_before"] for e in backend_rows}
@@ -100,7 +100,7 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
         old_backend_lives_gone, deadline=90.0, message="a recycled backend's old life never left the census"
     )
 
-    # D7 reality — counted READY capacity: the response `fresh` list carries a NEW READY
+    # Reality — counted READY capacity: the response `fresh` list carries a NEW READY
     # backend life covering the recycled count (a census-now fact, never a successor claim).
     fresh_backend = [f for f in fresh if f["kind"] == "backend"]
     assert len(fresh_backend) >= len(backend_rows), (

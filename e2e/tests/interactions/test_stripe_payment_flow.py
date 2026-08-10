@@ -39,12 +39,12 @@ from tai42_e2e.waiting import wait_for_async
 # Every delivery here is HMAC-signed locally and answered by the in-process FakeStripe stub
 # (session mint, complete_payment, list-cursor introspection), so this is the stripe MOCK leg.
 # A real stripe selection points the tools at the live Stripe host and the webhook arrives from
-# Stripe's servers; that real leg is exercised on the dedicated e2e creds host (PLAN_2 §F), not
+# Stripe's servers; that real leg is exercised on the dedicated e2e creds host, not
 # in CI, so the stub-bound module steps aside for it. Inert in the default mock run —
 # is_real("stripe") is False, so collection is byte-for-byte today's.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("stripe"),
-    reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host",
 )
 
 
@@ -88,11 +88,11 @@ def _preset_body(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "base_tool": "create_stripe_checkout_ask_external",
-        "description": "Ask the customer to pay for a Pro licence.",
+        "description": "Ask the payer to pay for a sample item.",
         "fixed_kwargs": {
             "amount": _AMOUNT,
             "currency": _CURRENCY,
-            "product_name": "Pro licence",
+            "product_name": "Sample item",
             "success_url": "https://acme.example/thanks",
             "cancel_url": "https://acme.example/cancelled",
             "answer_schema": {
@@ -142,7 +142,7 @@ async def _deliver(stack: TaiStack, topic: str, secret: bytes, event: dict[str, 
 async def _setup_flow(stack: TaiStack, api: Any, uniq: Callable[[str], str]) -> tuple[str, str]:
     """Bind the stripe verifier FIRST, mint an owned execution key and register the bridge
     hook, then bake the money-pinning preset. Returns ``(topic, preset_name)``."""
-    topic = uniq("payments").replace("_", "-")
+    topic = uniq("notifications").replace("_", "-")
     # The hook's execution key must be a MINTED key's user_id (every mint stamps the
     # fingerprint the bind resolves); the seeded root has no such anchor. The admin root
     # binds any existing key.
@@ -167,7 +167,7 @@ async def _setup_flow(stack: TaiStack, api: Any, uniq: Callable[[str], str]) -> 
             "expr": _CANONICAL_EXPR,
         },
     )
-    preset_name = uniq("buypro")
+    preset_name = uniq("buyitem")
     await api.post("/api/presets", json=_preset_body(preset_name), retry_on_reloading=True)
     return topic, preset_name
 

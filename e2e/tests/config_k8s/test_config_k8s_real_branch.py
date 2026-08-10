@@ -1,4 +1,4 @@
-"""PLAN_2 — the k8s REAL leg is SELECTED at fixture-build time.
+"""The k8s REAL leg is SELECTED at fixture-build time.
 
 The mock leg (``test_config_k8s_stack``) boots against the threaded fake apiserver. This
 proves the other half without a cluster: with ``k8s`` named on ``TAI_E2E_REAL`` the fixture

@@ -1,4 +1,4 @@
-r"""PLAN_10 §C (R5) — a hook's ``topic`` and ``name`` are each dispatched as ONE
+r"""A hook's ``topic`` and ``name`` are each dispatched as ONE
 lowercase URL path segment, so the register door refuses any value outside that charset
 with a 400 — never a stored record no webhook delivery could route to and no door could
 address. The end anchor is ``\Z`` (not ``$``), so a trailing newline cannot slip a

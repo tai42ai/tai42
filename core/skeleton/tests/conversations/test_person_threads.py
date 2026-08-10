@@ -1,4 +1,4 @@
-"""C3 — the LINKED person's AGGREGATED transcript door (R11/R13) and its authorization.
+"""The LINKED person's AGGREGATED transcript door and its authorization.
 
 A ``bridge:@person:{id}`` thread's records live in one per-route index PER ROUTE; the read is
 a k-way merge across them, so one full created_at-ordered history is served (never a partial
@@ -38,7 +38,7 @@ def _api_route(route_name: str) -> ConversationRoute:
         route_name=route_name,
         door="api",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         execution_key="svc",
         callback_url="https://cb.example/x",
         execution_key_fingerprint="fp",
@@ -50,7 +50,7 @@ def _channel_route(route_name: str) -> ConversationRoute:
         route_name=route_name,
         door="channel",
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550009999",
@@ -101,7 +101,7 @@ def _person(addresses: list[PersonAddress]) -> Person:
     return Person(
         person_id=_PERSON_ID,
         target_kind="agent",
-        target_name="concierge",
+        target_name="assistant",
         created_at=datetime.now(UTC),
         addresses=addresses,
     )
@@ -232,22 +232,22 @@ async def test_aggregated_read_skips_a_missing_or_corrupt_row_keeping_the_total(
     assert page.total == 3
 
 
-# -- the transcript door: authz + both R13 directions ------------------------
+# -- the transcript door: authz + both directions ----------------------------
 
 
 async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monkeypatch):
-    fake.seed_route("support-api")
+    fake.seed_route("chat-api")
     fake.seed_route("line-b")
     store = _store()
     await store.create_record(
-        _person_record("api-1", "support-api", door="api", caller_principal="alice", created_at=10.0)
+        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
     )
     await store.create_record(_person_record("chan-1", "line-b", door="channel", created_at=20.0))
     _seed_person(
         fake,
         _person(
             [
-                _addr(door="api", address="alice/u7", routes=["support-api"]),
+                _addr(door="api", address="alice/u7", routes=["chat-api"]),
                 _addr(
                     door="channel",
                     address="+2000",
@@ -258,44 +258,44 @@ async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monke
             ]
         ),
     )
-    _wire_manager(monkeypatch, _api_route("support-api"), _channel_route("line-b"))
+    _wire_manager(monkeypatch, _api_route("chat-api"), _channel_route("line-b"))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
 
-    read = await ops.get_conversation_thread("support-api", _THREAD, order="asc")
-    # BOTH legs, one merged history — the api leg AND the channel-leg record (R13/R11).
+    read = await ops.get_conversation_thread("chat-api", _THREAD, order="asc")
+    # BOTH legs, one merged history — the api leg AND the channel-leg record.
     assert [item["message_id"] for item in read["items"]] == ["api-1", "chan-1"]
     assert read["total"] == 2
 
 
 async def test_another_caller_is_404_uniformly(fake, monkeypatch):
-    fake.seed_route("support-api")
+    fake.seed_route("chat-api")
     store = _store()
     await store.create_record(
-        _person_record("api-1", "support-api", door="api", caller_principal="alice", created_at=10.0)
+        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
     )
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
-    _wire_manager(monkeypatch, _api_route("support-api"))
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     with pytest.raises(NotFoundError, match="thread not found"):
-        await ops.get_conversation_thread("support-api", _THREAD)
+        await ops.get_conversation_thread("chat-api", _THREAD)
 
 
 async def test_admin_reads_any_person_thread_on_a_valid_route(fake, monkeypatch):
-    fake.seed_route("support-api")
+    fake.seed_route("chat-api")
     store = _store()
     await store.create_record(
-        _person_record("api-1", "support-api", door="api", caller_principal="alice", created_at=10.0)
+        _person_record("api-1", "chat-api", door="api", caller_principal="alice", created_at=10.0)
     )
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
-    _wire_manager(monkeypatch, _api_route("support-api"))
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
-    read = await ops.get_conversation_thread("support-api", _THREAD)
+    read = await ops.get_conversation_thread("chat-api", _THREAD)
     assert [item["message_id"] for item in read["items"]] == ["api-1"]
 
 
 async def test_admin_unknown_route_keeps_its_own_404(fake, monkeypatch):
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
-    _wire_manager(monkeypatch, _api_route("support-api"))
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="route not found"):
         await ops.get_conversation_thread("nope", _THREAD)
@@ -304,9 +304,9 @@ async def test_admin_unknown_route_keeps_its_own_404(fake, monkeypatch):
 async def test_a_route_the_person_never_wrote_under_is_404(fake, monkeypatch):
     # ``other`` is a valid route on the same target, but not one of the person's routes:
     # governs authz only, so it 404s the same as an unknown thread.
-    fake.seed_route("support-api")
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
-    _wire_manager(monkeypatch, _api_route("support-api"), _api_route("other"))
+    fake.seed_route("chat-api")
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    _wire_manager(monkeypatch, _api_route("chat-api"), _api_route("other"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="thread not found"):
         await ops.get_conversation_thread("other", _THREAD)
@@ -315,7 +315,7 @@ async def test_a_route_the_person_never_wrote_under_is_404(fake, monkeypatch):
 async def test_a_target_mismatch_is_404(fake, monkeypatch):
     # The route resolves to a DIFFERENT target than the person is scoped to.
     other_target = ConversationRoute(
-        route_name="support-api",
+        route_name="chat-api",
         door="api",
         target_kind="agent",
         target_name="other-agent",
@@ -323,19 +323,19 @@ async def test_a_target_mismatch_is_404(fake, monkeypatch):
         callback_url="https://cb.example/x",
         execution_key_fingerprint="fp",
     )
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
     _wire_manager(monkeypatch, other_target)
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="thread not found"):
-        await ops.get_conversation_thread("support-api", _THREAD)
+        await ops.get_conversation_thread("chat-api", _THREAD)
 
 
 # -- the ownership seam directly ---------------------------------------------
 
 
 async def test_caller_owns_thread_person_branch(fake, monkeypatch):
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["support-api"])]))
-    route = _api_route("support-api")
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    route = _api_route("chat-api")
     assert await ops._caller_owns_thread(route, _THREAD, _authority_caller("alice")) is True
     assert await ops._caller_owns_thread(route, _THREAD, _authority_caller("bob")) is False
     # A channel route can never own an api-shaped person thread.
@@ -343,5 +343,5 @@ async def test_caller_owns_thread_person_branch(fake, monkeypatch):
 
 
 async def test_caller_owns_thread_unknown_person_is_false(fake, monkeypatch):
-    route = _api_route("support-api")
+    route = _api_route("chat-api")
     assert await ops._caller_owns_thread(route, f"{PERSON_THREAD_PREFIX}missing", _authority_caller("alice")) is False

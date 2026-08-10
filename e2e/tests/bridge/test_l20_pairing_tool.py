@@ -1,9 +1,9 @@
-"""L20 — the ``get_pairing_code`` builtin as a tool-target route: the R8 contract end to end.
+"""L20 — the ``get_pairing_code`` builtin as a tool-target route: the contract end to end.
 
 A deployment opts the ``get_pairing_code`` builtin in through a manifest ``tools[].module``
 row (done on the bridge profile), then wires it as a tool-target route: the inbound payload
 maps to the tool's ``(channel, our_identity, sender)`` via ``payload_expr``, and the tool
-result — ``{code, expires_at}`` and nothing else (R8) — maps to the reply via ``reply_expr``.
+result — ``{code, expires_at}`` and nothing else — maps to the reply via ``reply_expr``.
 No agent, no ``ask_user``: the tool runs directly under the route's execution key and its
 return is delivered over the channel.
 
@@ -42,7 +42,7 @@ from tai42_e2e.settings import HarnessSettings
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host (PLAN_2 §F)",
+    reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
 )
 
 _TOOL = "get_pairing_code"

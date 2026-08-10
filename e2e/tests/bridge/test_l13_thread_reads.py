@@ -44,14 +44,14 @@ from tai42_e2e.settings import HarnessSettings
 
 # Every leg scripts the LLM stub and asserts the scripted answer back, so the whole module
 # is the 'llm' mock leg; the twilio-driven ones additionally need FakeTwilio's signed
-# inbound. The real legs run on the dedicated creds host (PLAN_2 §F), not in CI.
+# inbound. The real legs run on the dedicated creds host, not in CI.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm"),
-    reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
 )
 MOCK_TWILIO_ONLY = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host (PLAN_2 §F)",
+    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host",
 )
 
 # An https callback URL with nothing behind it. Every api-door turn here finishes inside its

@@ -18,11 +18,15 @@ that hosts a capability and supplies the operational layer around it (manifest
 loading, access control, OAuth connectors, background execution, monitoring,
 storage, and human-in-the-loop steps).
 
-Three packages; each depends only on the ones to its left:
+Four packages; each depends only on the ones to its left:
 
 ```
-tai42-contract  <--  tai42-kit  <--  tai42-skeleton
-(interfaces)      (helpers)     (the server)
+                     tai42-kit  <--.
+                   /  (helpers)     \
+tai42-contract  <-+                  +--  tai42-skeleton
+  (interfaces)     \                /    (the server)
+                     tai42-cli  <--'
+               (the remote client)
 ```
 
 `tai42-kit` obeys the leaf rule: its only tai-* dependency is `tai42-contract`. It
@@ -72,7 +76,7 @@ See `CONTRIBUTING.md` for the rules.
 The whole platform — concepts, guides, and the generated reference — lives in
 the unified documentation site:
 
-- Layering & the contract/kit/skeleton split: https://tai42.ai/concepts/layering
+- Layering & the contract/kit/cli/skeleton split: https://tai42.ai/concepts/layering
 - Python SDK reference (this package's public API): https://tai42.ai/reference/python-sdk
 
 ## License

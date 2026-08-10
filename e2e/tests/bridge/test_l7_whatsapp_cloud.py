@@ -47,11 +47,11 @@ from tai42_e2e.settings import HarnessSettings
 # are the mock leg for BOTH the 'whatsapp' channel seam and the 'llm' seam (build_bridge_stack
 # wires the LLM env too, so TAI_E2E_REAL=llm also sends the bridge LLM to the live provider).
 # Either selection real breaks the stub scripting, so the module steps aside; the real legs run
-# on the dedicated e2e creds host (PLAN_2 §F), not in CI. Inert in the default mock run — both
+# on the dedicated e2e creds host, not in CI. Inert in the default mock run — both
 # is_real checks are False, so collection is byte-for-byte today's.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
-    reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host (PLAN_2 §F)",
+    reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host",
 )
 
 
@@ -207,7 +207,7 @@ async def test_select_renders_buttons_and_tap_answers_option_text(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     question = uniq("l7-buttons-q")
-    options = ["Refund", "Replace", "Cancel"]  # <= 3 short unique options -> reply buttons
+    options = ["Retry", "Replace", "Cancel"]  # <= 3 short unique options -> reply buttons
     wa_id = _fresh_wa_id()
 
     ask_task = await _ask_select(bridge, question=question, recipient=wa_id, options=options)

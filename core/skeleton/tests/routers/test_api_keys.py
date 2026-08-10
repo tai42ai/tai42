@@ -1196,9 +1196,9 @@ async def test_public_route_pin_lifecycle(store: _Fakes) -> None:
 
 
 async def test_pin_public_route_with_pattern_registers_it(store: _Fakes) -> None:
-    resp = await api_keys.pin_public_route(_req(body={"url": "/orders/{id}", "pattern": r"/orders/\d+"}))
+    resp = await api_keys.pin_public_route(_req(body={"url": "/events/{id}", "pattern": r"/events/\d+"}))
     assert resp.status_code == 200
-    assert await management.get_all_existing_patterns() == {"/orders/{id}": r"/orders/\d+"}
+    assert await management.get_all_existing_patterns() == {"/events/{id}": r"/events/\d+"}
 
 
 async def test_unpin_unpinned_route_is_404(store: _Fakes) -> None:

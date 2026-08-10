@@ -90,7 +90,7 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     before_reload = await _firing_count(schedule_stack, key)
     async with schedule_stack.mcp(port=schedule_stack.port_a) as mcp:
         # Prime the SDK's per-session tool-output-schema cache: reload_config retires this
-        # session (D13a — the swapped-in epoch serves a new session-id space), so its
+        # session (the swapped-in epoch serves a new session-id space), so its
         # post-call output validation would otherwise issue a follow-up tools/list on the
         # orphaned session -> "Session terminated". A primed cache skips that follow-up.
         await mcp.list_tools()

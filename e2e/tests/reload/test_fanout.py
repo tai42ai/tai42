@@ -23,7 +23,7 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
         # Prime the SDK's per-session tool-output-schema cache so the post-call result
         # validation issues no follow-up tools/list: reload_config retires this session
-        # (D13a new session-id space), which would otherwise raise "Session terminated".
+        # (new session-id space), which would otherwise raise "Session terminated".
         await mcp.list_tools()
         result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
     data = result.data if isinstance(result.data, dict) else result.structured_content

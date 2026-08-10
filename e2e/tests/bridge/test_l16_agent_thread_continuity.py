@@ -3,7 +3,7 @@
 An AGENT target reachable on two channel routes (twilio + whatsapp). Before pairing, the two
 channels are two separate route-keyed threads: a fact stated on one is invisible to a turn on
 the other. After the person links the two channels by pair code, both channels key the SAME
-aggregated ``bridge:@person:{id}`` thread (D3), so a fact stated on one channel is in the
+aggregated ``bridge:@person:{id}`` thread, so a fact stated on one channel is in the
 history the other channel's next turn runs against.
 
 The agent runs on the scripted LLM stub, so a turn's ANSWER is fixed regardless of history;
@@ -45,7 +45,7 @@ from tai42_e2e.settings import HarnessSettings
 # 'twilio'/'whatsapp' one. Any real breaks the scripting or the stubs.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host (PLAN_2 §F)",
+    reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
 )
 
 _AGENT = "tools_agent"

@@ -8,7 +8,7 @@
  * is NEVER swept. This orphan handling is NOT a prompt/dialog — it is an automatic,
  * per-key, provenance-based sweep at save time (McpTab's `orphanedKeysOf`): "accept"
  * (drop) is what happens to a session-generated orphan, "decline" (keep) is what
- * happens to a picked/pre-existing one. The three PLAN_6 F7 / E5c orphan passes are
+ * happens to a picked/pre-existing one. The three orphan passes are
  * driven here end to end over the live combined-op + reload seam (accept a
  * session-generated key, decline a picked key, and the per-key split of a two-secret
  * server), the browser-level counterpart of the pytest unit proofs in `McpTab.test.tsx`.
@@ -286,7 +286,7 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
 });
 
 // ---------------------------------------------------------------------------
-// F7 / E5c — the save-time orphan sweep's three passes, driven end to end. The sweep is
+// The save-time orphan sweep's three passes, driven end to end. The sweep is
 // automatic (no prompt): a removed `!ENV` leaf's key is dropped ("accept") iff THIS editor
 // generated it via a paste, and kept ("decline") when it was picked / pre-existing.
 // ---------------------------------------------------------------------------

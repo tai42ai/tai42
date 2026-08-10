@@ -46,10 +46,10 @@ LINKED_TEXT = "Done — this conversation is now linked to your other one."
 UNLINKED_TEXT = "Done — this conversation is no longer linked."
 NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is nothing to unlink."
 # The UNIFORM redeem refusal — an unknown / expired / already-redeemed / throttled code all
-# read the same, so a redeem reply reveals no oracle (D11).
+# read the same, so a redeem reply reveals no oracle.
 INVALID_CODE_TEXT = "That pairing code is not valid. It may have expired or already been used."
 
-# The D1 pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token — a leg pulls
+# The pair-code shape (``LINK-`` + 8 ``[A-Z0-9]``), matched as a whole token — a leg pulls
 # the minted code out of a link reply or a rendered greeting with this.
 PAIR_CODE_RE = re.compile(r"\bLINK-[A-Z0-9]{8}\b")
 

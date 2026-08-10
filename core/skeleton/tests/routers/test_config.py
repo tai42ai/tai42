@@ -216,7 +216,7 @@ async def test_settings_schema_value_overlay(install, monkeypatch):
 
 
 async def test_settings_schema_resolves_through_tai_default_namespace(install, monkeypatch):
-    # D9: a field whose own var and stored override are absent but which participates
+    # A field whose own var and stored override are absent but which participates
     # in the shared TAI_DEFAULT_* namespace shows the value resolved through that layer
     # (process env, then store) BEFORE the bare field default — the server truth an
     # operator reads.

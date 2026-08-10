@@ -27,18 +27,17 @@ from tai42_e2e.waiting import wait_for_async
 
 pytestmark = [
     pytest.mark.backendless,
-    # PUBLISH-CIRCULAR (deferred to post-release, same pin bump as the mcp-server leg):
-    # the assertions here require the marketplace's github docs-ingest branch that fetches
-    # the tag's docs index over the git-data ``/git/trees/`` + ``/git/blobs/`` surfaces —
-    # PLAN_3 code that lives ONLY on the unpushed M34 marketplace commit. The e2e installs
-    # tai42-marketplace at the pre-M34 _MARKETPLACE_PIN (marketplace.py), which has no
-    # git-tree docs ingest, so ``sum('/git/trees/' ...) >= 1`` is unsatisfiable until the
-    # pin is bumped to the published PLAN_3 marketplace. Verified post-release alongside
-    # test_install_mcp_server, after _MARKETPLACE_PIN is bumped (see MISSION_END_TASKS).
+    # PUBLISH-CIRCULAR (same pin bump as the mcp-server leg): the assertions here require the
+    # marketplace's github docs-ingest branch that fetches the tag's docs index over the
+    # git-data ``/git/trees/`` + ``/git/blobs/`` surfaces — a branch the e2e's pinned
+    # marketplace lacks. The e2e installs tai42-marketplace at ``_MARKETPLACE_PIN``
+    # (marketplace.py), which has no git-tree docs ingest, so ``sum('/git/trees/' ...) >= 1``
+    # is unsatisfiable until the pin is bumped to a marketplace carrying that branch. Verified
+    # alongside test_install_mcp_server, after ``_MARKETPLACE_PIN`` is bumped.
     pytest.mark.skip(
-        reason="Publish-circular: asserts the PLAN_3 marketplace github docs-ingest "
-        "(/git/trees + /git/blobs), which ships in this release wave's marketplace commit; "
-        "the e2e's pre-M34 _MARKETPLACE_PIN lacks it. Un-skipped post-release after the pin bump."
+        reason="Publish-circular: asserts the marketplace github docs-ingest "
+        "(/git/trees + /git/blobs), which the e2e's pinned _MARKETPLACE_PIN marketplace "
+        "lacks. Un-skipped after the pin is bumped to a marketplace carrying it."
     ),
     # The github-ingest path here reads the in-process FixturePackageIndex (the release
     # surfaces it serves + the source=github ingest). Under TAI_E2E_REAL=marketplace-github the
@@ -48,14 +47,14 @@ pytestmark = [
     # TAI_E2E_REAL is empty (and the module is opt-in via TAI_E2E_MARKETPLACE=1 regardless).
     pytest.mark.skipif(
         HarnessSettings().is_real("marketplace-github"),
-        reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real on creds host (PLAN_2 §F)",
+        reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real on creds host",
     ),
 ]
 
 _REPO_FULL_NAME = "tai42ai/tai-e2e-market-delta"
 
 # The mandatory docs landing page the github docs ingest fetches over the tree/blob
-# surfaces for delta's tag (W2_CONTRACTS §2). Keyed docs-relative, so ``index.mdx``
+# surfaces for delta's tag. Keyed docs-relative, so ``index.mdx``
 # is the ``docs/index.mdx`` a real delta repo carries at its root.
 _DELTA_DOCS = {
     "index.mdx": (
@@ -95,7 +94,7 @@ async def test_signed_webhook_ingests_github_source(
     # The seed entry carries the inline stamped 0.1.0 spec and the tag it installs
     # from; the tag webhook fetches later versions' specs over the contents surface.
     package_index.register_github_release("v0.1.0", fixture_artifacts.delta_v1.plugin_yml)
-    # Stage the tag's docs tree too: PLAN_3's ingest fetches docs over the tree/blob
+    # Stage the tag's docs tree too: the github docs-ingest fetches docs over the tree/blob
     # surfaces (never the tarball), and a published version must carry its docs index.
     package_index.register_github_docs_tree("v0.1.0", _DELTA_DOCS)
     seeded = await mp.api.post(

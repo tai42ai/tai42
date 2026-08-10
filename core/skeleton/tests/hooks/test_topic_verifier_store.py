@@ -34,31 +34,31 @@ def manager(request, fake_redis, monkeypatch, make_ctx):
 
 
 async def test_set_get_round_trip(manager) -> None:
-    assert await manager.get_topic_verifier("orders") is None
-    await manager.set_topic_verifier("orders", _BINDING)
-    assert await manager.get_topic_verifier("orders") == _BINDING
+    assert await manager.get_topic_verifier("events") is None
+    await manager.set_topic_verifier("events", _BINDING)
+    assert await manager.get_topic_verifier("events") == _BINDING
 
 
 async def test_replace(manager) -> None:
-    await manager.set_topic_verifier("orders", _BINDING)
+    await manager.set_topic_verifier("events", _BINDING)
     replacement = {"verifier": "github", "config": {"secret_env": "GH"}}
-    await manager.set_topic_verifier("orders", replacement)
-    assert await manager.get_topic_verifier("orders") == replacement
+    await manager.set_topic_verifier("events", replacement)
+    assert await manager.get_topic_verifier("events") == replacement
 
 
 async def test_all_topic_verifiers(manager) -> None:
-    await manager.set_topic_verifier("orders", _BINDING)
+    await manager.set_topic_verifier("events", _BINDING)
     await manager.set_topic_verifier("alerts", {"verifier": "github", "config": {}})
     everything = await manager.all_topic_verifiers()
-    assert everything == {"orders": _BINDING, "alerts": {"verifier": "github", "config": {}}}
+    assert everything == {"events": _BINDING, "alerts": {"verifier": "github", "config": {}}}
 
 
 async def test_delete(manager) -> None:
-    await manager.set_topic_verifier("orders", _BINDING)
-    assert await manager.delete_topic_verifier("orders") is True
-    assert await manager.get_topic_verifier("orders") is None
+    await manager.set_topic_verifier("events", _BINDING)
+    assert await manager.delete_topic_verifier("events") is True
+    assert await manager.get_topic_verifier("events") is None
     # A second delete reports nothing removed.
-    assert await manager.delete_topic_verifier("orders") is False
+    assert await manager.delete_topic_verifier("events") is False
 
 
 @pytest.mark.parametrize("bad", [{"config": {}}, {"verifier": 123}, {"verifier": "x", "config": "nope"}])
@@ -66,7 +66,7 @@ async def test_set_rejects_wrong_shape(manager, bad) -> None:
     # Both backends validate the binding shape against ``TopicVerifierBinding`` on
     # write, so a malformed binding can never be stored.
     with pytest.raises(ValidationError):
-        await manager.set_topic_verifier("orders", bad)
+        await manager.set_topic_verifier("events", bad)
 
 
 async def test_redis_reads_reject_wrong_shape_binding(fake_redis, monkeypatch, make_ctx) -> None:
@@ -74,9 +74,9 @@ async def test_redis_reads_reject_wrong_shape_binding(fake_redis, monkeypatch, m
     # BOTH read boundaries (single-topic and all-topics), matching every other
     # read in the module — never flows untyped into the ingress.
     manager = _redis(fake_redis, monkeypatch, make_ctx)
-    fake_redis._hashes[manager.settings.topic_verifiers_key] = {"orders": '{"missing": "verifier"}'}
+    fake_redis._hashes[manager.settings.topic_verifiers_key] = {"events": '{"missing": "verifier"}'}
 
     with pytest.raises(ValidationError):
-        await manager.get_topic_verifier("orders")
+        await manager.get_topic_verifier("events")
     with pytest.raises(ValidationError):
         await manager.all_topic_verifiers()

@@ -1032,7 +1032,7 @@ async def test_disconnect_purges_expired_connection(harness, monkeypatch):
 
 
 async def test_disconnect_under_lock_blocks_patch_from_stranding(harness, monkeypatch):
-    """M13: disconnect holds the connection lock across its manifest removal +
+    """Disconnect holds the connection lock across its manifest removal +
     record delete, so an in-flight patch (whose manifest add is now also under
     the lock) cannot slip its add in after the record is gone. The patch queued
     behind the lock reloads a deleted record and raises — stranding nothing."""

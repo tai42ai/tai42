@@ -8,7 +8,7 @@ driven over the server's own MCP surface:
   reached over loopback (the core stack opts the loopback CIDRs into the SSRF guard).
 * ``generate_embeddings`` against the LLM stub's ``/v1/embeddings`` via the tool's per-call
   ``base_url`` (``embedding_kwargs``), so no real embedding provider is contacted — the
-  boundary PLAN_2 owns.
+  real-provider boundary is a separate leg.
 * ``pad_embeddings`` widening the returned vectors, and ``current_time_info`` returning its
   structured clock — both pure, no backing service.
 """
@@ -24,13 +24,13 @@ from tai42_e2e.stack import TaiStack
 
 # ``test_generate_and_pad_embeddings`` asserts the LLM stub's deterministic /v1/embeddings
 # (identical input → identical vectors), so this module carries the embeddings MOCK leg. The
-# real-provider embedding boundary is PLAN_2's — exercised on the dedicated e2e creds host
-# (PLAN_2 §F), never in CI — so the stub-bound module steps aside when the 'embeddings' seam is
+# real-provider embedding boundary is exercised on the dedicated e2e creds host,
+# never in CI — so the stub-bound module steps aside when the 'embeddings' seam is
 # real. Inert in the default mock run — is_real("embeddings") is False, so collection is
 # byte-for-byte today's.
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("embeddings"),
-    reason="stub-embeddings determinism is the 'embeddings' mock leg; the real leg on the creds host (PLAN_2 §F)",
+    reason="stub-embeddings determinism is the 'embeddings' mock leg; the real leg on the creds host",
 )
 
 

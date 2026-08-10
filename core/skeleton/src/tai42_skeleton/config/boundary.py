@@ -42,8 +42,9 @@ from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 
-# Boot-identity + manifest-path bare reads that NO settings class registers as an
-# ``excluded`` field (SETTINGS_INVENTORY §K). Each is a real env var the launcher /
+# Boot-identity + manifest-path bare reads that NO settings class in the
+# registered-settings inventory (``registered_settings()``) marks as an ``excluded``
+# field. Each is a real env var the launcher /
 # runtime reads with no reload path, so a profile-carried value is X-refused at the
 # boundary. ``TAI_MANIFEST_PATH`` is redundant with the registry half
 # (``CoreSettings.manifest_path`` is field-excluded) — kept as belt-and-braces.
@@ -79,7 +80,7 @@ def registered_env_var_names() -> frozenset[str]:
     """Every registered field's non-empty ``env_var``, across ALL reload classes.
 
     Reflects only IMPORTED settings classes. Used to keep a GENERATED secret key from
-    SHADOWING any registered settings env var (C9c) — not just the X band, which covers
+    SHADOWING any registered settings env var — not just the X band, which covers
     only the ``excluded`` subset."""
     return frozenset(field.env_var for info in registered_settings() for field in info.fields if field.env_var)
 
@@ -163,7 +164,7 @@ _ADMIN_PAIR_RE = re.compile(r"^TAI_DATABASE_(.+)_PG_ADMIN_(USER|PASSWORD)$")
 
 
 def refuse_incomplete_admin_pair(effective_env: Mapping[str, str]) -> None:
-    """Refuse a half-set per-database admin (migrator) identity (README D8/D14).
+    """Refuse a half-set per-database admin (migrator) identity.
 
     ``TAI_DATABASE_<NAME>_PG_ADMIN_USER`` / ``_PG_ADMIN_PASSWORD`` are both-or-neither per
     database name: both set is the admin identity, neither set migrates the runtime identity,

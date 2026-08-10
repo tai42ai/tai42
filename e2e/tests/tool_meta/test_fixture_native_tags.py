@@ -16,7 +16,7 @@ from tai42_e2e.stack import TaiStack
 pytestmark = pytest.mark.backendless
 
 # The probe tools registered by ``tai42_e2e_fixtures.tools`` — every one carries the
-# native ``e2e`` tag (mirroring how PLAN_2 tagged the shipped fleet).
+# native ``e2e`` tag (mirroring how the shipped fleet is tagged).
 _FIXTURE_TOOLS = frozenset(
     {
         "e2e_echo",

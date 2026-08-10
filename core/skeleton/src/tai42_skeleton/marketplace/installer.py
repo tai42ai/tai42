@@ -500,7 +500,7 @@ class Installer:
         # omitted, so no pre-existing marker can reference a key this install owns).
         # ``env_restore`` captures the PRIOR store value of EVERY key this install writes
         # (the value keys AND the ``TAI_ENV_SECRET_KEYS`` marks var) — populated by the
-        # combined pipeline under its C9d lock, and consumed by the unwind to restore each
+        # combined pipeline under its env-write lock, and consumed by the unwind to restore each
         # key to its prior value (delete when it was absent), diffed against the live store
         # so a pre-persist refusal reverts nothing.
         env_written = self._env_to_write(env)
@@ -568,7 +568,7 @@ class Installer:
         env_restore: dict[str, str] | None = None,
     ) -> None:
         """Reverse an install whose Step 4/5 failed: revert THIS install's env write
-        (the combined pipeline's C9a leaves it standing as an inert orphan, but the
+        (the combined pipeline leaves it standing as an inert orphan, but the
         installer-unwind layer above it restores exactly this install's contribution —
         each key it wrote back to its captured PRIOR store value, so a newly-created key
         is deleted, an overwritten pre-existing key keeps its operator value, and the
@@ -637,11 +637,11 @@ class Installer:
         written in ONE unit, so the entry is written exactly once (the standalone
         ``apply_provides`` never runs a second time). An unsatisfied required marker is
         the pipeline's dangling refusal, surfaced as :class:`InstallEnvError` naming each
-        missing var + json-pointer BEFORE anything persists. The C9a non-atomicity
+        missing var + json-pointer BEFORE anything persists. The non-atomicity
         contract is preserved (a manifest-persist failure leaves the env write standing
         and raises ``OrphanEnvWriteError``); the installer-unwind above reverts it.
 
-        Under the pipeline's C9d lock (against the SAME stored-env snapshot the write
+        Under the pipeline's env-write lock (against the SAME stored-env snapshot the write
         derives from) this records the PRIOR store value of EVERY key it will write into
         ``env_restore`` — the value keys AND, when ``secret_keys`` are supplied, the
         ``TAI_ENV_SECRET_KEYS`` marks var it MERGES into (each key's exact prior string, or

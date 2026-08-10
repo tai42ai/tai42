@@ -50,9 +50,9 @@ async def test_add_url_normalizes_trailing_slash(pg: FakeAccessControlPg) -> Non
 
 
 async def test_add_url_with_pattern_registers_dynamic_pattern(pg: FakeAccessControlPg) -> None:
-    await STORE().add_url_to_scope("scope-a", "/orders/{id}", pattern=r"/orders/\d+")
-    assert await STORE().get_all_existing_patterns() == {"/orders/{id}": r"/orders/\d+"}
-    assert await STORE().fetch_dynamic_patterns() == {r"/orders/\d+": "/orders/{id}"}
+    await STORE().add_url_to_scope("scope-a", "/events/{id}", pattern=r"/events/\d+")
+    assert await STORE().get_all_existing_patterns() == {"/events/{id}": r"/events/\d+"}
+    assert await STORE().fetch_dynamic_patterns() == {r"/events/\d+": "/events/{id}"}
 
 
 async def test_repoint_url_replaces_scope_and_pattern(pg: FakeAccessControlPg) -> None:
@@ -138,9 +138,9 @@ async def test_pin_route_public_repoints_off_scope_and_clears_pattern(pg: FakeAc
 
 
 async def test_pin_route_public_with_pattern_registers_it(pg: FakeAccessControlPg) -> None:
-    await STORE().pin_route_public("/orders/{id}", pattern=r"/orders/\d+")
-    assert pg.route("/orders/{id}")["scope_id"] == PUBLIC
-    assert await STORE().fetch_dynamic_patterns() == {r"/orders/\d+": "/orders/{id}"}
+    await STORE().pin_route_public("/events/{id}", pattern=r"/events/\d+")
+    assert pg.route("/events/{id}")["scope_id"] == PUBLIC
+    assert await STORE().fetch_dynamic_patterns() == {r"/events/\d+": "/events/{id}"}
 
 
 async def test_pin_route_public_normalizes_trailing_slash(pg: FakeAccessControlPg) -> None:

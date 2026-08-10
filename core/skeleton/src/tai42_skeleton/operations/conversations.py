@@ -394,7 +394,7 @@ async def _caller_owns_thread(route: ConversationRoute, thread_id: str, caller: 
     same way is the only prefix that can match. A LINKED person's thread is
     ``bridge:@person:{person_id}``; the api caller owns it iff the person (on this route's
     target) holds an api address whose embedded caller principal is this caller — ownership
-    grants the FULL merged read (R13), resolved against the person store, never by parsing an
+    grants the FULL merged read, resolved against the person store, never by parsing an
     address out of the thread id. A ``channel`` route's addresses are the medium's, attested
     by the provider and owned by nobody who can call this door, so its threads are admin-only
     by construction — the route's door is checked too, so a channel address spelled like an
@@ -562,7 +562,7 @@ async def _read_person_thread(
     limit: int,
     order: str,
 ) -> dict[str, Any]:
-    """One page of a LINKED person's AGGREGATED transcript (R11): the merged history across
+    """One page of a LINKED person's AGGREGATED transcript: the merged history across
     every route the person has written under, keyed by ``bridge:@person:{person_id}``.
 
     Authorized from the thread's identity exactly as a route-keyed thread is: an admin reads

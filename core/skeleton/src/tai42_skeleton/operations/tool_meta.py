@@ -116,7 +116,7 @@ async def list_tool_meta() -> dict[str, Any]:
     per-tool row. The UI builds the tree and merges the rows against the live tool
     list client-side."""
     # OFF gate: with no overlay store the honest answer is the empty overlay — the
-    # UI degrades perfectly on empty (D7). No store touched.
+    # UI degrades perfectly on empty. No store touched.
     if not component_store_configured(SKELETON_COMPONENT):
         return {"folders": [], "meta": []}
     store = instance.app.tool_meta.store

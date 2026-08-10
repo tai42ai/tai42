@@ -96,7 +96,7 @@ def record_redis(monkeypatch) -> FakeRecordRedis:
 @pytest.fixture
 def wired(monkeypatch, record_redis):
     """Wire a dict-backed manager, a pass-role bind that returns a fingerprint, an agent
-    registry holding ``triage`` and a tool registry holding ``echo-tool`` — the standard
+    registry holding ``relay`` and a tool registry holding ``echo-tool`` — the standard
     happy-path environment."""
     manager = _DictManager(record_redis)
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
@@ -112,24 +112,24 @@ def wired(monkeypatch, record_redis):
 
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(instance, "app", _FakeApp({"triage"}, {"echo-tool"}), raising=False)
+    monkeypatch.setattr(instance, "app", _FakeApp({"relay"}, {"echo-tool"}), raising=False)
     return manager
 
 
 async def test_create_api_route_mints_and_shows_the_secret_once(wired):
     result = await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
     assert result["created"] is True
     assert result["callback_secret"]  # shown once here
     # The stored fingerprint is the one the bind derived, never a client value.
-    assert wired.rows["support"].execution_key_fingerprint == "fp-derived"
-    assert wired.rows["support"].callback_secret == result["callback_secret"]
+    assert wired.rows["chat"].execution_key_fingerprint == "fp-derived"
+    assert wired.rows["chat"].callback_secret == result["callback_secret"]
     # The route view withholds the secret.
     assert "callback_secret" not in result["route"]
 
@@ -139,7 +139,7 @@ async def test_create_channel_route_carries_no_secret(wired):
         route_name="line",
         door="channel",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
@@ -150,23 +150,23 @@ async def test_create_channel_route_carries_no_secret(wired):
 
 async def test_create_is_an_upsert(wired):
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
     result = await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc2",
         callback_url="https://example.com/cb2",
     )
     assert result["created"] is False
-    assert wired.rows["support"].execution_key == "svc2"
+    assert wired.rows["chat"].execution_key == "svc2"
 
 
 async def test_a_channel_identity_is_stored_canonicalized(wired):
@@ -176,7 +176,7 @@ async def test_a_channel_identity_is_stored_canonicalized(wired):
         route_name="line",
         door="channel",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         channel="twilio",
         our_identity="  +15550001111  ",
@@ -189,7 +189,7 @@ async def test_a_second_route_claiming_one_channel_identity_is_refused(wired):
         route_name="line-a",
         door="channel",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111 ",
@@ -201,7 +201,7 @@ async def test_a_second_route_claiming_one_channel_identity_is_refused(wired):
             route_name="line-b",
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             channel="twilio",
             our_identity="+15550001111",
@@ -217,7 +217,7 @@ async def test_a_route_may_re_claim_its_own_channel_identity(wired):
             route_name="line",
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key=execution_key,
             channel="twilio",
             our_identity="+15550001111",
@@ -233,7 +233,7 @@ async def test_the_same_identity_on_another_channel_is_a_different_route(wired):
             route_name=route_name,
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             channel=channel,
             our_identity="+15550001111",
@@ -249,7 +249,7 @@ async def test_create_rejects_a_colon_channel_name(wired):
             route_name="line",
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             channel="twi:lio",
             our_identity="+15550001111",
@@ -260,7 +260,7 @@ async def test_create_rejects_a_colon_channel_name(wired):
 async def test_create_rejects_unknown_agent(wired):
     with pytest.raises(NotFoundError, match="agent not found"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="agent",
             target_name="ghost",
@@ -271,7 +271,7 @@ async def test_create_rejects_unknown_agent(wired):
 
 async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
     result = await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="tool",
         target_name="echo-tool",
@@ -281,7 +281,7 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
         callback_url="https://example.com/cb",
     )
     assert result["created"] is True
-    row = wired.rows["support"]
+    row = wired.rows["chat"]
     assert row.target_kind == "tool"
     assert row.target_name == "echo-tool"
     assert row.payload_expr == "{message: .message, who: .sender}"
@@ -291,7 +291,7 @@ async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
 async def test_create_rejects_unknown_tool(wired):
     with pytest.raises(NotFoundError, match="tool not found"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="tool",
             target_name="ghost-tool",
@@ -303,7 +303,7 @@ async def test_create_rejects_unknown_tool(wired):
 async def test_create_rejects_invalid_payload_expr(wired):
     with pytest.raises(BadRequestError, match="invalid payload_expr"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="tool",
             target_name="echo-tool",
@@ -316,7 +316,7 @@ async def test_create_rejects_invalid_payload_expr(wired):
 async def test_create_rejects_invalid_reply_expr(wired):
     with pytest.raises(BadRequestError, match="invalid reply_expr"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="tool",
             target_name="echo-tool",
@@ -329,10 +329,10 @@ async def test_create_rejects_invalid_reply_expr(wired):
 async def test_create_rejects_exprs_on_agent_target(wired):
     with pytest.raises(BadRequestError, match="no payload_expr/reply_expr"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             reply_expr=".reply",
             execution_key="svc",
             callback_url="https://example.com/cb",
@@ -345,7 +345,7 @@ async def test_create_rejects_a_colon_route_name(wired):
             route_name="bad:name",
             door="api",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
@@ -358,28 +358,28 @@ async def test_create_bind_refusal_leaves_no_row(wired, monkeypatch):
     monkeypatch.setattr(ops, "assert_execution_key_bindable", _refuse)
     with pytest.raises(BadRequestError, match="not yours"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="api",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
-    assert "support" not in wired.rows
+    assert "chat" not in wired.rows
 
 
 async def test_get_withholds_the_secret_and_404s_unknown(wired):
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
-    view = await ops.get_conversation_route("support")
+    view = await ops.get_conversation_route("chat")
     assert "callback_secret" not in view
-    assert view["route_name"] == "support"
+    assert view["route_name"] == "chat"
     with pytest.raises(NotFoundError):
         await ops.get_conversation_route("missing")
 
@@ -391,10 +391,10 @@ async def test_get_rejects_a_colon_route_name(wired):
 
 async def test_list_withholds_secrets(wired):
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -405,26 +405,26 @@ async def test_list_withholds_secrets(wired):
 
 async def test_delete_removes_then_404s(wired):
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
-    assert (await ops.delete_conversation_route("support"))["removed"] is True
+    assert (await ops.delete_conversation_route("chat"))["removed"] is True
     with pytest.raises(NotFoundError):
-        await ops.delete_conversation_route("support")
+        await ops.delete_conversation_route("chat")
 
 
 async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
     # Neither thread index carries a TTL and the prune pass only walks LIVE routes, so a
     # delete that left them behind stranded them in redis forever.
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
@@ -434,9 +434,9 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
         await ConversationRecordStore(settings).create_record(
             ConversationRecord(
                 message_id=f"m{index}",
-                route_name="support",
+                route_name="chat",
                 door="api",
-                thread_id=f"bridge:support:alice/user-{index}",
+                thread_id=f"bridge:chat:alice/user-{index}",
                 client_address=f"alice/user-{index}",
                 caller_principal="alice",
                 callback_url="https://example.com/cb",
@@ -448,13 +448,13 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
                 updated_at=now,
             )
         )
-    assert settings.route_threads_key("support") in record_redis._zsets
+    assert settings.route_threads_key("chat") in record_redis._zsets
 
-    assert (await ops.delete_conversation_route("support"))["removed"] is True
+    assert (await ops.delete_conversation_route("chat"))["removed"] is True
 
-    assert settings.route_threads_key("support") not in record_redis._zsets
+    assert settings.route_threads_key("chat") not in record_redis._zsets
     for index in range(2):
-        assert settings.thread_index_key("support", f"bridge:support:alice/user-{index}") not in record_redis._zsets
+        assert settings.thread_index_key("chat", f"bridge:chat:alice/user-{index}") not in record_redis._zsets
 
 
 async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wired, record_redis, monkeypatch):
@@ -462,14 +462,14 @@ async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wi
     # a redis blip mid-loop strands whatever it had not reached: nothing walks a name that
     # no longer routes. A retry that answered 404 would leave those keys unnameable forever.
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
-    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+    await _seed_thread_on("chat", door="api", thread_id="bridge:chat:alice/user-1")
     settings = ConversationsSettings()
     inner = record_redis.zrem
     blown = False
@@ -484,20 +484,20 @@ async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wi
     monkeypatch.setattr(record_redis, "zrem", _blows_up_once)
 
     with pytest.raises(TimeoutError):
-        await ops.delete_conversation_route("support")
+        await ops.delete_conversation_route("chat")
 
     # The routing row is already gone, so no message can open a thread on the name...
-    assert "support" not in wired.rows
+    assert "chat" not in wired.rows
     # ...and the route's thread index survives, holding the work the run never reached.
-    assert settings.route_threads_key("support") in record_redis._zsets
+    assert settings.route_threads_key("chat") in record_redis._zsets
 
-    result = await ops.delete_conversation_route("support")
+    result = await ops.delete_conversation_route("chat")
 
     # Not a 404: the retry re-ran the reclamation and says the row was not this call's to
     # remove.
-    assert result == {"removed": False, "route_name": "support"}
-    assert settings.route_threads_key("support") not in record_redis._zsets
-    assert settings.thread_index_key("support", "bridge:support:alice/user-1") not in record_redis._zsets
+    assert result == {"removed": False, "route_name": "chat"}
+    assert settings.route_threads_key("chat") not in record_redis._zsets
+    assert settings.thread_index_key("chat", "bridge:chat:alice/user-1") not in record_redis._zsets
 
 
 async def _seed_thread_on(route_name: str, *, door: str, thread_id: str) -> None:
@@ -529,27 +529,27 @@ async def test_flipping_the_door_of_a_route_that_holds_threads_is_refused(wired,
     # so an api→channel flip 404s the owner out of a transcript they own while the
     # single-message door still hands them the same records.
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
-    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+    await _seed_thread_on("chat", door="api", thread_id="bridge:chat:alice/user-1")
 
     with pytest.raises(BadRequestError, match="holds 1 thread"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             channel="twilio",
             our_identity="+15550001111",
         )
     # Refused BEFORE any write: the row still routes exactly as it did.
-    assert wired.rows["support"].door == "api"
+    assert wired.rows["chat"].door == "api"
 
 
 async def test_a_thread_opened_during_the_edit_still_refuses_the_door_flip(wired, record_redis, monkeypatch):
@@ -558,77 +558,77 @@ async def test_a_thread_opened_during_the_edit_still_refuses_the_door_flip(wired
     # landing in that window opens the very thread the refusal exists to protect — after
     # which the flip lands anyway, and the revert is refused too.
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
 
     async def _bind_while_a_first_message_lands(caller, execution_key):
-        await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+        await _seed_thread_on("chat", door="api", thread_id="bridge:chat:alice/user-1")
         return "fp-derived"
 
     monkeypatch.setattr(ops, "assert_execution_key_bindable", _bind_while_a_first_message_lands)
 
     with pytest.raises(BadRequestError, match="holds 1 thread"):
         await ops.create_conversation_route(
-            route_name="support",
+            route_name="chat",
             door="channel",
             target_kind="agent",
-            target_name="triage",
+            target_name="relay",
             execution_key="svc",
             channel="twilio",
             our_identity="+15550001111",
         )
-    assert wired.rows["support"].door == "api"
+    assert wired.rows["chat"].door == "api"
 
 
 async def test_the_door_of_a_route_holding_no_thread_is_still_editable(wired, record_redis):
     # The refusal is about orphaning threads, not about the door being immutable.
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
     result = await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="channel",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         channel="twilio",
         our_identity="+15550001111",
     )
     assert result["created"] is False
-    assert wired.rows["support"].door == "channel"
+    assert wired.rows["chat"].door == "channel"
 
 
 async def test_an_edit_that_keeps_the_door_is_untouched_by_the_guard(wired, record_redis):
     await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc",
         callback_url="https://example.com/cb",
     )
-    await _seed_thread_on("support", door="api", thread_id="bridge:support:alice/user-1")
+    await _seed_thread_on("chat", door="api", thread_id="bridge:chat:alice/user-1")
 
     result = await ops.create_conversation_route(
-        route_name="support",
+        route_name="chat",
         door="api",
         target_kind="agent",
-        target_name="triage",
+        target_name="relay",
         execution_key="svc2",
         callback_url="https://example.com/cb2",
     )
     assert result["created"] is False
-    assert wired.rows["support"].execution_key == "svc2"
+    assert wired.rows["chat"].execution_key == "svc2"
 
 
 async def test_unclaimed_channel_identity_rejects_a_blank_identity(wired):
@@ -646,6 +646,6 @@ async def test_operations_501_without_a_backend(monkeypatch):
     with pytest.raises(NotSupportedError):
         await ops.list_conversation_routes()
     with pytest.raises(NotSupportedError):
-        await ops.list_conversation_threads("support")
+        await ops.list_conversation_threads("chat")
     with pytest.raises(NotSupportedError):
-        await ops.get_conversation_thread("support", "bridge:support:+15550001111")
+        await ops.get_conversation_thread("chat", "bridge:chat:+15550001111")

@@ -1096,7 +1096,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
         except Exception:
             logger.exception("failed to hard-delete conflicted preset record %r", name)
             raise
-        # Cascade the overlay row (R5): the tool is gone, so its organizational
+        # Cascade the overlay row: the tool is gone, so its organizational
         # metadata goes with it. A no-op when the preset never got a row, and skipped
         # entirely when the overlay store is OFF (no absent-Postgres open).
         if component_store_configured(SKELETON_COMPONENT):
@@ -1114,7 +1114,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
     await mgr.remove(name)
-    # Cascade the overlay row (R5) once the preset is soft-deleted and torn down.
+    # Cascade the overlay row once the preset is soft-deleted and torn down.
     # Keyed by tool name, so the soft-delete ghost in ``versioned_documents`` is
     # irrelevant; a no-op when the preset never got a row, and skipped entirely when
     # the overlay store is OFF (no absent-Postgres open).

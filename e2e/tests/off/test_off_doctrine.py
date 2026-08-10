@@ -1,4 +1,4 @@
-"""The house OFF pattern (D1/D8), pinned end to end against one all-features-OFF
+"""The house OFF pattern, pinned end to end against one all-features-OFF
 deployment.
 
 ``off_stack`` mounts the WHOLE default router surface but wires no feature Redis
@@ -133,7 +133,7 @@ async def test_mutations_refuse_501_with_named_code(off_stack: TaiStack) -> None
         json={"provider_id": "ghost", "alias": "a", "enabled_sub_services": ["svc"]},
     )
 
-    # preset write (versioning code, post-D2 — 501, not 503).
+    # preset write (versioning code — 501, not 503).
     await _assert_501_code(
         off_stack,
         "POST",

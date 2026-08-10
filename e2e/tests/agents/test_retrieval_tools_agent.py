@@ -27,10 +27,10 @@ pytestmark = [
     # stub's DETERMINISTIC embeddings (the `"e2e_echo" in requests[1]` assertion presumes the
     # stub's ordering), so BOTH seams break it: real 'llm' empties llm_stub.requests, and real
     # 'embeddings' lets a live embedder reorder retrieval. The real-provider legs run on the e2e
-    # creds host (PLAN_2 §F), not in CI, so the module steps aside for either. Inert by default.
+    # creds host, not in CI, so the module steps aside for either. Inert by default.
     pytest.mark.skipif(
         HarnessSettings().is_real("llm") or HarnessSettings().is_real("embeddings"),
-        reason="scripted-stub llm+embeddings determinism is the mock leg; real legs on the creds host (PLAN_2 §F)",
+        reason="scripted-stub llm+embeddings determinism is the mock leg; real legs on the creds host",
     ),
 ]
 

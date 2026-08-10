@@ -1,5 +1,5 @@
 /**
- * Bind a topic verifier (Mission 9 PLAN_1 UI). Via the hooks page: bind the
+ * Bind a topic verifier. Via the hooks page: bind the
  * `github` catalog verifier to a fresh topic, pointing it at the stack's secret
  * env var. Asserts the bound state in the UI and via `GET /api/hooks`
  * (`data.topic_verifiers`), with the sharp negative: an UNSIGNED delivery to the

@@ -23,7 +23,7 @@ class LlmProvider:
 
     ``provider`` is the kit's ``LLM_PROVIDER_LLM`` / ``_EMBEDDING`` value (the
     ``tai42_kit.llm`` builders match on it); ``api_key_env`` is the credential
-    template's §8 env var holding that provider's key; ``default_llm_model`` /
+    template's env var holding that provider's key; ``default_llm_model`` /
     ``default_embedding_model`` are the fallback models when the operator leaves
     ``REAL_E2E_LLM_MODEL`` / ``REAL_E2E_EMBEDDING_MODEL`` unset.
     ``default_embedding_model`` is ``None`` for a chat-only provider — it cannot
@@ -36,7 +36,7 @@ class LlmProvider:
 
 
 # The real-LLM providers the kit builders accept (``tai42_kit.llm.models.get_llm`` /
-# ``embedding.get_embedding``), matched to the credential template's §8 keys. A name
+# ``embedding.get_embedding``), matched to the credential template's keys. A name
 # the operator puts in ``REAL_E2E_LLM_PROVIDER`` / ``_EMBEDDING_PROVIDER`` must be a key
 # here; an unknown name raises rather than silently falling back. Models carry cheap
 # defaults the operator overrides per provider via ``REAL_E2E_*_MODEL``.

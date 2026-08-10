@@ -13,6 +13,11 @@
       "component": "tai42-kit",
       "skip-changelog": true
     },
+    "core/cli": {
+      "package-name": "tai42-cli",
+      "component": "tai42-cli",
+      "skip-changelog": true
+    },
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
@@ -375,6 +380,23 @@
         }
       ]
     },
+    "plugins/tools-github": {
+      "package-name": "tai42-tools-github",
+      "component": "tai42-tools-github",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_github/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "plugins/tools-stripe": {
       "package-name": "tai42-tools-stripe",
       "component": "tai42-tools-stripe",
@@ -388,6 +410,40 @@
         {
           "type": "yaml",
           "path": "src/tai42_tools_stripe/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-twilio": {
+      "package-name": "tai42-tools-twilio",
+      "component": "tai42-tools-twilio",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_twilio/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/tools-whatsapp": {
+      "package-name": "tai42-tools-whatsapp",
+      "component": "tai42-tools-whatsapp",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_tools_whatsapp/tai-plugin.yml",
           "jsonpath": "$.version"
         }
       ]

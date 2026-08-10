@@ -9,7 +9,7 @@ stack so the census dimension is real (≥2 HTTP workers + the backend worker on
 
 * the group's field resolves to the NEW effective value (the reset cache re-read the env);
 * ZERO stale settings holders (no retired-epoch settings singleton is still held —
-  PLAN_1's sweep, surfaced by the probe);
+  the sweep, surfaced by the probe);
 * ZERO stale-epoch client pools (the retire drained + detached every retired pool);
 * the settings epoch advanced past the pre-apply epoch;
 * MULTI-WORKER census: EVERY live census worker (both HTTP replicas + the backend worker)
@@ -101,7 +101,7 @@ async def test_hot_profile_flip_converges_and_fans_out(replicas_stack: TaiStack,
     assert after["settings_epoch"] > base_epoch, f"the settings epoch did not advance: {before} -> {after}"
     # No retired-epoch settings LEAK from the flip. Two holders are expected baseline, NOT
     # leaks: the app-lifetime ``WorkerBus`` intentionally pins its epoch-0 ``BusSettings``
-    # across every reload (PLAN_2's epoch-immune subscription), and a swept entry with no
+    # across every reload (an epoch-immune subscription), and a swept entry with no
     # live holder is benign roster residue. A real leak is any OTHER retired-epoch singleton
     # still held — in particular the flipped ``LoggingSettings`` must have been released.
     leaked = [

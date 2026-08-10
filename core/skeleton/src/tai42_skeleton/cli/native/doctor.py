@@ -10,6 +10,8 @@ from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 
 import typer
+from tai42_cli.commands._common import app_context
+from tai42_cli.render import print_json, render_table
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -21,8 +23,6 @@ from tai42_kit.db import (
     migration_status,
 )
 
-from tai42_skeleton.cli.commands._common import app_context
-from tai42_skeleton.cli.render import print_json, render_table
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.db import SKELETON_COMPONENT, all_migration_entries
 

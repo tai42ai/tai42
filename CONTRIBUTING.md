@@ -1,6 +1,6 @@
 # Contributing to tai42
 
-tai42 is one repository and one uv workspace: `core/*` (contract, kit,
+tai42 is one repository and one uv workspace: `core/*` (contract, kit, cli,
 skeleton), `plugins/*`, and `e2e`. A change lives in the package directory it
 touches, and the `tai42-*` dependencies between packages resolve in-tree through
 the workspace.

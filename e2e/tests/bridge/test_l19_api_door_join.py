@@ -1,16 +1,16 @@
 """L19 — an api-door conversation joins a person, and the api caller reads the merged thread.
 
 An AGENT target reachable on a channel route (twilio) and an api route (person keys are
-agent-only, D3). The person mints a code on the channel side and submits it through the API
+agent-only). The person mints a code on the channel side and submits it through the API
 DOOR — a plain authed ``POST`` whose caller principal is the api conversation's identity
-(R1: api-door conversations can join persons). The redeem answers ``linked``.
+(api-door conversations can join persons). The redeem answers ``linked``.
 
 Two switch-points are pinned at the door. The redeem response's ``thread_id`` is the api
 leg's OLD route-keyed thread — the key is fixed at accept, BEFORE the merge lands, so this
 turn still belongs to the pre-link thread. The very NEXT api message keys the aggregated
 ``bridge:@person:{id}`` thread instead. Then, after a post-merge message on each leg, the
 SAME api caller reads the person thread through the api door and is served BOTH legs' records —
-the full merged history, not the api leg's slice (R11/R13).
+the full merged history, not the api leg's slice.
 """
 
 from __future__ import annotations
@@ -35,11 +35,11 @@ from tai42_e2e.settings import HarnessSettings
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),
-    reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host (PLAN_2 §F)",
+    reason="scripted-LLM + FakeTwilio are the 'llm'/'twilio' mock leg; real on the creds host",
 )
 
 _AGENT = "tools_agent"
-# The bridge thread namespaces (D3): a route-keyed thread is ``bridge:{route}:{address}``; a
+# The bridge thread namespaces: a route-keyed thread is ``bridge:{route}:{address}``; a
 # linked person's aggregated thread is ``bridge:@person:{person_id}``.
 _BRIDGE_PREFIX = "bridge:"
 _PERSON_PREFIX = "bridge:@person:"
@@ -122,7 +122,7 @@ async def test_api_caller_joins_a_person_and_reads_the_merged_thread(
     await wait_twilio_send(bridge.fake_twilio, ch_answer)
 
     # The SAME api caller reads the person thread through the api door and is served BOTH legs'
-    # post-merge records — the merged history, aggregated across the person's routes (R11/R13).
+    # post-merge records — the merged history, aggregated across the person's routes.
     transcript = await caller.get(_transcript_path(route_api, person_thread))
     assert transcript["total"] == 2, transcript
     by_text = {item["inbound_text"]: item for item in transcript["items"]}

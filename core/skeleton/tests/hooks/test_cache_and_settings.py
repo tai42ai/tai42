@@ -91,14 +91,16 @@ async def test_hook_count_reflects_live_in_memory_hooks():
     manager = InMemoryHooksManager(HooksSettings())
     assert manager.hook_count == 0
     await manager.register(
-        HookParams(name="a", topic="orders", tool="ship", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+        HookParams(
+            name="a", topic="events", tool="forward", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+        )
     )
     await manager.register(
-        HookParams(name="b", topic="orders", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp-fire")
+        HookParams(name="b", topic="events", tool="notify", execution_key="k-fire", execution_key_fingerprint="fp-fire")
     )
     await manager.register(
         HookParams(
-            name="c", topic="refunds", tool="refund", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+            name="c", topic="signals", tool="process", execution_key="k-fire", execution_key_fingerprint="fp-fire"
         )
     )
     # Counts across every topic bucket.
@@ -117,7 +119,7 @@ async def test_reset_warns_naming_count_and_drops_in_memory_hooks(monkeypatch, c
         assert isinstance(manager, InMemoryHooksManager)
         await manager.register(
             HookParams(
-                name="h1", topic="orders", tool="ship", execution_key="k-fire", execution_key_fingerprint="fp-fire"
+                name="h1", topic="events", tool="forward", execution_key="k-fire", execution_key_fingerprint="fp-fire"
             )
         )
         assert manager.hook_count == 1
@@ -169,7 +171,7 @@ def test_in_memory_flag_reflects_redis_url():
 
 def test_derived_keys():
     settings = HooksSettings()
-    assert settings.get_hook_key("orders") == "hooks:topic:orders"
+    assert settings.get_hook_key("events") == "hooks:topic:events"
     assert settings.name_trigger_map_key == "hooks:name_trigger_map"
 
 
@@ -179,7 +181,7 @@ def test_trigger_key_helpers_round_trip():
 
     # Each helper builds its documented ``hooks:trigger:rec:/name:/tomb:`` form.
     assert settings.trigger_record_key(token_hash) == f"hooks:trigger:rec:{token_hash}"
-    assert settings.trigger_name_key("orders") == "hooks:trigger:name:orders"
+    assert settings.trigger_name_key("events") == "hooks:trigger:name:events"
     assert settings.trigger_tomb_key(token_hash) == f"hooks:trigger:tomb:{token_hash}"
 
     # The prefix properties match exactly what the key helpers prepend.
@@ -187,7 +189,7 @@ def test_trigger_key_helpers_round_trip():
     assert settings.trigger_name_key_prefix == "hooks:trigger:name:"
     assert settings.trigger_tomb_key_prefix == "hooks:trigger:tomb:"
     assert settings.trigger_record_key(token_hash) == f"{settings.trigger_record_key_prefix}{token_hash}"
-    assert settings.trigger_name_key("orders") == f"{settings.trigger_name_key_prefix}orders"
+    assert settings.trigger_name_key("events") == f"{settings.trigger_name_key_prefix}events"
     assert settings.trigger_tomb_key(token_hash) == f"{settings.trigger_tomb_key_prefix}{token_hash}"
 
     # The scan patterns glob their own prefixes.

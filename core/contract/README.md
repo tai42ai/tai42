@@ -19,15 +19,19 @@ loading, access control, OAuth connectors, background execution, monitoring,
 storage, and human-in-the-loop steps). Everything plugs in against the
 interfaces this package defines.
 
-Three packages; each depends only on the ones to its left:
+Four packages; each depends only on the ones to its left:
 
 ```
-tai42-contract  <--  tai42-kit  <--  tai42-skeleton
-(interfaces)      (helpers)     (the server)
+                     tai42-kit  <--.
+                   /  (helpers)     \
+tai42-contract  <-+                  +--  tai42-skeleton
+  (interfaces)     \                /    (the server)
+                     tai42-cli  <--'
+               (the remote client)
 ```
 
 `tai42-contract` is the leaf: it depends on no other tai-* package, so anything —
-the skeleton, a plugin, a helper — can import it without pulling in an
+the skeleton, the CLI, a plugin, a helper — can import it without pulling in an
 implementation.
 
 ## Install
@@ -64,7 +68,7 @@ uv run --no-sync pytest --cov --cov-report=term-missing                         
 The whole platform — concepts, guides, and the generated reference — lives in
 the unified documentation site:
 
-- Layering & the contract/kit/skeleton split: https://tai42.ai/concepts/layering
+- Layering & the contract/kit/cli/skeleton split: https://tai42.ai/concepts/layering
 - Python SDK reference (this package's public API): https://tai42.ai/reference/python-sdk
 
 ## License

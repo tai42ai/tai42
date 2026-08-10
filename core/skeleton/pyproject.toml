@@ -29,10 +29,13 @@ dependencies = [
     # (agent facets, checkpoint/store registries), jq (hooks + policy
     # conditions), uvicorn (CLI arg parsing), redis/postgres drivers.
     "tai42-kit[llm,jq,uvicorn,redis,postgres]>=1.4,<2",
+    # The `tai` command client. The server owns no console script; it contributes
+    # its local/runtime commands to the CLI through the `tai.commands` entry point.
+    "tai42-cli>=1.0,<2",
     # Direct third-party deps imported by the orchestrator + copied-in impl.
     "click>=8.3",
-    # The unified ``tai`` CLI. Typer builds on click, so it composes with the
-    # existing click launcher commands re-homed as ``tai`` subcommands.
+    # The local commands the skeleton contributes are Typer apps. Typer builds on
+    # click, so they compose with the click launchers mounted as ``tai`` subcommands.
     "typer>=0.12",
     "fastmcp>=3.2,<4",
     "mcp>=1",
@@ -85,11 +88,10 @@ Repository = "https://github.com/tai42ai/tai42/tree/main/core/skeleton"
 Issues = "https://github.com/tai42ai/tai42/issues"
 Changelog = "https://github.com/tai42ai/tai42/blob/main/core/skeleton/CHANGELOG.md"
 
-[project.entry-points.console_scripts]
-# `tai` is the documented command. `tai42` is an alias so a deployment that
-# already has an unrelated `tai` on PATH still has an unambiguous entry point.
-tai = "tai42_skeleton.cli.app:app"
-tai42 = "tai42_skeleton.cli.app:app"
+# The `tai` console script is owned by tai42-cli; the server contributes its
+# local and runtime commands to it through this entry-point group.
+[project.entry-points."tai.commands"]
+skeleton = "tai42_skeleton.cli.local:register"
 
 [project.optional-dependencies]
 # Batteries: the tai42-toolbox contrib package — composition tool extensions
@@ -181,13 +183,14 @@ fail_under = 96
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]
 
-# Dev-only: resolve the sibling packages (the tai42-contract/tai42-kit foundation and
+# Dev-only: resolve the sibling packages (the tai42-contract/tai42-kit/tai42-cli foundation and
 # the tai42-toolbox contrib extra) from local checkouts. The published version
 # floors in [project].dependencies / [project.optional-dependencies] are what the
 # shipped wheel declares; these source overrides are not part of wheel metadata.
 [tool.uv.sources]
 tai42-contract = { workspace = true }
 tai42-kit = { workspace = true }
+tai42-cli = { workspace = true }
 tai42-toolbox = { workspace = true }
 tai42-identity-redis = { workspace = true }
 

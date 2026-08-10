@@ -142,7 +142,7 @@ def _toolbox_tools_entry() -> dict:
 # Each toolbox tool lives in its own module (one tool per module), so a profile
 # names the module and ``include``s the one tool it registers. ``request`` needs the
 # ``http`` extra (already in the e2e env) and ``generate_embeddings`` the ``embeddings``
-# extra (a PLAN_1 dep addition) — both fail LOUDLY at import when their extra is absent,
+# extra — both fail LOUDLY at import when their extra is absent,
 # so a stack carrying them refuses to boot rather than silently dropping the tool.
 _TOOLBOX_EXTRA_TOOL_ENTRIES: list[dict] = [
     {"title": "toolbox-request", "module": "tai42_toolbox.tools.request", "include": ["request"]},
@@ -900,7 +900,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_builtin_entries(),
             # The pairing-code mint builtin, opted in as a tool[].module row exactly as a
             # deployment does: the bridge suite drives it as a tool-target route to prove the
-            # R8 {code, expires_at} contract end to end.
+            # {code, expires_at} contract end to end.
             {"title": "builtin-pairing", "module": "tai42_skeleton.tools.builtin.get_pairing_code"},
         ],
         "agents": [
@@ -1053,7 +1053,7 @@ def build_payments_stack(res: StackResources, variants: Variants) -> StackConfig
     env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"
     env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__BURST"] = "100000"
     return StackConfig(
-        name="payments",
+        name="notifications",
         topology=Topology.REPLICAS,
         manifest=manifest,
         env=env,
@@ -1617,7 +1617,7 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
 # the vendor authorize/token URLs with no env indirection, so the leg's scope ENDS at
 # descriptor registration + the locally-built authorize (launch) URL: a stub IdP cannot
 # intercept the vendor token exchange, and probe launches the sub-service then calls the
-# real vendor. Token/refresh/probe against live vendors is PLAN_2's real-connector leg.
+# real vendor. Token/refresh/probe against live vendors is the real-connector leg.
 
 # The two shipped connector descriptor modules; importing each registers its provider
 # through ``tai42_app.connectors.register_connector`` (google → Gmail/Calendar/Drive,
@@ -2086,7 +2086,7 @@ def build_projection_authz_stack(res: StackResources, variants: Variants) -> Sta
     )
 
 
-# ---- OFF profile (D8) ----------------------------------------------------
+# ---- OFF profile ---------------------------------------------------------
 #
 # The honest all-features-OFF deployment: no feature Redis, no default PG. Every
 # DB-backed feature resolves NO store, so the whole house OFF pattern is pinned in
@@ -2105,7 +2105,7 @@ _OFF_UNREACHABLE_REGISTRY_URL = "http://127.0.0.1:9"
 
 
 def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """MULTIWORKER(1), no backend — the all-features-OFF profile (D8).
+    """MULTIWORKER(1), no backend — the all-features-OFF profile.
 
     Serves the WHOLE default router surface (``default_routers="all"``) so every
     gated feature's door is mounted, then subtracts the two config anchors that

@@ -98,12 +98,12 @@ class SetMcpSecretEnv(BaseModel):
     """The combined env+manifest secret op body (``POST /api/mcp-config/secret-env``).
 
     ``value`` is the raw secret pasted by the operator. The env KEY it is stored under is
-    EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one is given (C9b
-    ``{value, key | key_hint, manifest_pointer}``). The server writes ``value`` to the env
+    EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one is given
+    (``{value, key | key_hint, manifest_pointer}``). The server writes ``value`` to the env
     store under that key (marked secret) and writes an ``!ENV ${KEY}`` MARKER at
     ``manifest_pointer`` — so the secret lives only in the env store and the manifest carries
     a placeholder. An explicit ``key`` that collides with an existing stored key holding a
-    DIFFERENT value is refused with a loud 400 naming the key (C9c — never a silent overwrite
+    DIFFERENT value is refused with a loud 400 naming the key (never a silent overwrite
     of a live secret). ``manifest_pointer`` is a slash-delimited, no-leading-slash path (e.g.
     ``mcp/0/config/headers/Authorization``) whose HEAD segment MUST be ``mcp`` (the same
     mcp-only authority ``set_mcp_config`` holds). The generated key is NOT returned."""
@@ -138,15 +138,9 @@ async def get_manifest() -> dict:
     ``!ENV ${KEY}`` markers kept intact, so a secret leaf is its placeholder marker,
     NEVER the plaintext value.
 
-    RETIGHTEN (PLAN_3 §D / QUESTIONS decision): this door previously served the RESOLVED
-    in-process ``live_manifest`` (``tai42_app.admin.live_manifest``), which materialized
-    every ``!ENV`` marker and leaked plaintext secrets onto the wire. It is FLIPPED to the
-    preserved read (the no-leak posture PLAN_6 e2e asserts). The resolved read is RETIRED
-    outright — a clean break with no compat path (R2) and NO secret-fenced resolved
-    surface, because no server-side consumer needs the resolved view here: McpTab already
-    reads ``/api/manifest/preserved`` and ManifestTab now renders markers (PLAN_5's
-    ManifestTab expected the resolved view — that Studio adjustment is PLAN_5/PLAN_6 scope,
-    the intended clean-break outcome, out of this wave).
+    This door serves ONLY the preserved read: no resolved-view surface exists here, so no
+    ``!ENV`` marker is ever materialized onto the wire. McpTab reads
+    ``/api/manifest/preserved`` and ManifestTab renders the markers directly.
     """
     return _preserved_manifest_view()
 
@@ -156,8 +150,8 @@ async def get_manifest_preserved() -> dict:
     """Return the PRESERVED persisted manifest's MCP section + user tools with every
     ``!ENV ${KEY}`` marker intact (no secret is resolved) — the source the Studio McpTab
     config editor reads so it can round-trip markers instead of baking a resolved secret.
-    Same ``{mcp, user_tools}`` view as ``get_manifest`` (both serve the preserved read
-    post-retighten); the explicit ``/preserved`` door is the PLAN_5-pinned contract."""
+    Same ``{mcp, user_tools}`` view as ``get_manifest`` — both serve the preserved read;
+    this explicit ``/preserved`` door names that no-resolve contract in its path."""
     return _preserved_manifest_view()
 
 
@@ -291,14 +285,14 @@ def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
 
 def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, stored: dict[str, str]) -> str:
     """Resolve the env KEY a secret is stored under: exactly one of an EXPLICIT ``explicit``
-    key or a ``hint`` to generate from (C9b ``key | key_hint``).
+    key or a ``hint`` to generate from (``key | key_hint``).
 
     An explicit key is validated to the shell-identifier charset (an odd value is a loud
     ``ValueError`` → 400) and REFUSED if it collides with an existing stored key holding a
-    DIFFERENT value (C9c — never a silent overwrite of a live secret; an identical value is an
+    DIFFERENT value (never a silent overwrite of a live secret; an identical value is an
     idempotent re-send, no collision). A generated key is made unique against the stored keys,
     the X band, AND every registered settings ``env_var``, so it never clobbers a stored key
-    nor SHADOWS a registered var (C9c). Raises ``ValueError`` (the op maps it to a 400)."""
+    nor SHADOWS a registered var. Raises ``ValueError`` (the op maps it to a 400)."""
     if (explicit is None) == (hint is None):
         raise ValueError("provide exactly one of 'key' (explicit) or 'key_hint' (to generate from)")
     if explicit is not None:
@@ -368,14 +362,14 @@ async def set_mcp_secret_env(
     """Store a pasted secret as an env value and reference it from the manifest by a marker.
 
     The env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one
-    (C9b ``key | key_hint``). Writes the secret ``value`` to the env store under that key AND
+    (``key | key_hint``). Writes the secret ``value`` to the env store under that key AND
     marks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``
     MARKER at ``manifest_pointer`` — all through the combined
     ``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate
-    stay consistent. C9a partial-failure: a manifest-persist failure after the env write does
+    stay consistent. Partial-failure: a manifest-persist failure after the env write does
     NO rollback — the env write stands as an inert, re-runnable orphan and the op raises
     loudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value
-    is a loud 400 naming the key (C9c); a generated key never shadows a registered settings
+    is a loud 400 naming the key; a generated key never shadows a registered settings
     ``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response
     is the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling
     ``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary
@@ -385,7 +379,7 @@ async def set_mcp_secret_env(
     service = ConfigService.from_app()
 
     async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
-        # Runs INSIDE the ConfigService C9d env-write lock, against the stored env read once
+        # Runs INSIDE the ConfigService env-write lock, against the stored env read once
         # under that lock — so the key resolution and the secret-marks append are read-then-
         # write against a snapshot no concurrent combined op can clobber.
         #
@@ -394,7 +388,7 @@ async def set_mcp_secret_env(
         # a ValueError the op maps to a 400 below (raised before any write).
         key_resolved = _resolve_secret_env_key(key, key_hint, value, stored)
 
-        # Mark the new key secret (C9d): APPEND to the current marks read from the STORED env —
+        # Mark the new key secret: APPEND to the current marks read from the STORED env —
         # never the settings cache, which is stale until a reload and would clobber a mark a
         # prior op just added. Read→append→fold into the same write_env merge, order-stable.
         existing_marks = [m.strip() for m in stored.get(_SECRET_MARKS_VAR, "").split(",") if m.strip()]
