@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-slack"
-version = "0.7.0"
+version = "0.8.0"
 description = "Slack channel plugin for the TAI ecosystem — delivers ask_user questions to a Slack channel and bridges threaded replies back to the interactions callback door."
 readme = "README.md"
 requires-python = ">=3.13"

@@ -25,7 +25,9 @@ provides:
   - kind: tool
     name: list_twilio_numbers
     module: tai42_tools_twilio.tools.list_twilio_numbers
-    description: List a Twilio account's incoming phone numbers with their inbound-message webhook.
+    description: >-
+      List a Twilio account's incoming phone numbers with their inbound-message
+      webhook.
     tags:
       - twilio
       - provisioning

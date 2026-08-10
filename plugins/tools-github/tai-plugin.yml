@@ -27,14 +27,18 @@ provides:
   - kind: tool
     name: create_github_webhook
     module: tai42_tools_github.tools.create_github_webhook
-    description: Create a repository webhook and return its id, url, events, and active flag.
+    description: >-
+      Create a repository webhook and return its id, url, events, and active
+      flag.
     tags:
       - github
       - provisioning
   - kind: tool
     name: list_github_webhooks
     module: tai42_tools_github.tools.list_github_webhooks
-    description: List a repository's webhooks, following Link-header pagination to exhaustion.
+    description: >-
+      List a repository's webhooks, following Link-header pagination to
+      exhaustion.
     tags:
       - github
       - provisioning
