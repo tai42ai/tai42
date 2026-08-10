@@ -32,6 +32,19 @@ def strip_ansi(text: str) -> str:
     return _ANSI_CSI.sub("", text)
 
 
+# Box-drawing glyphs rich frames an error panel with. rich picks the panel width
+# from a console whose size can be fixed before any test env is applied, so a
+# message token can wrap mid-phrase at whatever width that console detected.
+_BOX_CHARS = re.compile(r"[│┃╭╮╰╯─━┌┐└┘├┤┬┴┼|]")
+
+
+def visible(text: str) -> str:
+    """The panel's text content, de-framed and de-wrapped — ANSI and box glyphs
+    dropped, whitespace collapsed — so a substring assert reads the message
+    regardless of the width rich rendered it at."""
+    return " ".join(_BOX_CHARS.sub(" ", strip_ansi(text)).split())
+
+
 # Force a wide, plain terminal for every invoke: Typer/rich renders its error and help
 # panels through a rich Console that, off a real tty, folds a long option name mid-token at
 # whatever narrow width it detects (empty COLUMNS collapses to a handful of columns in CI),

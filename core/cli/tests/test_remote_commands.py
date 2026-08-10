@@ -12,7 +12,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import data_response, error_response, run_cli
+from tests.remote_harness import data_response, error_response, run_cli, visible
 
 
 def _parse_tool_call(request: httpx.Request) -> tuple[str, dict[str, object]]:
@@ -1324,7 +1324,7 @@ def test_config_profile_set_env_file_bad_line_no_echo(monkeypatch: pytest.Monkey
 
     result = run_cli(monkeypatch, handler, ["config", "profile", "set", "staging", "--env-file", str(env_file)])
     assert result.exit_code != 0
-    assert "line 1" in result.output
+    assert "line 1" in visible(result.output)
     assert "whsec_value" not in result.output
 
 
