@@ -1,9 +1,9 @@
 """Direct Stripe REST client and interaction-callback bridge for the Stripe payment tools.
 
-Speaks Stripe's REST API through tai42-kit's curl client (no ``stripe`` SDK): creates and lists
-Checkout Sessions, asserts a session's ``livemode`` against the configured key's mode, builds the
-whitelisted answer, and POSTs it to the interaction callback door under an exact-origin SSRF pin
-with a bounded transient retry.
+Speaks Stripe's REST API through tai42-kit's curl client (no ``stripe`` SDK): creates, expires and
+lists Checkout Sessions, creates, lists and deletes webhook endpoints, asserts a Stripe object's
+``livemode`` against the configured key's mode, builds the whitelisted answer, and POSTs it to the
+interaction callback door under an exact-origin SSRF pin with a bounded transient retry.
 
 Facts pinned here are read from Stripe's published docs (https://docs.stripe.com) and nowhere else:
 
@@ -28,7 +28,7 @@ import json
 import logging
 import random
 from typing import Any, cast
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from curl_cffi import CurlError
 from pydantic import Field, SecretStr
@@ -75,11 +75,11 @@ _rng = random.Random()
 
 
 class StripeLivemodeMismatch(Exception):
-    """A Checkout Session's ``livemode`` disagrees with the configured key's mode.
+    """A Stripe object's ``livemode`` disagrees with the configured key's mode.
 
-    Its own type because a cross-mode session is not one session's bad luck -- it means the
-    process holds the wrong-mode key -- so a batch caller collects it into ``failed`` and raises
-    rather than treating it as a per-session verdict.
+    Its own type because a cross-mode object is not one object's bad luck -- it means the process
+    holds the wrong-mode key -- so a batch caller collects it into ``failed`` and raises rather than
+    treating it as a per-object verdict.
     """
 
 
@@ -155,17 +155,19 @@ def _expected_livemode() -> bool:
     )
 
 
-def _assert_livemode(session: dict[str, Any]) -> None:
-    """Raise ``StripeLivemodeMismatch`` unless the session's ``livemode`` matches the key's mode.
+def _assert_livemode(obj: dict[str, Any]) -> None:
+    """Raise ``StripeLivemodeMismatch`` unless the Stripe object's ``livemode`` matches the key's mode.
 
     ``livemode`` is a required boolean: a missing or non-bool value raises loudly.
     """
     expected = _expected_livemode()
-    actual = session.get("livemode")
+    actual = obj.get("livemode")
     if not isinstance(actual, bool):
-        raise ValueError(f"session 'livemode' is missing or not a boolean: {actual!r}")
+        raise ValueError(f"Stripe object 'livemode' is missing or not a boolean: {actual!r}")
     if actual != expected:
-        raise StripeLivemodeMismatch(f"session livemode is {actual} but the configured key expects livemode {expected}")
+        raise StripeLivemodeMismatch(
+            f"Stripe object livemode is {actual} but the configured key expects livemode {expected}"
+        )
 
 
 async def _http_request(
@@ -242,6 +244,27 @@ async def create_checkout_session(
     return json.loads(text)
 
 
+async def expire_checkout_session(session_id: str) -> dict[str, Any]:
+    """POST ``/v1/checkout/sessions/{session_id}/expire`` and return the response JSON whole.
+
+    Stripe expires only a session whose ``status`` is ``open``; an already-completed or
+    already-expired session is a Stripe 400 that RAISES with Stripe's status and message like any
+    other non-2xx -- never caught, never remapped to success. No request-header content is ever
+    echoed into the raised text.
+    """
+    headers = {
+        "Authorization": f"Bearer {_secret_key()}",
+        "Stripe-Version": STRIPE_API_VERSION,
+    }
+    # ``session_id`` is caller input; percent-encode the whole segment (``safe=""`` encodes ``/ ? #``)
+    # so it cannot escape into a different API path.
+    url = f"{stripe_settings().api_base}/v1/checkout/sessions/{quote(session_id, safe='')}/expire"
+    status, _resp_headers, text = await _http_request("POST", url, headers=headers)
+    if not 200 <= status < 300:
+        raise ValueError(f"Stripe checkout session expire failed: HTTP {status} {text}")
+    return json.loads(text)
+
+
 async def list_checkout_sessions(created_gte: int) -> list[dict[str, Any]]:
     """GET all completed Checkout Sessions created at or after ``created_gte`` (unix seconds),
     following Stripe's ``starting_after`` cursor.
@@ -282,6 +305,85 @@ async def list_checkout_sessions(created_gte: int) -> list[dict[str, Any]]:
             break
         starting_after = page[-1]["id"]
     return sessions
+
+
+async def create_webhook_endpoint(*, url: str, enabled_events: list[str]) -> dict[str, Any]:
+    """POST ``/v1/webhook_endpoints`` with the target ``url`` and ``enabled_events`` and return the
+    response JSON whole. A non-2xx raises loudly with Stripe's status and message (never a silent
+    default), and no request-header content is ever echoed into the raised text.
+
+    The response carries the endpoint's signing ``secret`` -- Stripe reveals it ONLY on this create
+    call and never again. This helper returns it inside the JSON and writes it nowhere.
+    """
+    pairs: list[tuple[str, str]] = [("url", url)]
+    for event in enabled_events:
+        pairs.append(("enabled_events[]", event))
+    headers = {
+        "Authorization": f"Bearer {_secret_key()}",
+        "Stripe-Version": STRIPE_API_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    endpoint_url = f"{stripe_settings().api_base}/v1/webhook_endpoints"
+    status, _resp_headers, text = await _http_request("POST", endpoint_url, headers=headers, data=urlencode(pairs))
+    if not 200 <= status < 300:
+        raise ValueError(f"Stripe webhook endpoint create failed: HTTP {status} {text}")
+    return json.loads(text)
+
+
+async def list_webhook_endpoints() -> list[dict[str, Any]]:
+    """GET all of the account's webhook endpoints, following Stripe's ``starting_after`` cursor.
+
+    Stripe never returns a signing ``secret`` on this call -- it is create-only. The loop terminates
+    on ``has_more == false`` and on an empty page, and RAISES at a hard ceiling of
+    ``_LIST_PAGE_CEILING`` pages -- naming the ceiling -- rather than truncating the listing silently.
+    """
+    url = f"{stripe_settings().api_base}/v1/webhook_endpoints"
+    headers = {
+        "Authorization": f"Bearer {_secret_key()}",
+        "Stripe-Version": STRIPE_API_VERSION,
+    }
+    endpoints: list[dict[str, Any]] = []
+    starting_after: str | None = None
+    pages = 0
+    while True:
+        if pages >= _LIST_PAGE_CEILING:
+            raise ValueError(
+                f"Stripe webhook endpoint list exceeded its {_LIST_PAGE_CEILING}-page ceiling "
+                f"({_LIST_PAGE_CEILING * _LIST_LIMIT} endpoints)"
+            )
+        params = {"limit": str(_LIST_LIMIT)}
+        if starting_after is not None:
+            params["starting_after"] = starting_after
+        status, _resp_headers, text = await _http_request("GET", url, headers=headers, params=params)
+        if not 200 <= status < 300:
+            raise ValueError(f"Stripe webhook endpoint list failed: HTTP {status} {text}")
+        payload = json.loads(text)
+        pages += 1
+        page = payload.get("data") or []
+        if not page:
+            break
+        endpoints.extend(page)
+        if not payload.get("has_more"):
+            break
+        starting_after = page[-1]["id"]
+    return endpoints
+
+
+async def delete_webhook_endpoint(endpoint_id: str) -> dict[str, Any]:
+    """DELETE ``/v1/webhook_endpoints/{endpoint_id}`` and return Stripe's deletion stub whole. A
+    non-2xx raises loudly with Stripe's status and message; no request-header content is echoed.
+    """
+    headers = {
+        "Authorization": f"Bearer {_secret_key()}",
+        "Stripe-Version": STRIPE_API_VERSION,
+    }
+    # ``endpoint_id`` is caller input; percent-encode the whole segment (``safe=""`` encodes ``/ ? #``)
+    # so it cannot escape into a different API path.
+    url = f"{stripe_settings().api_base}/v1/webhook_endpoints/{quote(endpoint_id, safe='')}"
+    status, _resp_headers, text = await _http_request("DELETE", url, headers=headers)
+    if not 200 <= status < 300:
+        raise ValueError(f"Stripe webhook endpoint delete failed: HTTP {status} {text}")
+    return json.loads(text)
 
 
 def build_answer_payload(session: dict[str, Any]) -> dict[str, Any]:

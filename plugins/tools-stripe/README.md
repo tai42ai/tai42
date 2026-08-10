@@ -2,10 +2,11 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Stripe payment tools for the TAI ecosystem — manifest-loaded Checkout Session
-tools that mint a hosted payment link, answer a paid ask from a Stripe webhook,
-reconcile payments the webhook path lost, and mint a flexible-amount
-non-blocking payment link.
+Stripe payment tools for the TAI ecosystem — manifest-loaded tools that mint a
+hosted payment link, answer a paid ask from a Stripe webhook, reconcile payments
+the webhook path lost, mint a flexible-amount non-blocking payment link, expire
+an issued checkout session early, and provision Stripe webhook endpoints (create,
+list, delete).
 
 All Stripe traffic is direct REST through tai42-kit's curl client (no `stripe`
 SDK); the `Stripe-Version` header is pinned in code. The package registers its
@@ -49,6 +50,10 @@ uv add --editable ../tai42/plugins/tools-stripe
 | `confirm_stripe_payment` | Webhook bridge: answers a paid checkout ask from a projected Stripe event. Not a user/agent tool — it holds the bridge secret. |
 | `reconcile_stripe_payments` | Recovery layer: re-answers paid sessions the webhook path lost, re-derived from Stripe's own session list. Not a user/agent tool. |
 | `create_stripe_payment_link` | Flexible-amount, non-blocking: mints a hosted payment link with no callback and returns its URL and session id. Deployment-fenced to deterministic flow callers. |
+| `expire_stripe_checkout` | Expires an `open` Checkout Session early and returns its id and post-expire status; a non-open (completed/expired) session raises Stripe's 400. |
+| `create_stripe_webhook_endpoint` | Provisions a Stripe webhook endpoint and returns its id and one-time signing secret (returned to the caller, never persisted here). |
+| `list_stripe_webhook_endpoints` | Lists the account's webhook endpoints (id, url, status, events); Stripe never returns signing secrets post-creation. |
+| `delete_stripe_webhook_endpoint` | Deletes a webhook endpoint by id and returns Stripe's deletion confirmation. |
 
 ## The payment ask (checkout / confirm / reconcile)
 
@@ -97,13 +102,13 @@ the pin. Bake all six as fixed constants a caller can neither supply nor overrid
 
 ```json
 {
-  "name": "buy_pro_licence",
+  "name": "buy_sample_item",
   "base_tool": "create_stripe_checkout_ask_external",
-  "description": "Ask the customer to pay for a Pro licence.",
+  "description": "Ask the payer to pay for a sample item.",
   "fixed_kwargs": {
     "amount": 50000,
     "currency": "usd",
-    "product_name": "Pro licence",
+    "product_name": "Sample item",
     "success_url": "https://acme.example/thanks",
     "cancel_url": "https://acme.example/cancelled",
     "answer_schema": {
@@ -159,16 +164,60 @@ payment URL and session id and does not wait for or answer anything:
 ```
 
 It takes `amount` (minor units, ≥ 1), `currency` (3-letter lowercase), `product_name`,
-`success_url`, `cancel_url`, and optional `wa_id` / `offer_uuid`. The session is stamped with
-`tai_amount` and `tai_currency`, plus `tai_wa_id` / `tai_offer_uuid` when supplied. The created
-session's `livemode` is asserted against the configured key's mode. Its `Idempotency-Key` is a
-canonical hash of every argument, so two calls with identical arguments return the **same** session
-— distinct payments must differ in at least one argument (`wa_id` or `offer_uuid` are the natural
-discriminators).
+`success_url`, `cancel_url`, and an optional `metadata` dict of caller key/value pairs. The session
+is stamped with `tai_amount` and `tai_currency`, plus every caller `metadata` entry verbatim
+alongside them. Caller values must be strings, no key may be empty, and no key may start with
+`tai_` (reserved for the tool's own stamps). The created session's `livemode` is asserted against
+the configured key's mode. Its `Idempotency-Key` is a canonical hash of every argument (with the
+`metadata` dict sorted), so two calls with identical arguments return the **same** session —
+distinct payments must differ in at least one argument, and a distinct `metadata` entry (e.g.
+`external_ref` or `channel_user`) is the natural discriminator.
 
 **Exposure.** This tool is **deployment-fenced to deterministic flow callers only** — its
 money-facing arguments are all caller-supplied, so it must never be exposed on any agent or user
 toolset.
+
+## Expiring a checkout session (`expire_stripe_checkout`)
+
+`expire_stripe_checkout` ends an issued Checkout Session before Stripe's ~24h default timeout,
+through the same client seam and `Stripe-Version` pin. It takes a single `session_id` (required,
+non-empty) and returns the session id and its post-expire status:
+
+```json
+{ "session_id": "cs_...", "status": "expired" }
+```
+
+Stripe expires only a session whose `status` is `open`; a completed or already-expired session is
+a Stripe 400 that propagates unchanged — it is never remapped to success. The returned session's
+`livemode` is asserted against the configured key's mode and a mismatch raises.
+
+## Provisioning webhook endpoints (create / list / delete)
+
+Three tools manage the account's Stripe webhook endpoints through the same client seam and
+`Stripe-Version` pin.
+
+`create_stripe_webhook_endpoint` takes an `https` `url` and a non-empty `enabled_events` list and
+returns the endpoint and its **one-time signing secret**:
+
+```json
+{ "endpoint_id": "we_...", "secret": "whsec_...", "url": "https://…", "enabled_events": ["checkout.session.completed"], "status": "enabled" }
+```
+
+**The signing secret is revealed by Stripe only at creation.** This tool RETURNS it and writes it
+nowhere — no config, no env, no file. Persisting it (through the platform's config API) is the
+caller's job; a lost secret cannot be re-fetched. The `url` is where Stripe delivers events *to*
+us, so it is validated as an `https` URL with a host and is **not** run through the outbound
+callback SSRF pin (that pin guards URLs this process dials; this one is dialed by Stripe). The
+created endpoint's `livemode` is asserted against the key's mode.
+
+`list_stripe_webhook_endpoints` returns `{ "endpoints": [{ "endpoint_id", "url", "status",
+"enabled_events" }] }` — Stripe never returns a signing secret post-creation.
+
+`delete_stripe_webhook_endpoint` deletes an endpoint by id and returns `{ "endpoint_id", "deleted" }`.
+
+**Rotating a signing secret.** Stripe has **no** rotate-secret endpoint. Rotation is: create a new
+endpoint, swap the stored secret to the new one, then delete the old endpoint — these three tools
+together enable it.
 
 ## Configuration
 

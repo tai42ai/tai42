@@ -10,6 +10,10 @@ from tai42_tools_stripe.tools import (  # noqa: F401
     confirm_stripe_payment,
     create_stripe_checkout,
     create_stripe_payment_link,
+    create_stripe_webhook_endpoint,
+    delete_stripe_webhook_endpoint,
+    expire_stripe_checkout,
+    list_stripe_webhook_endpoints,
     reconcile_stripe_payments,
 )
 
@@ -17,6 +21,10 @@ _STRIPE_TOOLS = [
     "confirm_stripe_payment",
     "create_stripe_checkout",
     "create_stripe_payment_link",
+    "create_stripe_webhook_endpoint",
+    "delete_stripe_webhook_endpoint",
+    "expire_stripe_checkout",
+    "list_stripe_webhook_endpoints",
     "reconcile_stripe_payments",
 ]
 

@@ -1,7 +1,6 @@
-"""Tests for the ``create_stripe_payment_link`` tool: the form-encoded create body, the metadata
-stamps (including the optional ``tai_wa_id`` / ``tai_offer_uuid``), the argument-derived
-Idempotency-Key, the livemode assert on the created session, argument validation, the
-link/session_id extraction, and the missing/empty secret."""
+"""Tests for the ``create_stripe_payment_link`` tool: the form-encoded create body, the caller
+metadata stamps, the argument-derived Idempotency-Key, the livemode assert on the created session,
+argument and metadata validation, the link/session_id extraction, and the missing/empty secret."""
 
 from __future__ import annotations
 
@@ -33,7 +32,7 @@ def _call(**overrides: Any) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "amount": 5000,
         "currency": "usd",
-        "product_name": "Pro",
+        "product_name": "Sample item",
         "success_url": "https://acme.example/thanks",
         "cancel_url": "https://acme.example/cancelled",
     }
@@ -57,7 +56,7 @@ def test_happy_path_returns_link_and_session_id(stripe_env: Callable[..., None],
     assert body["line_items[0][quantity]"] == ["1"]
     assert body["line_items[0][price_data][unit_amount]"] == ["5000"]
     assert body["line_items[0][price_data][currency]"] == ["usd"]
-    assert body["line_items[0][price_data][product_data][name]"] == ["Pro"]
+    assert body["line_items[0][price_data][product_data][name]"] == ["Sample item"]
     assert body["success_url"] == ["https://acme.example/thanks"]
     assert body["cancel_url"] == ["https://acme.example/cancelled"]
     assert body["metadata[tai_amount]"] == ["5000"]
@@ -71,25 +70,30 @@ def test_happy_path_returns_link_and_session_id(stripe_env: Callable[..., None],
 
 
 @pytest.mark.usefixtures("curl_app")
-def test_optional_ids_are_stamped_when_supplied(stripe_env: Callable[..., None], stub_server: Any) -> None:
+def test_caller_metadata_is_stamped_verbatim(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
     stub_server.set_responder(_responder())
 
-    _call(wa_id="wa-42", offer_uuid="offer-9")
+    _call(metadata={"external_ref": "ref-42", "channel_user": "user-9"})
     body = parse_qs(stub_server.requests[0]["body"])
-    assert body["metadata[tai_wa_id]"] == ["wa-42"]
-    assert body["metadata[tai_offer_uuid]"] == ["offer-9"]
+    assert body["metadata[external_ref]"] == ["ref-42"]
+    assert body["metadata[channel_user]"] == ["user-9"]
+    # The tool's own stamps ride alongside the caller keys.
+    assert body["metadata[tai_amount]"] == ["5000"]
+    assert body["metadata[tai_currency]"] == ["usd"]
 
 
 @pytest.mark.usefixtures("curl_app")
-def test_optional_ids_absent_when_not_supplied(stripe_env: Callable[..., None], stub_server: Any) -> None:
+def test_caller_metadata_absent_when_not_supplied(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
     stub_server.set_responder(_responder())
 
     _call()
     body = parse_qs(stub_server.requests[0]["body"])
-    assert "metadata[tai_wa_id]" not in body
-    assert "metadata[tai_offer_uuid]" not in body
+    assert body["metadata[tai_amount]"] == ["5000"]
+    assert body["metadata[tai_currency]"] == ["usd"]
+    # Only the tool's own stamps are present.
+    assert [k for k in body if k.startswith("metadata[")] == ["metadata[tai_amount]", "metadata[tai_currency]"]
 
 
 @pytest.mark.usefixtures("curl_app")
@@ -100,12 +104,25 @@ def test_idempotency_key_is_argument_derived(stripe_env: Callable[..., None], st
     _call()
     _call()  # identical arguments -> same session
     _call(amount=6000)  # a different argument -> a different session
-    _call(offer_uuid="offer-x")  # a discriminator -> a different session
+    _call(metadata={"external_ref": "ref-x"})  # a metadata discriminator -> a different session
 
     keys = [r["headers"]["idempotency-key"] for r in stub_server.requests]
     assert keys[0] == keys[1]
     assert keys[0] != keys[2]
     assert keys[0] != keys[3]
+
+
+@pytest.mark.usefixtures("curl_app")
+def test_same_metadata_yields_same_key(stripe_env: Callable[..., None], stub_server: Any) -> None:
+    stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
+    stub_server.set_responder(_responder())
+
+    _call(metadata={"external_ref": "ref-1", "channel_user": "user-1"})
+    # Key order differs but the sorted dict makes the basis identical.
+    _call(metadata={"channel_user": "user-1", "external_ref": "ref-1"})
+
+    keys = [r["headers"]["idempotency-key"] for r in stub_server.requests]
+    assert keys[0] == keys[1]
 
 
 @pytest.mark.usefixtures("curl_app")
@@ -127,6 +144,10 @@ def test_livemode_mismatch_on_created_session_raises(stripe_env: Callable[..., N
         ({"product_name": ""}, "product_name"),
         ({"success_url": ""}, "success_url"),
         ({"cancel_url": ""}, "cancel_url"),
+        ({"metadata": {"": "v"}}, "non-empty"),
+        ({"metadata": {"tai_amount": "9"}}, "reserved"),
+        ({"metadata": {"tai_custom": "x"}}, "reserved"),
+        ({"metadata": {"external_ref": 7}}, "must be a string"),
     ],
 )
 def test_argument_validation_raises(kwargs: dict[str, Any], match: str) -> None:

@@ -93,6 +93,7 @@ class _StubHandler(http.server.BaseHTTPRequestHandler):
 
     do_GET = _handle
     do_POST = _handle
+    do_DELETE = _handle
 
     def log_message(self, *args: Any) -> None:
         pass

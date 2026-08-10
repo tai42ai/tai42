@@ -26,7 +26,7 @@ def _call(callback_url: str = "https://acme.example/cb") -> str:
             callback_url=callback_url,
             amount=5000,
             currency="usd",
-            product_name="Pro",
+            product_name="Sample item",
             success_url="https://acme.example/thanks",
         )
     )
@@ -48,7 +48,7 @@ def test_happy_path_posts_form_encoded_body(stripe_env: Callable[..., None], stu
     assert body["line_items[0][quantity]"] == ["1"]
     assert body["line_items[0][price_data][unit_amount]"] == ["5000"]
     assert body["line_items[0][price_data][currency]"] == ["usd"]
-    assert body["line_items[0][price_data][product_data][name]"] == ["Pro"]
+    assert body["line_items[0][price_data][product_data][name]"] == ["Sample item"]
     assert body["success_url"] == ["https://acme.example/thanks"]
     assert body["metadata[tai_callback_url]"] == ["https://acme.example/cb"]
     assert body["metadata[tai_amount]"] == ["5000"]
@@ -70,7 +70,7 @@ def test_cancel_url_is_forwarded_when_supplied(stripe_env: Callable[..., None], 
             callback_url="https://acme.example/cb",
             amount=5000,
             currency="usd",
-            product_name="Pro",
+            product_name="Sample item",
             success_url="https://acme.example/thanks",
             cancel_url="https://acme.example/cancelled",
         )
@@ -109,7 +109,7 @@ def test_argument_validation_raises(kwargs: dict[str, Any], match: str) -> None:
         "callback_url": "https://acme.example/cb",
         "amount": 5000,
         "currency": "usd",
-        "product_name": "Pro",
+        "product_name": "Sample item",
         "success_url": "https://acme.example/thanks",
     }
     base.update(kwargs)

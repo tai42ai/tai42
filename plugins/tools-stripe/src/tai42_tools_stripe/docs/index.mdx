@@ -1,10 +1,12 @@
 ---
 title: "Stripe payment tools"
-description: "The four Stripe checkout and reconciliation tools and the STRIPE settings that configure them."
+description: "The eight Stripe checkout, reconciliation and webhook-endpoint tools and the STRIPE settings that configure them."
 ---
 
-Four tools that take a payment through Stripe Checkout and reconcile the result back
-to a blocked interaction. The full deployment — the money-pinning preset, the manifest
+Eight tools: four that take a payment through Stripe Checkout and reconcile the result
+back to a blocked interaction, one that expires an open checkout session early, and three
+that provision the account's webhook endpoints.
+The full deployment — the money-pinning preset, the manifest
 wiring, the verifier binding, the reconciliation schedule, and the confused-deputy
 rules that make it safe to hand an agent — is a guide that stays central; see
 [Use interactions](/guides/use-interactions). This page is the
@@ -43,6 +45,28 @@ the `ask_external` extension to open a blocking payment ask.
 
 Creates a flexible-amount, non-blocking Stripe payment link and returns its URL and
 session id.
+
+## create_stripe_webhook_endpoint
+
+Provisions a Stripe webhook endpoint for an `https` URL and a set of event types, and returns
+its id and one-time signing secret. Stripe reveals the secret only at creation, so this tool
+returns it to the caller and persists it nowhere; storing it is the caller's job. Stripe has no
+rotate-secret endpoint — rotation is create-new, swap-config, delete-old.
+
+## delete_stripe_webhook_endpoint
+
+Deletes a Stripe webhook endpoint by id and returns Stripe's deletion confirmation.
+
+## expire_stripe_checkout
+
+Expires an `open` Checkout Session early — before Stripe's ~24h default timeout — and
+returns its id and post-expire status. A completed or already-expired session is a Stripe
+400 that propagates, never a silent success.
+
+## list_stripe_webhook_endpoints
+
+Lists the account's webhook endpoints with their id, url, status and events. Stripe never
+returns a signing secret post-creation.
 
 ## reconcile_stripe_payments
 

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import tai42_tools_stripe._internal.tools.stripe_client as stripe_client
 from tai42_tools_stripe._internal.tools.stripe_client import (
     STRIPE_API_VERSION,
     CallbackTargetRefused,
@@ -21,7 +22,10 @@ from tai42_tools_stripe._internal.tools.stripe_client import (
     _assert_livemode,
     _expected_livemode,
     create_checkout_session,
+    delete_webhook_endpoint,
+    expire_checkout_session,
     list_checkout_sessions,
+    list_webhook_endpoints,
 )
 
 # --- livemode -------------------------------------------------------------------------------
@@ -76,11 +80,11 @@ def test_assert_livemode_match_passes(stripe_env: Callable[..., None]) -> None:
     _assert_livemode({"livemode": False})
 
 
-@pytest.mark.parametrize("session", [{}, {"livemode": "true"}, {"livemode": 1}])
-def test_assert_livemode_requires_boolean(stripe_env: Callable[..., None], session: dict[str, Any]) -> None:
+@pytest.mark.parametrize("obj", [{}, {"livemode": "true"}, {"livemode": 1}])
+def test_assert_livemode_requires_boolean(stripe_env: Callable[..., None], obj: dict[str, Any]) -> None:
     stripe_env(secret_key="sk_test_abc")
     with pytest.raises(ValueError, match="livemode"):
-        _assert_livemode(session)
+        _assert_livemode(obj)
 
 
 # --- SSRF pin -------------------------------------------------------------------------------
@@ -148,7 +152,7 @@ def test_stripe_version_header_on_create_and_list(stripe_env: Callable[..., None
         create_checkout_session(
             amount=5000,
             currency="usd",
-            product_name="Pro",
+            product_name="Sample item",
             success_url="https://acme.example/thanks",
             cancel_url=None,
             metadata={"tai_callback_url": "https://acme.example/cb"},
@@ -176,7 +180,7 @@ def test_create_does_not_follow_redirect_and_hides_key(
             create_checkout_session(
                 amount=5000,
                 currency="usd",
-                product_name="Pro",
+                product_name="Sample item",
                 success_url="https://acme.example/thanks",
                 cancel_url=None,
                 metadata={"tai_callback_url": "https://acme.example/cb"},
@@ -206,7 +210,7 @@ def test_create_raises_on_stripe_error_without_leaking_headers(
             create_checkout_session(
                 amount=5000,
                 currency="usd",
-                product_name="Pro",
+                product_name="Sample item",
                 success_url="https://acme.example/thanks",
                 cancel_url=None,
                 metadata={"tai_callback_url": "https://acme.example/cb"},
@@ -261,3 +265,68 @@ def test_list_paginates_with_starting_after(stripe_env: Callable[..., None], stu
     for request in stub_server.requests:
         assert request["query"]["status"] == ["complete"]
         assert request["query"]["limit"] == ["100"]
+
+
+# --- expire percent-encodes the path segment ----------------------------------------------
+
+
+def test_expire_percent_encodes_the_session_id_path_segment(
+    stripe_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stripe_env(secret_key="sk_test_abc", api_base="https://api.stripe.test")
+    captured: dict[str, str] = {}
+
+    async def fake_request(method: str, url: str, **_kwargs: Any) -> tuple[int, dict[str, str], str]:
+        captured["method"] = method
+        captured["url"] = url
+        return 200, {}, '{"id": "cs_x", "status": "expired", "livemode": false}'
+
+    monkeypatch.setattr(stripe_client, "_http_request", fake_request)
+    asyncio.run(expire_checkout_session("cs_x/expire?y=1"))
+    # The '/' , '?' and '#' bearing id is encoded whole, so the POST cannot escape to another path.
+    assert captured["url"] == "https://api.stripe.test/v1/checkout/sessions/cs_x%2Fexpire%3Fy%3D1/expire"
+
+
+# --- webhook-endpoint helpers -------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("curl_app")
+def test_webhook_list_page_ceiling_raises(stripe_env: Callable[..., None], stub_server: Any) -> None:
+    stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
+    counter = {"n": 0}
+
+    def responder(_request: dict[str, Any]) -> tuple[int, dict[str, str], str]:
+        counter["n"] += 1
+        page = json.dumps({"object": "list", "data": [{"id": f"we_{counter['n']}"}], "has_more": True})
+        return 200, {"Content-Type": "application/json"}, page
+
+    stub_server.set_responder(responder)
+    with pytest.raises(ValueError, match="50-page ceiling"):
+        asyncio.run(list_webhook_endpoints())
+    assert len([r for r in stub_server.requests if r["method"] == "GET"]) == 50
+
+
+@pytest.mark.usefixtures("curl_app")
+def test_webhook_list_raises_on_non_2xx(stripe_env: Callable[..., None], stub_server: Any) -> None:
+    stripe_env(secret_key="sk_test_abc", api_base=stub_server.base_url)
+    stub_server.set_responder(lambda _r: (500, {}, "stripe is down"))
+    with pytest.raises(ValueError, match="webhook endpoint list failed"):
+        asyncio.run(list_webhook_endpoints())
+
+
+def test_delete_percent_encodes_the_endpoint_id_path_segment(
+    stripe_env: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stripe_env(secret_key="sk_test_abc", api_base="https://api.stripe.test")
+    captured: dict[str, str] = {}
+
+    async def fake_request(method: str, url: str, **_kwargs: Any) -> tuple[int, dict[str, str], str]:
+        captured["method"] = method
+        captured["url"] = url
+        return 200, {}, '{"id": "we_x", "deleted": true}'
+
+    monkeypatch.setattr(stripe_client, "_http_request", fake_request)
+    asyncio.run(delete_webhook_endpoint("we_x/../secrets?y=1"))
+    assert captured["method"] == "DELETE"
+    # The id is encoded whole, so the DELETE cannot escape to another API path.
+    assert captured["url"] == "https://api.stripe.test/v1/webhook_endpoints/we_x%2F..%2Fsecrets%3Fy%3D1"

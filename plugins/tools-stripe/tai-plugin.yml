@@ -4,10 +4,11 @@ name: tools-stripe
 package: tai42-tools-stripe
 version: 0.4.0
 description: >-
-  Stripe payment tools for the TAI ecosystem: manifest-loaded Checkout Session
-  tools for the external-ask checkout link, the webhook-bridge confirm, the
-  reconciliation recovery layer, and a flexible-amount non-blocking payment
-  link.
+  Stripe payment tools for the TAI ecosystem: manifest-loaded tools for the
+  external-ask checkout link, the webhook-bridge confirm, the reconciliation
+  recovery layer, a flexible-amount non-blocking payment link, an early expire
+  of an issued checkout session, and webhook-endpoint provisioning (create,
+  list, delete).
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-stripe
@@ -44,6 +45,36 @@ provides:
     description: >-
       Create a flexible-amount non-blocking Stripe payment link and return its
       URL and session id.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: create_stripe_webhook_endpoint
+    module: tai42_tools_stripe.tools.create_stripe_webhook_endpoint
+    description: >-
+      Create a Stripe webhook endpoint and return its id and one-time signing
+      secret.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: delete_stripe_webhook_endpoint
+    module: tai42_tools_stripe.tools.delete_stripe_webhook_endpoint
+    description: Delete a Stripe webhook endpoint by id.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: expire_stripe_checkout
+    module: tai42_tools_stripe.tools.expire_stripe_checkout
+    description: Expire an open Stripe Checkout Session early and return its id and status.
+    tags:
+      - stripe
+      - payments
+  - kind: tool
+    name: list_stripe_webhook_endpoints
+    module: tai42_tools_stripe.tools.list_stripe_webhook_endpoints
+    description: List the account's Stripe webhook endpoints (no signing secrets).
     tags:
       - stripe
       - payments
