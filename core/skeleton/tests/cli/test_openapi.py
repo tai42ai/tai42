@@ -644,26 +644,28 @@ def test_conversation_route_create_omits_the_server_minted_fields(spec: dict) ->
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/conversations/{route_name}/messages/{message_id}",
         "/api/conversations/messages/failed",
         "/api/conversations/{route_name}/threads",
     ],
 )
-def test_conversation_read_doors_document_the_caller_scope_refusal(
-    spec: dict, api_routes: list[RouteMetadata], path: str
-) -> None:
-    # Every read door answers 403 to an authenticated-but-unauthorized reader rather
-    # than leaking a record, and documents that status.
+def test_admin_listing_doors_document_the_403_refusal(spec: dict, api_routes: list[RouteMetadata], path: str) -> None:
+    # The admin-only listing doors are whole-door admin gates: a non-admin caller is
+    # refused 403 before any record is read, and each documents that status.
     (meta,) = [m for m in api_routes if m.path == path and "GET" in m.methods]
     assert 403 in meta.error_statuses
     assert "403" in spec["paths"][path]["get"]["responses"]
 
 
-def test_the_transcript_door_documents_no_403(spec: dict, api_routes: list[RouteMetadata]) -> None:
-    # The transcript is the one read door that must not tell "yours, refused" from "no such
-    # thread": a 403 on a guessable thread id would answer whether a given address has ever
-    # talked to a given route. Every refusal it makes is the uniform 404.
-    path = "/api/conversations/{route_name}/transcript"
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/conversations/{route_name}/transcript",
+        "/api/conversations/{route_name}/messages/{message_id}",
+    ],
+)
+def test_grant_gated_read_doors_document_no_403(spec: dict, api_routes: list[RouteMetadata], path: str) -> None:
+    # The grant-gated read doors never answer an authorization verdict: every refusal is
+    # a uniform 404, so a guessable id cannot tell "yours, refused" from "no such record".
     (meta,) = [m for m in api_routes if m.path == path and "GET" in m.methods]
     assert 403 not in meta.error_statuses
     assert 404 in meta.error_statuses
