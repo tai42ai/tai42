@@ -73,6 +73,17 @@ async def _post(name: str, combos: list[list[str]]):
     )
 
 
+async def _post_combos(name: str, *, add: list[list[Any]] | None = None, remove: list[list[Any]] | None = None):
+    return await router.modify_tool_extension_combos(
+        _request(
+            "POST",
+            f"/api/tools/{name}/extensions/combos",
+            name=name,
+            body={"add": add or [], "remove": remove or []},
+        )
+    )
+
+
 async def _tools() -> set[str]:
     return set(await instance.app.tools.get_tools())
 
@@ -641,6 +652,173 @@ def test_post_apply_local_reload_failure_after_manifest_write_propagates(cfg, mo
             # The write already landed before the reload/broadcast — the new combos
             # are persisted, so re-running the apply is the recovery.
             assert cfg["manifest"]["tools"][0]["extensions"] == {"shout": [["marka"]]}
+
+    asyncio.run(run())
+
+
+# -- POST combos: granular add / remove --------------------------------------
+
+
+def test_post_combos_add_appends_and_binds(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            resp = await _post_combos("shout", add=[["markb"]])
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["combos"] == [["marka"], ["markb"]]
+            assert {"shout_marka", "shout_markb"} <= await _tools()
+            assert cfg["manifest"]["tools"][0]["extensions"] == {"shout": [["marka"], ["markb"]]}
+
+    asyncio.run(run())
+
+
+def test_post_combos_remove_drops_and_tears_down(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"], ["markb"]]})):
+            resp = await _post_combos("shout", remove=[["markb"]])
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["combos"] == [["marka"]]
+            tools = await _tools()
+            assert "shout_marka" in tools
+            assert "shout_markb" not in tools
+
+    asyncio.run(run())
+
+
+def test_post_combos_add_and_remove_in_one_call(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            resp = await _post_combos("shout", add=[["markb"]], remove=[["marka"]])
+            assert resp.status_code == 200, _err(resp)
+            # New list = current minus removed, additions appended in order.
+            assert _data(resp)["combos"] == [["markb"]]
+
+    asyncio.run(run())
+
+
+def test_post_combos_both_empty_400(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout")
+            assert resp.status_code == 400
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_duplicate_add_400_nothing_written(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout", add=[["marka"]])
+            assert resp.status_code == 400
+            assert "already attached" in _err(resp)
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_absent_remove_404_nothing_written(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout", remove=[["markb"]])
+            assert resp.status_code == 404
+            assert "not attached" in _err(resp)
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_unregistered_tool_404(cfg):
+    async def run():
+        async with _running(cfg, _single()):
+            resp = await _post_combos("nope", add=[["marka"]])
+            assert resp.status_code == 404
+            assert "not a registered tool" in _err(resp)
+
+    asyncio.run(run())
+
+
+def test_post_combos_registered_but_unowned_tool_400(cfg):
+    async def run():
+        async with _running(cfg, _single()):
+            # A preset tool is registered (passes the registration check) but is
+            # provided by NO manifest config — owner resolution refuses it.
+            await instance.app.preset_manager.register("pre", "shout", {}, [], "d")
+            assert "pre" in await _tools()
+            resp = await _post_combos("pre", add=[["marka"]])
+            assert resp.status_code == 400
+            assert "not currently provided by any config" in _err(resp)
+
+    asyncio.run(run())
+
+
+def test_post_combos_add_unknown_extension_400_nothing_written(cfg):
+    async def run():
+        async with _running(cfg, _single({"shout": [["marka"]]})):
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout", add=[["ghost"]])
+            assert resp.status_code == 400
+            assert "unknown extension" in _err(resp)
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_consolidation_guard_409_nothing_written(cfg):
+    async def run():
+        async with _running(cfg, _two({"shout": [["marka"]]}, {"shout": [["markb"]]})):
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout", add=[["argswrap"]])
+            assert resp.status_code == 409
+            assert "consolidate" in _err(resp)
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_providing_config_vanished_from_manifest_400(cfg, monkeypatch):
+    async def run():
+        async with _running(cfg, _single()):
+            # The live manifest resolves an owner, but the persisted manifest read for
+            # the write no longer carries that config — the merge write refuses (400)
+            # rather than writing a config that is gone.
+            monkeypatch.setattr(instance.app.config.config_manager, "read_manifest", lambda: {"tools": []})
+            resp = await _post_combos("shout", add=[["marka"]])
+            assert resp.status_code == 400
+            assert "not found in the manifest" in _err(resp)
+
+    asyncio.run(run())
+
+
+def test_post_combos_invalid_manifest_after_edit_400(cfg, monkeypatch):
+    async def run():
+        async with _running(cfg, _single()):
+
+            def boom(_: object) -> object:
+                raise ValueError("bad manifest")
+
+            monkeypatch.setattr(router.Manifest, "model_validate", boom)
+            before = deepcopy(cfg["manifest"])
+            resp = await _post_combos("shout", add=[["marka"]])
+            assert resp.status_code == 400
+            assert "invalid extensions" in _err(resp)
+            assert cfg["manifest"] == before
+
+    asyncio.run(run())
+
+
+def test_post_combos_dict_element_membership_matches_stored_form(cfg):
+    async def run():
+        combo = [{"name": "marka", "config": {"schema": {"type": "object"}}}]
+        async with _running(cfg, _single({"shout": [combo]})):
+            # Removing the config-bearing combo matches by the stored (contract)
+            # form, and re-removing it 404s.
+            resp = await _post_combos("shout", remove=[combo])
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["combos"] == []
+            assert (await _post_combos("shout", remove=[combo])).status_code == 404
 
     asyncio.run(run())
 

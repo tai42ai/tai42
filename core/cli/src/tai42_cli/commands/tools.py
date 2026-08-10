@@ -198,6 +198,55 @@ def apply_extensions(
     emit_result(ctx_obj, data)
 
 
+_COMBO_CHANGE_HELP = (
+    "One extension combo as a JSON array of elements (repeatable). Each element is an "
+    'extension name (\'"chain"\') or a {"name","config"} object binding config to it '
+    '(e.g. \'[{"name":"output_schema","config":{"schema":{"type":"object"}}}]\').'
+)
+
+
+@app.command("extensions-add")
+@covers(("POST", "/api/tools/{name}/extensions/combos"))
+def extensions_add(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="Tool name.")],
+    combo: Annotated[list[str] | None, typer.Option("--combo", help=_COMBO_CHANGE_HELP)] = None,
+) -> None:
+    """Attach one or more extension combos to a tool, leaving its others in place.
+
+    Each ``--combo`` is one combo to append; repeat it to add several. Adding a
+    combo the tool already carries is refused by the server (400).
+
+    Example: ``tai tools extensions-add my_tool --combo '["chain","batch"]'``
+    """
+    ctx_obj = app_context(ctx)
+    combos = [parse_extension_combo(chain, param_hint="--combo") for chain in (combo or [])]
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": combos, "remove": []})
+    emit_result(ctx_obj, data)
+
+
+@app.command("extensions-remove")
+@covers(("POST", "/api/tools/{name}/extensions/combos"))
+def extensions_remove(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="Tool name.")],
+    combo: Annotated[list[str] | None, typer.Option("--combo", help=_COMBO_CHANGE_HELP)] = None,
+) -> None:
+    """Detach one or more extension combos from a tool, leaving its others in place.
+
+    Each ``--combo`` is one combo to drop; repeat it to remove several. Removing a
+    combo the tool does not carry is refused by the server (404).
+
+    Example: ``tai tools extensions-remove my_tool --combo '["chain","batch"]'``
+    """
+    ctx_obj = app_context(ctx)
+    combos = [parse_extension_combo(chain, param_hint="--combo") for chain in (combo or [])]
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": [], "remove": combos})
+    emit_result(ctx_obj, data)
+
+
 # -- Background tool runs (``tai tools runs ...``) ---------------------------
 
 runs_app = typer.Typer(

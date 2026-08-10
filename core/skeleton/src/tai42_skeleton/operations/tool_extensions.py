@@ -16,10 +16,11 @@ extension registry — none of which ride the emitted ``live_manifest`` dict.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from pydantic import BaseModel
-from tai42_contract.manifest import ExtensionElement
+from pydantic import BaseModel, Field
+from tai42_contract.manifest import ExtensionElement, ExtensionsConfigMixin
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
@@ -36,6 +37,14 @@ class ToolExtensionsUpdate(BaseModel):
     mapping binding author config. An empty list clears them."""
 
     combos: list[list[ExtensionElement]]
+
+
+class ToolExtensionCombosModify(BaseModel):
+    """Add and/or remove single extension combos on a tool, granular over the full
+    ``set`` write. Each combo is authored losslessly, exactly as ``combos`` above."""
+
+    add: list[list[ExtensionElement]] = Field(default_factory=list)
+    remove: list[list[ExtensionElement]] = Field(default_factory=list)
 
 
 def _live_manifest() -> Manifest:
@@ -83,6 +92,50 @@ def _other_mappers(manifest: Manifest, name: str, owner: tuple[str, str]) -> lis
         if name in cfg.extensions and not (kind == "mcp" and cfg.title == key):
             others.append(f"mcp:{cfg.title}")
     return others
+
+
+def _resolve_single_owner(manifest: Manifest, name: str) -> tuple[str, str]:
+    """The ONE config that provides ``name`` as ``(kind, key)``, or a loud reject:
+    no owner → 400, multiple owners → 400, a mapping split across configs → the 409
+    consolidation error. Shared by every door that writes a tool's ``extensions``
+    entry so the resolution stays byte-identical."""
+    owners = _owning_configs(manifest, name)
+    if not owners:
+        raise BadRequestError(f"tool {name!r} is not currently provided by any config")
+    if len(owners) > 1:
+        where = ", ".join(f"{kind}:{key}" for kind, key in owners)
+        raise BadRequestError(
+            f"tool {name!r} is provided by multiple configs ({where}); cannot determine which to edit"
+        )
+    owner = owners[0]
+    conflicting = _other_mappers(manifest, name, owner)
+    if conflicting:
+        raise ConflictError(
+            f"tool {name!r} extensions are also mapped by other config(s) ({', '.join(conflicting)}); "
+            "consolidate the mapping into the providing config first"
+        )
+    return owner
+
+
+def _owner_combos(manifest: Manifest, owner: tuple[str, str], name: str) -> list[list[ExtensionElement]]:
+    """The write target's OWN combos for ``name`` — after ``_resolve_single_owner``'s
+    gates this is the union view, and it is what the granular merge edits. The owner
+    came from these same configs, so a missing match is an invariant breach and
+    raises (``next`` with no default) rather than fabricating an empty list."""
+    kind, key = owner
+    configs = manifest.tools if kind == "tools" else manifest.mcp
+    key_field = "module" if kind == "tools" else "title"
+    cfg = next(cfg for cfg in configs if getattr(cfg, key_field) == key)
+    return [list(combo) for combo in cfg.extensions.get(name, [])]
+
+
+def _normalized_combos(name: str, combos: list[list[ExtensionElement]]) -> list[list[ExtensionElement]]:
+    """Combos in the exact stored form ``ExtensionsConfigMixin`` produces, so
+    add/remove membership compares against the PERSISTED shape (the contract
+    normalization) rather than the router edge's element reader."""
+    if not combos:
+        return []
+    return ExtensionsConfigMixin.model_validate({"extensions": {name: combos}}).extensions[name]
 
 
 def _validate_combos_against_registry(combos: list[list[ExtensionElement]]) -> None:
@@ -154,22 +207,7 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
     sibling that did not converge.
     """
     manifest = _live_manifest()
-    owners = _owning_configs(manifest, name)
-    if not owners:
-        raise BadRequestError(f"tool {name!r} is not currently provided by any config")
-    if len(owners) > 1:
-        where = ", ".join(f"{kind}:{key}" for kind, key in owners)
-        raise BadRequestError(
-            f"tool {name!r} is provided by multiple configs ({where}); cannot determine which to edit"
-        )
-    owner = owners[0]
-
-    conflicting = _other_mappers(manifest, name, owner)
-    if conflicting:
-        raise ConflictError(
-            f"tool {name!r} extensions are also mapped by other config(s) ({', '.join(conflicting)}); "
-            "consolidate the mapping into the providing config first"
-        )
+    owner = _resolve_single_owner(manifest, name)
 
     _validate_combos_against_registry(combos)
 
@@ -192,3 +230,70 @@ async def set_tool_extensions(name: str, combos: list[list[ExtensionElement]]) -
     except ValueError as exc:
         raise BadRequestError(f"invalid extensions for tool {name!r}: {exc}") from exc
     return apply_response(result)
+
+
+@operation(
+    summary="Add or remove single extension combos on a tool",
+    tags=["extensions"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, ConflictError, NotFoundError],
+    request_model=ToolExtensionCombosModify,
+)
+async def modify_tool_extension_combos(
+    name: str,
+    add: list[list[ExtensionElement]] | None = None,
+    remove: list[list[ExtensionElement]] | None = None,
+) -> dict:
+    """Granularly edit a tool's extension combos: append ``add`` and drop ``remove``
+    over the merge of its current combos, then persist through the same pipeline
+    ``set_tool_extensions`` rides.
+
+    Pinned order (each check loud, nothing persisted on a reject): the tool must be
+    REGISTERED (404, as ``get_tool_extensions``); its owning config resolves
+    (400/400/409, as ``set_tool_extensions``); membership over the OWNING config's
+    combos in their stored form — adding a present combo → 400, removing an absent
+    one → 404, each naming the combo; the MERGED list validates against the live
+    registry (400) before any write. Returns the tool's full new combos in the GET
+    door's shape.
+    """
+    add = add or []
+    remove = remove or []
+    if not add and not remove:
+        raise BadRequestError("at least one of 'add' or 'remove' must carry a combo")
+
+    tools = await instance.app.tools.get_tools()
+    if name not in tools:
+        raise NotFoundError(f"tool {name!r} is not a registered tool")
+
+    manifest = _live_manifest()
+    owner = _resolve_single_owner(manifest, name)
+
+    current = _normalized_combos(name, _owner_combos(manifest, owner, name))
+    add_combos = _normalized_combos(name, add)
+    remove_combos = _normalized_combos(name, remove)
+
+    for combo in add_combos:
+        if combo in current:
+            raise BadRequestError(f"combo {json.dumps(combo)} is already attached to tool {name!r}")
+    for combo in remove_combos:
+        if combo not in current:
+            raise NotFoundError(f"combo {json.dumps(combo)} is not attached to tool {name!r}")
+
+    merged = [combo for combo in current if combo not in remove_combos] + add_combos
+    _validate_combos_against_registry(merged)
+
+    def mutator(document: dict[str, Any]) -> None:
+        if not _apply_combos(document, owner, name, merged):
+            raise BadRequestError(f"providing config for tool {name!r} not found in the manifest")
+
+    try:
+        await ConfigService.from_app().apply_change(mutator)
+    except BackendNeedsBusError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequestError(f"invalid extensions for tool {name!r}: {exc}") from exc
+
+    reloaded = _live_manifest()
+    combos = [list(combo) for combo in reloaded.tool_extensions.get(name, [])]
+    return {"combos": combos, "available": instance.app.extensions.available_extensions()}

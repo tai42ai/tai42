@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from tai42_contract.app import tai42_app
@@ -53,6 +54,18 @@ async def test_set_tool_extensions_multiple_owners_is_bad_request(monkeypatch):
     )
     with pytest.raises(BadRequestError, match="provided by multiple configs"):
         await ops.set_tool_extensions("shout", [["marka"]])
+
+
+async def test_modify_combos_multiple_owners_is_bad_request(monkeypatch):
+    # The registration check passes, but two configs claim the tool — the shared
+    # owner-resolution refuses (400) before any membership or write, exactly as the
+    # set door does (this branch is unreachable at route level: two configs binding
+    # one name collide at boot).
+    monkeypatch.setattr(instance.app.tools, "get_tools", AsyncMock(return_value={"shout"}))
+    monkeypatch.setattr(ops, "_live_manifest", lambda: SimpleNamespace())
+    monkeypatch.setattr(ops, "_owning_configs", lambda _manifest, _name: [("tools", "a"), ("mcp", "b")])
+    with pytest.raises(BadRequestError, match="provided by multiple configs"):
+        await ops.modify_tool_extension_combos("shout", add=[["marka"]])
 
 
 class _MutateStore:
@@ -106,5 +119,37 @@ async def test_set_tool_extensions_backend_without_bus_maps_to_400(monkeypatch):
             await ops.set_tool_extensions("shout", [["marka"]])
 
         assert store.persisted == []  # rejected in validation, before any persist
+    finally:
+        reset_all_settings()
+
+
+async def test_modify_combos_backend_without_bus_maps_to_400(monkeypatch):
+    # The registration/owner/membership/registry checks pass, so the merge write
+    # reaches ConfigService; the persisted manifest registers a task backend with no
+    # bus, so the pipeline raises ``BackendNeedsBusError`` at MUTATE time. The op maps
+    # it to a loud 400 naming TAI_BUS_REDIS_URL, exactly as the set door does.
+    monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
+    reset_all_settings()
+    try:
+        monkeypatch.setattr(instance.app.tools, "get_tools", AsyncMock(return_value={"shout"}))
+        monkeypatch.setattr(ops, "_live_manifest", lambda: SimpleNamespace())
+        monkeypatch.setattr(ops, "_owning_configs", lambda _manifest, _name: [("tools", "mod")])
+        monkeypatch.setattr(ops, "_other_mappers", lambda _manifest, _name, _owner: [])
+        monkeypatch.setattr(ops, "_owner_combos", lambda _manifest, _owner, _name: [])
+        monkeypatch.setattr(ops, "_validate_combos_against_registry", lambda _combos: None)
+
+        store = _MutateStore(manifest={"backend_module": "myapp.backend", "tools": [{"title": "T", "module": "mod"}]})
+        impl = SimpleNamespace(
+            config=SimpleNamespace(config_manager=store),
+            admin=_ReloadAdmin(),
+            backends=SimpleNamespace(backend=None),
+        )
+        monkeypatch.setattr(tai42_app, "_impl", impl)
+        monkeypatch.setattr(instance.app, "_bus", FakeBus())
+
+        with pytest.raises(BadRequestError, match="TAI_BUS_REDIS_URL"):
+            await ops.modify_tool_extension_combos("shout", add=[["marka"]])
+
+        assert store.persisted == []  # rejected before any persist
     finally:
         reset_all_settings()

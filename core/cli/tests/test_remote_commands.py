@@ -208,6 +208,71 @@ def test_tools_apply_rejects_non_element(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "must be an extension name or a" in result.output
 
 
+def test_tools_extensions_add_posts_add_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/tools/my_tool/extensions/combos"
+        assert json.loads(request.content) == {"add": [["chain", "batch"], ["chain"]], "remove": []}
+        return data_response({"combos": [["chain", "batch"], ["chain"]]})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["tools", "extensions-add", "my_tool", "--combo", '["chain","batch"]', "--combo", '["chain"]'],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_tools_extensions_remove_posts_remove_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tools/my_tool/extensions/combos"
+        assert json.loads(request.content) == {"add": [], "remove": [["chain"]]}
+        return data_response({"combos": []})
+
+    result = run_cli(monkeypatch, handler, ["tools", "extensions-remove", "my_tool", "--combo", '["chain"]'])
+    assert result.exit_code == 0, result.output
+
+
+def test_tools_extensions_add_carries_element_config_losslessly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "add": [[{"name": "output_schema", "config": {"schema": {"type": "object"}}}]],
+            "remove": [],
+        }
+        return data_response({"combos": []})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "tools",
+            "extensions-add",
+            "my_tool",
+            "--combo",
+            '[{"name":"output_schema","config":{"schema":{"type":"object"}}}]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_tools_extensions_add_rejects_non_array_combo(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["tools", "extensions-add", "my_tool", "--combo", '"chain"'])
+    assert result.exit_code != 0
+    assert "non-empty JSON array" in result.output
+
+
+def test_tools_extensions_remove_surfaces_absent_combo_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response("combo [\"chain\"] is not attached to tool 'my_tool'", 404)
+
+    result = run_cli(monkeypatch, handler, ["tools", "extensions-remove", "my_tool", "--combo", '["chain"]'])
+    assert result.exit_code != 0
+    assert "not attached" in result.output
+
+
 def test_tools_runs_submit_posts_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
