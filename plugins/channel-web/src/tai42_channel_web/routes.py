@@ -206,10 +206,10 @@ _PAGE_UNAVAILABLE_PAGE = render_refusal(
 _REFERRER_POLICY = {"referrer-policy": "no-referrer"}
 
 # Query names the web door consumes itself and NEVER stores or delivers as params:
-# ``pair`` (existing, client-consumed) and the entry-gate code ``tai_entry``. Link
+# ``tai_pair`` (client-consumed) and the entry-gate code ``tai_entry``. Link
 # param VALUES (and the entry code) never appear in any log line, error body, or
 # transcript frame — keys may be logged, values never.
-_RESERVED_QUERY_PARAMS = frozenset({"pair", "tai_entry"})
+_RESERVED_QUERY_PARAMS = frozenset({"tai_pair", "tai_entry"})
 
 # The link params carried a value that violates a bound (count, key shape, value
 # length, or total size). One byte-constant page; the log names the bound.
@@ -453,7 +453,7 @@ def _client_bucket(request: Request) -> str:
 def _read_link_params(request: Request, identity: str) -> tuple[dict[str, str], Response | None]:
     """Parse the navigation's query into the validated link params, or a byte-constant
     400 refusal page. A DUPLICATE key — checked on the RAW query, reserved names
-    included, so ``?pair=a&pair=b`` is a 400 too — is a bound violation; the reserved
+    included, so ``?tai_pair=a&tai_pair=b`` is a 400 too — is a bound violation; the reserved
     names are then stripped before validation. Param VALUES never reach the log: the
     duplicate warning names no value, and ``validate_entry_params`` names only the
     violated bound (and at most a key)."""

@@ -213,7 +213,7 @@ links addresses on any other target.
 
 `get_pairing_code` is a runtime-native builtin that mints a pair code for a live
 channel conversation, so an operator can compose an invite (a typed code, or a
-`channel-web` `?pair=` URL) around it. Opt the module in with a manifest
+`channel-web` `?tai_pair=` URL) around it. Opt the module in with a manifest
 `tools[].module` row:
 
 ```yaml

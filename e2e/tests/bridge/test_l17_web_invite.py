@@ -1,7 +1,7 @@
-"""L17 — the web invite: a pair code carried into the web chat by the ``?pair=`` URL.
+"""L17 — the web invite: a pair code carried into the web chat by the ``?tai_pair=`` URL.
 
 One AGENT target reachable on a channel route (twilio) and a web route. The person mints a
-code on the channel side (``/link``), then opens the web chat at ``?pair=<code>``. The chat
+code on the channel side (``/link``), then opens the web chat at ``?tai_pair=<code>``. The chat
 page carries the code as a browser-side coordinate the bundle submits ONCE as the visitor's
 first message — reusing the ordinary message door and the whole intercept path, with no new
 redemption door. That single submit redeems into a merge and the visitor is answered
@@ -92,18 +92,18 @@ async def test_a_pair_url_invite_redeems_on_the_first_and_only_submit(
         route_name=route_web, agent=_AGENT, execution_key=exec_web, channel="web", our_identity=identity
     )
 
-    # Open the chat page at ?pair=<code>. The server ignores the query, so the shell it serves
+    # Open the chat page at ?tai_pair=<code>. The server ignores the query, so the shell it serves
     # is the ordinary one (the code is the browser's coordinate), and the session it mints is
     # this visitor's conversation.
     base_url = f"http://{bridge.stack.host}:{bridge.stack.port_b}"
     web, page = await WebChatClient.open_page(
-        base_url, identity, store_url=bridge.stack.resources.redis_url, query={"pair": code}
+        base_url, identity, store_url=bridge.stack.resources.redis_url, query={"tai_pair": code}
     )
     assert page.status_code == 200, page.text
     assert f'data-identity="{identity}"' in page.text
     assert re.search(r'src="/api/channels/web/assets/([^"]+)"', page.text) is not None, page.text[:1000]
 
-    # Stand in for the bundle's ONE submit of the ?pair code as the visitor's first message —
+    # Stand in for the bundle's ONE submit of the ?tai_pair code as the visitor's first message —
     # it redeems into a merge and the visitor is answered ``linked`` in their own transcript.
     await _await_web_out(web, lambda: web.send(code), LINKED_TEXT)
 

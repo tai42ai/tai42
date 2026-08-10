@@ -44,7 +44,7 @@ interface OutboxItem {
 }
 
 /**
- * A pair code carried in the page URL as `?pair=…`. The visitor followed an invite
+ * A pair code carried in the page URL as `?tai_pair=…`. The visitor followed an invite
  * link, so the page submits the code ONCE as their first message and the server-side
  * intercept redeems it exactly as if they had typed it. Only a value that FULLY matches
  * this shape is acted on — anything else is ignored entirely, never submitted and never
@@ -270,7 +270,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
 
   const onSend = useCallback(() => submit(draft), [draft, submit]);
 
-  // A pair code carried in the page URL (`?pair=…`) is submitted ONCE as the visitor's
+  // A pair code carried in the page URL (`?tai_pair=…`) is submitted ONCE as the visitor's
   // first message and then stripped from the URL, so a reload or a shared link cannot
   // resubmit it. The session cookie is already minted by the navigation that served this
   // page, so the send needs no further wait. A `pair` that does not fully match the code
@@ -279,11 +279,11 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   useEffect(() => {
     if (pairConsumedRef.current) return;
     pairConsumedRef.current = true;
-    const pair = new URLSearchParams(window.location.search).get('pair');
+    const pair = new URLSearchParams(window.location.search).get('tai_pair');
     if (pair === null || !PAIR_CODE_RE.test(pair)) return;
     submit(pair);
     const url = new URL(window.location.href);
-    url.searchParams.delete('pair');
+    url.searchParams.delete('tai_pair');
     window.history.replaceState(
       window.history.state,
       '',

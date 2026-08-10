@@ -82,7 +82,7 @@ https://<your deployment>/api/channels/web/chat/desk?topic=news&ref=abc
 Bounds are enforced at the door — **at most 16** parameters, each key matching
 `^[A-Za-z0-9_-]{1,64}$`, each value at most **512** characters, the whole set at
 most **2048** bytes — and a violation is a refused page, never a silent trim. The
-names `pair` and `tai_entry` are reserved and stripped before storage. A later
+names `tai_pair` and `tai_entry` are reserved and stripped before storage. A later
 navigation carrying parameters replaces the stored set; starting a new
 conversation clears it. Parameter values are never logged, and `params` is
 present on the payload only when the entry carried parameters.

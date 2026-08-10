@@ -4,7 +4,7 @@ conversation so the person can prove, from another channel, that both addresses 
 A thin, LLM-facing shim over
 :func:`tai42_skeleton.conversations.pairing.mint_pairing_code`. It returns ONLY
 ``{"code", "expires_at"}`` — no link and no wording; the operator composes the invite text
-(a typed code, or a channel-web ``?pair=`` URL) around it.
+(a typed code, or a channel-web ``?tai_pair=`` URL) around it.
 
 Authorization fence: a plain builtin takes the capability path — no per-call scope check —
 so its reach is bounded by manifest exposure (a deployment opts the module in through a

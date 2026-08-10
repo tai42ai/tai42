@@ -1,7 +1,7 @@
 """L22 — link params: query parameters carried onto a tool target's payload.
 
 The platform is a DUMB transport for link params. A query parameter on the chat-page URL
-(anything but the door's own ``pair`` / ``tai_entry`` coordinates) is captured with the
+(anything but the door's own ``tai_pair`` / ``tai_entry`` coordinates) is captured with the
 visitor's session and delivered to the turn's tool payload under its OWN ``params`` key —
 never merged into the root, never interpreted, never trusted. The web page door captures
 them; the authed API door takes the same field on its message body, for one uniform
@@ -11,7 +11,7 @@ assertion is on the delivered payload and not on any intermediate.
 
 The security invariants pinned here: the payload ``sender`` is the server-side visitor id
 and is NOT spoofable by a ``?sender=`` param (a caller value lands only under
-``.params.sender``); ``pair`` and ``tai_entry`` never reach the delivered params; a bounds
+``.params.sender``); ``tai_pair`` and ``tai_entry`` never reach the delivered params; a bounds
 violation is a byte-constant refusal PAGE (``link_params_invalid`` in the meta, no session
 minted); and the API door's invalid-params refusal names the violated bound WITHOUT echoing
 a value.
@@ -223,9 +223,9 @@ async def test_bounds_violations_answer_a_400_page_and_mint_no_session(
 async def test_reserved_query_names_never_reach_the_delivered_params(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
-    """``pair`` and ``tai_entry`` are the door's own coordinates: they are stripped before
+    """``tai_pair`` and ``tai_entry`` are the door's own coordinates: they are stripped before
     params are built, so a navigation carrying them delivers only the real params and never
-    ``pair`` / ``tai_entry`` under ``.params``."""
+    ``tai_pair`` / ``tai_entry`` under ``.params``."""
     probe = uniq("l22-reserved")
     identity = await _web_tool_route(
         bridge, uniq, "l22g", payload_expr=_record_expr(json.dumps(probe), '(.params | keys | join(","))')
@@ -235,13 +235,13 @@ async def test_reserved_query_names_never_reach_the_delivered_params(
         _base_url(bridge),
         identity,
         store_url=bridge.stack.resources.redis_url,
-        query={"pair": "PAIRVAL", "tai_entry": "ENTRYVAL", "a": "1"},
+        query={"tai_pair": "PAIRVAL", "tai_entry": "ENTRYVAL", "a": "1"},
     )
     assert (await web.send(uniq("l22g-msg"))).status_code == 200
     (entry,) = await _wait_record_count(bridge, probe, 1)
     delivered_keys = entry["value"].split(",") if entry["value"] else []
     assert delivered_keys == ["a"], f"only real params are delivered, got {delivered_keys!r}"
-    assert "pair" not in delivered_keys
+    assert "tai_pair" not in delivered_keys
     assert "tai_entry" not in delivered_keys
 
 

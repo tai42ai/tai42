@@ -129,7 +129,7 @@ class WebChatClient:
         there is no conversation to open.
 
         ``query`` appends URL query parameters to the page load. Two are the browser's own
-        coordinates the door consumes and never stores: the ``pair`` invite code (the bundle
+        coordinates the door consumes and never stores: the ``tai_pair`` invite code (the bundle
         submits it once as the visitor's first message) and the ``tai_entry`` gate code. Every
         OTHER name is a link param captured with this session and delivered to the turn's tool
         payload under ``.params`` — the shell HTML is identical either way; the caller stands in

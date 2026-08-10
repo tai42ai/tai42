@@ -18,7 +18,7 @@ as plain text (byte-identical to today).
 the resolved target has multichannel turned off, and otherwise mints a fresh single-use code
 for the ``sender`` address — rotating out any code already open for that same conversation. The
 RAW code is returned once, here, and never stored recoverably; composing an invite (typed code,
-or a channel-web ``?pair=`` URL) around it is the operator's job, never the platform's."""
+or a channel-web ``?tai_pair=`` URL) around it is the operator's job, never the platform's."""
 
 from __future__ import annotations
 

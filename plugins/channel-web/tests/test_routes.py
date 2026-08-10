@@ -1475,8 +1475,8 @@ async def test_a_fresh_mint_with_no_params_stores_the_empty_map(
 async def test_reserved_query_names_are_stripped_never_stored(
     web_env, stub_app, fake_redis: FakeRedis, public_build: Path
 ):
-    # ``pair`` (client-consumed) and ``tai_entry`` (gate code) never become params.
-    resp = await _handler(stub_app, _CHAT)(_chat_request(query="pair=LINK-ABCD1234&tai_entry=code&ref=spring"))
+    # ``tai_pair`` (client-consumed) and ``tai_entry`` (gate code) never become params.
+    resp = await _handler(stub_app, _CHAT)(_chat_request(query="tai_pair=LINK-ABCD1234&tai_entry=code&ref=spring"))
     registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
     assert registration is not None
     assert registration.params == {"ref": "spring"}
@@ -1532,7 +1532,7 @@ async def test_a_rotation_mints_a_clean_registration_with_no_params(web_env, stu
 @pytest.mark.parametrize(
     "query",
     [
-        "pair=a&pair=b",  # a duplicated RESERVED name is a bound violation too
+        "tai_pair=a&tai_pair=b",  # a duplicated RESERVED name is a bound violation too
         "tai_entry=x&tai_entry=y",
         "a=1&a=2",  # duplicated non-reserved key
         "bad key=1",  # key regex: a space

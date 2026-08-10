@@ -293,7 +293,7 @@ describe('invite pairing', () => {
   });
 
   it('submits a valid pair code once as the first message, then strips it from the URL', async () => {
-    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?tai_pair=LINK-ABCD1234');
     render(app());
 
     await waitFor(() =>
@@ -314,19 +314,19 @@ describe('invite pairing', () => {
     window.history.replaceState(
       {},
       '',
-      '/api/channels/web/chat/site-alpha?ref=email&pair=LINK-ABCD1234&x=1',
+      '/api/channels/web/chat/site-alpha?ref=email&tai_pair=LINK-ABCD1234&x=1',
     );
     render(app());
 
     await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
     const params = new URLSearchParams(window.location.search);
-    expect(params.get('pair')).toBeNull();
+    expect(params.get('tai_pair')).toBeNull();
     expect(params.get('ref')).toBe('email');
     expect(params.get('x')).toBe('1');
   });
 
   it('submits the pair code only once, even as the page re-renders', async () => {
-    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?tai_pair=LINK-ABCD1234');
     const { rerender } = render(app());
 
     await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
@@ -338,7 +338,7 @@ describe('invite pairing', () => {
   });
 
   it('submits the pair code exactly once under a StrictMode double-invoke', async () => {
-    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?pair=LINK-ABCD1234');
+    window.history.replaceState({}, '', '/api/channels/web/chat/site-alpha?tai_pair=LINK-ABCD1234');
     render(<StrictMode>{app()}</StrictMode>);
 
     // StrictMode mounts, tears the effect down, then remounts and re-runs it — a replay
@@ -374,13 +374,13 @@ describe('invite pairing', () => {
     window.history.replaceState(
       {},
       '',
-      `/api/channels/web/chat/site-alpha?pair=${encodeURIComponent(bad)}`,
+      `/api/channels/web/chat/site-alpha?tai_pair=${encodeURIComponent(bad)}`,
     );
     render(app());
 
     // Never submitted, never stripped, never reflected into the page.
     expect(api.sendMessage).not.toHaveBeenCalled();
-    expect(new URLSearchParams(window.location.search).get('pair')).toBe(bad);
+    expect(new URLSearchParams(window.location.search).get('tai_pair')).toBe(bad);
     expect(screen.queryByText(bad)).not.toBeInTheDocument();
   });
 });
