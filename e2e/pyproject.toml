@@ -27,14 +27,14 @@ dependencies = [
     # its tai42-contract cap to admit 0.3 — a lower floor lets a pre-0.3 wheel back
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=1.5,<2",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=1.4,<2",
-    "tai42-skeleton[toolbox,files]>=1.6,<2",
+    "tai42-contract>=1.6,<2",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=1.5,<2",
+    "tai42-skeleton[toolbox,files]>=1.7,<2",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.4,<0.5",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
-    "tai42-tools-stripe>=0.4,<0.5",
-    "tai42-agents>=0.5,<0.6",
+    "tai42-tools-stripe>=0.5,<0.6",
+    "tai42-agents>=0.6,<0.7",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=0.3,<0.4",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
@@ -57,11 +57,11 @@ dependencies = [
     "tai42-webhook-verifier-github>=0.3,<0.4",
     "tai42-webhook-verifier-stripe>=0.3,<0.4",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=0.7,<0.8",
-    "tai42-channel-slack>=0.7,<0.8",
-    "tai42-channel-twilio>=0.6,<0.7",
-    "tai42-channel-whatsapp>=0.6,<0.7",
-    "tai42-channel-web>=0.5,<0.6",
+    "tai42-channel-telegram>=0.8,<0.9",
+    "tai42-channel-slack>=0.8,<0.9",
+    "tai42-channel-twilio>=0.7,<0.8",
+    "tai42-channel-whatsapp>=0.7,<0.8",
+    "tai42-channel-web>=0.6,<0.7",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=0.3,<0.4",
     # The shipped OAuth connector plugins the shipped-connectors stack boots.
