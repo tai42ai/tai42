@@ -70,7 +70,7 @@ class RoleRollback(BaseModel):
 
 
 class RoleGrantsModify(BaseModel):
-    """The set/remove-grants request body: ``set`` upserts a tag → level (the mission's one
+    """The set/remove-grants request body: ``set`` upserts a tag → level (the one
     sanctioned overwrite), ``remove`` drops tags. At least one must be non-empty; a tag may
     not appear in both."""
 

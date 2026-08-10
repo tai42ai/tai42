@@ -192,7 +192,7 @@ def apply_extensions(
     Example: ``tai tools apply my_tool --combo '["chain","batch"]' --combo '["chain"]'``
     """
     ctx_obj = app_context(ctx)
-    combos = [parse_extension_combo(chain, param_hint="--combo") for chain in (combo or [])]
+    combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
         data = client.post(f"/api/tools/{name}/extensions", json={"combos": combos})
     emit_result(ctx_obj, data)
@@ -220,7 +220,7 @@ def extensions_add(
     Example: ``tai tools extensions-add my_tool --combo '["chain","batch"]'``
     """
     ctx_obj = app_context(ctx)
-    combos = [parse_extension_combo(chain, param_hint="--combo") for chain in (combo or [])]
+    combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
         data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": combos, "remove": []})
     emit_result(ctx_obj, data)
@@ -241,7 +241,7 @@ def extensions_remove(
     Example: ``tai tools extensions-remove my_tool --combo '["chain","batch"]'``
     """
     ctx_obj = app_context(ctx)
-    combos = [parse_extension_combo(chain, param_hint="--combo") for chain in (combo or [])]
+    combos = [parse_extension_combo(raw, param_hint="--combo") for raw in (combo or [])]
     with ctx_obj.client() as client:
         data = client.post(f"/api/tools/{name}/extensions/combos", json={"add": [], "remove": combos})
     emit_result(ctx_obj, data)

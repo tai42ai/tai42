@@ -583,6 +583,16 @@ def test_mcp_add_rejects_wrong_shape(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     assert "entries" in result.output
 
 
+def test_mcp_add_rejects_non_list_entries(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # An "entries" key whose value is not a list is a malformed wrapper, refused
+    # locally by name — never forwarded as a non-list body.
+    cfg = tmp_path / "entries.json"
+    cfg.write_text(json.dumps({"entries": "srv"}), encoding="utf-8")
+    result = run_cli(monkeypatch, lambda r: data_response({}), ["mcp", "add", "--file", str(cfg)])
+    assert result.exit_code != 0
+    assert "entries" in result.output
+
+
 def test_mcp_remove(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

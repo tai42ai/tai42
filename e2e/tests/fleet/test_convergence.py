@@ -217,7 +217,7 @@ async def test_env_write_moves_resolved_view(fresh_stack: Callable[..., TaiStack
     await converged_digest(stack, differ_from=baseline)
 
 
-# ---- granular manifest-family entry ops (M36 A/B/C) ----------------------
+# ---- granular manifest-family entry ops (mcp / tools / agents / api_tools) ----
 #
 # The per-entry add/remove doors mutate ONE section of the persisted manifest and ride
 # the SAME pipeline the whole-list writers above ride, so convergence is proven the same
@@ -388,12 +388,12 @@ async def test_tools_entries_add_remove_converges(
     entry = {"title": title, "module": _TOOLS_MODULE, "include": _TOOLS_INCLUDE}
     result = await api.post("/api/tools-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
     assert_fleet_fanout(result)
-    await converged_digest(stack, differ_from=baseline)
+    after_add = await converged_digest(stack, differ_from=baseline)
     assert title in _section_titles(await _exported_manifest(stack), "tools")
 
     removed = await api.delete(f"/api/tools-config/entries/{title}", retry_on_reloading=True)
     assert_fleet_fanout(removed)
-    await converged_digest(stack, differ_from=baseline)
+    await converged_digest(stack, differ_from=after_add)
 
     await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     assert title not in _section_titles(await _exported_manifest(stack), "tools")
@@ -412,12 +412,12 @@ async def test_agents_entries_add_remove_converges(
     entry = {"title": title, "module": _AGENTS_MODULE, "include": _AGENTS_INCLUDE}
     result = await api.post("/api/agents-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
     assert_fleet_fanout(result)
-    await converged_digest(stack, differ_from=baseline)
+    after_add = await converged_digest(stack, differ_from=baseline)
     assert title in _section_titles(await _exported_manifest(stack), "agents")
 
     removed = await api.delete(f"/api/agents-config/entries/{title}", retry_on_reloading=True)
     assert_fleet_fanout(removed)
-    await converged_digest(stack, differ_from=baseline)
+    await converged_digest(stack, differ_from=after_add)
 
     await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     assert title not in _section_titles(await _exported_manifest(stack), "agents")

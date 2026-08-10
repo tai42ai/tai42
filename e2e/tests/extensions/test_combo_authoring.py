@@ -1,11 +1,11 @@
-"""Granular extension-combo ops (M36 E): add/remove a SINGLE combo on a tool through
+"""Granular extension-combo ops: add/remove a SINGLE combo on a tool through
 ``POST /api/tools/{name}/extensions/combos``, instead of the whole-list replace ``POST
 /api/tools/{name}/extensions`` forces.
 
 The ``e2e_record`` probe carries exactly one authored combo (``[["cache"]]``). A second
 combo is added, a GET verifies both, the first is removed, a GET verifies the shrink;
 then adding a combo already present is a loud 400 naming it and removing one that is
-absent a loud 404 — the mission's loud-membership rule on the combo surface."""
+absent a loud 404 — the loud-membership rule on the combo surface."""
 
 from __future__ import annotations
 

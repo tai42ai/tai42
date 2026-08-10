@@ -1,9 +1,9 @@
-"""Granular key-scope ops (M36 D): add/remove ONE scope at a time on an api key
+"""Granular key-scope ops: add/remove ONE scope at a time on an api key
 through ``POST /api/auth/api-keys/{user_id}/scopes``, instead of the whole-set replace
 ``PUT /api/auth/api-keys/{user_id}`` forces.
 
 Driven over the seeded access-control stack as the root ``*`` admin, so the subset gate
-(added scopes must be ⊆ the caller's) is satisfied unconditionally and the per-op
+(added scopes must be ⊆ the caller's) is bypassed — admin short-circuits it — and the per-op
 membership rules — a present add is a loud 400, an absent remove a loud 404 — are what
 the assertions isolate. The mutation response carries the new scope set (the read-back),
 and the key's own ``/api/auth/me`` confirms the change took effect at the gate."""

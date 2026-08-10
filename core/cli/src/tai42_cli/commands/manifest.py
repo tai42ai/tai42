@@ -32,14 +32,19 @@ app = typer.Typer(
 
 def _load_add_entries(file: Path) -> list[Any]:
     """Read an ``add``-file's entries: ONE entry object, a bare JSON array, or an
-    object carrying an ``"entries"`` list. An object is a single entry unless it
-    carries an ``"entries"`` list."""
+    object with an ``"entries"`` list. An object is a single entry unless it has an
+    ``"entries"`` key, whose value must then be a list."""
     try:
         parsed = json.loads(file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise typer.BadParameter(f"file must be valid JSON: {exc}", param_hint="--file") from exc
     if isinstance(parsed, dict):
-        return parsed.get("entries", [parsed])
+        if "entries" not in parsed:
+            return [parsed]
+        entries = parsed["entries"]
+        if isinstance(entries, list):
+            return entries
+        # an "entries" key that is not a list is a malformed wrapper, not a single entry
     if isinstance(parsed, list):
         return parsed
     raise typer.BadParameter(

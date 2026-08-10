@@ -1,9 +1,9 @@
-"""Granular role-grant ops (M36 F): set/remove a SINGLE tag grant on a role through
+"""Granular role-grant ops: set/remove a SINGLE tag grant on a role through
 ``POST /api/auth/roles/{name}/grants``, instead of the whole-map replace ``PUT
 /api/auth/roles/{name}`` forces.
 
 Driven over the seeded access-control stack as the root ``*`` admin (role management is
-an admin-only ``fenced`` surface). ``--set`` is the mission's one sanctioned overwrite (a
+an admin-only ``fenced`` surface). ``--set`` is the one sanctioned overwrite (a
 map upsert), while ``remove`` of a tag the map does not carry is a loud 404 naming it.
 The mutation response is the updated role body; the roles listing confirms it persisted.
 """
