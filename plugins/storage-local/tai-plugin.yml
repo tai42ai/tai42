@@ -9,7 +9,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/storage-local
-contract: '>=1.5,<2'
+contract: '>=1.6,<2'
 categories:
   - storage
 tags:

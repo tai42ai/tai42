@@ -11,7 +11,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-whatsapp
-contract: '>=1.5,<2'
+contract: '>=1.6,<2'
 categories:
   - provisioning
   - utilities
@@ -26,14 +26,18 @@ provides:
   - kind: tool
     name: register_whatsapp_template
     module: tai42_tools_whatsapp.tools.register_whatsapp_template
-    description: Register a WhatsApp message template on the business account and return Graph's id and status.
+    description: >-
+      Register a WhatsApp message template on the business account and return
+      Graph's id and status.
     tags:
       - whatsapp
       - provisioning
   - kind: tool
     name: list_whatsapp_templates
     module: tai42_tools_whatsapp.tools.list_whatsapp_templates
-    description: List every WhatsApp message template on the business account, following Graph's paging to exhaustion.
+    description: >-
+      List every WhatsApp message template on the business account, following
+      Graph's paging to exhaustion.
     tags:
       - whatsapp
       - provisioning
@@ -48,8 +52,8 @@ provides:
     name: subscribe_whatsapp_app
     module: tai42_tools_whatsapp.tools.subscribe_whatsapp_app
     description: >-
-      Subscribe the app to the business account's webhooks, optionally overriding
-      the callback URI and verify token, and return Graph's response.
+      Subscribe the app to the business account's webhooks, optionally
+      overriding the callback URI and verify token, and return Graph's response.
     tags:
       - whatsapp
       - provisioning

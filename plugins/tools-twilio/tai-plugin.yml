@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-twilio
-contract: '>=1.5,<2'
+contract: '>=1.6,<2'
 categories:
   - communication
   - utilities
@@ -25,7 +25,9 @@ provides:
   - kind: tool
     name: list_twilio_numbers
     module: tai42_tools_twilio.tools.list_twilio_numbers
-    description: List a Twilio account's incoming phone numbers with their inbound-message webhook.
+    description: >-
+      List a Twilio account's incoming phone numbers with their inbound-message
+      webhook.
     tags:
       - twilio
       - provisioning
