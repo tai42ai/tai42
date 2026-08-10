@@ -44,7 +44,7 @@ import re
 from collections.abc import Callable
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_kit.utils.data import load_manifest
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
@@ -53,7 +53,7 @@ from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.manifest import TaiMCPConfig
+from tai42_skeleton.manifest import AgentsConfig, TaiMCPConfig, ToolsConfig
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast
 
@@ -75,6 +75,43 @@ class McpConfigUpdate(BaseModel):
     that overwrites the manifest's ``mcp`` list before the reload."""
 
     mcp: list[TaiMCPConfig]
+
+
+class McpEntriesAdd(BaseModel):
+    """MCP entries to append to the manifest's ``mcp`` section. ``replace``
+    lets an entry whose title already exists swap in at its current position;
+    without it a title collision is refused."""
+
+    entries: list[TaiMCPConfig]
+    replace: bool = False
+
+
+class ToolsEntriesAdd(BaseModel):
+    """Tools entries to append to the manifest's ``tools`` section. ``replace``
+    lets an entry whose title already exists swap in at its current position;
+    without it a title collision is refused."""
+
+    entries: list[ToolsConfig]
+    replace: bool = False
+
+
+class AgentsEntriesAdd(BaseModel):
+    """Agents entries to append to the manifest's ``agents`` section. ``replace``
+    lets an entry whose title already exists swap in at its current position;
+    without it a title collision is refused."""
+
+    entries: list[AgentsConfig]
+    replace: bool = False
+
+
+class ApiToolsListsUpdate(BaseModel):
+    """Names to add to / remove from the manifest ``api_tools`` include and
+    exclude lists. Each field is a bare name list; all four empty is refused."""
+
+    include_add: list[str] = Field(default_factory=list)
+    include_remove: list[str] = Field(default_factory=list)
+    exclude_add: list[str] = Field(default_factory=list)
+    exclude_remove: list[str] = Field(default_factory=list)
 
 
 class McpTargets(BaseModel):
@@ -243,6 +280,219 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
         raise BadRequestError(str(exc)) from exc
     except ValueError as exc:
         raise BadRequestError(f"invalid mcp config: {exc}") from exc
+    return apply_response(result)
+
+
+# ---------------------------------------------------------------------------
+# Per-entry manifest-section add/remove (mcp / tools / agents)
+# ---------------------------------------------------------------------------
+#
+# One add-mutator and one remove-mutator, parameterized on the section key, back the
+# six thin ops below — the sections share title-keyed identity and the same collision /
+# membership contract. Deep per-entry validation stays with the pipeline
+# (``_validate_manifest``), exactly as ``set_mcp_config``.
+
+
+def _merged_entries(current: list[Any], entries: list[Any], replace: bool) -> list[Any]:
+    """The new section list from ``current`` + incoming ``entries``. Every entry must be
+    a dict carrying a non-empty ``title`` string (else a ``ValueError`` naming the
+    position); duplicate incoming titles are refused. A title already present is refused
+    unless ``replace`` swaps the entry in at its current index; non-colliding entries
+    append in given order. Pure / re-runnable: builds a fresh list from the arguments."""
+    incoming_titles: list[str] = []
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"entry at position {position} must be a mapping carrying a 'title'")
+        title = entry.get("title")
+        if not isinstance(title, str) or not title:
+            raise ValueError(f"entry at position {position} must carry a non-empty 'title' string")
+        incoming_titles.append(title)
+    duplicates = sorted({t for t in incoming_titles if incoming_titles.count(t) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate titles within entries: {duplicates}")
+
+    current_titles = [e.get("title") if isinstance(e, dict) else None for e in current]
+    by_title = dict(zip(incoming_titles, entries, strict=True))
+    collisions = sorted(set(incoming_titles) & {t for t in current_titles if t is not None})
+    if collisions and not replace:
+        raise ValueError(f"entries already present (use replace): {collisions}")
+
+    collided = set(collisions)
+    kept = zip(current, current_titles, strict=True)
+    result = [by_title[title] if title in collided else entry for entry, title in kept]
+    result.extend(entry for title, entry in zip(incoming_titles, entries, strict=True) if title not in collided)
+    return result
+
+
+def _without_entry(current: list[Any], title: str) -> list[Any]:
+    """``current`` minus the entry whose ``title`` matches; a missing title is a
+    ``LookupError`` (the mutator aborts the transaction). Pure / re-runnable."""
+    result = [e for e in current if not (isinstance(e, dict) and e.get("title") == title)]
+    if len(result) == len(current):
+        raise LookupError(title)
+    return result
+
+
+async def _apply_entries_add(section: str, entries: list[Any], replace: bool) -> dict:
+    # Empty ``entries`` is refused INSIDE the try (op-level, so the projection path is
+    # refused identically) — a guard above the try would escape as a 500.
+    try:
+        if not entries:
+            raise ValueError("entries must be a non-empty list")
+
+        def mutator(document: dict[str, Any]) -> None:
+            document[section] = _merged_entries(document.get(section) or [], entries, replace)
+
+        result = await ConfigService.from_app().apply_change(mutator)
+    except BackendNeedsBusError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequestError(f"invalid {section} config: {exc}") from exc
+    return apply_response(result)
+
+
+async def _apply_entry_remove(section: str, title: str) -> dict:
+    try:
+
+        def mutator(document: dict[str, Any]) -> None:
+            document[section] = _without_entry(document.get(section) or [], title)
+
+        result = await ConfigService.from_app().apply_change(mutator)
+    except BackendNeedsBusError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except LookupError as exc:
+        raise NotFoundError(f"unknown {section} entry title: {title!r}") from exc
+    except ValueError as exc:
+        raise BadRequestError(f"invalid {section} config: {exc}") from exc
+    return apply_response(result)
+
+
+@operation(
+    summary="Add or replace MCP config entries and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError],
+    request_model=McpEntriesAdd,
+)
+async def add_mcp_entries(entries: list[Any], replace: bool = False) -> dict:
+    return await _apply_entries_add("mcp", entries, replace)
+
+
+@operation(
+    summary="Remove one MCP config entry by title and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, NotFoundError],
+)
+async def remove_mcp_entry(title: str) -> dict:
+    return await _apply_entry_remove("mcp", title)
+
+
+@operation(
+    summary="Add or replace tools config entries and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError],
+    request_model=ToolsEntriesAdd,
+)
+async def add_tools_entries(entries: list[Any], replace: bool = False) -> dict:
+    return await _apply_entries_add("tools", entries, replace)
+
+
+@operation(
+    summary="Remove one tools config entry by title and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, NotFoundError],
+)
+async def remove_tools_entry(title: str) -> dict:
+    return await _apply_entry_remove("tools", title)
+
+
+@operation(
+    summary="Add or replace agents config entries and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError],
+    request_model=AgentsEntriesAdd,
+)
+async def add_agents_entries(entries: list[Any], replace: bool = False) -> dict:
+    return await _apply_entries_add("agents", entries, replace)
+
+
+@operation(
+    summary="Remove one agents config entry by title and hot-reload",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, NotFoundError],
+)
+async def remove_agents_entry(title: str) -> dict:
+    return await _apply_entry_remove("agents", title)
+
+
+def _edit_name_list(current: list[Any], add: list[str], remove: list[str], field: str) -> list[str]:
+    """The edited ``api_tools`` include/exclude list. A name in ``add`` already present is
+    refused (``ValueError`` naming it); a name in ``remove`` absent is refused
+    (``LookupError`` naming it). Order-stable: kept names first, additions appended. Pure
+    / re-runnable: builds a fresh list from the arguments."""
+    names = [str(n) for n in current]
+    present = set(names)
+    already = sorted(n for n in add if n in present)
+    if already:
+        raise ValueError(f"api_tools {field}: already present: {already}")
+    absent = sorted(n for n in remove if n not in present)
+    if absent:
+        raise LookupError(f"api_tools {field}: not present: {absent}")
+    dropped = set(remove)
+    return [n for n in names if n not in dropped] + list(add)
+
+
+@operation(
+    summary="Add/remove names on the api_tools include/exclude lists and hot-reload",
+    tags=["manifest"],
+    authority_changing=True,
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, NotFoundError],
+    request_model=ApiToolsListsUpdate,
+)
+async def update_api_tools(
+    include_add: list[str] | None = None,
+    include_remove: list[str] | None = None,
+    exclude_add: list[str] | None = None,
+    exclude_remove: list[str] | None = None,
+) -> dict:
+    include_add = include_add or []
+    include_remove = include_remove or []
+    exclude_add = exclude_add or []
+    exclude_remove = exclude_remove or []
+    try:
+        if not (include_add or include_remove or exclude_add or exclude_remove):
+            raise ValueError("nothing to change")
+
+        def mutator(document: dict[str, Any]) -> None:
+            api_tools = document.get("api_tools")
+            if not isinstance(api_tools, dict):
+                api_tools = {}
+                document["api_tools"] = api_tools
+            included = _edit_name_list(api_tools.get("include") or [], include_add, include_remove, "include")
+            excluded = _edit_name_list(api_tools.get("exclude") or [], exclude_add, exclude_remove, "exclude")
+            api_tools["include"] = included
+            api_tools["exclude"] = excluded
+
+        result = await ConfigService.from_app().apply_change(mutator)
+    except BackendNeedsBusError as exc:
+        raise BadRequestError(str(exc)) from exc
+    except LookupError as exc:
+        raise NotFoundError(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequestError(f"invalid api_tools config: {exc}") from exc
     return apply_response(result)
 
 

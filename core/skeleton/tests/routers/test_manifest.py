@@ -407,6 +407,102 @@ async def test_mcp_config_valid_persists_and_reloads(fake):
     assert fake.cm.written["mcp"] == []
 
 
+# -- per-entry add/remove (mcp / tools / agents) + api_tools lists -----------
+
+
+def _mcp_entry(title, url="https://x/mcp"):
+    return {"title": title, "config": {"type": "streamable_http", "url": url}}
+
+
+async def test_add_mcp_entries_route_persists(fake):
+    resp = await router.add_mcp_entries(_req({"entries": [_mcp_entry("new")]}))
+    assert resp.status_code == 200
+    assert [e["title"] for e in fake.cm.written["mcp"]] == ["new"]
+
+
+async def test_add_mcp_entries_route_missing_entries_400(fake):
+    resp = await router.add_mcp_entries(_req({}))
+    assert resp.status_code == 400
+    assert "entries" in _data(resp)["error"]
+    assert fake.cm.written is None
+
+
+async def test_add_mcp_entries_route_non_bool_replace_400(fake):
+    resp = await router.add_mcp_entries(_req({"entries": [_mcp_entry("n")], "replace": "yes"}))
+    assert resp.status_code == 400
+    assert "replace" in _data(resp)["error"]
+    assert fake.cm.written is None
+
+
+async def test_add_mcp_entries_route_malformed_entry_pipeline_400(fake):
+    # A titled but structurally invalid entry (no ``config``) is refused by the manifest
+    # pipeline — a loud 400 with nothing persisted.
+    resp = await router.add_mcp_entries(_req({"entries": [{"title": "x"}]}))
+    assert resp.status_code == 400
+    assert fake.cm.written is None
+
+
+async def test_remove_mcp_entry_route_removes(fake):
+    fake.cm._manifest = {"mcp": [_mcp_entry("gone")], "tools": []}
+    resp = await router.remove_mcp_entry(_req(title="gone"))
+    assert resp.status_code == 200
+    assert fake.cm.written["mcp"] == []
+
+
+async def test_remove_mcp_entry_route_unknown_404(fake):
+    resp = await router.remove_mcp_entry(_req(title="ghost"))
+    assert resp.status_code == 404
+    assert "ghost" in _data(resp)["error"]
+    assert fake.cm.written is None
+
+
+async def test_add_tools_entries_route_persists(fake):
+    resp = await router.add_tools_entries(_req({"entries": [{"title": "t", "module": "pkg.mod"}]}))
+    assert resp.status_code == 200
+    assert [e["title"] for e in fake.cm.written["tools"]] == ["t"]
+
+
+async def test_remove_tools_entry_route_unknown_404(fake):
+    resp = await router.remove_tools_entry(_req(title="ghost"))
+    assert resp.status_code == 404
+    assert "ghost" in _data(resp)["error"]
+
+
+async def test_add_agents_entries_route_persists(fake):
+    fake.cm._manifest = {"mcp": [], "tools": [], "agents": []}
+    resp = await router.add_agents_entries(_req({"entries": [{"title": "a", "module": "pkg.mod"}]}))
+    assert resp.status_code == 200
+    assert [e["title"] for e in fake.cm.written["agents"]] == ["a"]
+
+
+async def test_remove_agents_entry_route_unknown_404(fake):
+    resp = await router.remove_agents_entry(_req(title="ghost"))
+    assert resp.status_code == 404
+    assert "ghost" in _data(resp)["error"]
+
+
+async def test_update_api_tools_route_add_and_remove(fake):
+    fake.cm._manifest = {"mcp": [], "tools": [], "api_tools": {"include": [], "exclude": ["op_x"]}}
+    resp = await router.update_api_tools(_req({"include_add": ["op_a"], "exclude_remove": ["op_x"]}))
+    assert resp.status_code == 200
+    assert fake.cm.written["api_tools"]["include"] == ["op_a"]
+    assert fake.cm.written["api_tools"]["exclude"] == []
+
+
+async def test_update_api_tools_route_all_empty_400(fake):
+    resp = await router.update_api_tools(_req({}))
+    assert resp.status_code == 400
+    assert "nothing to change" in _data(resp)["error"]
+    assert fake.cm.written is None
+
+
+async def test_update_api_tools_route_non_list_of_str_field_400(fake):
+    resp = await router.update_api_tools(_req({"include_add": ["ok", 7]}))
+    assert resp.status_code == 400
+    assert "include_add" in _data(resp)["error"]
+    assert fake.cm.written is None
+
+
 # -- the new mcp-status / manifest routes (C4 domain work) -------------------
 
 

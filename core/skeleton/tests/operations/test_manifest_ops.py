@@ -230,6 +230,337 @@ async def test_set_mcp_config_backend_without_bus_maps_to_400(monkeypatch: pytes
         reset_all_settings()
 
 
+# -- add/remove entries (mcp / tools / agents) + api_tools lists ---------------
+
+
+def _mcp_entry(title: str, url: str = "https://example.com/mcp") -> dict:
+    return {"title": title, "config": {"type": "streamable_http", "url": url}}
+
+
+def _tools_entry(title: str, module: str | None = None) -> dict:
+    # The manifest validator refuses two rows sharing a module, so a per-title default
+    # keeps distinct entries distinct.
+    return {"title": title, "module": module or f"pkg.{title}"}
+
+
+def _agents_entry(title: str, module: str | None = None) -> dict:
+    return {"title": title, "module": module or f"pkg.{title}"}
+
+
+async def test_add_mcp_entries_appends_to_existing(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.add_mcp_entries([_mcp_entry("b")])
+
+    assert [e["title"] for e in store.manifest["mcp"]] == ["a", "b"]
+
+
+async def test_add_mcp_entries_from_missing_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A never-populated ``mcp`` section (absent key) is treated as an empty list.
+    store = _MutateStore(manifest={})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.add_mcp_entries([_mcp_entry("a")])
+
+    assert [e["title"] for e in store.manifest["mcp"]] == ["a"]
+
+
+async def test_add_mcp_entries_collision_without_replace_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a"), _mcp_entry("b")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match=r"'a'.*'b'|\['a', 'b'\]"):
+        await manifest_ops.add_mcp_entries([_mcp_entry("a"), _mcp_entry("b"), _mcp_entry("c")])
+
+    assert store.persisted == []  # refused before any persist
+
+
+async def test_add_mcp_entries_replace_swaps_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a"), _mcp_entry("b")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.add_mcp_entries([_mcp_entry("b", url="https://new/mcp"), _mcp_entry("c")], replace=True)
+
+    # ``b`` swapped at its position, ``c`` appended; ``a`` untouched.
+    assert [e["title"] for e in store.manifest["mcp"]] == ["a", "b", "c"]
+    assert store.manifest["mcp"][1]["config"]["url"] == "https://new/mcp"
+
+
+async def test_add_mcp_entries_duplicate_incoming_titles_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": []})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="dup"):
+        await manifest_ops.add_mcp_entries([_mcp_entry("dup"), _mcp_entry("dup")])
+
+    assert store.persisted == []
+
+
+async def test_add_mcp_entries_non_dict_or_titleless_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": []})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="position 0"):
+        await manifest_ops.add_mcp_entries(["not-a-dict"])
+    with pytest.raises(BadRequestError, match="position 0"):
+        await manifest_ops.add_mcp_entries([{"config": {}}])
+
+    assert store.persisted == []
+
+
+async def test_add_mcp_entries_empty_list_400_nothing_happens(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The empty-list refusal precedes ``apply_change`` entirely: no persist, no reload, no
+    # broadcast — asserted via the store / admin / bus observables.
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a")]})
+    admin = _ReloadAdmin()
+    bus = _install_mutate_pipeline(monkeypatch, store=store, admin=admin)
+
+    with pytest.raises(BadRequestError, match="entries must be a non-empty list"):
+        await manifest_ops.add_mcp_entries([])
+
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_add_mcp_entries_malformed_entry_pipeline_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A titled but structurally invalid entry (no ``config``) passes the title guard and is
+    # refused by the manifest pipeline inside the transaction — nothing persisted.
+    store = _MutateStore(manifest={"mcp": []})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="invalid mcp config"):
+        await manifest_ops.add_mcp_entries([{"title": "x"}])
+
+    assert store.persisted == []
+
+
+async def test_remove_mcp_entry_removes_named_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a"), _mcp_entry("b")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.remove_mcp_entry("a")
+
+    assert [e["title"] for e in store.manifest["mcp"]] == ["b"]
+
+
+async def test_remove_mcp_entry_unknown_404_nothing_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(NotFoundError, match="ghost"):
+        await manifest_ops.remove_mcp_entry("ghost")
+
+    assert store.persisted == []
+
+
+async def test_remove_mcp_entry_missing_section_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(NotFoundError, match="ghost"):
+        await manifest_ops.remove_mcp_entry("ghost")
+
+    assert store.persisted == []
+
+
+async def test_add_mcp_entries_backend_without_bus_maps_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Byte-parallel to set_mcp_config: an add whose resolved config needs the bus with none
+    # configured raises the RuntimeError ``BackendNeedsBusError`` at MUTATE time; the op maps
+    # it to a loud 400 naming TAI_BUS_REDIS_URL rather than letting it escape as a 500.
+    monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
+    reset_all_settings()
+    try:
+        store = _MutateStore(manifest={"backend_module": "myapp.backend", "mcp": []})
+        _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+        with pytest.raises(BadRequestError, match="TAI_BUS_REDIS_URL"):
+            await manifest_ops.add_mcp_entries([_mcp_entry("a")])
+
+        assert store.persisted == []
+    finally:
+        reset_all_settings()
+
+
+async def test_remove_mcp_entry_backend_without_bus_maps_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The remove path validates the whole resulting manifest too, so the same
+    # backend-needs-bus invariant maps to a loud 400 (never a 500).
+    monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
+    reset_all_settings()
+    try:
+        store = _MutateStore(manifest={"backend_module": "myapp.backend", "mcp": [_mcp_entry("a")]})
+        _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+        with pytest.raises(BadRequestError, match="TAI_BUS_REDIS_URL"):
+            await manifest_ops.remove_mcp_entry("a")
+
+        assert store.persisted == []
+    finally:
+        reset_all_settings()
+
+
+async def test_remove_mcp_entry_pipeline_400_on_dangling_marker_elsewhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Removal validates the whole remaining manifest: a dangling ``!ENV`` marker on a
+    # DIFFERENT entry is a loud 400 from inside the transaction, nothing persisted.
+    monkeypatch.delenv("MISSING_XYZ", raising=False)
+    dangling = {
+        "title": "b",
+        "config": {
+            "type": "streamable_http",
+            "url": "https://x/mcp",
+            "headers": {"Authorization": "!ENV ${MISSING_XYZ}"},
+        },
+    }
+    store = _MutateStore(manifest={"mcp": [_mcp_entry("a"), dangling]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="MISSING_XYZ"):
+        await manifest_ops.remove_mcp_entry("a")
+
+    assert store.persisted == []
+
+
+async def test_add_tools_entries_happy_and_collision_and_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"tools": [_tools_entry("a")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.add_tools_entries([_tools_entry("b")])
+    assert [e["title"] for e in store.manifest["tools"]] == ["a", "b"]
+
+    with pytest.raises(BadRequestError, match="a"):
+        await manifest_ops.add_tools_entries([_tools_entry("a")])
+
+    await manifest_ops.add_tools_entries([_tools_entry("a", module="pkg.new")], replace=True)
+    assert store.manifest["tools"][0]["module"] == "pkg.new"
+    assert [e["title"] for e in store.manifest["tools"]] == ["a", "b"]
+
+
+async def test_remove_tools_entry_happy_and_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"tools": [_tools_entry("a"), _tools_entry("b")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.remove_tools_entry("a")
+    assert [e["title"] for e in store.manifest["tools"]] == ["b"]
+
+    with pytest.raises(NotFoundError, match="ghost"):
+        await manifest_ops.remove_tools_entry("ghost")
+
+
+async def test_add_agents_entries_happy_and_collision_and_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"agents": [_agents_entry("a")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.add_agents_entries([_agents_entry("b")])
+    assert [e["title"] for e in store.manifest["agents"]] == ["a", "b"]
+
+    with pytest.raises(BadRequestError, match="a"):
+        await manifest_ops.add_agents_entries([_agents_entry("a")])
+
+    await manifest_ops.add_agents_entries([_agents_entry("a", module="pkg.new")], replace=True)
+    assert store.manifest["agents"][0]["module"] == "pkg.new"
+    assert [e["title"] for e in store.manifest["agents"]] == ["a", "b"]
+
+
+async def test_remove_agents_entry_happy_and_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"agents": [_agents_entry("a"), _agents_entry("b")]})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.remove_agents_entry("a")
+    assert [e["title"] for e in store.manifest["agents"]] == ["b"]
+
+    with pytest.raises(NotFoundError, match="ghost"):
+        await manifest_ops.remove_agents_entry("ghost")
+
+
+async def test_update_api_tools_all_four_empty_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={})
+    admin = _ReloadAdmin()
+    bus = _install_mutate_pipeline(monkeypatch, store=store, admin=admin)
+
+    with pytest.raises(BadRequestError, match="nothing to change"):
+        await manifest_ops.update_api_tools()
+
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_update_api_tools_add_and_remove_both_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"api_tools": {"include": ["keep_in"], "exclude": ["drop_ex"]}})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.update_api_tools(include_add=["new_in"], exclude_add=["new_ex"], exclude_remove=["drop_ex"])
+
+    assert store.manifest["api_tools"]["include"] == ["keep_in", "new_in"]
+    assert store.manifest["api_tools"]["exclude"] == ["new_ex"]
+
+
+async def test_update_api_tools_creates_mapping_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    await manifest_ops.update_api_tools(include_add=["op_a"])
+
+    assert store.manifest["api_tools"]["include"] == ["op_a"]
+
+
+async def test_update_api_tools_add_already_present_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"api_tools": {"include": ["op_a"]}})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="op_a"):
+        await manifest_ops.update_api_tools(include_add=["op_a"])
+
+    assert store.persisted == []
+
+
+async def test_update_api_tools_remove_absent_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _MutateStore(manifest={"api_tools": {"include": ["op_a"]}})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(NotFoundError, match="op_ghost"):
+        await manifest_ops.update_api_tools(include_remove=["op_ghost"])
+
+    assert store.persisted == []
+
+
+async def test_update_api_tools_overlap_after_edit_pipeline_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Adding a name to ``include`` that already sits in ``exclude`` produces an
+    # include/exclude overlap the pipeline's ApiToolsConfig validator rejects — a 400
+    # from inside the transaction, nothing persisted.
+    store = _MutateStore(manifest={"api_tools": {"include": [], "exclude": ["op_x"]}})
+    _install_mutate_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+    with pytest.raises(BadRequestError, match="invalid api_tools config"):
+        await manifest_ops.update_api_tools(include_add=["op_x"])
+
+    assert store.persisted == []
+
+
+def test_entry_ops_are_destructive_and_reload_gated() -> None:
+    for op in (
+        manifest_ops.add_mcp_entries,
+        manifest_ops.remove_mcp_entry,
+        manifest_ops.add_tools_entries,
+        manifest_ops.remove_tools_entry,
+        manifest_ops.add_agents_entries,
+        manifest_ops.remove_agents_entry,
+        manifest_ops.update_api_tools,
+    ):
+        meta = operation_metadata_of(op)
+        assert meta.destructive is True, meta.name
+        assert meta.reload_gated is True, meta.name
+
+
+def test_update_api_tools_is_authority_changing_tier2() -> None:
+    meta = operation_metadata_of(manifest_ops.update_api_tools)
+    assert meta.authority_changing is True
+    assert is_tier2(meta) is True
+    # The per-entry add/remove ops stay module-selection (tier-0), like set_mcp_config.
+    assert is_tier2(operation_metadata_of(manifest_ops.add_mcp_entries)) is False
+
+
 # -- list_failed_mcps -------------------------------
 
 
