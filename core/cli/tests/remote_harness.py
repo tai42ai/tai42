@@ -81,9 +81,5 @@ def run_cli(
     monkeypatch.setattr(AppContext, "client", _client)
     monkeypatch.setenv("TAI_API_KEY", "test-key")
     monkeypatch.setenv("TAI_SERVER_URL", "http://testserver")
-    # Pin a wide, stable render width so content assertions read the visible text
-    # regardless of the ambient terminal: an error's line-number token must not be
-    # split across a wrap boundary the surrounding terminal happens to impose.
-    monkeypatch.setenv("COLUMNS", "200")
     full_args = (["--json"] if json_output else []) + args
     return CliRunner().invoke(app_module.app, full_args, input=stdin, env=_PLAIN_WIDE_TERM)
