@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end (checklist items 1-6):
 
-1. the projected tool surface is exactly the expected op surface — the 120
-   default-projected ops (162 total - 38 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 127
+   default-projected ops (172 total - 41 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -118,7 +118,7 @@ class _RecordingApp:
         self.tools = _RecordingTools()
 
 
-# -- checklist 1: the projected surface is exactly the 120 default ops ---------
+# -- checklist 1: the projected surface is exactly the 127 default ops ---------
 
 
 def test_d1_projected_surface_is_the_expected_op_count():
@@ -130,14 +130,14 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier1 = sorted(op.name for op in ops if is_tier1(op))
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
-            # The arithmetic: 162 total - 38 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 120.
+            # The arithmetic: 172 total - 41 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 127.
             # The +8 over the historical 143 are the settings-profile CRUD ops (list/get/put/
             # delete/diff/versions/version/rollback under /api/config/profiles*) — tier-0
             # default-projected like the sibling config ops (read_env/write_env/reload_config);
             # the HTTP secret/fenced action-class fences the door, not the MCP projection. The
             # +1 to 152 is ``apply_profile`` — authority_changing (tier-2, off the default MCP
             # surface): it replaces the whole env + recycles the fleet, never a default tool.
-            # The +2 to 154 are the WAVE-5 manifest ops ``get_manifest_preserved`` (the preserved
+            # The +2 to 154 are the manifest ops ``get_manifest_preserved`` (the preserved
             # markers-intact read) and ``set_mcp_secret_env`` (the combined env+manifest secret
             # write) — both tier-0 default-projected like their siblings ``get_manifest`` /
             # ``set_mcp_config`` (the HTTP read/fenced action-class fences the door, not the
@@ -149,11 +149,17 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # it stays on the default surface, like ``upsert_tool_meta``). The +1 to 161 is
             # ``get_mcp_env_refs`` — the manifest MCP section's !ENV-marker checklist (names +
             # set/unset booleans only), a tier-0 read like its ``get_manifest`` siblings. The +1
-            # to 162 is ``delete_conversation_thread`` — the thread memory-delete door, tier-0
-            # default-projected like its siblings ``delete_conversation_route`` /
-            # ``delete_conversation_config`` (destructive but not authority_changing, so it stays
-            # on the default surface).
-            assert total == 162, total
+            # to 162 is ``delete_conversation_thread`` (the thread-forget door) — tier-0
+            # default-projected like its ``delete_conversation_config`` sibling (destructive but
+            # not authority_changing). The +7 to 169 are the granular manifest-family
+            # add/remove ops ``add_mcp_entries``/``remove_mcp_entry``,
+            # ``add_tools_entries``/``remove_tools_entry``, ``add_agents_entries``/``remove_agents_entry``
+            # and ``modify_tool_extension_combos`` — all tier-0 default-projected (module-selection
+            # writes; the combo door mirrors its ``set_tool_extensions`` sibling, neither
+            # authority_changing). The +3 to 172 are ``update_api_tools`` and ``modify_role_grants``
+            # (authority_changing) and ``modify_api_key_scopes`` (tier-2 by the ``/api/auth/`` route
+            # prefix) — all off the default MCP surface.
+            assert total == 172, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -165,8 +171,10 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # plus the trigger-link mutators, register_hook, the two topic-verifier ops
             # (binding a lock REPLACES it, reaching the same state as unbinding),
             # create_conversation_route and apply_profile (the C5 env-replace + fleet-recycle
-            # door) — all authority_changing — 38 in all. ``get_me`` is tier-1
-            # hardcode-blocked, not tier-2.
+            # door), plus the granular-config authority ops update_api_tools and
+            # modify_role_grants (authority_changing) and modify_api_key_scopes (tier-2 by the
+            # ``/api/auth/`` route prefix, like the sibling api-key ops) — 41 in all. ``get_me``
+            # is tier-1 hardcode-blocked, not tier-2.
             assert set(tier2) == {
                 "add_scope_url",
                 "apply_profile",
@@ -195,6 +203,8 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "marketplace_uninstall",
                 "marketplace_update",
                 "marketplace_upgrade_all",
+                "modify_api_key_scopes",
+                "modify_role_grants",
                 "pin_public_route",
                 "register_hook",
                 "remove_scope_url",
@@ -203,22 +213,23 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "rollback_policy",
                 "rollback_role",
                 "unpin_public_route",
+                "update_api_tools",
                 "update_manifest",
                 "update_role",
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 120, measured two ways.
+            # The default-projected surface = 127, measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 120, len(projected)
-            assert total - len(tier2) - len(tier1) == 120
+            assert len(projected) == 127, len(projected)
+            assert total - len(tier2) - len(tier1) == 127
 
-            # And the LIVE booted tool surface is exactly those 120 (no keep-set /
+            # And the LIVE booted tool surface is exactly those 127 (no keep-set /
             # plugin / toolbox tools are loaded in this projection-only stack).
             live = await app.tools.get_tools()
             assert set(live) == set(projected)
-            assert len(live) == 120
+            assert len(live) == 127
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -383,15 +394,14 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 120
+            assert len(live) == 127
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process
             # manifest — asserted via ``live_manifest_typed`` here, NOT via ``get_manifest``:
-            # the WAVE-5 retighten flipped ``GET /api/manifest`` to the PERSISTED store view
-            # (markers intact, no secret leak), which this in-process harness does not persist,
-            # so ``get_manifest`` would return the empty persisted view. The curation the
-            # checklist verifies is the live one.
+            # ``GET /api/manifest`` serves the PERSISTED store view (markers intact, no secret
+            # leak), which this in-process harness does not persist, so ``get_manifest`` would
+            # return the empty persisted view. The curation the checklist verifies is the live one.
             assert sorted(app.admin.live_manifest_typed.user_tools) == ["list_hooks", "remove_tool"]
 
     asyncio.run(run())

@@ -101,10 +101,15 @@ def test_gated_routes_declare_the_retriable_503(spec: dict, api_routes: list[Rou
 # Every route publishing a 503 is pinned into its class below, so a route changing
 # source — or a new one arriving — trips here and its shape is re-confirmed.
 _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
+    ("DELETE", "/api/agents-config/entries/{title}"),
+    ("DELETE", "/api/mcp-config/entries/{title}"),
     ("DELETE", "/api/presets/{name}"),
     ("DELETE", "/api/sub-mcp/{slug}"),
+    ("DELETE", "/api/tools-config/entries/{title}"),
+    ("POST", "/api/agents-config/entries"),
     ("POST", "/api/agents/authored/{name}/runs"),
     ("POST", "/api/agents/{name}/runs"),
+    ("POST", "/api/api-tools"),
     ("POST", "/api/backup/import"),
     ("POST", "/api/checkpoints/sweep"),
     ("POST", "/api/config/env"),
@@ -112,6 +117,7 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/config/reload"),
     ("POST", "/api/manifest/replace"),
     ("POST", "/api/mcp-config"),
+    ("POST", "/api/mcp-config/entries"),
     ("POST", "/api/mcp-config/secret-env"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
@@ -124,9 +130,11 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/presets/{name}/versions"),
     ("POST", "/api/run-tool"),
     ("POST", "/api/sub-mcp"),
+    ("POST", "/api/tools-config/entries"),
     ("POST", "/api/tools/reload"),
     ("POST", "/api/tools/remove"),
     ("POST", "/api/tools/{name}/extensions"),
+    ("POST", "/api/tools/{name}/extensions/combos"),
 }
 
 # The versioning store-unconfigured refusal is a 501, not a 503, so ``validate`` and
@@ -240,8 +248,11 @@ def test_the_combined_503_schema_admits_both_bodies_and_oneof_would_not(spec: di
 # gated surface into a test failure, forcing the author to confirm the 503
 # coverage.
 _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
+    ("POST", "/api/agents-config/entries"),
+    ("DELETE", "/api/agents-config/entries/{title}"),
     ("POST", "/api/agents/authored/{name}/runs"),
     ("POST", "/api/agents/{name}/runs"),
+    ("POST", "/api/api-tools"),
     ("POST", "/api/backup/import"),
     ("POST", "/api/checkpoints/sweep"),
     ("POST", "/api/config/env"),
@@ -254,6 +265,8 @@ _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
     ("POST", "/api/marketplace/update"),
     ("POST", "/api/marketplace/upgrade-all"),
     ("POST", "/api/mcp-config"),
+    ("POST", "/api/mcp-config/entries"),
+    ("DELETE", "/api/mcp-config/entries/{title}"),
     ("POST", "/api/mcp-config/secret-env"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
@@ -269,23 +282,30 @@ _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
     ("POST", "/api/sub-mcp"),
     ("DELETE", "/api/sub-mcp/{slug}"),
     ("POST", "/api/tool-runs"),
+    ("POST", "/api/tools-config/entries"),
+    ("DELETE", "/api/tools-config/entries/{title}"),
     ("POST", "/api/tools/reload"),
     ("POST", "/api/tools/remove"),
     ("POST", "/api/tools/{name}/extensions"),
+    ("POST", "/api/tools/{name}/extensions/combos"),
 }
 
 # The body-reading routes, hand-maintained as ground truth (same coverage intent as
 # the gated set: ``reads_body`` is declared per route, so pinning the full set trips
 # on any change to the body-reading surface).
 _EXPECTED_READS_BODY: set[tuple[str, str]] = {
+    ("POST", "/api/agents-config/entries"),
     ("POST", "/api/agents/authored/{name}/runs"),
     ("POST", "/api/agents/{name}/runs"),
+    ("POST", "/api/api-tools"),
     ("POST", "/api/auth/api-keys"),
     ("PUT", "/api/auth/api-keys/{user_id}"),
     ("POST", "/api/auth/api-keys/{user_id}/policy/rollback"),
+    ("POST", "/api/auth/api-keys/{user_id}/scopes"),
     ("POST", "/api/auth/claim-links"),
     ("POST", "/api/auth/roles"),
     ("PUT", "/api/auth/roles/{name}"),
+    ("POST", "/api/auth/roles/{name}/grants"),
     ("POST", "/api/auth/roles/{name}/rollback"),
     ("POST", "/api/auth/scopes"),
     ("DELETE", "/api/auth/scopes/urls"),
@@ -318,6 +338,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/marketplace/uninstall"),
     ("POST", "/api/marketplace/update"),
     ("POST", "/api/mcp-config"),
+    ("POST", "/api/mcp-config/entries"),
     ("POST", "/api/mcp-config/secret-env"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
@@ -341,9 +362,11 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/tool-meta/folders/{folder_id}/move"),
     ("POST", "/api/tool-meta/folders/{folder_id}/rename"),
     ("POST", "/api/tool-runs"),
+    ("POST", "/api/tools-config/entries"),
     ("POST", "/api/tools/reload"),
     ("POST", "/api/tools/remove"),
     ("POST", "/api/tools/{name}/extensions"),
+    ("POST", "/api/tools/{name}/extensions/combos"),
     ("POST", "/api/upload-template"),
 }
 
