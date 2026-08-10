@@ -138,6 +138,20 @@ def parse_extension_combos(value: str, *, param_hint: str) -> list[list[Extensio
     return result
 
 
+def _apply_kw_pairs(result: dict[str, Any], kw: Sequence[str] | None, *, param_hint: str) -> None:
+    """Merge repeated ``key=value`` pairs into ``result`` in place, each value parsed as
+    JSON and falling back to the literal string. A pair overrides the same key already
+    present. A token without ``=`` or with an empty key raises a usage error."""
+    for pair in kw or []:
+        key, sep, raw = pair.partition("=")
+        if not sep or not key:
+            raise typer.BadParameter(f"expected key=value, got {pair!r}", param_hint=param_hint)
+        try:
+            result[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            result[key] = raw
+
+
 def parse_kwargs(kwargs_json: str | None, kw: Sequence[str] | None) -> dict[str, Any]:
     """Build a kwargs mapping from an optional ``--kwargs`` JSON object plus any
     repeated ``--kw key=value`` pairs (each value parsed as JSON, falling back to
@@ -146,14 +160,29 @@ def parse_kwargs(kwargs_json: str | None, kw: Sequence[str] | None) -> dict[str,
     result: dict[str, Any] = {}
     if kwargs_json is not None:
         result.update(parse_json_object(kwargs_json, param_hint="--kwargs"))
-    for pair in kw or []:
-        key, sep, raw = pair.partition("=")
-        if not sep or not key:
-            raise typer.BadParameter(f"expected key=value, got {pair!r}", param_hint="--kw")
-        try:
-            result[key] = json.loads(raw)
-        except json.JSONDecodeError:
-            result[key] = raw
+    _apply_kw_pairs(result, kw, param_hint="--kw")
+    return result
+
+
+def load_kwargs_arg(
+    inline: str | None,
+    file: str | None,
+    kw: Sequence[str] | None,
+    *,
+    param_hint: str,
+    file_param_hint: str,
+    kw_param_hint: str,
+) -> dict[str, Any]:
+    """Build a kwargs mapping from an inline JSON object OR a file/stdin (``-``) source,
+    plus any repeated ``key=value`` pairs.
+
+    The object source keeps a secret off the command line (a value on argv leaks via
+    ``ps`` and shell history). Giving both the inline and file source is a usage error;
+    a ``key=value`` pair overrides the same key from the object source.
+    """
+    base = load_json_object_arg(inline, file, param_hint=param_hint, file_param_hint=file_param_hint)
+    result: dict[str, Any] = dict(base) if base is not None else {}
+    _apply_kw_pairs(result, kw, param_hint=kw_param_hint)
     return result
 
 

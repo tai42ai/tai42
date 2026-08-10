@@ -65,6 +65,7 @@ _F_OUTBOUND = "outbound_ids"
 _F_ATTEMPTS = "attempts"
 _F_GRACE = "grace_deadline"
 _F_UPDATED = "updated_at"
+_F_INTAKE = "intake_claim"
 
 # Every record-mutating script takes the same key layout: KEYS[1]=record key, then one
 # key per DeliveryStatus (the per-status indexes), then the index the transition moves the
@@ -1240,6 +1241,66 @@ class ConversationRecordStore:
                     await awaited(r.delete(self.settings.thread_index_key(route_name, thread_id)))
                 await awaited(r.zrem(key, *members))
             await awaited(r.delete(key))
+
+    async def thread_has_live_intake(self, thread_id: str) -> bool:
+        """Whether a turn is IN FLIGHT on ``thread_id`` — an ``accepted`` intake record still
+        holding a LIVE lease. That turn's completion re-stamps the thread indexes and writes
+        checkpoint state, so a delete racing it would half-forget the memory. The intake lease
+        is the CROSS-WORKER liveness marker the re-drive trusts (an ``accepted`` record whose
+        lease expiry is still ahead of now); the per-worker FIFO reservation cannot answer for
+        a turn running on a sibling worker, so the lease is read here, never taken. Scanned
+        off the ``accepted`` status index, which holds only the turns in flight fleet-wide."""
+        now = time.time()
+        accepted_key = self.settings.status_index_key(DeliveryStatus.ACCEPTED.value)
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            for member in await awaited(r.zrange(accepted_key, 0, -1)):
+                message_id = _member(member)
+                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                if hashed.get(_F_STATUS) != DeliveryStatus.ACCEPTED.value:
+                    continue
+                try:
+                    record_thread_id = json.loads(hashed[_F_DATA])["thread_id"]
+                except (ValueError, KeyError):
+                    logger.warning(
+                        "conversations: record %r is corrupt and was skipped in the in-flight check", message_id
+                    )
+                    continue
+                if record_thread_id != thread_id:
+                    continue
+                _token, sep, expiry = (hashed.get(_F_INTAKE) or "").partition(":")
+                if sep and expiry and float(expiry) > now:
+                    return True
+        return False
+
+    async def drop_thread(self, route_name: str, thread_id: str) -> int:
+        """Delete one thread under ``route_name`` outright — every answer record its transcript
+        index names, that index, and the thread's membership in the route index. Returns the
+        number of record ROWS removed (an index member whose row already expired counts 0 yet
+        is still unindexed).
+
+        RETRYABLE: draining the transcript index reclaims the route member with the last
+        record (the same atomic step a record delete takes), so an interrupted run leaves the
+        still-indexed remainder for a re-run, and the trailing deletes cover an index already
+        emptied and a route member stranded without one. Neither thread index carries a TTL and
+        the prune pass walks LIVE routes only, so nothing here may leave a member behind: the
+        operator asked for the thread gone now, not on the records' own retention clock."""
+        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        route_key = self.settings.route_threads_key(route_name)
+        status_keys = [self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES]
+        removed = 0
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            while True:
+                members = [
+                    _member(member) for member in await awaited(r.zrange(thread_key, 0, _PRUNE_MEMBERS_PER_BATCH - 1))
+                ]
+                if not members:
+                    break
+                for message_id in members:
+                    keys = [self.settings.record_key(message_id), *status_keys, thread_key, route_key]
+                    removed += int(await eval_script(r, _DELETE_LUA, len(keys), *keys, message_id, thread_id))
+            await awaited(r.delete(thread_key))
+            await awaited(r.zrem(route_key, thread_id))
+        return removed
 
     # -- outbound reverse index (keyspace 3) ---------------------------------
 

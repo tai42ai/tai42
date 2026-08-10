@@ -116,6 +116,23 @@ def test_conversations_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_conversations_delete_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        # The thread id rides the query, so an api-door id carrying a ``/`` reaches the door
+        # spelled exactly as it was given.
+        assert request.url.path == "/api/conversations/chat/thread"
+        assert request.url.params["thread_id"] == "bridge:chat:+15550001111/user-7"
+        return data_response({"removed": 1, "route_name": "chat", "thread_id": "bridge:chat:+15550001111/user-7"})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["conversations", "delete-thread", "chat", "bridge:chat:+15550001111/user-7"],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_conversations_get_message(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/conversations/chat/messages/abc"

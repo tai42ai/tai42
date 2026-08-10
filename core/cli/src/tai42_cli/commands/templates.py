@@ -16,13 +16,19 @@ from tai42_cli.commands._common import (
     app_context,
     covers,
     emit_result,
-    parse_kwargs,
+    load_kwargs_arg,
 )
 
 app = typer.Typer(
     name="templates",
     help="Manage prompt and resource templates.",
     no_args_is_help=True,
+)
+
+_KWARGS_FILE_HELP = (
+    "Read the render kwargs JSON object from a file, or from stdin when the path is '-', instead of putting a "
+    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --kwargs; "
+    "--kw pairs still override its keys."
 )
 
 
@@ -111,6 +117,7 @@ def render_template(
     template_id: Annotated[str | None, typer.Option("--template-id", help="A stored template id to render.")] = None,
     content: Annotated[str | None, typer.Option("--content", help="Inline template content to render.")] = None,
     kwargs: Annotated[str | None, typer.Option("--kwargs", help="Render kwargs as a JSON object.")] = None,
+    kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     kw: Annotated[
         list[str] | None, typer.Option("--kw", help="A key=value render kwarg (repeatable; value parsed as JSON).")
     ] = None,
@@ -122,7 +129,10 @@ def render_template(
     ctx_obj = app_context(ctx)
     if (template_id is None) == (content is None):
         raise typer.BadParameter("provide exactly one of --template-id or --content")
-    body: dict = {"kwargs": parse_kwargs(kwargs, kw)}
+    render_kwargs = load_kwargs_arg(
+        kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
+    )
+    body: dict = {"kwargs": render_kwargs}
     if template_id is not None:
         body["template_id"] = template_id
     else:

@@ -2,10 +2,11 @@
 
 A ``bridge:@person:{id}`` thread's records live in one per-route index PER ROUTE; the read is
 a k-way merge across them, so one full created_at-ordered history is served (never a partial
-leg), and an api caller whose api address belongs to the person reads BOTH its own api-leg
-records and the merged channel-leg records. Authorization mirrors the route-keyed door: an
-admin reads any person thread on a valid route, a non-admin only a person its own principal
-belongs to, and everything else answers the one uniform not-found."""
+leg), and a grant-holder reads BOTH the api-leg records and the merged channel-leg records.
+The read is grant-gated: any authenticated grant-holder reads it, an admin the whole records
+and a non-admin the caller-safe projection. The supplied ``route_name`` must be one of the
+person's routes; an unknown route is its own loud 404, and a target mismatch or a route the
+person never wrote under answers the one uniform not-found."""
 
 from __future__ import annotations
 
@@ -13,7 +14,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
-from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 
 from tai42_skeleton.agent.thread_reservation import PERSON_THREAD_PREFIX
@@ -24,7 +24,6 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
-from tai42_skeleton.operations._authority import Caller
 from tai42_skeleton.operations.errors import NotFoundError
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
@@ -80,10 +79,6 @@ class _DictManager(BaseConversationsManager):
 class _Caller:
     caller_id: str | None
     is_admin: bool
-
-
-def _authority_caller(caller_id: str) -> Caller:
-    return Caller(caller_id=caller_id, policy=AccessPolicy(scopes=[]), is_admin=False, owner_claim=None)
 
 
 def _addr(*, door, address, routes, channel=None, our_identity=None) -> PersonAddress:
@@ -267,7 +262,9 @@ async def test_api_caller_reads_both_its_api_leg_and_the_channel_leg(fake, monke
     assert read["total"] == 2
 
 
-async def test_another_caller_is_404_uniformly(fake, monkeypatch):
+async def test_another_grant_holder_reads_the_person_thread(fake, monkeypatch):
+    # Grant-gated: a non-admin who is not the person still reads the aggregated thread, as the
+    # caller-safe projection.
     fake.seed_route("chat-api")
     store = _store()
     await store.create_record(
@@ -276,8 +273,9 @@ async def test_another_caller_is_404_uniformly(fake, monkeypatch):
     _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
     _wire_manager(monkeypatch, _api_route("chat-api"))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
-    with pytest.raises(NotFoundError, match="thread not found"):
-        await ops.get_conversation_thread("chat-api", _THREAD)
+    read = await ops.get_conversation_thread("chat-api", _THREAD)
+    assert [item["message_id"] for item in read["items"]] == ["api-1"]
+    assert "error" not in read["items"][0]
 
 
 async def test_admin_reads_any_person_thread_on_a_valid_route(fake, monkeypatch):
@@ -328,20 +326,3 @@ async def test_a_target_mismatch_is_404(fake, monkeypatch):
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
     with pytest.raises(NotFoundError, match="thread not found"):
         await ops.get_conversation_thread("chat-api", _THREAD)
-
-
-# -- the ownership seam directly ---------------------------------------------
-
-
-async def test_caller_owns_thread_person_branch(fake, monkeypatch):
-    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
-    route = _api_route("chat-api")
-    assert await ops._caller_owns_thread(route, _THREAD, _authority_caller("alice")) is True
-    assert await ops._caller_owns_thread(route, _THREAD, _authority_caller("bob")) is False
-    # A channel route can never own an api-shaped person thread.
-    assert await ops._caller_owns_thread(_channel_route("line-b"), _THREAD, _authority_caller("alice")) is False
-
-
-async def test_caller_owns_thread_unknown_person_is_false(fake, monkeypatch):
-    route = _api_route("chat-api")
-    assert await ops._caller_owns_thread(route, f"{PERSON_THREAD_PREFIX}missing", _authority_caller("alice")) is False

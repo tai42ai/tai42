@@ -136,6 +136,34 @@ def delete_route(ctx: typer.Context, route_name: Annotated[str, typer.Argument(h
     emit_result(ctx_obj, data)
 
 
+@app.command("delete-thread")
+@covers(("DELETE", "/api/conversations/{route_name}/thread"))
+def delete_thread(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat:+15550001111).")],
+) -> None:
+    """Forget one conversation thread — its agent checkpoint, its answer records and its
+    thread indexes — so a later message on the same address starts a fresh memory.
+
+    Forgetting is absolute: a valid id on its own route always succeeds, reporting
+    ``removed: 0`` when nothing was left to clear (an aged-out or never-seen thread), never a
+    404 — the agent memory is forgotten regardless. A route-keyed id must carry the route's
+    ``bridge:<route_name>:`` prefix, else it is refused (400); a person thread not on the named
+    route is a 404. A turn in flight on the thread is refused (409, retry once it drains). The
+    same write grant that creates a route lets you delete routes and forget threads.
+
+    The thread id rides the query string, so an api-door id — which carries a percent-encoded
+    principal — reaches the door spelled exactly as the listing showed it.
+
+    Example: ``tai conversations delete-thread chat-line bridge:chat-line:+15550001111``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.delete(f"/api/conversations/{route_name}/thread", params={"thread_id": thread_id})
+    emit_result(ctx_obj, data)
+
+
 @app.command("get-message")
 @covers(("GET", "/api/conversations/{route_name}/messages/{message_id}"))
 def get_message(
@@ -143,8 +171,9 @@ def get_message(
     route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
     message_id: Annotated[str, typer.Argument(help="Answer record message id (uuid4).")],
 ) -> None:
-    """Read one conversation answer record (caller-scoped: your own records, or any as
-    admin; channel records are admin-only).
+    """Read one conversation answer record. Any holder of the conversations read grant reads
+    any record on the route, whichever door it arrived through; a non-admin caller gets the
+    caller-safe projection, with the internal error detail withheld.
 
     Example: ``tai conversations get-message chat-line 4f1c...``
     """
@@ -187,9 +216,8 @@ def get_transcript(
     page_size: Annotated[int, typer.Option("--page-size", help="Records per page (capped server-side).")] = 50,
     order: Annotated[str, typer.Option("--order", help="Record order: 'asc' (oldest first) or 'desc'.")] = "asc",
 ) -> None:
-    """Read one thread's transcript (caller-scoped: your own threads, or any as admin;
-    channel threads are admin-only, and any thread you cannot read reads as a plain 'not
-    found').
+    """Read one thread's transcript. Any holder of the conversations read grant reads any
+    thread's transcript on the route; an unknown thread or route is a plain 404.
 
     ``--order asc`` (the default) reads oldest first; ``--order desc`` reads newest first,
     so page 1 always holds the latest messages — the order a live tail wants. The window

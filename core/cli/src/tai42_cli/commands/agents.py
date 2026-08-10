@@ -16,7 +16,7 @@ from tai42_cli.commands._common import (
     app_context,
     covers,
     emit_records,
-    parse_json_object,
+    load_json_object_arg,
     stream_frames,
 )
 
@@ -27,6 +27,11 @@ app = typer.Typer(
 )
 
 _LIST_COLUMNS = ["name", "tool_name", "spec_runnable", "description"]
+
+_INPUT_FILE_HELP = (
+    "Read the agent input JSON object from a file, or from stdin when the path is '-', instead of putting a secret "
+    "on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --input."
+)
 
 
 @app.command("list")
@@ -60,14 +65,18 @@ def list_spec_runnable(ctx: typer.Context) -> None:
 def run_agent(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Agent registration name.")],
-    input_json: Annotated[str, typer.Option("--input", help="The agent input as a JSON object.")],
+    input_json: Annotated[str | None, typer.Option("--input", help="The agent input as a JSON object.")] = None,
+    input_file: Annotated[str | None, typer.Option("--input-file", help=_INPUT_FILE_HELP)] = None,
 ) -> None:
-    """Stream a run of an agent, one event frame at a time.
+    """Stream a run of an agent, one event frame at a time. Exactly one of ``--input`` or
+    ``--input-file`` is required.
 
     Example: ``tai agents run researcher --input '{"query":"weather"}'``
     """
     ctx_obj = app_context(ctx)
-    body = parse_json_object(input_json, param_hint="--input")
+    body = load_json_object_arg(input_json, input_file, param_hint="--input", file_param_hint="--input-file")
+    if body is None:
+        raise typer.BadParameter("give one of --input or --input-file", param_hint="--input/--input-file")
     stream_frames(ctx_obj, "POST", f"/api/agents/{name}/runs", json_body=body)
 
 
@@ -76,12 +85,18 @@ def run_agent(
 def run_authored_agent(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Authored-agent (preset) name.")],
-    input_json: Annotated[str, typer.Option("--input", help="The non-baked agent input as a JSON object.")],
+    input_json: Annotated[
+        str | None, typer.Option("--input", help="The non-baked agent input as a JSON object.")
+    ] = None,
+    input_file: Annotated[str | None, typer.Option("--input-file", help=_INPUT_FILE_HELP)] = None,
 ) -> None:
     """Stream a run of an authored agent (a preset baked over a spec-runnable agent).
+    Exactly one of ``--input`` or ``--input-file`` is required.
 
     Example: ``tai agents authored-run my_researcher --input '{"query":"weather"}'``
     """
     ctx_obj = app_context(ctx)
-    body = parse_json_object(input_json, param_hint="--input")
+    body = load_json_object_arg(input_json, input_file, param_hint="--input", file_param_hint="--input-file")
+    if body is None:
+        raise typer.BadParameter("give one of --input or --input-file", param_hint="--input/--input-file")
     stream_frames(ctx_obj, "POST", f"/api/agents/authored/{name}/runs", json_body=body)

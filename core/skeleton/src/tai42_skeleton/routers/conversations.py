@@ -14,9 +14,20 @@ the operator and Studio drive over the routing table.
 - ``GET /api/conversations/{route_name}/threads`` (AUTHED, admin) — the route's threads,
   newest activity first, paged by ``?page=``/``?pageSize=``.
 - ``GET /api/conversations/{route_name}/transcript?thread_id=`` (AUTHED) — one thread's
-  transcript, caller-scoped, paged the same way and ordered by ``?order=asc|desc``. The
+  transcript, paged the same way and ordered by ``?order=asc|desc``. The
   thread id is a query value because it holds a percent-encoded principal that no path
   spelling round-trips.
+- ``DELETE /api/conversations/{route_name}/thread?thread_id=`` (AUTHED) — forget one
+  thread: its agent checkpoint, its answer records and its thread indexes. Forgetting is
+  absolute — a valid id on its own route always succeeds, ``removed=0`` when nothing is
+  stored, never a 404; a route-keyed id must carry the route's ``bridge:{route_name}:``
+  prefix or it is a 400, and a person thread not on the named route is a 404. A turn in
+  flight on the thread is a 409. The thread id is a query value, the same as the transcript
+  door, because it holds a percent-encoded principal that no path spelling round-trips.
+
+The write doors (route create, route delete, thread delete) share ONE authority: the
+grantable ``write`` action. The same write grant that creates a route deletes routes and
+forgets threads — no per-thread owner check.
 
 - ``GET /api/conversation-configs`` (AUTHED) — list the per-target conversation configs
   (the ``multichannel`` opt-in + first-contact greeting), keyed ``(target_kind,
@@ -32,9 +43,12 @@ The config doors carry their own ``/api/conversation-configs`` prefix rather tha
 under ``/api/conversations/{route_name}``, where a ``config`` first segment would collide
 with the read-one route door.
 
-Both thread doors parse their query at the edge here, and both declare the query they take
-as an operation ``request_model``, so the emitted spec publishes their ``in: query``
-parameters and a generated client sends the REQUIRED ``thread_id``.
+The two thread READ doors parse their query at the edge here, and both declare the query
+they take as an operation ``request_model``, so the emitted spec publishes their ``in:
+query`` parameters and a generated client sends the REQUIRED ``thread_id``. The delete door
+reads the same ``thread_id`` from the query at the edge; being a write method — whose model
+the spec would document as a body, which this door has none of — it declares no
+``request_model`` and publishes no query parameter.
 
 Thin adapters over ``tai42_skeleton.operations.conversations`` — no routing logic here.
 The POST body is structurally validated at the edge (a strict 400 surface); the operation
@@ -67,6 +81,7 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations.conversations import create_conversation_route as _create_conversation_route_op
 from tai42_skeleton.operations.conversations import delete_conversation_config as _delete_conversation_config_op
 from tai42_skeleton.operations.conversations import delete_conversation_route as _delete_conversation_route_op
+from tai42_skeleton.operations.conversations import delete_conversation_thread as _delete_conversation_thread_op
 from tai42_skeleton.operations.conversations import get_conversation_config as _get_conversation_config_op
 from tai42_skeleton.operations.conversations import get_conversation_message as _get_conversation_message_op
 from tai42_skeleton.operations.conversations import get_conversation_route as _get_conversation_route_op
@@ -203,6 +218,35 @@ get_conversation_thread = register_operation_route(
     method="GET",
     context_extractor=_extract_transcript_query,
     action="read",
+)
+
+
+async def _extract_thread_delete_query(request: Request) -> dict:
+    """The delete door's ``?thread_id=``.
+
+    The thread id rides the QUERY, not the path: it carries the api door's percent-encoded
+    ``{principal}/{end user}`` address, which no path spelling round-trips — sent raw the
+    server decodes it before routing, sent already-encoded the access-control path
+    canonicalizer reads it as a doubly-encoded byte. A query value is decoded exactly once,
+    by the query parser, whatever it holds. A missing one is a loud 400 here; a blank one is
+    the operation's own 400."""
+    thread_id = request.query_params.get("thread_id")
+    if thread_id is None:
+        raise BadRequestError("thread_id is required: DELETE /api/conversations/{route_name}/thread?thread_id=...")
+    return {"thread_id": thread_id}
+
+
+# The item-level thread delete addresses the thread by ``?thread_id=`` query, the same as
+# the transcript read door, because the id holds a percent-encoded principal that no path
+# spelling round-trips. Its literal ``thread`` segment keeps it clear of the ``{route_name}``
+# read/delete doors above.
+delete_conversation_thread = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_delete_conversation_thread_op),
+    path="/api/conversations/{route_name}/thread",
+    method="DELETE",
+    context_extractor=_extract_thread_delete_query,
+    action="write",
 )
 
 

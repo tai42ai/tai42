@@ -56,7 +56,7 @@ def run_cli(
     args: list[str],
     *,
     json_output: bool = False,
-    stdin: str | None = None,
+    stdin: str | bytes | None = None,
 ) -> Result:
     """Invoke the compiled ``tai`` app against a fake server built from ``handler``.
 

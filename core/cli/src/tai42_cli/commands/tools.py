@@ -16,8 +16,8 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    load_kwargs_arg,
     parse_extension_combo,
-    parse_kwargs,
 )
 
 app = typer.Typer(
@@ -28,6 +28,11 @@ app = typer.Typer(
 
 _KWARGS_HELP = "Tool arguments as a JSON object."
 _KW_HELP = "A key=value tool argument (repeatable; value parsed as JSON)."
+_KWARGS_FILE_HELP = (
+    "Read the tool arguments JSON object from a file, or from stdin when the path is '-', instead of putting a "
+    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --kwargs; "
+    "--kw pairs still override its keys."
+)
 
 
 @app.command("list")
@@ -88,6 +93,7 @@ def run_tool(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Tool name.")],
     kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
+    kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     kw: Annotated[list[str] | None, typer.Option("--kw", help=_KW_HELP)] = None,
 ) -> None:
     """Run a registered tool synchronously and print its result.
@@ -95,7 +101,9 @@ def run_tool(
     Example: ``tai tools run add --kw a=1 --kw b=2``
     """
     ctx_obj = app_context(ctx)
-    arguments = parse_kwargs(kwargs, kw)
+    arguments = load_kwargs_arg(
+        kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
+    )
     with ctx_obj.client() as client:
         data = client.post("/api/run-tool", json={"tool_name": name, "arguments": arguments})
     emit_result(ctx_obj, data)
@@ -206,6 +214,7 @@ def submit_run(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Tool name.")],
     kwargs: Annotated[str | None, typer.Option("--kwargs", help=_KWARGS_HELP)] = None,
+    kwargs_file: Annotated[str | None, typer.Option("--kwargs-file", help=_KWARGS_FILE_HELP)] = None,
     kw: Annotated[list[str] | None, typer.Option("--kw", help=_KW_HELP)] = None,
 ) -> None:
     """Submit a tool for background execution and print its run id.
@@ -213,7 +222,9 @@ def submit_run(
     Example: ``tai tools runs submit slow_tool --kw n=100``
     """
     ctx_obj = app_context(ctx)
-    arguments = parse_kwargs(kwargs, kw)
+    arguments = load_kwargs_arg(
+        kwargs, kwargs_file, kw, param_hint="--kwargs", file_param_hint="--kwargs-file", kw_param_hint="--kw"
+    )
     with ctx_obj.client() as client:
         data = client.post("/api/tool-runs", json={"tool_name": name, "arguments": arguments})
     emit_result(ctx_obj, data)

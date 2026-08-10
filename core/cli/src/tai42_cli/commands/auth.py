@@ -6,6 +6,7 @@ Thin wrappers over the authed ``/api/auth/me`` route and the PUBLIC
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated
 
 import typer
@@ -50,18 +51,27 @@ def whoami(ctx: typer.Context) -> None:
 @covers(("POST", "/api/login/claim"))
 def claim(
     ctx: typer.Context,
-    token: Annotated[str, typer.Argument(help="A claim token or a full claim URL/fragment (either works).")],
+    token: Annotated[
+        str,
+        typer.Argument(
+            help="A claim token or a full claim URL/fragment (either works), or '-' to read it from stdin "
+            "(keeping it out of shell history)."
+        ),
+    ],
 ) -> None:
     """Exchange a one-time claim link for its API key — runs WITHOUT a credential.
 
     Pass the bare token or the whole claim URL; the token is taken from the ``#claim=``
-    fragment. The exchanged API key is printed ONCE — capture it now (there is no second
-    exchange; the link is single-use). A used/unknown/expired token answers the same
-    ``unknown or already used claim token``.
+    fragment. Pass ``-`` to read the token (or claim URL) from stdin, stripped, keeping it
+    off the command line. The exchanged API key is printed ONCE — capture it now (there is
+    no second exchange; the link is single-use). A used/unknown/expired token answers the
+    same ``unknown or already used claim token``.
 
     Example: ``tai auth claim 'https://host/login#claim=<token>'``
     """
     ctx_obj = app_context(ctx)
+    if token == "-":
+        token = sys.stdin.read()
     claim_token = _extract_claim_token(token)
     # The caller has no key yet — this is the whole point — so the exchange runs over the
     # no-credential client path; a stale/wrong credential is never sent to the public door.

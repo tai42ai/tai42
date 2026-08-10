@@ -16,6 +16,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    load_json_object_arg,
     parse_json_object,
 )
 
@@ -23,6 +24,11 @@ app = typer.Typer(
     name="hooks",
     help="Register and inspect webhook hooks.",
     no_args_is_help=True,
+)
+
+_PARAMS_FILE_HELP = (
+    "Read the params JSON object from a file, or from stdin when the path is '-', instead of putting a secret on "
+    "the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --params."
 )
 
 
@@ -61,9 +67,13 @@ def list_verifiers(ctx: typer.Context) -> None:
 @covers(("POST", "/api/hooks"))
 def register_hook(
     ctx: typer.Context,
-    params_json: Annotated[str, typer.Option("--params", help="The hook register body as a JSON object.")],
+    params_json: Annotated[
+        str | None, typer.Option("--params", help="The hook register body as a JSON object.")
+    ] = None,
+    params_file: Annotated[str | None, typer.Option("--params-file", help=_PARAMS_FILE_HELP)] = None,
 ) -> None:
-    """Register a hook from a ``HookRegister`` JSON body.
+    """Register a hook from a ``HookRegister`` JSON body. Exactly one of ``--params`` or
+    ``--params-file`` is required.
 
     The body REQUIRES an ``execution_key`` — the api-key user id the hook fires as. Bind
     your own identity or a key you own (an admin may bind any); its policy condition must
@@ -75,7 +85,9 @@ def register_hook(
     Example: ``tai hooks register --params '{"name":"h1","topic":"gh","tool":"notify","execution_key":"svc"}'``
     """
     ctx_obj = app_context(ctx)
-    body = parse_json_object(params_json, param_hint="--params")
+    body = load_json_object_arg(params_json, params_file, param_hint="--params", file_param_hint="--params-file")
+    if body is None:
+        raise typer.BadParameter("give one of --params or --params-file", param_hint="--params/--params-file")
     with ctx_obj.client() as client:
         data = client.post("/api/hooks", json=body)
     emit_result(ctx_obj, data)
@@ -148,6 +160,7 @@ def create_trigger_link(
             help="Per-link tool_kwargs as a JSON object, filling only the arguments a hook leaves unpinned.",
         ),
     ] = None,
+    params_file: Annotated[str | None, typer.Option("--params-file", help=_PARAMS_FILE_HELP)] = None,
 ) -> None:
     """Mint a trigger link — a PUBLIC URL that fires the topic's hooks.
 
@@ -180,8 +193,9 @@ def create_trigger_link(
     }
     if name is not None:
         body["name"] = name
-    if params_json is not None:
-        body["tool_kwargs"] = parse_json_object(params_json, param_hint="--params")
+    tool_kwargs = load_json_object_arg(params_json, params_file, param_hint="--params", file_param_hint="--params-file")
+    if tool_kwargs is not None:
+        body["tool_kwargs"] = tool_kwargs
 
     with ctx_obj.client() as client:
         data = client.post("/api/hooks/trigger-links", json=body)

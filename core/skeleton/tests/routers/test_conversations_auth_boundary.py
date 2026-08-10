@@ -28,6 +28,11 @@ _ROUTES = [
         methods=["GET"],
     ),
     Route("/api/conversations/{route_name}/threads", router.list_conversation_threads, methods=["GET"]),
+    Route(
+        "/api/conversations/{route_name}/thread",
+        router.delete_conversation_thread,
+        methods=["DELETE"],
+    ),
     Route("/api/conversations/{route_name}/transcript", router.get_conversation_thread, methods=["GET"]),
     Route("/api/conversation-configs", router.list_conversation_configs, methods=["GET"]),
     Route(
@@ -53,6 +58,7 @@ _STANCES = {
     r"/api/conversations/[^/]+/messages": AUTHED,
     r"/api/conversations/[^/]+/messages/[^/]+": AUTHED,
     r"/api/conversations/[^/]+/threads": AUTHED,
+    r"/api/conversations/[^/]+/thread": AUTHED,
     r"/api/conversations/[^/]+/transcript": AUTHED,
     r"/api/conversation-configs": AUTHED,
     r"/api/conversation-configs/[^/]+/[^/]+": AUTHED,
@@ -99,6 +105,14 @@ def test_list_threads_rejected_without_auth(monkeypatch):
     assert client.get("/api/conversations/chat/threads").status_code in (401, 403)
 
 
+def test_delete_thread_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.delete("/api/conversations/chat/thread", params={"thread_id": "bridge:chat:+1"}).status_code in (
+        401,
+        403,
+    )
+
+
 def test_get_transcript_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.get("/api/conversations/chat/transcript").status_code in (401, 403)
@@ -139,6 +153,7 @@ _REGISTERED_AUTHED = {
     ("/api/conversations/{route_name}/messages", ("POST",)): True,
     ("/api/conversations/{route_name}/messages/{message_id}", ("GET",)): True,
     ("/api/conversations/{route_name}/threads", ("GET",)): True,
+    ("/api/conversations/{route_name}/thread", ("DELETE",)): True,
     ("/api/conversations/{route_name}/transcript", ("GET",)): True,
     ("/api/conversation-configs", ("GET",)): True,
     ("/api/conversation-configs/{target_kind}/{target_name}", ("GET",)): True,

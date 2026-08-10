@@ -16,6 +16,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    load_json_object_arg,
     parse_json_object,
 )
 
@@ -26,6 +27,24 @@ app = typer.Typer(
 )
 
 _CONDITION_KWARGS_HELP = "Condition kwargs as a JSON object."
+_CONDITION_KWARGS_FILE_HELP = (
+    "Read the condition kwargs JSON object from a file, or from stdin when the path is '-', instead of putting a "
+    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with "
+    "--condition-kwargs."
+)
+_POLICY_DATA_FILE_HELP = (
+    "Read the policy data JSON object from a file, or from stdin when the path is '-', instead of putting a secret "
+    "on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --policy-data."
+)
+
+
+def _reject_double_stdin(condition_kwargs_file: str | None, policy_data_file: str | None) -> None:
+    """Stdin drains on the first read, so only one file option may be ``-`` per call."""
+    if condition_kwargs_file == "-" and policy_data_file == "-":
+        raise typer.BadParameter(
+            "only one option may read from stdin ('-')",
+            param_hint="--condition-kwargs-file/--policy-data-file",
+        )
 
 
 @app.command("list")
@@ -51,9 +70,13 @@ def create_key(
     condition: Annotated[str | None, typer.Option("--condition", help="An inline jq authorization condition.")] = None,
     condition_id: Annotated[str | None, typer.Option("--condition-id", help="A stored jq condition id.")] = None,
     condition_kwargs: Annotated[str | None, typer.Option("--condition-kwargs", help=_CONDITION_KWARGS_HELP)] = None,
+    condition_kwargs_file: Annotated[
+        str | None, typer.Option("--condition-kwargs-file", help=_CONDITION_KWARGS_FILE_HELP)
+    ] = None,
     policy_data: Annotated[
         str | None, typer.Option("--policy-data", help="Extra policy data as a JSON object.")
     ] = None,
+    policy_data_file: Annotated[str | None, typer.Option("--policy-data-file", help=_POLICY_DATA_FILE_HELP)] = None,
 ) -> None:
     """Provision an API key; the raw ``sk-…`` value is printed ONCE.
 
@@ -65,10 +88,20 @@ def create_key(
         body["condition"] = condition
     if condition_id is not None:
         body["condition_id"] = condition_id
-    if condition_kwargs is not None:
-        body["condition_kwargs"] = parse_json_object(condition_kwargs, param_hint="--condition-kwargs")
-    if policy_data is not None:
-        body["policy_data"] = parse_json_object(policy_data, param_hint="--policy-data")
+    _reject_double_stdin(condition_kwargs_file, policy_data_file)
+    condition_kwargs_obj = load_json_object_arg(
+        condition_kwargs,
+        condition_kwargs_file,
+        param_hint="--condition-kwargs",
+        file_param_hint="--condition-kwargs-file",
+    )
+    if condition_kwargs_obj is not None:
+        body["condition_kwargs"] = condition_kwargs_obj
+    policy_data_obj = load_json_object_arg(
+        policy_data, policy_data_file, param_hint="--policy-data", file_param_hint="--policy-data-file"
+    )
+    if policy_data_obj is not None:
+        body["policy_data"] = policy_data_obj
     with ctx_obj.client() as client:
         data = client.post("/api/auth/api-keys", json=body)
     emit_result(ctx_obj, data)
@@ -90,7 +123,11 @@ def edit_key(
     condition_kwargs: Annotated[
         str | None, typer.Option("--condition-kwargs", help="Condition kwargs JSON; '{}' clears.")
     ] = None,
+    condition_kwargs_file: Annotated[
+        str | None, typer.Option("--condition-kwargs-file", help=_CONDITION_KWARGS_FILE_HELP)
+    ] = None,
     policy_data: Annotated[str | None, typer.Option("--policy-data", help="Policy data JSON; '{}' clears.")] = None,
+    policy_data_file: Annotated[str | None, typer.Option("--policy-data-file", help=_POLICY_DATA_FILE_HELP)] = None,
 ) -> None:
     """Partially edit a key's description/scopes/policy in place (no rotation).
 
@@ -113,10 +150,20 @@ def edit_key(
         updates["condition"] = condition
     if condition_id is not None:
         updates["condition_id"] = condition_id
-    if condition_kwargs is not None:
-        updates["condition_kwargs"] = parse_json_object(condition_kwargs, param_hint="--condition-kwargs")
-    if policy_data is not None:
-        updates["policy_data"] = parse_json_object(policy_data, param_hint="--policy-data")
+    _reject_double_stdin(condition_kwargs_file, policy_data_file)
+    condition_kwargs_obj = load_json_object_arg(
+        condition_kwargs,
+        condition_kwargs_file,
+        param_hint="--condition-kwargs",
+        file_param_hint="--condition-kwargs-file",
+    )
+    if condition_kwargs_obj is not None:
+        updates["condition_kwargs"] = condition_kwargs_obj
+    policy_data_obj = load_json_object_arg(
+        policy_data, policy_data_file, param_hint="--policy-data", file_param_hint="--policy-data-file"
+    )
+    if policy_data_obj is not None:
+        updates["policy_data"] = policy_data_obj
     if not updates:
         raise typer.BadParameter("provide at least one field to edit")
     with ctx_obj.client() as client:
@@ -180,6 +227,9 @@ def validate_condition(
     condition: Annotated[str | None, typer.Option("--condition", help="An inline jq condition to compile.")] = None,
     condition_id: Annotated[str | None, typer.Option("--condition-id", help="A stored jq condition id.")] = None,
     condition_kwargs: Annotated[str | None, typer.Option("--condition-kwargs", help=_CONDITION_KWARGS_HELP)] = None,
+    condition_kwargs_file: Annotated[
+        str | None, typer.Option("--condition-kwargs-file", help=_CONDITION_KWARGS_FILE_HELP)
+    ] = None,
     sample_context: Annotated[
         str | None, typer.Option("--sample-context", help="A JqAuthContext-shaped sample to evaluate against, as JSON.")
     ] = None,
@@ -194,8 +244,14 @@ def validate_condition(
         body["condition"] = condition
     if condition_id is not None:
         body["condition_id"] = condition_id
-    if condition_kwargs is not None:
-        body["condition_kwargs"] = parse_json_object(condition_kwargs, param_hint="--condition-kwargs")
+    condition_kwargs_obj = load_json_object_arg(
+        condition_kwargs,
+        condition_kwargs_file,
+        param_hint="--condition-kwargs",
+        file_param_hint="--condition-kwargs-file",
+    )
+    if condition_kwargs_obj is not None:
+        body["condition_kwargs"] = condition_kwargs_obj
     if sample_context is not None:
         body["sample_context"] = parse_json_object(sample_context, param_hint="--sample-context")
     with ctx_obj.client() as client:

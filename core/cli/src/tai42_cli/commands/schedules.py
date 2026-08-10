@@ -14,6 +14,7 @@ from tai42_cli.commands._common import (
     app_context,
     covers,
     emit_result,
+    load_kwargs_arg,
     parse_kwargs,
 )
 
@@ -21,6 +22,12 @@ app = typer.Typer(
     name="schedules",
     help="Manage scheduled jobs.",
     no_args_is_help=True,
+)
+
+_TOOL_KWARGS_FILE_HELP = (
+    "Read the tool arguments JSON object from a file, or from stdin when the path is '-', instead of putting a "
+    "secret on the command line (a value on argv leaks via ps and shell history). Mutually exclusive with "
+    "--tool-kwargs; --tool-kw pairs still override its keys."
 )
 
 
@@ -56,6 +63,7 @@ def create_schedule(
     ctx: typer.Context,
     tool_name: Annotated[str, typer.Argument(help="The tool to run on a schedule.")],
     tool_kwargs: Annotated[str | None, typer.Option("--tool-kwargs", help="Tool arguments as a JSON object.")] = None,
+    tool_kwargs_file: Annotated[str | None, typer.Option("--tool-kwargs-file", help=_TOOL_KWARGS_FILE_HELP)] = None,
     tool_kw: Annotated[
         list[str] | None, typer.Option("--tool-kw", help="A key=value tool argument (repeatable).")
     ] = None,
@@ -73,7 +81,14 @@ def create_schedule(
     ctx_obj = app_context(ctx)
     body = {
         "tool_name": tool_name,
-        "tool_kwargs": parse_kwargs(tool_kwargs, tool_kw),
+        "tool_kwargs": load_kwargs_arg(
+            tool_kwargs,
+            tool_kwargs_file,
+            tool_kw,
+            param_hint="--tool-kwargs",
+            file_param_hint="--tool-kwargs-file",
+            kw_param_hint="--tool-kw",
+        ),
         "schedule_kwargs": parse_kwargs(schedule_kwargs, schedule_kw),
     }
     with ctx_obj.client() as client:

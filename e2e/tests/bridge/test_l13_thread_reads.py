@@ -10,18 +10,16 @@ spelling round-trips.
 
 The paging/order and refusal arms are driven over twilio deliberately: the read doors are
 the SKELETON's, so they lean on the most-proven inbound path rather than on any one channel
-plugin. A channel thread names no caller principal, so no non-admin can own one — that arm
-proves both refusals, and that they are told apart: the thread LISTING is an outright 403,
-while the transcript door answers ONE uniform 404 for every thread the caller cannot read,
-so it can never be used to probe whether an address has talked to a route.
+plugin. The transcript read is grant-gated: any authenticated grant-holder reads it, so the
+channel arm proves a scoped non-admin reads the transcript while the thread LISTING stays an
+outright 403 (admin-only).
 
-Ownership itself only exists on the API door, so it is proven there: an api-door thread
-names its owner inside its own id, as the caller's principal percent-encoded with
-``safe=''``. Producer (the turn that composes the address) and consumer (the read that
-authorizes from it) must spell that encoding identically, and a drift between them would
-hide behind the very 404 that is indistinguishable from "no such thread". The owner arm
-therefore drives a principal that genuinely needs encoding and asserts the caller reads
-their own records back.
+The api door composes its thread id out of the authenticated caller's principal, percent-
+encoded with ``safe=''``. The read authorizes from a grant, not that principal, but the id
+still has to round-trip through the query: a producer/consumer drift in the encoding would
+land as the door's 404. The api arm therefore drives a principal that genuinely needs
+encoding, asserts the caller reads their own records back, and that a second grant-holder
+reads them too.
 """
 
 from __future__ import annotations
@@ -89,9 +87,8 @@ async def _channel_route(bridge: BridgeHarness, uniq: Callable[[str], str]) -> t
 async def _api_route(bridge: BridgeHarness, uniq: Callable[[str], str]) -> str:
     """A fresh api-door route bound to its own execution key; returns the route name.
 
-    The api door is the ONLY door whose threads have an owner: it composes the thread's
-    address out of the authenticated caller's principal, so a caller can be shown their own
-    transcript without being an administrator."""
+    The api door composes the thread's address out of the authenticated caller's principal,
+    so its thread ids carry a percent-encoded principal the read has to round-trip."""
     route_name = uniq("l13-api").replace("_", "-")
     execution_key = uniq("l13-api-exec")
     await bridge.mint_key(user_id=execution_key, scopes=["e2e-all"])
@@ -194,42 +191,39 @@ async def test_unknown_route_and_thread_are_uniform_404s(bridge: BridgeHarness, 
 
 
 @MOCK_TWILIO_ONLY
-async def test_channel_threads_are_admin_only(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+async def test_channel_listing_is_admin_only_and_transcript_reads_for_a_grant_holder(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
     route_name, identity = await _channel_route(bridge, uniq)
     await _two_exchanges(bridge, uniq, identity)
     thread_id = (await bridge.api().get(f"/api/conversations/{route_name}/threads"))["items"][0]["thread_id"]
 
     # A scoped key reaches the doors (the route table maps them to e2e-all) but is not an
-    # administrator. The two doors refuse it in the two different shapes their contracts
-    # promise: the listing spans every caller on the route, so it is refused outright with
-    # a 403; a channel thread names no caller principal, so no caller can own one, and the
-    # transcript door answers the SAME 404 it gives any unreadable thread.
+    # administrator. The listing spans every caller on the route, so it stays admin-only and
+    # refuses the scoped key with a 403; the transcript read is grant-gated, so the scoped
+    # key reads it. An absent thread is still the uniform 404.
     scoped = await bridge.mint_key(user_id=uniq("l13-scoped"), scopes=["e2e-all"])
     reader = bridge.api(token=scoped)
     await reader.get(f"/api/conversations/{route_name}/threads", expect=403)
-    # The refusal for a thread that DOES exist and the one for a thread that never did
-    # differ only in the id the caller themselves supplied: the door leaks no oracle for
-    # whether this address has ever talked to the route.
-    real = await reader.request_raw("GET", _transcript_path(route_name, thread_id))
+    real = await reader.get(_transcript_path(route_name, thread_id), expect=200)
+    assert real["total"] == 2
     absent = await reader.request_raw("GET", _transcript_path(route_name, "bridge:nope"))
-    assert real.status_code == absent.status_code == 404
-    assert real.json() == {"error": f"conversation thread not found: {thread_id!r}"}, real.text
+    assert absent.status_code == 404
     assert absent.json() == {"error": "conversation thread not found: 'bridge:nope'"}, absent.text
 
-    # The refusals are authorization, not absence: the admin still reads both.
+    # The admin reads both too.
     assert (await bridge.api().get(f"/api/conversations/{route_name}/threads"))["total"] == 1
     assert (await bridge.api().get(_transcript_path(route_name, thread_id)))["total"] == 2
 
 
-async def test_api_door_owner_reads_their_own_transcript(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
-    """A NON-admin api caller reads back the thread its own principal keys.
+async def test_api_door_caller_reads_their_own_transcript(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    """A NON-admin grant-holder reads back an api-door thread through the transcript door.
 
-    The door authorizes from the thread's identity alone, and an api-door thread id ends in
-    ``{principal percent-encoded with safe=''}/{end-user id}``. So the turn that WRITES the
-    address and the read that AUTHORIZES from it must spell the encoding the same way, and
-    any drift would land as the door's uniform 404 — indistinguishable from "no such
-    thread". This caller's principal carries the ``:`` an OIDC subject does, so it is only
-    readable if the two spellings agree on percent-encoding."""
+    An api-door thread id ends in ``{principal percent-encoded with safe=''}/{end-user id}``,
+    so the turn that WRITES the address and the read that fetches it must spell the encoding
+    the same way; a drift would land as the door's 404. This caller's principal carries the
+    ``:`` an OIDC subject does, so the thread is only readable if the two spellings agree on
+    percent-encoding."""
     route_name = await _api_route(bridge, uniq)
     principal = f"oidc:google:{uniq('l13-owner')}"
     encoded = quote(principal, safe="")
@@ -266,12 +260,11 @@ async def test_api_door_owner_reads_their_own_transcript(bridge: BridgeHarness, 
     assert all(item["caller_principal"] == principal for item in transcript["items"])
     assert all("error" not in item for item in transcript["items"])
 
-    # Ownership is per principal, never "any authenticated non-admin": a second scoped key
-    # gets the one uniform 404 for the very thread the owner just read.
+    # Grant-gated, not per-principal: a second scoped grant-holder reads the same thread.
     stranger = bridge.api(token=await bridge.mint_key(user_id=uniq("l13-stranger"), scopes=["e2e-all"]))
-    await stranger.get(_transcript_path(route_name, thread_id), expect=404)
-    # And owning a thread buys no listing: that door spans every caller on the route, so it
-    # stays an outright 403 on the api door too.
+    assert (await stranger.get(_transcript_path(route_name, thread_id), expect=200))["total"] == len(exchanges)
+    # The thread LISTING stays admin-only: it spans every caller on the route, so the scoped
+    # key gets a 403.
     await caller.get(f"/api/conversations/{route_name}/threads", expect=403)
     (listed,) = (await bridge.api().get(f"/api/conversations/{route_name}/threads"))["items"]
     assert listed["thread_id"] == thread_id

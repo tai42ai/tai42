@@ -7,6 +7,9 @@ CRUD commands answer the route's honest 501 when none is.
 
 from __future__ import annotations
 
+import base64
+import sys
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -83,20 +86,37 @@ def upload_resource(
     resource_id: Annotated[str, typer.Argument(help="Resource id.")],
     text: Annotated[str | None, typer.Option("--text", help="Store this text verbatim.")] = None,
     content_base64: Annotated[str | None, typer.Option("--base64", help="Store these base64-encoded bytes.")] = None,
+    file: Annotated[
+        str | None,
+        typer.Option(
+            "--file",
+            help="Store the raw bytes read from this file path, or from stdin when the path is '-', keeping secret "
+            "content off the command line (a value on argv leaks via ps and shell history).",
+        ),
+    ] = None,
 ) -> None:
-    """Upload a resource — exactly one of ``--text`` or ``--base64``. An existing id
-    is overwritten.
+    """Upload a resource — exactly one of ``--text``, ``--base64``, or ``--file`` (a
+    path, or ``-`` to read the raw bytes from stdin). An existing id is overwritten.
 
     Example: ``tai storage upload notes/todo.txt --text 'buy milk'``
     """
     ctx_obj = app_context(ctx)
-    if (text is None) == (content_base64 is None):
-        raise typer.BadParameter("pass exactly one of --text or --base64")
+    if sum(source is not None for source in (text, content_base64, file)) != 1:
+        raise typer.BadParameter("pass exactly one of --text, --base64, or --file", param_hint="--text/--base64/--file")
     body: dict = {"id": resource_id}
     if text is not None:
         body["content_text"] = text
-    else:
+    elif content_base64 is not None:
         body["content_base64"] = content_base64
+    elif file is not None:
+        if file == "-":
+            raw = sys.stdin.buffer.read()
+        else:
+            try:
+                raw = Path(file).read_bytes()
+            except OSError as exc:
+                raise typer.BadParameter(f"cannot read {file!r}: {exc}", param_hint="--file") from exc
+        body["content_base64"] = base64.b64encode(raw).decode("ascii")
     with ctx_obj.client() as client:
         data = client.post("/api/storage/resources", json=body)
     emit_result(ctx_obj, data)

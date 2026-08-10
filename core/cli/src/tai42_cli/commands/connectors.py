@@ -16,7 +16,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
-    parse_json_object,
+    load_json_object_arg,
 )
 
 app = typer.Typer(
@@ -27,6 +27,10 @@ app = typer.Typer(
 
 _SUB_SERVICE_HELP = "An enabled sub-service (repeatable)."
 _RETURN_URL_HELP = "Where to return after the flow completes."
+_CONFIG_FILE_HELP = (
+    "Read the provider config values from a file, or from stdin when the path is '-', which keeps provider secrets "
+    "off the command line (a value on argv leaks via ps and shell history). Mutually exclusive with --config."
+)
 
 
 @app.command("providers")
@@ -78,6 +82,7 @@ def connect(
     config_values: Annotated[
         str | None, typer.Option("--config", help="Provider config values as a JSON object.")
     ] = None,
+    config_file: Annotated[str | None, typer.Option("--config-file", help=_CONFIG_FILE_HELP)] = None,
     return_url: Annotated[str, typer.Option("--return-url", help=_RETURN_URL_HELP)] = "/connectors",
 ) -> None:
     """Start a connection flow; prints the authorize URL (or the created connection).
@@ -85,11 +90,12 @@ def connect(
     Example: ``tai connectors connect google --alias work --sub-service gmail``
     """
     ctx_obj = app_context(ctx)
+    config = load_json_object_arg(config_values, config_file, param_hint="--config", file_param_hint="--config-file")
     body: dict = {
         "provider_id": provider,
         "alias": alias,
         "enabled_sub_services": list(sub_service),
-        "config_values": parse_json_object(config_values, param_hint="--config") if config_values else {},
+        "config_values": config if config is not None else {},
         "return_url": return_url,
     }
     with ctx_obj.client() as client:

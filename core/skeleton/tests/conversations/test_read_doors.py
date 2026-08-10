@@ -1,9 +1,10 @@
-"""The caller-scoped operator read doors: one answer record by id, a thread's transcript,
-the route's thread listing, and the admin-tier failed-delivery listing.
+"""The operator read doors: one answer record by id, a thread's transcript, the route's
+thread listing, and the admin-tier failed-delivery listing.
 
-An api-door record is readable only by the caller that invoked the turn or an admin; a
-channel-door record has a null ``caller_principal``, so it is admin-only. Each deny
-asserts the SPECIFIC typed error.
+The record and transcript reads are grant-gated: any authenticated grant-holder reads
+them, an admin getting the whole record and a non-admin the caller-safe projection. The
+thread and failed-delivery LISTINGS are admin-only. Each deny asserts the SPECIFIC typed
+error.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import time
 from dataclasses import dataclass
 
 import pytest
-from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.conversations import records as records_module
@@ -21,7 +21,6 @@ from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStat
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
-from tai42_skeleton.operations._authority import Caller
 from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError
 
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
@@ -39,8 +38,7 @@ _ROUTE = ConversationRoute(
 )
 
 
-#: The same route name as an ``api`` row. A transcript's reader is authorized from the
-#: thread's identity, and only an api-door route's threads name a principal that can own one.
+#: The same route name as an ``api`` row, for reads exercised over an api-door thread.
 _API_ROUTE = ConversationRoute(
     route_name="chat",
     door="api",
@@ -76,11 +74,6 @@ class _DictManager(BaseConversationsManager):
 class _Caller:
     caller_id: str
     is_admin: bool
-
-
-def _authority_caller(caller_id: str) -> Caller:
-    """A real :class:`Caller` for the ownership helper, which takes the resolved type."""
-    return Caller(caller_id=caller_id, policy=AccessPolicy(scopes=[]), is_admin=False, owner_claim=None)
 
 
 def _record(
@@ -134,11 +127,11 @@ def _as_caller(monkeypatch, caller: _Caller) -> None:
 
 
 def _as_api_route(monkeypatch) -> None:
-    """Make ``chat`` an ``api`` row, so its threads are ones a caller can own."""
+    """Make ``chat`` an ``api`` row, for a read over an api-door thread."""
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: _DictManager(_API_ROUTE))
 
 
-# -- get_conversation_message: api records are caller-or-admin ----------------
+# -- get_conversation_message: a record reads for any grant-holder ------------
 
 
 async def test_api_record_readable_by_its_invoking_caller(store, monkeypatch):
@@ -149,11 +142,14 @@ async def test_api_record_readable_by_its_invoking_caller(store, monkeypatch):
     assert view["caller_principal"] == "alice"
 
 
-async def test_api_record_hidden_from_another_caller(store, monkeypatch):
+async def test_api_record_readable_by_another_grant_holder_as_projection(store, monkeypatch):
+    # Grant-gated: another authenticated non-admin grant-holder reads the record too, as the
+    # caller-safe projection that withholds the route key's run detail.
     await store.create_record(_record("m1", door="api", caller_principal="alice", status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
-    with pytest.raises(ForbiddenError, match="only read conversation records from turns you invoked"):
-        await ops.get_conversation_message("chat", "m1")
+    view = await ops.get_conversation_message("chat", "m1")
+    assert view["message_id"] == "m1"
+    assert "error" not in view
 
 
 async def test_api_record_readable_by_admin(store, monkeypatch):
@@ -201,14 +197,17 @@ async def test_an_admin_reads_the_whole_record_including_the_internal_detail(sto
         assert field in view
 
 
-# -- get_conversation_message: channel records are admin-only -----------------
+# -- get_conversation_message: a channel record reads as the projection -------
 
 
-async def test_channel_record_is_admin_only(store, monkeypatch):
+async def test_channel_record_readable_by_a_grant_holder_as_projection(store, monkeypatch):
+    # A channel record names no caller principal; grant-gated, a non-admin grant-holder still
+    # reads it as the caller-safe projection.
     await store.create_record(_record("c1", door="channel", caller_principal=None, status=DeliveryStatus.DELIVERED))
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
-    with pytest.raises(ForbiddenError, match="only read conversation records from turns you invoked"):
-        await ops.get_conversation_message("chat", "c1")
+    view = await ops.get_conversation_message("chat", "c1")
+    assert view["message_id"] == "c1"
+    assert "error" not in view
 
 
 async def test_channel_record_readable_by_admin(store, monkeypatch):
@@ -223,8 +222,8 @@ async def test_unknown_or_cross_route_record_is_404(store, monkeypatch):
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation record not found"):
         await ops.get_conversation_message("chat", "missing")
-    # A record that exists under a DIFFERENT route is a 404 (not a 403) — it is not this
-    # route's record to reveal even the existence of.
+    # A record that exists under a DIFFERENT route is a 404 — it is not this route's record
+    # to reveal even the existence of.
     with pytest.raises(NotFoundError, match="conversation record not found"):
         await ops.get_conversation_message("other-route", "m1")
 
@@ -314,7 +313,7 @@ async def _seed_thread(store, *, caller_principal: str | None, door: str = "api"
         )
 
 
-async def test_a_thread_reads_oldest_first_for_its_owning_caller(store, monkeypatch):
+async def test_a_thread_reads_oldest_first_for_a_grant_holder(store, monkeypatch):
     _as_api_route(monkeypatch)
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
@@ -340,49 +339,33 @@ async def test_an_admin_reads_the_whole_record_of_every_thread(store, monkeypatc
     assert "attempts" in read["items"][0]
 
 
-async def test_a_thread_is_refused_to_a_caller_that_did_not_invoke_it(store, monkeypatch):
-    _as_api_route(monkeypatch)
-    await _seed_thread(store, caller_principal="alice")
-    _as_caller(monkeypatch, _Caller("bob", is_admin=False))
-    # The SAME answer an absent thread gets: a 403 here would tell bob that alice has a
-    # thread on this route, which is the fact the door exists to protect.
-    with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("chat", _THREAD)
-
-
-async def test_a_channel_thread_is_admin_only(store, monkeypatch):
-    # Nothing on a channel route names a principal a door caller can be, so its threads are
-    # admin-only whatever their address looks like.
-    await _seed_thread(store, caller_principal=None, door="channel")
-    _as_caller(monkeypatch, _Caller("alice", is_admin=False))
-    with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("chat", _THREAD)
-
-
-async def test_an_empty_page_of_a_foreign_thread_discloses_nothing(store, monkeypatch):
-    # Authorization is decided from the thread id alone, never from the page's records, so
-    # a page holding none of them is refused exactly as page 1 is. A page that ran no check
-    # would answer 200 with the thread's exact record count.
+async def test_a_thread_reads_for_another_grant_holder(store, monkeypatch):
+    # Grant-gated: a non-admin who did not invoke the turns still reads the thread, as the
+    # caller-safe projection.
     _as_api_route(monkeypatch)
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
 
-    for page in (1, 2, 99):
-        with pytest.raises(NotFoundError, match="conversation thread not found"):
-            await ops.get_conversation_thread("chat", _THREAD, page=page, page_size=1)
+    read = await ops.get_conversation_thread("chat", _THREAD)
+
+    assert [item["message_id"] for item in read["items"]] == ["t0", "t1"]
+    assert "error" not in read["items"][0]
 
 
-async def test_an_empty_page_of_a_channel_thread_discloses_nothing(store, monkeypatch):
+async def test_a_channel_thread_reads_for_a_grant_holder(store, monkeypatch):
+    # A channel thread names no caller principal; grant-gated, a non-admin grant-holder still
+    # reads it as the caller-safe projection.
     await _seed_thread(store, caller_principal=None, door="channel")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
 
-    for page in (1, 2, 99):
-        with pytest.raises(NotFoundError, match="conversation thread not found"):
-            await ops.get_conversation_thread("chat", _THREAD, page=page, page_size=1)
+    read = await ops.get_conversation_thread("chat", _THREAD)
+
+    assert [item["message_id"] for item in read["items"]] == ["t0", "t1"]
+    assert "error" not in read["items"][0]
 
 
-async def test_an_owner_reading_past_the_end_gets_an_empty_page_not_a_refusal(store, monkeypatch):
-    # The flip side: a page past the end of a thread the caller DOES own is valid data.
+async def test_reading_past_the_end_gets_an_empty_page_not_a_refusal(store, monkeypatch):
+    # A page past the end of a thread that reads is valid data, never a 404.
     _as_api_route(monkeypatch)
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("alice", is_admin=False))
@@ -394,69 +377,9 @@ async def test_an_owner_reading_past_the_end_gets_an_empty_page_not_a_refusal(st
     assert read["next_page"] is None
 
 
-async def test_a_principal_that_is_not_url_safe_still_owns_its_thread(store, monkeypatch):
-    # An OIDC-minted principal is percent-encoded into the address the thread is keyed by;
-    # ownership is decided on that same encoded form, so the caller reads its own thread.
-    _as_api_route(monkeypatch)
-    principal = "oidc:google:1234"
-    thread = "bridge:chat:oidc%3Agoogle%3A1234/user-7"
-    await store.create_record(
-        _record("t0", door="api", caller_principal=principal, status=DeliveryStatus.DELIVERED, thread_id=thread)
-    )
-    _as_caller(monkeypatch, _Caller(principal, is_admin=False))
-
-    read = await ops.get_conversation_thread("chat", thread)
-
-    assert [item["message_id"] for item in read["items"]] == ["t0"]
-    # And the encoded principal is not a prefix anyone else inherits.
-    _as_caller(monkeypatch, _Caller("oidc", is_admin=False))
-    with pytest.raises(NotFoundError, match="conversation thread not found"):
-        await ops.get_conversation_thread("chat", thread)
-
-
-@pytest.mark.parametrize(
-    "principal",
-    [
-        "alice",
-        # An OIDC-minted principal: every character the encoder escapes has to be escaped
-        # the same way on BOTH sides, or its owner is 404'd out of its own transcript.
-        "oidc:google:1234",
-        "svc/robot",
-        "a b+c%d",
-    ],
-)
-async def test_the_thread_id_a_turn_mints_is_the_one_its_caller_owns(store, monkeypatch, principal):
-    """Bind the api door's thread-id PRODUCER to its ownership CONSUMER.
-
-    ``turn._api_client_address`` percent-encodes the caller principal into the address the
-    thread is keyed by, and ``_caller_owns_thread`` re-encodes the caller's own principal to
-    match it. Neither side is testable alone: widening the producer's ``safe`` set keeps
-    every other test green while silently 404ing an OIDC-style principal out of its own
-    transcript, behind a uniform 404 that names nothing.
-    """
-    from tai42_skeleton.conversations import turn as turn_module
-
-    address = turn_module._api_client_address(principal, "user-7")
-    thread_id = turn_module._thread_id(_API_ROUTE.route_name, address)
-
-    _as_api_route(monkeypatch)
-    await store.create_record(
-        _record("t0", door="api", caller_principal=principal, status=DeliveryStatus.DELIVERED, thread_id=thread_id)
-    )
-    _as_caller(monkeypatch, _Caller(principal, is_admin=False))
-
-    assert await ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(principal)) is True
-    read = await ops.get_conversation_thread("chat", thread_id)
-    assert [item["message_id"] for item in read["items"]] == ["t0"]
-
-    # And nobody else keys it — not even a principal the encoded form starts with.
-    for other in ("oidc", principal[:-1], f"{principal}x"):
-        assert await ops._caller_owns_thread(_API_ROUTE, thread_id, _authority_caller(other)) is False
-
-
-async def test_an_unknown_thread_is_404_before_any_authorization(store, monkeypatch):
-    # A thread the route's index does not hold — never seen, or every record expired — is
-    # a 404 whoever asks, so no reader learns whether it exists elsewhere.
+async def test_an_unknown_thread_is_404(store, monkeypatch):
+    # A thread the route's index does not hold — never seen, or every record expired — is a
+    # 404 whoever asks. An unknown route is its own loud 404.
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
     with pytest.raises(NotFoundError, match="conversation thread not found"):
@@ -466,13 +389,12 @@ async def test_an_unknown_thread_is_404_before_any_authorization(store, monkeypa
         await ops.get_conversation_thread("other-route", _THREAD)
 
 
-async def test_an_unknown_route_tells_a_non_admin_nothing_the_uniform_404_does_not(store, monkeypatch):
-    # The transcript door's whole point is that a refusal names nothing. A distinct
-    # "route not found" would answer WHICH route names exist to a caller that owns no
-    # thread on any of them — the same oracle read from one step further out.
+async def test_an_unknown_route_is_a_loud_404_for_a_non_admin_too(store, monkeypatch):
+    # Grant-gated reads disclose route existence: a non-admin asking an unknown route gets the
+    # loud route not-found, the same as an admin.
     await _seed_thread(store, caller_principal="alice")
     _as_caller(monkeypatch, _Caller("bob", is_admin=False))
-    with pytest.raises(NotFoundError, match="conversation thread not found"):
+    with pytest.raises(NotFoundError, match="conversation route not found"):
         await ops.get_conversation_thread("other-route", _THREAD)
 
 
