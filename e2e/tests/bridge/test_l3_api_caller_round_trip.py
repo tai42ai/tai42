@@ -2,8 +2,9 @@
 
 The authed ``POST /api/conversations/{route}/messages`` door: the sync-wait carrying the
 answer inline in a ``200`` (callback suppressed), the async ``202`` whose permanently
-undeliverable callback lands ``failed`` on the admin list door, and read-door scoping
-(a second integration's key cannot read the first's record).
+undeliverable callback lands ``failed`` on the admin list door, and the grant-gated read
+door (any grant-holder reads the caller-safe projection, which withholds the route key's
+internal detail; only an admin reads that detail).
 
 The signed-callback SUCCESS delivery is not exercised here: the contract forces an absolute
 HTTPS ``callback_url`` with no insecure opt-out, so a plain-loopback receiver cannot stand in
@@ -111,8 +112,13 @@ async def test_read_door_scoping(bridge: BridgeHarness, uniq: Callable[[str], st
     assert own["caller_principal"] == caller_one_id
     assert "error" not in own  # the caller projection withholds the route-key run's detail
 
-    # A SECOND integration's key cannot read the first's record — a 403, not the record.
-    await bridge.api(token=caller_two).get(f"/api/conversations/{route_name}/messages/{message_id}", expect=403)
+    # The read door is grant-gated, not caller-scoped: a SECOND integration's key reads the
+    # record too — served the same caller-safe projection, naming the record's own turn and
+    # withholding the route key's detail.
+    other = await bridge.api(token=caller_two).get(f"/api/conversations/{route_name}/messages/{message_id}")
+    assert other["message_id"] == message_id
+    assert other["caller_principal"] == caller_one_id
+    assert "error" not in other
 
     # Admin (root) reads the full record including the internal bookkeeping.
     admin_view = await bridge.get_record(route_name, message_id)

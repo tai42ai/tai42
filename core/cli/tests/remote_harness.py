@@ -32,6 +32,14 @@ def strip_ansi(text: str) -> str:
     return _ANSI_CSI.sub("", text)
 
 
+# Force a wide, plain terminal for every invoke: Typer/rich renders its error and help
+# panels through a rich Console that, off a real tty, folds a long option name mid-token at
+# whatever narrow width it detects (empty COLUMNS collapses to a handful of columns in CI),
+# so a substring assert like ``"--params-file" in output`` breaks. COLUMNS pins the width
+# wide enough that no option wraps; NO_COLOR and TERM keep the output free of ANSI styling.
+_PLAIN_WIDE_TERM = {"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"}
+
+
 def data_response(payload: Any, status_code: int = 200) -> httpx.Response:
     """A ``{"data": ...}`` success envelope response."""
     return httpx.Response(status_code, json={"data": payload})
@@ -74,4 +82,4 @@ def run_cli(
     monkeypatch.setenv("TAI_API_KEY", "test-key")
     monkeypatch.setenv("TAI_SERVER_URL", "http://testserver")
     full_args = (["--json"] if json_output else []) + args
-    return CliRunner().invoke(app_module.app, full_args, input=stdin)
+    return CliRunner().invoke(app_module.app, full_args, input=stdin, env=_PLAIN_WIDE_TERM)
