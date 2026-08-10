@@ -785,3 +785,139 @@ async def test_second_edit_reads_first_edits_committed_body_no_lost_update(mem, 
     # that would silently drop the second edit's grant change (a lost update).
     assert audit[2]["before"]["grants"] == {tag: "write"}
     assert audit[2]["after"]["grants"] == {tag: "write"}  # description-only edit kept the grants
+
+
+# -- modify_role_grants: set/remove single tag grants ------------------------
+
+
+def _two_grantable_tags() -> tuple[str, str]:
+    tags = sorted(grantable_feature_tags())
+    assert len(tags) >= 2, "need at least two grantable tags for the set/remove tests"
+    return tags[0], tags[1]
+
+
+async def test_modify_grants_set_upserts_new_and_overwrites_existing(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, b = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read"})
+    edited = await roles_ops.modify_role_grants("ops", set={a: "write", b: "read"})
+    assert edited["grants"][a] == "write"  # existing tag overwritten (the sanctioned upsert)
+    assert edited["grants"][b] == "read"  # new tag added
+
+
+async def test_modify_grants_remove_drops_tag(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, b = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read", b: "write"})
+    edited = await roles_ops.modify_role_grants("ops", remove=[a])
+    assert a not in edited["grants"]
+    assert edited["grants"][b] == "write"
+
+
+async def test_modify_grants_set_and_remove_in_one_call(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, b = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read"})
+    edited = await roles_ops.modify_role_grants("ops", set={b: "write"}, remove=[a])
+    assert a not in edited["grants"]
+    assert edited["grants"][b] == "write"
+
+
+async def test_modify_grants_both_empty_400(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    await roles_ops.create_role("ops", "x", "editor", {})
+    with pytest.raises(BadRequestError, match="nothing to change"):
+        await roles_ops.modify_role_grants("ops")
+
+
+async def test_modify_grants_overlapping_tag_400(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read"})
+    with pytest.raises(BadRequestError, match="both set and remove"):
+        await roles_ops.modify_role_grants("ops", set={a: "write"}, remove=[a])
+
+
+async def test_modify_grants_absent_remove_404_names_tags(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, b = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read"})  # b is not on the map
+    with pytest.raises(NotFoundError, match=b):
+        await roles_ops.modify_role_grants("ops", remove=[b])
+
+
+async def test_modify_grants_unknown_role_404(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    with pytest.raises(NotFoundError, match="unknown role"):
+        await roles_ops.modify_role_grants("nope", set={a: "read"})
+
+
+async def test_modify_grants_reserved_admin_forbidden(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    with pytest.raises(ForbiddenError):
+        await roles_ops.modify_role_grants("admin", set={a: "read"})
+
+
+async def test_modify_grants_allow_all_forbidden(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    await mem.create(
+        "role",
+        "super",
+        {"name": "super", "description": "x", "scopes": ["*"], "grants": {}, "condition": None, "allow_all": True},
+    )
+    with pytest.raises(ForbiddenError, match="allow_all"):
+        await roles_ops.modify_role_grants("super", set={a: "read"})
+
+
+async def test_modify_grants_invalid_level_400_via_validate_grants(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {})
+    with pytest.raises(BadRequestError, match="grant level"):
+        await roles_ops.modify_role_grants("ops", set={a: "bogus"})
+    # The rejected edit never persisted a version beyond the create.
+    history = await roles_ops.list_role_versions("ops")
+    assert len(history["versions"]) == 1
+
+
+async def test_update_role_rejects_invalid_level_via_direct_op_call(mem, pg, redis_mgmt, monkeypatch):
+    # The sanctioned ``_validate_grants`` extension closes update_role's projection-path gap:
+    # model validation is skipped on the direct op-call path (and on any extractor route), so a
+    # bad LEVEL must be refused loudly in the op layer, not only by the request model.
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, _ = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {})
+    with pytest.raises(BadRequestError, match="grant level"):
+        await roles_ops.update_role("ops", {a: "bogus"}, None)
+    history = await roles_ops.list_role_versions("ops")
+    assert len(history["versions"]) == 1  # only the create persisted
+
+
+async def test_modify_grants_records_edit_audit(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    a, b = _two_grantable_tags()
+    await roles_ops.create_role("ops", "x", "editor", {a: "read"})
+    await roles_ops.modify_role_grants("ops", set={b: "write"}, remove=[a])
+
+    history = await roles_ops.list_role_versions("ops")
+    events = [e["body"] for e in history["audit"]]
+    assert [e["action"] for e in events] == ["create", "edit"]
+    edit = events[1]
+    assert edit["actor"] == "root"
+    assert edit["before"]["grants"] == {a: "read"}
+    assert edit["after"]["grants"] == {b: "write"}

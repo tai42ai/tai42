@@ -13,7 +13,7 @@ to classify and the surface is already reachable by anyone.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, Field
 from tai42_contract.access_control.models import RoleDefinition
@@ -41,6 +41,7 @@ _BASE_TIER_CONDITIONS = {"editor": EDITOR_JQ, "viewer": VIEWER_JQ}
 
 _GrantLevel = Literal["none", "read", "write"]
 _GrantMap = dict[str, _GrantLevel]
+_GRANT_LEVELS = frozenset(get_args(_GrantLevel))
 
 
 class RoleCreate(BaseModel):
@@ -68,10 +69,22 @@ class RoleRollback(BaseModel):
     version: int
 
 
+class RoleGrantsModify(BaseModel):
+    """The set/remove-grants request body: ``set`` upserts a tag → level (the mission's one
+    sanctioned overwrite), ``remove`` drops tags. At least one must be non-empty; a tag may
+    not appear in both."""
+
+    set: dict[str, _GrantLevel] = Field(default_factory=dict)
+    remove: list[str] = Field(default_factory=list)
+
+
 def _validate_grants(grants: Mapping[str, str]) -> None:
     """Reject a grant on a tag that is not a GRANTABLE feature group — a nonexistent tag
-    or one whose routes are ALL fenced/secret (admin-only, never opened by a level).
-    A loud 400 so a typo'd or un-openable tag can never be persisted as dead access."""
+    or one whose routes are ALL fenced/secret (admin-only, never opened by a level) — and
+    reject a LEVEL outside ``_GrantLevel``. A loud 400 so a typo'd or un-openable tag, or a
+    bad level, can never be persisted as dead access. The level check lives here because
+    model validation does NOT run on every path (a context_extractor route skips it, and the
+    api_tools/MCP projection calls the op function directly)."""
     grantable = grantable_feature_tags()
     unknown = sorted(tag for tag in grants if tag not in grantable)
     if unknown:
@@ -79,6 +92,9 @@ def _validate_grants(grants: Mapping[str, str]) -> None:
             f"grant tag(s) are not grantable feature groups (nonexistent, or all their routes are "
             f"admin-only fenced/secret): {unknown}"
         )
+    bad_levels = sorted(f"{tag}={level!r}" for tag, level in grants.items() if level not in _GRANT_LEVELS)
+    if bad_levels:
+        raise BadRequestError(f"grant level(s) must be one of {sorted(_GRANT_LEVELS)}: {bad_levels}")
 
 
 def _resolved_create(name: str, description: str, base_tier: str, grants: Mapping[str, str]) -> RoleDefinition:
@@ -174,6 +190,61 @@ async def update_role(name: str, grants: dict[str, str] | None, description: str
                 "description": existing.description if description is None else description,
             }
         )
+        body = updated.model_dump()
+        await role_store().update(name, body, tx=tx)
+        await role_audit().record(name, "edit", caller.caller_id, before, body, tx=tx)
+    await _bump()
+    return body
+
+
+@operation(
+    summary="Set/remove single tag grants on a role",
+    tags=["access-control"],
+    authority_changing=True,
+    errors=[BadRequestError, ForbiddenError, NotFoundError],
+    request_model=RoleGrantsModify,
+)
+async def modify_role_grants(
+    name: str, set: dict[str, str] | None = None, remove: list[str] | None = None
+) -> dict[str, Any]:
+    """Set (upsert) and/or remove single tag grants on a role WITHOUT replacing the whole
+    map. Admin-only; guards the reserved ``admin`` role and the block-downgrade of any
+    allow_all role. ``set`` overwrites a tag's level (the one sanctioned overwrite); a
+    ``remove`` tag absent from the stored map is a loud 404. Validates the merged map before
+    persist; LIVE via the policy-version bump. Audits as ``edit``."""
+    # The ``set`` parameter shadows the builtin deliberately — wire-key parity with the CLI
+    # ``--set`` flag and the request model; the body never calls the builtin.
+    set = set or {}
+    remove = remove or []
+    if not set and not remove:
+        raise BadRequestError("nothing to change: provide 'set' and/or 'remove'")
+    overlap = sorted(tag for tag in remove if tag in set)
+    if overlap:
+        raise BadRequestError(f"tag(s) cannot be in both set and remove: {overlap}")
+    caller = await resolve_caller()
+    require_admin(caller)
+    if name == RESERVED_ADMIN_ROLE:
+        raise ForbiddenError("the 'admin' role is reserved and permanent; it cannot be edited (block-downgrade)")
+    # One transaction on one connection, exactly as ``update_role``: the ``before`` read
+    # row-locks the active role (concurrent edits serialize, the audit ``before`` is the truly
+    # current body), and no mutation holds a second pooled connection. The bump follows commit.
+    async with _versioned_store().transaction() as tx:
+        try:
+            before = await role_store().get_active_body(name, tx=tx, for_update=True)
+        except DocumentNotFoundError as exc:
+            raise NotFoundError(f"unknown role: {name!r}") from exc
+        existing = RoleDefinition(**before)
+        if existing.allow_all:
+            raise ForbiddenError("an allow_all role cannot be narrowed (block-downgrade)")
+        merged = cast("dict[str, str]", dict(existing.grants))
+        absent = sorted(tag for tag in remove if tag not in merged)
+        if absent:
+            raise NotFoundError(f"tag(s) not present on role {name!r}: {absent}")
+        for tag in remove:
+            del merged[tag]
+        merged.update(set)
+        _validate_grants(merged)
+        updated = existing.model_copy(update={"grants": merged})
         body = updated.model_dump()
         await role_store().update(name, body, tx=tx)
         await role_audit().record(name, "edit", caller.caller_id, before, body, tx=tx)

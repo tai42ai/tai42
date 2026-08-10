@@ -24,6 +24,7 @@ in :mod:`tai42_skeleton.operations.api_keys`; no key/scope logic lives here:
 - ``GET    /me``                 — the caller's derived capability projection.
 - ``GET    /capabilities``       — whether any configured provider can mint keys, per provider.
 - ``GET    /roles``              — the role templates (name/scopes/condition/description).
+- ``POST   /roles/{name}/grants``— set/remove single tag grants on a role; ADMIN-ONLY.
 - ``POST   /validate-condition`` — compile (and optionally sample-evaluate) a jq condition
                                     WITHOUT persisting it (the fail-closed lock-out guard).
 - ``GET    /api-keys/{user_id}/policy/versions``  — the user's policy version history; ADMIN-ONLY.
@@ -73,6 +74,7 @@ from tai42_skeleton.operations.api_keys import validate_condition as _validate_c
 from tai42_skeleton.operations.roles import create_role as _create_role_op
 from tai42_skeleton.operations.roles import delete_role as _delete_role_op
 from tai42_skeleton.operations.roles import list_role_versions as _list_role_versions_op
+from tai42_skeleton.operations.roles import modify_role_grants as _modify_role_grants_op
 from tai42_skeleton.operations.roles import rollback_role as _rollback_role_op
 from tai42_skeleton.operations.roles import update_role as _update_role_op
 
@@ -429,6 +431,14 @@ rollback_role = register_operation_route(
     tai42_app,
     operation_metadata_of(_rollback_role_op),
     path="/api/auth/roles/{name}/rollback",
+    method="POST",
+    action="fenced",
+)
+
+modify_role_grants = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_modify_role_grants_op),
+    path="/api/auth/roles/{name}/grants",
     method="POST",
     action="fenced",
 )

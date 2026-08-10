@@ -112,6 +112,47 @@ def edit_role(
     emit_result(ctx_obj, data)
 
 
+def _parse_set(items: list[str]) -> dict[str, str]:
+    """Parse repeatable ``--set tag=level`` options into a grant map. Each value must carry
+    EXACTLY one ``=`` (the server validates the level)."""
+    parsed: dict[str, str] = {}
+    for item in items:
+        if item.count("=") != 1:
+            raise typer.BadParameter(f"--set must be 'tag=level' with exactly one '=', got {item!r}")
+        tag, level = item.split("=")
+        if not tag:
+            raise typer.BadParameter(f"--set must be 'tag=level', got {item!r}")
+        parsed[tag] = level
+    return parsed
+
+
+@app.command("grants")
+@covers(("POST", "/api/auth/roles/{name}/grants"))
+def modify_grants(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="Role name.")],
+    set_: Annotated[
+        list[str] | None, typer.Option("--set", help="Repeatable tag=level (none/read/write) to set (upsert).")
+    ] = None,
+    remove: Annotated[list[str] | None, typer.Option("--remove", help="Repeatable tag to remove.")] = None,
+) -> None:
+    """Set (upsert) and/or remove single tag grants on a role without replacing the whole
+    map. At least one ``--set`` or ``--remove`` is required. LIVE — every holder's reach
+    changes on their next request.
+
+    Example: ``tai roles grants ops --set hooks=write --remove presets``
+    """
+    ctx_obj = app_context(ctx)
+    set_items = set_ or []
+    remove_items = remove or []
+    if not set_items and not remove_items:
+        raise typer.BadParameter("provide at least one --set or --remove")
+    body = {"set": _parse_set(set_items), "remove": remove_items}
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/auth/roles/{name}/grants", json=body)
+    emit_result(ctx_obj, data)
+
+
 @app.command("delete")
 @covers(("DELETE", "/api/auth/roles/{name}"))
 def delete_role(ctx: typer.Context, name: Annotated[str, typer.Argument(help="Role name.")]) -> None:

@@ -52,3 +52,37 @@ def test_edit_with_grant_and_description_sends_both(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert captured["body"]["grants"] == {"hooks": "read"}
     assert captured["body"]["description"] == "d"
+
+
+def test_grants_set_parses_and_posts(monkeypatch) -> None:
+    handler, captured = _capture()
+    result = run_cli(monkeypatch, handler, ["roles", "grants", "ops", "--set", "hooks=read"])
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/auth/roles/ops/grants"
+    assert captured["body"] == {"set": {"hooks": "read"}, "remove": []}
+
+
+def test_grants_set_and_remove_body_mapping(monkeypatch) -> None:
+    handler, captured = _capture()
+    result = run_cli(monkeypatch, handler, ["roles", "grants", "ops", "--set", "hooks=write", "--remove", "presets"])
+    assert result.exit_code == 0, result.output
+    assert captured["body"] == {"set": {"hooks": "write"}, "remove": ["presets"]}
+
+
+def test_grants_no_flags_is_bad_parameter(monkeypatch) -> None:
+    handler, _ = _capture()
+    result = run_cli(monkeypatch, handler, ["roles", "grants", "ops"])
+    assert result.exit_code != 0
+
+
+def test_grants_malformed_set_no_equals_is_bad_parameter(monkeypatch) -> None:
+    handler, _ = _capture()
+    result = run_cli(monkeypatch, handler, ["roles", "grants", "ops", "--set", "hooks"])
+    assert result.exit_code != 0
+
+
+def test_grants_malformed_set_two_equals_is_bad_parameter(monkeypatch) -> None:
+    handler, _ = _capture()
+    result = run_cli(monkeypatch, handler, ["roles", "grants", "ops", "--set", "a=b=c"])
+    assert result.exit_code != 0
