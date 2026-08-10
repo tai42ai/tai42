@@ -127,6 +127,121 @@ async def test_rollback_policy_restore_value_error_maps_to_bad_request(monkeypat
         await ops.rollback_policy("k1", 1)
 
 
+# -- modify_api_key_scopes ---------------------------------------------------
+
+
+def _install_scope_store(monkeypatch, stored_body):
+    """Stub the read-merge-write store tail so the op runs without a live backend.
+    Returns a dict capturing the scopes ``edit_user_payload`` was asked to persist."""
+    captured: dict = {}
+
+    async def _body(_user_id):
+        return stored_body
+
+    async def _edit(*, user_id, scopes):
+        captured["scopes"] = scopes
+        return {**stored_body, "scopes": scopes}
+
+    async def _bump():
+        return 1
+
+    async def _record(_user_id, _body):
+        captured["recorded"] = _body
+
+    monkeypatch.setattr(management, "get_policy_body", _body)
+    monkeypatch.setattr(management, "edit_user_payload", _edit)
+    monkeypatch.setattr(management, "bump_policy_version", _bump)
+    monkeypatch.setattr(ops, "_record_policy_version", _record)
+    return captured
+
+
+async def test_modify_scopes_add_appends_in_order(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    captured = _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {}})
+    result = await ops.modify_api_key_scopes("k1", add=["write", "admin"])
+    assert result == {"user_id": "k1", "updated": True, "scopes": ["read", "write", "admin"]}
+    assert captured["scopes"] == ["read", "write", "admin"]
+
+
+async def test_modify_scopes_remove_keeps_stored_order(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    captured = _install_scope_store(monkeypatch, {"scopes": ["read", "write"], "policy_data": {}})
+    result = await ops.modify_api_key_scopes("k1", remove=["read"])
+    assert result["scopes"] == ["write"]
+    assert captured["scopes"] == ["write"]
+
+
+async def test_modify_scopes_add_and_remove_in_one_call(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {}})
+    result = await ops.modify_api_key_scopes("k1", add=["write"], remove=["read"])
+    assert result["scopes"] == ["write"]
+
+
+async def test_modify_scopes_both_empty_is_bad_request(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    with pytest.raises(BadRequestError, match="nothing to change"):
+        await ops.modify_api_key_scopes("k1")
+
+
+async def test_modify_scopes_duplicate_add_is_bad_request(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {}})
+    with pytest.raises(BadRequestError, match="read"):
+        await ops.modify_api_key_scopes("k1", add=["read"])
+
+
+async def test_modify_scopes_absent_remove_is_not_found(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+    _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {}})
+    with pytest.raises(NotFoundError, match="write"):
+        await ops.modify_api_key_scopes("k1", remove=["write"])
+
+
+async def test_modify_scopes_unknown_user_is_not_found(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(is_admin=True)))
+
+    async def _no_body(_user_id):
+        return None
+
+    monkeypatch.setattr(management, "get_policy_body", _no_body)
+    with pytest.raises(NotFoundError, match="user not found"):
+        await ops.modify_api_key_scopes("ghost", add=["read"])
+
+
+async def test_modify_scopes_non_admin_other_owner_is_forbidden(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(caller_id="alice", scopes=["read"])))
+    _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {OWNER_USER_ID_CLAIM: "bob"}})
+    with pytest.raises(ForbiddenError, match="only edit API keys you own"):
+        await ops.modify_api_key_scopes("k1", add=["read"])
+
+
+async def test_modify_scopes_non_admin_add_exceeding_subset_is_bad_request(monkeypatch):
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(caller_id="alice", scopes=["read"])))
+    _install_scope_store(monkeypatch, {"scopes": ["read"], "policy_data": {OWNER_USER_ID_CLAIM: "alice"}})
+    with pytest.raises(BadRequestError, match="exceed your own"):
+        await ops.modify_api_key_scopes("k1", add=["write"])
+
+
+async def test_modify_scopes_non_admin_removes_own_scope(monkeypatch):
+    # Removing a scope never widens authority, so a non-admin owner may remove even a
+    # scope not in its own set — the subset gate applies only to additions.
+    monkeypatch.setattr(ops, "resolve_caller", lambda: _make(_caller(caller_id="alice", scopes=["read"])))
+    captured = _install_scope_store(
+        monkeypatch, {"scopes": ["read", "write"], "policy_data": {OWNER_USER_ID_CLAIM: "alice"}}
+    )
+    result = await ops.modify_api_key_scopes("k1", remove=["write"])
+    assert result["scopes"] == ["read"]
+    assert captured["scopes"] == ["read"]
+
+
+async def test_modify_scopes_disabled_refuses(monkeypatch):
+    monkeypatch.setattr(ops, "access_control_settings", lambda: AccessControlSettings(enable=False))
+    with pytest.raises(NotSupportedError) as exc_info:
+        await ops.modify_api_key_scopes("k1", add=["read"])
+    assert exc_info.value.extra["code"] == "access-control-disabled"
+
+
 # -- OFF state: access control disabled --------------------------------
 
 

@@ -192,6 +192,26 @@ def test_keys_policy_rollback_posts_version(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.exit_code == 0, result.output
 
 
+def test_keys_scopes_maps_flags_to_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/auth/api-keys/alice/scopes"
+        assert json.loads(request.content) == {"add": ["write"], "remove": ["read"]}
+        return data_response({"user_id": "alice", "updated": True, "scopes": ["write"]})
+
+    result = run_cli(monkeypatch, handler, ["keys", "scopes", "alice", "--add", "write", "--remove", "read"])
+    assert result.exit_code == 0, result.output
+
+
+def test_keys_scopes_requires_at_least_one_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["keys", "scopes", "alice"])
+    assert result.exit_code != 0
+    assert "at least one" in result.output
+
+
 # -- presets -----------------------------------------------------------------
 
 

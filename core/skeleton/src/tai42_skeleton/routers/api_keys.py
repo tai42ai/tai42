@@ -29,6 +29,7 @@ in :mod:`tai42_skeleton.operations.api_keys`; no key/scope logic lives here:
 - ``GET    /api-keys/{user_id}/policy/versions``  — the user's policy version history; ADMIN-ONLY.
 - ``POST   /api-keys/{user_id}/policy/rollback``  — re-point the enforced policy to a prior
                                     version; ADMIN-ONLY.
+- ``POST   /api-keys/{user_id}/scopes``           — add/remove scopes on a key (granular; never a full replace).
 
 Each mutating door parses and validates its body at the HTTP edge into the
 operation's flat arguments (producing an explicit 400 surface), then the
@@ -62,6 +63,7 @@ from tai42_skeleton.operations.api_keys import list_roles as _list_roles_op
 from tai42_skeleton.operations.api_keys import list_routes as _list_routes_op
 from tai42_skeleton.operations.api_keys import list_scopes as _list_scopes_op
 from tai42_skeleton.operations.api_keys import list_tokens_payload as _list_tokens_payload_op
+from tai42_skeleton.operations.api_keys import modify_api_key_scopes as _modify_api_key_scopes_op
 from tai42_skeleton.operations.api_keys import pin_public_route as _pin_public_route_op
 from tai42_skeleton.operations.api_keys import remove_scope_url as _remove_scope_url_op
 from tai42_skeleton.operations.api_keys import revoke_api_key as _revoke_api_key_op
@@ -197,6 +199,16 @@ async def _extract_edit_api_key(request: Request) -> dict:
     if "condition_kwargs" in body:
         updates["condition_kwargs"] = _opt_dict(body, "condition_kwargs")
     return {"updates": updates}
+
+
+async def _extract_key_scopes(request: Request) -> dict:
+    # Granular scope edit: ``add``/``remove`` each absent → an empty list; present →
+    # a strict list-of-strings (the op refuses both-empty). ``user_id`` binds by path.
+    body = await _json_body(request)
+    return {
+        "add": _require_str_list(body, "add") if "add" in body else [],
+        "remove": _require_str_list(body, "remove") if "remove" in body else [],
+    }
 
 
 async def _extract_create_claim_link(request: Request) -> dict:
@@ -455,4 +467,13 @@ rollback_policy = register_operation_route(
     method="POST",
     context_extractor=_extract_rollback_policy,
     action="fenced",
+)
+
+modify_api_key_scopes = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_modify_api_key_scopes_op),
+    path="/api/auth/api-keys/{user_id}/scopes",
+    method="POST",
+    context_extractor=_extract_key_scopes,
+    action="write",
 )

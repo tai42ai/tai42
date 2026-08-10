@@ -388,6 +388,21 @@ async def test_edit_scopes_only_preserves_policy_and_condition(store: _Fakes) ->
     assert policy["condition"] == "c"
 
 
+async def test_modify_scopes_round_trip_through_route(store: _Fakes) -> None:
+    # The granular scopes door drives the op through the extractor end to end: the new
+    # set keeps the stored order, drops the removed scope, and appends the added one.
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-b", "url": "/b"}))
+    await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "desc", "scopes": ["scope-a"]}))
+
+    resp = await api_keys.modify_api_key_scopes(
+        _req(path_params={"user_id": "u1"}, body={"add": ["scope-b"], "remove": ["scope-a"]})
+    )
+    assert resp.status_code == 200
+    assert _body(resp)["data"] == {"user_id": "u1", "updated": True, "scopes": ["scope-b"]}
+    assert store.pg.policy_body("u1")["scopes"] == ["scope-b"]
+
+
 async def test_edit_explicit_null_clears_policy_and_condition(store: _Fakes) -> None:
     # An explicit null in the body IS an intentional clear (distinct from omission).
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
@@ -477,6 +492,8 @@ async def test_oidc_subject_user_id_round_trips_through_routes(store: _Fakes) ->
         (api_keys.create_api_key, {"body": {"user_id": "u", "description": "d"}}),  # missing scopes
         (api_keys.create_api_key, {"body": [1, 2]}),  # non-object body
         (api_keys.create_api_key, {"body": ValueError("bad json")}),  # invalid JSON
+        (api_keys.modify_api_key_scopes, {"path_params": {"user_id": "u1"}, "body": {"add": "read"}}),  # add not a list
+        (api_keys.modify_api_key_scopes, {"path_params": {"user_id": "u1"}, "body": {"remove": [1]}}),  # remove non-str
     ],
 )
 async def test_malformed_body_is_400(store: _Fakes, handler: Any, kwargs: dict) -> None:

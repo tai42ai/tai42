@@ -171,6 +171,30 @@ def edit_key(
     emit_result(ctx_obj, data)
 
 
+@app.command("scopes")
+@covers(("POST", "/api/auth/api-keys/{user_id}/scopes"))
+def modify_scopes(
+    ctx: typer.Context,
+    user: Annotated[str, typer.Argument(help="The key's user id.")],
+    add: Annotated[list[str] | None, typer.Option("--add", help="A scope to add (repeatable).")] = None,
+    remove: Annotated[list[str] | None, typer.Option("--remove", help="A scope to remove (repeatable).")] = None,
+) -> None:
+    """Add and/or remove individual scopes on a key WITHOUT replacing the whole set.
+
+    At least one --add or --remove is required. This is the granular complement of
+    ``tai keys edit --scope``, which replaces the entire scope set at once.
+
+    Example: ``tai keys scopes alice --add write --remove read``
+    """
+    if not add and not remove:
+        raise typer.BadParameter("provide at least one --add or --remove scope")
+    ctx_obj = app_context(ctx)
+    body: dict = {"add": list(add or []), "remove": list(remove or [])}
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/auth/api-keys/{user}/scopes", json=body)
+    emit_result(ctx_obj, data)
+
+
 @app.command("delete")
 @covers(("DELETE", "/api/auth/api-keys/{user_id}"))
 def delete_key(ctx: typer.Context, user: Annotated[str, typer.Argument(help="The key's user id.")]) -> None:

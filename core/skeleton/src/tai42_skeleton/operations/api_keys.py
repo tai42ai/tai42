@@ -113,6 +113,15 @@ class ApiKeyEdit(BaseModel):
     condition_kwargs: dict[str, Any] | None = None
 
 
+class KeyScopesModify(BaseModel):
+    """Add and/or remove individual scopes on an api key — a granular edit that changes
+    named scopes without replacing the whole set (the key ``edit`` door's ``scopes``
+    field does a full replace)."""
+
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
 class ConditionValidation(BaseModel):
     """A fail-closed jq policy-condition check — compile and (with a
     ``sample_context``) sample-evaluate a condition without persisting it."""
@@ -530,6 +539,61 @@ async def edit_api_key(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     await management.bump_policy_version()
     await _record_policy_version(user_id, updated)
     return {"user_id": user_id, "updated": True}
+
+
+@operation(
+    summary="Add/remove scopes on an api key",
+    tags=["access-control"],
+    destructive=True,
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    request_model=KeyScopesModify,
+)
+async def modify_api_key_scopes(
+    user_id: str, add: list[str] | None = None, remove: list[str] | None = None
+) -> dict[str, Any]:
+    """Add and/or remove named scopes on a key's stored scope set without replacing the
+    whole set. The new set keeps the stored order, drops the removed scopes, then appends
+    the additions in the given order. A plain read-merge-write with NO new locking: two
+    simultaneous edits of one key can lose one (accepted for this surface)."""
+    add = add or []
+    remove = remove or []
+    # OFF: access control disabled → refuse the write with a named, machine-readable
+    # reason rather than operate the AC store under the synthetic admin.
+    if not access_control_settings().enable:
+        raise NotSupportedError(_DISABLED_MESSAGE, extra={"code": _DISABLED_CODE})
+    if not add and not remove:
+        raise BadRequestError("nothing to change: provide scopes to add or remove")
+    caller = await resolve_caller()
+    stored_body = await management.get_policy_body(user_id)
+    if stored_body is None:
+        raise NotFoundError(f"user not found: {user_id!r}")
+    if not caller.is_admin:
+        # A non-admin may edit only a key it owns, and may only ADD scopes ⊆ its own
+        # (removing scopes never widens authority, so it carries no subset gate).
+        if owner_of(stored_body.get("policy_data")) != caller.caller_id:
+            raise ForbiddenError("you may only edit API keys you own")
+        _check_scope_subset(caller, add)
+    stored_scopes = list(stored_body.get("scopes") or [])
+    already_present = sorted(set(add) & set(stored_scopes))
+    if already_present:
+        raise BadRequestError(f"scopes already present on the key: {already_present}")
+    absent = sorted(set(remove) - set(stored_scopes))
+    if absent:
+        raise NotFoundError(f"scopes not present on the key: {absent}")
+    removed = set(remove)
+    new = [scope for scope in stored_scopes if scope not in removed] + add
+    # Store-first, byte-parallel to ``edit_api_key``: the edit lands in the enforced store
+    # and returns the committed body, then the cache bump so enforcement follows, then the
+    # durable version record (incl. the ``updated`` None → 404 re-check).
+    try:
+        updated = await management.edit_user_payload(user_id=user_id, scopes=new)
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+    if not updated:
+        raise NotFoundError(f"user not found: {user_id!r}")
+    await management.bump_policy_version()
+    await _record_policy_version(user_id, updated)
+    return {"user_id": user_id, "updated": True, "scopes": new}
 
 
 @operation(
