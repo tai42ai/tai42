@@ -179,7 +179,7 @@ async def test_2xx_without_data_key_is_a_response_error(wire) -> None:
 
 
 async def test_search_drops_none_and_forwards_given_params(wire) -> None:
-    fake = wire(lambda m, u, p, j: _ok({"items": []}))
+    fake = wire(lambda m, u, p, j: _ok({"listings": []}))
     # ``kind`` is None and must be dropped before the request is issued.
     given: dict[str, Any] = {"q": "uuid", "kind": None, "tier": "official"}
     await RegistryClient(_BASE).search(given)
@@ -189,7 +189,7 @@ async def test_search_drops_none_and_forwards_given_params(wire) -> None:
 
 
 async def test_search_tags_list_encodes_as_repeated_params(wire) -> None:
-    fake = wire(lambda m, u, p, j: _ok({"items": []}))
+    fake = wire(lambda m, u, p, j: _ok({"listings": []}))
     await RegistryClient(_BASE).search({"tags": ["a", "b"]})
     # httpx repeats a list value; it is never comma-joined nor first-only.
     query = fake.calls[0]["request"].url.query.decode()
@@ -240,7 +240,7 @@ async def test_resolve_404_remaps_to_listing_not_found_naming_version(wire) -> N
 
 
 async def test_base_url_trailing_slash_is_stripped(wire) -> None:
-    fake = wire(lambda m, u, p, j: _ok({"items": []}))
+    fake = wire(lambda m, u, p, j: _ok({"listings": []}))
     await RegistryClient(_BASE + "/").search({})
     assert fake.calls[0]["url"] == f"{_BASE}/api/v1/search"
 
