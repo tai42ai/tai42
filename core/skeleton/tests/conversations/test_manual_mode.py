@@ -21,7 +21,10 @@ from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
+from tai42_skeleton.conversations import pair_codes as pair_codes_module
+from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import redeem_throttle as throttle_module
 from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.mode import ConversationModeStore
@@ -159,11 +162,19 @@ async def _fake_bind(execution_key, *, bound_fingerprint):
 
 @pytest.fixture
 def env(monkeypatch):
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_GRACE_SECONDS", "1")
     caps_module._CAPS_CACHE.clear()
     fake = FakeRecordRedis()
-    for module in (records_module, ledger_module, target_config_module, mode_module):
+    for module in (
+        records_module,
+        ledger_module,
+        mode_module,
+        persons_module,
+        pair_codes_module,
+        target_config_module,
+        throttle_module,
+    ):
         monkeypatch.setattr(module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
 
@@ -270,8 +281,6 @@ async def test_person_thread_manual_fold_to_a_memoryless_target_records_silent_n
     from datetime import UTC, datetime
 
     from tai42_contract.conversations import Person, PersonAddress
-
-    from tai42_skeleton.conversations import persons as persons_module
 
     person = Person(
         person_id="p9",
