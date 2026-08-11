@@ -99,6 +99,7 @@ def _record(
         our_identity="+15550001111" if door == "channel" else None,
         callback_url="https://cb.example/x" if door == "api" else None,
         caller_principal=caller_principal,
+        origin="client",
         answer_status="answered",
         answer="the answer",
         delivery_status=status,

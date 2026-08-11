@@ -33,6 +33,21 @@ _ROUTES = [
         router.delete_conversation_thread,
         methods=["DELETE"],
     ),
+    Route(
+        "/api/conversations/{route_name}/thread/messages",
+        router.send_conversation_thread_message,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/conversations/{route_name}/thread/mode",
+        router.get_conversation_thread_mode,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/conversations/{route_name}/thread/mode",
+        router.set_conversation_thread_mode,
+        methods=["PUT"],
+    ),
     Route("/api/conversations/{route_name}/transcript", router.get_conversation_thread, methods=["GET"]),
     Route("/api/conversation-configs", router.list_conversation_configs, methods=["GET"]),
     Route(
@@ -59,6 +74,8 @@ _STANCES = {
     r"/api/conversations/[^/]+/messages/[^/]+": AUTHED,
     r"/api/conversations/[^/]+/threads": AUTHED,
     r"/api/conversations/[^/]+/thread": AUTHED,
+    r"/api/conversations/[^/]+/thread/messages": AUTHED,
+    r"/api/conversations/[^/]+/thread/mode": AUTHED,
     r"/api/conversations/[^/]+/transcript": AUTHED,
     r"/api/conversation-configs": AUTHED,
     r"/api/conversation-configs/[^/]+/[^/]+": AUTHED,
@@ -113,6 +130,27 @@ def test_delete_thread_rejected_without_auth(monkeypatch):
     )
 
 
+def test_send_thread_message_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post(
+        "/api/conversations/chat/thread/messages", json={"thread_id": "bridge:chat:+1", "text": "hi"}
+    ).status_code in (401, 403)
+
+
+def test_get_thread_mode_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.get(
+        "/api/conversations/chat/thread/mode", params={"thread_id": "bridge:chat:+1"}
+    ).status_code in (401, 403)
+
+
+def test_set_thread_mode_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.put(
+        "/api/conversations/chat/thread/mode", json={"thread_id": "bridge:chat:+1", "mode": "manual"}
+    ).status_code in (401, 403)
+
+
 def test_get_transcript_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.get("/api/conversations/chat/transcript").status_code in (401, 403)
@@ -154,6 +192,9 @@ _REGISTERED_AUTHED = {
     ("/api/conversations/{route_name}/messages/{message_id}", ("GET",)): True,
     ("/api/conversations/{route_name}/threads", ("GET",)): True,
     ("/api/conversations/{route_name}/thread", ("DELETE",)): True,
+    ("/api/conversations/{route_name}/thread/messages", ("POST",)): True,
+    ("/api/conversations/{route_name}/thread/mode", ("GET",)): True,
+    ("/api/conversations/{route_name}/thread/mode", ("PUT",)): True,
     ("/api/conversations/{route_name}/transcript", ("GET",)): True,
     ("/api/conversation-configs", ("GET",)): True,
     ("/api/conversation-configs/{target_kind}/{target_name}", ("GET",)): True,

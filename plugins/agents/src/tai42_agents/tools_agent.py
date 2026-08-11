@@ -36,7 +36,8 @@ from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 
-from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
+from tai42_agents._internal.append import require_thread_id, to_thread_messages
+from tai42_agents._internal.base_tool_agent import aappend_tools_agent_messages, ainvoke_tools_agent
 from tai42_agents._internal.config_util import build_run_config
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
@@ -364,3 +365,36 @@ class ToolsAgent(Agent):
         # rather than silently omitting the frame.
         if response_format is not None and not saw_structured:
             raise RuntimeError("agent run requested a response_format but produced no structured output")
+
+    async def append_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        messages: list[dict[str, str]],
+        llm_provider: str | None = None,
+        checkpoint_provider: str | None = None,
+        llm_kwargs: dict[str, Any] | None = None,
+        langgraph_config: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> None:
+        """Append ``messages`` to the thread's stored history without running the model.
+
+        ``messages`` items are ``{"role": "user"|"assistant", "content": str}`` — an
+        unknown role or blank content raises. ``thread_id`` (or a
+        ``configurable.thread_id`` carried in ``langgraph_config``) names the thread
+        to append to; a missing one raises rather than minting a fresh thread the
+        messages would be lost on. ``llm_provider`` / ``checkpoint_provider`` /
+        ``llm_kwargs`` resolve the same model and checkpointer a run would, so the
+        append lands on the SAME checkpointed thread a run reads.
+        """
+        converted = to_thread_messages(messages)
+        reject_blank_memory_keys("tools_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None)
+        config = build_run_config(langgraph_config, thread_id)
+        require_thread_id("tools_agent.append_thread_messages", config)
+        await aappend_tools_agent_messages(
+            converted,
+            config,
+            llm_provider=llm_provider,
+            checkpoint_provider=checkpoint_provider,
+            llm_kwargs=llm_kwargs,
+        )

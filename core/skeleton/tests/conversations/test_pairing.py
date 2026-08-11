@@ -23,6 +23,7 @@ from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
+from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import pair_codes as pair_codes_module
 from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
@@ -124,6 +125,7 @@ def env(monkeypatch):
     for module in (
         records_module,
         ledger_module,
+        mode_module,
         persons_module,
         pair_codes_module,
         target_config_module,
@@ -964,7 +966,7 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     }
     for expected, event in cases.items():
         monkeypatch.setattr(turn_module, "_agent_registry", lambda event=event: {"assistant": _StreamAgent(event)})
-        status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
+        status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
         assert status == "answered"
         assert answer == expected
         assert error is None
@@ -974,7 +976,7 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
     route = _api_route()
     agent = _StreamAgent(InterruptFinal(interrupt_id="i1", payload={"q": "?"}, reason="needs input"))
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent})
-    status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
+    status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
     assert status == "error"
     assert answer == turn_module._ERROR_ANSWER_TEXT
     assert error is not None
@@ -984,7 +986,7 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
 async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": _StreamAgent()})  # no events
-    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
+    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
     assert status == "error"
     assert error == "agent produced an empty answer"
 
@@ -992,7 +994,7 @@ async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatc
 async def test_agent_turn_for_an_unregistered_agent_is_an_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(turn_module, "_agent_registry", dict)
-    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y")
+    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
     assert status == "error"
     assert error is not None
     assert "not registered" in error

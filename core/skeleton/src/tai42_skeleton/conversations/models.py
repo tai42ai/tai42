@@ -9,6 +9,7 @@ outcome sits in the send machine.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tai42_contract.conversations import AnswerStatus, ConversationAnswer, ConversationDoor
@@ -67,13 +68,19 @@ class ConversationRecord(BaseModel):
     # it live from the route row at send.
     callback_url: str | None = None
 
-    # The api-door caller the turn was invoked by. ``None`` for a channel record, which is
-    # then admin-only to read.
+    # The api-door caller the turn was invoked by, and the operator an ``operator`` record
+    # was sent by. ``None`` for a channel-door client record, which is then admin-only to
+    # read; an ``operator`` record always names its sender, whichever door it rides.
     caller_principal: str | None = None
 
+    # Who produced this record: ``client`` is an inbound message's turn; ``operator`` is a
+    # message an operator sent into the thread by hand, which runs no turn. Required — every
+    # construction states it, and a stored blob missing it is corruption that fails loudly.
+    origin: Literal["client", "operator"]
+
     # The inbound message this record answers, verbatim — nothing truncates or caps it
-    # here, so its size is whatever the door that read it admitted on its own body. Every
-    # door records one, so it is required.
+    # here, so its size is whatever the door that read it admitted on its own body. A
+    # ``client`` record carries the message it answers; an ``operator`` record carries ``""``.
     inbound_text: str
 
     # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
@@ -108,6 +115,22 @@ class ConversationRecord(BaseModel):
             raise ValueError("an answered/error record must carry non-blank answer text")
         if self.answer_status == "silent" and self.answer is not None:
             raise ValueError("a silent record carries no answer text")
+        return self
+
+    @model_validator(mode="after")
+    def _origin_matches_fields(self) -> ConversationRecord:
+        """A ``client`` record answers a non-blank inbound message; an ``operator`` record
+        carries no inbound (``""``) and is always an ``answered`` outcome with non-blank
+        answer text — it IS the operator's reply, sent into the thread with no turn to run."""
+        if self.origin == "operator":
+            if self.inbound_text != "":
+                raise ValueError("an operator record carries no inbound_text (must be '')")
+            if self.answer_status != "answered":
+                raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
+            if not (self.caller_principal or "").strip():
+                raise ValueError("an operator record must name the operator that sent it in caller_principal")
+        elif not self.inbound_text.strip():
+            raise ValueError("a client record carries non-blank inbound_text")
         return self
 
     def answer_payload(self) -> ConversationAnswer:
@@ -146,6 +169,7 @@ class ConversationRecord(BaseModel):
                 "thread_id",
                 "client_address",
                 "caller_principal",
+                "origin",
                 "inbound_text",
                 "answer_status",
                 "answer",

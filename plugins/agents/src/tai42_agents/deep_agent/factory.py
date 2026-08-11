@@ -25,6 +25,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_settings
 
@@ -355,6 +356,8 @@ async def build_deep_agent(
         interrupt_on=interrupt_on,
         response_format=response_format,
         # A tool-logic failure surfaces to the model as an error ToolMessage rather
-        # than aborting the run; every other exception stays a loud abort.
-        middleware=[_tool_error_middleware],
+        # than aborting the run; every other exception stays a loud abort. The
+        # leading-user middleware keeps a thread that opens with an assistant message
+        # user-first for strict-ordering providers.
+        middleware=[_tool_error_middleware, LeadingUserMiddleware()],
     )

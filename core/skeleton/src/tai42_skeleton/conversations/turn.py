@@ -44,6 +44,7 @@ from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.caps import AddressAdmission, AddressRateLimitedError, TurnCaps, get_turn_caps
 from tai42_skeleton.conversations.delivery import mark_wait_delivered, spawn_delivery
+from tai42_skeleton.conversations.mode import ConversationModeStore, effective_mode, supports_thread_append
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.pair_codes import ConversationPairCodeStore, MintingConversation
 from tai42_skeleton.conversations.pairing import Link, Passthrough, Redeem, Unlink, classify
@@ -52,6 +53,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.redeem_throttle import ConversationRedeemThrottle
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
+from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
 
 logger = logging.getLogger(__name__)
@@ -336,21 +338,34 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str:
 
 
 async def _run_agent_turn(
-    route: ConversationRoute, text: str, thread_id: str
+    route: ConversationRoute, text: str, thread_id: str, client_address: str
 ) -> tuple[Literal["answered", "error"], str, str | None]:
     """Run one agent turn as the route's execution key and return ``(answer_status, answer,
     error_detail)``. The identity is bound for the turn's duration and the run authorized
     against it before the agent runs. A denied run, a mid-turn error or an empty answer
-    becomes a client-safe ``error`` outcome; its detail is returned, never delivered."""
+    becomes a client-safe ``error`` outcome; its detail is returned, never delivered.
+
+    The turn-scoped bridge context is established around the agent invocation, so an
+    in-process builtin the agent calls (``set_conversation_mode``) reads the CURRENT
+    conversation's thread from it — the same contextvar propagation the bound execution
+    identity relies on."""
     agent = _agent_registry().get(route.target_name)
     if agent is None:
         return ("error", _ERROR_ANSWER_TEXT, f"agent {route.target_name!r} is not registered")
+    turn_context = BridgeTurnContext(
+        thread_id=thread_id,
+        route_name=route.route_name,
+        channel=route.channel,
+        our_identity=route.our_identity,
+        client_address=client_address,
+    )
     try:
-        async with bind_execution_identity(
-            route.execution_key, bound_fingerprint=route.execution_key_fingerprint
-        ) as identity:
-            await authorize_execution_agent_run(identity, route.target_name)
-            answer = await _drain_answer(agent, text, thread_id)
+        with bridge_turn_context(turn_context):
+            async with bind_execution_identity(
+                route.execution_key, bound_fingerprint=route.execution_key_fingerprint
+            ) as identity:
+                await authorize_execution_agent_run(identity, route.target_name)
+                answer = await _drain_answer(agent, text, thread_id)
     except PermissionDenied as exc:
         return ("error", _ERROR_ANSWER_TEXT, f"turn denied: {exc}")
     except Exception as exc:
@@ -366,6 +381,13 @@ def _agent_registry() -> dict[str, Agent]:
     from tai42_skeleton.app import instance
 
     return instance.app.agents.all_agents()
+
+
+async def _refresh_thread_mode_ttl(thread_id: str) -> None:
+    """Extend a live mode override's retention window on new thread activity, so an override
+    lives exactly as long as the conversation stays within its retention window. A no-op when
+    none is set — the override is never resurrected."""
+    await ConversationModeStore(ConversationsSettings()).refresh_ttl(thread_id)
 
 
 # -- the tool target ---------------------------------------------------------
@@ -521,13 +543,22 @@ def _new_record(
     answer_status: AnswerStatus | None = None,
     answer: str | None = None,
     error: str | None = None,
+    origin: Literal["client", "operator"] = "client",
 ) -> ConversationRecord:
     """A freshly minted record for one accepted message, in the state its door commits it
     to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
     verbatim, durable from here so the record reads as a turn of a conversation and not
-    only as its answer. An api-door record MUST name the authenticated caller its thread and
-    rate bucket are keyed by; a channel-door record names none."""
-    if (route.door == "api") != bool(caller_principal and caller_principal.strip()):
+    only as its answer. A ``client`` api-door record MUST name the authenticated caller its
+    thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
+    ``operator`` record names the operator that sent it on EITHER door — it rides no rate
+    bucket and carries no inbound to dedupe."""
+    if origin == "operator":
+        if not (caller_principal and caller_principal.strip()):
+            raise RuntimeError(
+                f"conversations: an operator record on route {route.route_name!r} requires the sending "
+                "operator principal in caller_principal"
+            )
+    elif (route.door == "api") != bool(caller_principal and caller_principal.strip()):
         raise RuntimeError(
             f"conversations: a {route.door} record cannot carry caller_principal={caller_principal!r}; "
             "the api door requires one and the channel door has none"
@@ -543,6 +574,7 @@ def _new_record(
         our_identity=route.our_identity,
         callback_url=route.callback_url,
         caller_principal=caller_principal,
+        origin=origin,
         provider_message_id=provider_message_id,
         inbound_text=inbound_text,
         delivery_status=delivery_status,
@@ -614,11 +646,48 @@ async def _target_outcome(
     """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
     agent run (always answered/error). The single dispatch both the plain and the
     multichannel paths route ordinary text to. ``person`` and ``params`` reach only the tool
-    payload; the agent branch ignores both."""
+    payload; the agent branch ignores both.
+
+    A thread whose effective mode is ``manual`` runs NO target turn: this is where the
+    suppression lives, so a pairing turn — dispatched on its own path, never through here —
+    stays live and a first-contact greeting still prepends onto the silent outcome."""
+    if await effective_mode(route, intake.thread_id) == "manual":
+        return await _manual_target_outcome(route, intake, text)
     if route.target_kind == "tool":
         return await _run_tool_turn(route, text, intake.client_address, person, params)
-    answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id)
+    answer_status, answer, error_detail = await _run_agent_turn(
+        route, text, intake.thread_id, intake.client_address
+    )
     return _ResolvedOutcome(answer_status=answer_status, answer=answer, error=error_detail)
+
+
+async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
+    """The target turn SUPPRESSED for a manual-mode thread — no agent run, no tool dispatch.
+    An agent target that HOLDS thread memory (implements ``append_thread_messages``) has the
+    inbound appended to its checkpoint as a ``user`` message, so a later agent turn (once the
+    thread returns to ``agent`` mode) reads it as prior context; a memoryless agent target
+    (leaves the ABC default), an unregistered agent and a tool target have no thread memory to
+    feed, so nothing is appended. Either way the turn produces no reply: the outcome is silent
+    (terminal on the channel door, a delivered marker on the api door). An append that FAILS on
+    a memory-holding target is a loud client-safe ``error`` outcome, never a silent skip that
+    would drop the inbound out of the thread's memory unremarked. A turn that dies after the
+    append takes an error outcome without re-running, so the redrive adds no duplicate; an
+    api-door caller retrying the same inbound submits a fresh turn (new ``message_id``, no
+    inbound dedup there) that appends the line again — accepted over losing the inbound from
+    memory."""
+    if route.target_kind == "agent":
+        agent = _agent_registry().get(route.target_name)
+        if agent is not None and supports_thread_append(agent):
+            try:
+                await agent.append_thread_messages(
+                    thread_id=intake.thread_id, messages=[{"role": "user", "content": text}]
+                )
+            except Exception as exc:
+                logger.error(
+                    "conversations: manual-mode inbound append for route %r failed", route.route_name, exc_info=exc
+                )
+                return _tool_error(f"manual-mode append error: {exc}")
+    return _SilentOutcome()
 
 
 def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> ConversationRecord:
@@ -1033,6 +1102,7 @@ async def _accept_for_turn(
     )
     try:
         await store.create_record(intake, intake_token=intake_token)
+        await _refresh_thread_mode_ttl(thread_id)
         owner = await store.claim_inbound(channel, provider_message_id, message_id)
     except asyncio.CancelledError:
         # A cancelled task cannot await the round-trips the resolution needs, so it is
@@ -1132,6 +1202,7 @@ async def submit_api_message(
     )
     try:
         await _store().create_record(intake, intake_token=intake_token)
+        await _refresh_thread_mode_ttl(thread_id)
     except BaseException:
         caps.release_thread_slot(thread_id)
         raise
@@ -1168,6 +1239,81 @@ async def _get_api_route(route_name: str) -> ConversationRoute:
     if route is None or route.door != "api":
         raise ConversationRouteResolutionError(f"no api conversation route named {route_name!r}")
     return route
+
+
+# -- the operator send door --------------------------------------------------
+
+
+class OperatorAppendError(RuntimeError):
+    """Appending an operator's message to the thread's agent checkpoint failed, so the send
+    is refused and NO record is created — the operator's reply must not stand in the
+    transcript while it is absent from the memory a later agent turn reads."""
+
+
+async def operator_send(
+    *,
+    route: ConversationRoute,
+    thread_id: str,
+    client_address: str,
+    text: str,
+    operator_principal: str,
+) -> str:
+    """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
+    record's ``message_id`` (a uuid4). No turn runs: the record is minted already
+    ``answered`` carrying the operator's text and handed to the delivery machine, which sends
+    it from the route identity exactly as it sends a produced answer (same chunking, ledger
+    and receipts). Allowed in either mode; it never flips the mode.
+
+    For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
+    text is appended to the thread's checkpoint as an ``assistant`` message BEFORE the record
+    is created, mirroring how an agent's own answer enters its memory, so a later agent turn
+    reads the operator's reply as prior context; a memoryless agent target (leaves the ABC
+    default), an unregistered agent and a tool target have no thread memory to feed, so nothing
+    is appended. The order is resolve → append → create + spawn: an append that fails raises
+    :class:`OperatorAppendError` and no record is created, and a create that fails after the
+    append also raises — leaving a duplicated memory line a retry would add again, which is
+    accepted over a phantom record with no memory behind it.
+
+    The whole append → create → spawn runs under the thread's per-thread FIFO
+    (:meth:`TurnCaps.run_reserved`), the same lock in-flight turns take, so the operator's
+    write never interleaves a turn's checkpoint and record writes; the HTTP call waits behind
+    an in-flight turn. Serialization is guaranteed WITHIN a worker; across workers concurrent
+    operator sends and turns interleave at the checkpointer's own read-modify-write, as the
+    rest of the bridge tolerates. A full FIFO raises the loud, retriable
+    :class:`ThreadQueueOverflowError` (503) before anything is written."""
+    message_id = str(uuid4())
+    caps = get_turn_caps()
+    caps.reserve_thread_slot(thread_id)
+    async with caps.run_reserved(thread_id):
+        if route.target_kind == "agent":
+            agent = _agent_registry().get(route.target_name)
+            if agent is not None and supports_thread_append(agent):
+                try:
+                    await agent.append_thread_messages(
+                        thread_id=thread_id, messages=[{"role": "assistant", "content": text}]
+                    )
+                except Exception as exc:
+                    raise OperatorAppendError(
+                        f"appending the operator message to thread {thread_id!r} on route {route.route_name!r} "
+                        f"failed: {exc}"
+                    ) from exc
+        record = _new_record(
+            route=route,
+            message_id=message_id,
+            thread_id=thread_id,
+            client_address=client_address,
+            caller_principal=operator_principal,
+            provider_message_id=None,
+            inbound_text="",
+            delivery_status=DeliveryStatus.PENDING_DELIVERY,
+            answer_status="answered",
+            answer=text,
+            origin="operator",
+        )
+        await _store().create_record(record)
+        await _refresh_thread_mode_ttl(thread_id)
+        spawn_delivery(message_id)
+    return message_id
 
 
 # -- turn scheduling under the caps ------------------------------------------
@@ -1403,8 +1549,10 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
 __all__ = [
     "ApiSubmitResult",
     "ConversationRouteResolutionError",
+    "OperatorAppendError",
     "UnauthenticatedApiCallerError",
     "accept",
+    "operator_send",
     "redrive_accepted",
     "submit_api_message",
 ]

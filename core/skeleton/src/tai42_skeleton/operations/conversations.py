@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 from tai42_contract.conversations import (
+    CONVERSATION_MODES,
     ROUTE_NAME_RE,
     ConversationRoute,
     ConversationRouteCreate,
@@ -41,10 +42,21 @@ from tai42_skeleton.operations._authority import (
     require_admin,
     resolve_caller,
 )
-from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError
+from tai42_skeleton.operations.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotSupportedError,
+    OperationFailed,
+    UnavailableError,
+)
 
 if TYPE_CHECKING:
-    from tai42_skeleton.conversations.persons import ConversationPersonStore, Person
+    from tai42_contract.conversations import Person
+
+    from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager as _Manager
+    from tai42_skeleton.conversations.mode import ConversationModeStore
+    from tai42_skeleton.conversations.persons import ConversationPersonStore
+    from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 
 # Surfaced before a create does any bind work it would then have to discard.
@@ -183,12 +195,16 @@ async def create_conversation_route(
     execution_key: str,
     payload_expr: str | None = None,
     reply_expr: str | None = None,
+    initial_mode: str = "agent",
     channel: str | None = None,
     our_identity: str | None = None,
     callback_url: str | None = None,
 ) -> dict[str, Any]:
     """Create a conversation route from its flat parameters — an UPSERT, so this is the
     create path AND the edit path for a route of that name.
+
+    ``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``
+    suppresses it for an operator to answer) when a thread carries no per-thread override.
 
     ``execution_key`` is the api-key identity the turn runs AS; the caller must be allowed
     to delegate it and it must be usable by a tokenless fire, both decided BEFORE the write
@@ -213,6 +229,7 @@ async def create_conversation_route(
             target_name=target_name,
             payload_expr=payload_expr,
             reply_expr=reply_expr,
+            initial_mode=initial_mode,  # pyright: ignore[reportArgumentType]
             execution_key=execution_key,
             channel=channel,
             our_identity=our_identity,
@@ -651,7 +668,7 @@ async def _delete_thread_checkpoint(thread_id: str) -> None:
 @operation(
     summary="Delete a conversation thread",
     tags=["conversations"],
-    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UnavailableError],
     query_model=ThreadDeleteQuery,
 )
 async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[str, Any]:
@@ -670,8 +687,10 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     person is unknown, or whose ``route_name`` is not one of the person's routes, is a loud
     404. A turn IN FLIGHT on the thread (an ``accepted`` intake still holding a live lease) is
     a 409: its completion re-writes checkpoint state and re-stamps the indexes behind the
-    delete, half-forgetting the memory — retry once it drains. A ``route_name`` that is not a
-    valid slug, or a blank ``thread_id``, is a 400.
+    delete, half-forgetting the memory — retry once it drains. The guard is re-checked under
+    the FIFO, so a turn admitted while the lock is being taken is refused before any teardown,
+    never left to re-create memory behind the delete. A ``route_name`` that is not a valid
+    slug, or a blank ``thread_id``, is a 400.
 
     Caller authority is the door's grantable write action — the SAME write grant that creates
     a route deletes routes and forgets threads — never a per-thread owner check.
@@ -682,6 +701,11 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     together, the index being the durable marker of an owed reclamation and torn down LAST.
     Idempotent under re-run, so a partial completion is FINISHED by a retry.
 
+    The whole teardown runs under the thread's per-thread FIFO (the lock an operator send and
+    an in-flight turn take), so an operator send already in flight on the thread within this
+    worker drains BEFORE the delete rather than half-behind it; a full queue is the loud,
+    retriable 503 that FIFO raises before anything is torn down.
+
     Returns ``{"removed", "route_name", "thread_id"}``, where ``removed`` counts the answer
     records this call deleted (0 when a prior run already cleared them, when their rows had
     expired under the retention TTL, or when the id was never stored)."""
@@ -689,18 +713,258 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     if not thread_id.strip():
         raise BadRequestError("thread_id must be a non-blank thread identifier")
     _require_backend()
+    from tai42_skeleton.conversations.caps import get_turn_caps
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     store = ConversationRecordStore(ConversationsSettings())
     route_names = await _thread_delete_routes(thread_id, route_name)
+    in_flight_409 = f"conversation thread {thread_id!r} has a turn in flight; retry once it drains"
     if await store.thread_has_live_intake(thread_id):
-        raise ConflictError(f"conversation thread {thread_id!r} has a turn in flight; retry once it drains")
-    await _delete_thread_checkpoint(thread_id)
-    removed = 0
-    for name in route_names:
-        removed += await store.drop_thread(name, thread_id)
+        raise ConflictError(in_flight_409)
+    caps = get_turn_caps()
+    caps.reserve_thread_slot(thread_id)
+    async with caps.run_reserved(thread_id):
+        # Re-check UNDER the FIFO: an intake admitted between the outer check and taking the
+        # lock is durably visible here, so its turn — queued behind this lock — is refused
+        # before any teardown, never left to run after the delete and re-create the checkpoint.
+        if await store.thread_has_live_intake(thread_id):
+            raise ConflictError(in_flight_409)
+        await _delete_thread_checkpoint(thread_id)
+        removed = 0
+        for name in route_names:
+            removed += await store.drop_thread(name, thread_id)
     return {"removed": removed, "route_name": route_name, "thread_id": thread_id}
+
+
+# -- operator send + per-thread mode ------------------------------------------------------
+#
+# The operator surface over a live thread: send a message BY HAND into it (no turn runs), and
+# read or override the thread's control mode. All three carry the thread-belongs-to-route
+# guard the thread delete uses, so one route can never reach another's thread by id.
+
+
+def _record_store() -> ConversationRecordStore:
+    """The answer/record store over the live conversations settings. Called only after
+    :func:`_require_backend`, so its own backend guard never fires here."""
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    return ConversationRecordStore(ConversationsSettings())
+
+
+def _mode_store() -> ConversationModeStore:
+    """The per-thread mode-override store over the live conversations settings. Called only
+    after :func:`_require_backend`, so its own backend guard never fires here."""
+    from tai42_skeleton.conversations.mode import ConversationModeStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    return ConversationModeStore(ConversationsSettings())
+
+
+async def _route_keyed_target(named_route: ConversationRoute, thread_id: str, address: str | None) -> tuple[str, str]:
+    """The ``(route_name, client_address)`` a route-keyed thread's operator send targets: the
+    one route it lives on and the address embedded in its id. The id MUST carry the route's
+    ``bridge:{route_name}:`` prefix (the sole guard against reaching another route's thread) —
+    a mismatch is a loud 400. An explicit ``address`` must equal that embedded address."""
+    prefix = f"{BRIDGE_THREAD_PREFIX}{named_route.route_name}:"
+    if not thread_id.startswith(prefix):
+        raise BadRequestError(
+            f"thread_id {thread_id!r} is not a thread of route {named_route.route_name!r}: "
+            f"it must start with {prefix!r}"
+        )
+    embedded = thread_id[len(prefix) :]
+    if not embedded.strip():
+        raise BadRequestError(f"thread_id {thread_id!r} carries no address after its route prefix")
+    if address is not None and address != canonical_address(embedded):
+        raise BadRequestError(f"address {address!r} is not the address of thread {thread_id!r}")
+    return named_route.route_name, embedded
+
+
+async def _person_target(
+    store: ConversationRecordStore,
+    named_route: ConversationRoute,
+    thread_id: str,
+    address: str | None,
+) -> tuple[str, str]:
+    """The ``(route_name, client_address)`` a LINKED person's aggregated-thread operator send
+    targets. The named route must be one of the person's routes (else a uniform thread
+    not-found). An explicit ``address`` must be one of the person's addresses (else a loud
+    400), and its send route is the named route when the address wrote under it, else the
+    address's own first route. With no explicit address the target is the person's NEWEST
+    record — its route and client_address — so the reply returns where they last wrote from;
+    an empty thread offers none, which is a loud 400 asking for an explicit address."""
+    person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
+    person = await _person_store().get_by_id(person_id)
+    if (
+        person is None
+        or (named_route.target_kind, named_route.target_name) != (person.target_kind, person.target_name)
+        or named_route.route_name not in _person_routes(person)
+    ):
+        raise _thread_not_found(thread_id)
+    if address is not None:
+        match = next((row for row in person.addresses if row.address == address), None)
+        if match is None:
+            raise BadRequestError(f"address {address!r} is not one of the thread's person addresses")
+        route_name = named_route.route_name if named_route.route_name in match.routes else sorted(match.routes)[0]
+        return route_name, match.address
+    newest = await store.list_person_thread_records(
+        sorted(_person_routes(person)), thread_id, offset=0, limit=1, newest_first=True
+    )
+    if not newest.records:
+        raise BadRequestError(
+            f"thread {thread_id!r} holds no record to infer a send address from; pass an explicit address"
+        )
+    record = newest.records[0]
+    return record.route_name, record.client_address
+
+
+async def _resolve_operator_target(
+    manager: _Manager,
+    store: ConversationRecordStore,
+    named_route: ConversationRoute,
+    thread_id: str,
+    address: str | None,
+) -> tuple[ConversationRoute, str]:
+    """The ``(target route, client_address)`` an operator message is built and delivered
+    against. A route-keyed thread targets its own route and embedded address; a person thread
+    targets the address's (or newest record's) route — looked up live, so a deleted route is a
+    loud 404 rather than a send with a stale identity. ``address``, when given, is already
+    canonicalized by the caller — the only place a MALFORMED address maps to a 400 —
+    so a ``ValueError`` from a store read here is server-side corruption, not a client error."""
+    if thread_id.startswith(PERSON_THREAD_PREFIX):
+        route_name, client_address = await _person_target(store, named_route, thread_id, address)
+    else:
+        route_name, client_address = await _route_keyed_target(named_route, thread_id, address)
+    target_route = named_route if route_name == named_route.route_name else await manager.get_route(route_name)
+    if target_route is None:
+        raise NotFoundError(f"conversation route not found: {route_name!r}")
+    return target_route, client_address
+
+
+@operation(
+    summary="Send an operator message into a conversation thread",
+    tags=["conversations"],
+    destructive=True,
+    errors=[BadRequestError, NotFoundError, NotSupportedError, OperationFailed, UnavailableError],
+)
+async def send_conversation_thread_message(
+    route_name: str, thread_id: str, text: str, address: str | None = None
+) -> dict[str, Any]:
+    """Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity, and
+    return ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
+    ``answered`` and delivered through the same machine a produced answer takes.
+
+    Allowed in either mode and it never flips the mode. Blank ``text`` is a loud 400, and a
+    present-but-blank ``address`` is a 400. The thread-belongs-to-route guard is the thread
+    delete's: a route-keyed id must carry the route's ``bridge:{route_name}:`` prefix (400
+    otherwise), a person thread must be on the named route (404 otherwise). ``address`` picks
+    the send target on a LINKED person's aggregated thread — it must be one of the person's
+    addresses (400 otherwise); with no ``address`` the target is the thread's newest record,
+    and an empty person thread with no ``address`` is a 400. For an agent target that holds
+    thread memory the message is appended to the thread's checkpoint as an ``assistant`` reply
+    BEFORE the record is created; an append that fails is a loud 500 and no record is created.
+    The send takes the thread's per-thread FIFO, so it waits behind an in-flight turn and
+    never interleaves it; a full queue is a loud, retriable 503.
+
+    Caller authority is the door's grantable ``write`` action — the same write grant that
+    forgets threads — and the record names the calling operator. An unauthenticated caller
+    (access control disabled or unbound) is a loud 501, since an operator action must be
+    attributable."""
+    _validate_route_name(route_name)
+    if not thread_id.strip():
+        raise BadRequestError("thread_id must be a non-blank thread identifier")
+    if not text.strip():
+        raise BadRequestError("text must be a non-blank message to send")
+    manager = _require_backend()
+    named_route = await _require_route(manager, route_name)
+    caller = await resolve_caller()
+    operator_principal = caller.caller_id
+    if not (operator_principal and operator_principal.strip()):
+        raise NotSupportedError(
+            "an operator send needs an authenticated caller principal to attribute the message to, and this "
+            "deployment resolved none; enable access control"
+        )
+    store = _record_store()
+    if address is not None:
+        try:
+            address = canonical_address(address)
+        except ValueError as exc:
+            raise BadRequestError(f"invalid address: {exc}") from exc
+    target_route, client_address = await _resolve_operator_target(manager, store, named_route, thread_id, address)
+    from tai42_skeleton.conversations.turn import OperatorAppendError, operator_send
+
+    try:
+        message_id = await operator_send(
+            route=target_route,
+            thread_id=thread_id,
+            client_address=client_address,
+            text=text,
+            operator_principal=operator_principal,
+        )
+    except OperatorAppendError as exc:
+        raise OperationFailed(str(exc)) from exc
+    return {"message_id": message_id, "thread_id": thread_id}
+
+
+@operation(
+    summary="Read a conversation thread's control mode",
+    tags=["conversations"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def get_conversation_thread_mode(route_name: str, thread_id: str) -> dict[str, Any]:
+    """The mode in force for ``thread_id`` on ``route_name`` and where it comes from:
+    ``{"mode", "source"}``, ``source`` being ``thread`` for a per-thread override and
+    ``route`` for the no-override default. A route-keyed thread's default is the route's
+    ``initial_mode``; a LINKED person's aggregated thread defaults to ``manual`` when ANY
+    route the person spans defaults to ``manual``, else ``agent``.
+
+    The thread-belongs-to-route guard is the thread delete's: a route-keyed id off the route
+    is a 400, a person thread off the named route a 404. An unknown route is a loud 404; a
+    blank ``thread_id`` a 400."""
+    _validate_route_name(route_name)
+    if not thread_id.strip():
+        raise BadRequestError("thread_id must be a non-blank thread identifier")
+    manager = _require_backend()
+    await _require_route(manager, route_name)
+    route_names = await _thread_delete_routes(thread_id, route_name)
+    override = await _mode_store().get_mode(thread_id)
+    if override is not None:
+        return {"mode": override, "source": "thread"}
+    from tai42_skeleton.conversations.mode import default_mode_for_routes
+
+    return {"mode": await default_mode_for_routes(manager, route_names), "source": "route"}
+
+
+@operation(
+    summary="Set a conversation thread's control mode",
+    tags=["conversations"],
+    destructive=True,
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+)
+async def set_conversation_thread_mode(route_name: str, thread_id: str, mode: str) -> dict[str, Any]:
+    """Set the per-thread mode override for ``thread_id`` on ``route_name`` to ``mode`` (one
+    of ``agent``/``manual``), returning ``{"route_name", "thread_id", "mode", "source"}`` with
+    ``source`` always ``thread`` — a set writes an override.
+
+    This is the door an EXTERNAL/programmatic caller names a thread through; an agent flipping
+    its OWN live conversation uses the ``set_conversation_mode`` builtin instead, which reads
+    the current thread from the turn context rather than naming it.
+
+    Caller authority is the door's grantable ``write`` action. The thread-belongs-to-route
+    guard is the thread delete's: a route-keyed id off the route is a 400, a person thread off
+    the named route a 404. An unknown route is a loud 404; a blank ``thread_id`` or a ``mode``
+    outside the vocabulary is a 400."""
+    _validate_route_name(route_name)
+    if not thread_id.strip():
+        raise BadRequestError("thread_id must be a non-blank thread identifier")
+    if mode not in CONVERSATION_MODES:
+        raise BadRequestError(f"mode must be one of {list(CONVERSATION_MODES)}: {mode!r}")
+    manager = _require_backend()
+    await _require_route(manager, route_name)
+    await _thread_delete_routes(thread_id, route_name)
+    stored = await _mode_store().set_mode(thread_id, mode)
+    return {"route_name": route_name, "thread_id": thread_id, "mode": stored, "source": "thread"}
 
 
 # -- per-target conversation config --------------------------------------------------------

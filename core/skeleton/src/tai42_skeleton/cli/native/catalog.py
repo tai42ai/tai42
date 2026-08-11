@@ -62,6 +62,14 @@ _BUILTIN_ROWS: list[dict[str, str]] = [
         "description": "Mint a single-use pair code for a channel conversation.",
     },
     {
+        "name": "set_conversation_mode",
+        "kind": "tool",
+        "package": "tai42-skeleton",
+        "source": "builtin",
+        "module": "tai42_skeleton.tools.builtin.set_conversation_mode",
+        "description": "Flip the current conversation between agent and manual control.",
+    },
+    {
         "name": "monitor",
         "kind": "extension",
         "package": "tai42-skeleton",

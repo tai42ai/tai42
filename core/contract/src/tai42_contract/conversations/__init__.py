@@ -28,6 +28,14 @@ ConversationDoor = Literal["api", "channel"]
 #: conversation memory), ``tool`` dispatches a registered tool statelessly per message.
 ConversationTargetKind = Literal["agent", "tool"]
 
+#: A thread's conversation control mode: ``agent`` runs the target turn (an agent run or a
+#: tool dispatch); ``manual`` suppresses the target turn so an operator answers by hand,
+#: while platform control turns (pairing, first-contact greeting) still run.
+ConversationMode = Literal["agent", "manual"]
+
+#: The mode values, for the store and the doors that validate an override.
+CONVERSATION_MODES: tuple[ConversationMode, ...] = ("agent", "manual")
+
 #: A turn's outcome kind. ``answered``/``error`` carry answer text (``error`` is generic
 #: client-safe text only); ``silent`` is a deliberate no-reply and carries NO answer text.
 AnswerStatus = Literal["answered", "error", "silent"]
@@ -196,6 +204,9 @@ class ConversationRouteCreate(BaseModel):
     # carries neither.
     payload_expr: str | None = None
     reply_expr: str | None = None
+    # The thread's control mode when no per-thread override is set: ``agent`` runs the
+    # target turn, ``manual`` suppresses it for an operator to answer.
+    initial_mode: ConversationMode = "agent"
     execution_key: str = Field(
         min_length=1,
         description=(
@@ -455,6 +466,7 @@ class TargetConversationConfig(BaseModel):
 
 
 __all__ = [
+    "CONVERSATION_MODES",
     "ENTRY_PARAMS_MAX_COUNT",
     "ENTRY_PARAMS_MAX_TOTAL_BYTES",
     "ENTRY_PARAM_KEY_RE",
@@ -466,6 +478,7 @@ __all__ = [
     "ConversationAnswer",
     "ConversationDoor",
     "ConversationMessage",
+    "ConversationMode",
     "ConversationRoute",
     "ConversationRouteCreate",
     "ConversationTargetKind",

@@ -39,6 +39,7 @@ from langgraph.types import Send
 from langgraph.utils.runnable import RunnableCallable
 from pydantic import ValidationError
 from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.utils.data.string_util import text_to_md5
 
 from tai42_agents._internal.recovery import _tool_error_middleware
@@ -104,7 +105,9 @@ class RetrievalToolsGraph:
         self._should_continue_node: Callable[..., Any] | None = None
         self._overwrite_store = overwrite_store
         self._tools_limit = tools_limit
-        self._context_middlewares = context_overflow_middlewares()
+        # The leading-user normalization runs last, after the history is reduced, so a
+        # thread opening with an assistant message leads user-first for the next model call.
+        self._context_middlewares = [*context_overflow_middlewares(), LeadingUserMiddleware()]
 
     async def abuild(self) -> Any:
         store = self.store

@@ -78,6 +78,10 @@ def create_route(
         str | None,
         typer.Option("--reply-expr", help="target-kind=tool: jq mapping the tool result to the reply."),
     ] = None,
+    initial_mode: Annotated[
+        str,
+        typer.Option("--initial-mode", help="Default control mode when a thread has no override: 'agent' or 'manual'."),
+    ] = "agent",
     channel: Annotated[
         str | None, typer.Option("--channel", help="door=channel: the channel registry name (e.g. twilio).")
     ] = None,
@@ -107,6 +111,7 @@ def create_route(
         "target_kind": target_kind,
         "target_name": target_name,
         "execution_key": execution_key,
+        "initial_mode": initial_mode,
     }
     if payload_expr is not None:
         body["payload_expr"] = payload_expr
@@ -161,6 +166,82 @@ def delete_thread(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.delete(f"/api/conversations/{route_name}/thread", params={"thread_id": thread_id})
+    emit_result(ctx_obj, data)
+
+
+@app.command("send")
+@covers(("POST", "/api/conversations/{route_name}/thread/messages"))
+def send_message(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat-line:+15550001111).")],
+    text: Annotated[str, typer.Option("--text", help="The message to send into the thread.")],
+    address: Annotated[
+        str | None,
+        typer.Option("--address", help="Send target on a linked person's thread (one of the person's addresses)."),
+    ] = None,
+) -> None:
+    """Send a message BY HAND into one thread, delivered as the route identity — no turn runs.
+
+    Allowed in either mode and it never flips the mode. A route-keyed id must carry the
+    route's ``bridge:<route_name>:`` prefix (else 400); a person thread not on the named route
+    is a 404. ``--address`` picks the send target on a linked person's aggregated thread and
+    must be one of the person's addresses; without it the target is the thread's newest
+    record, and an empty person thread with no ``--address`` is a 400. A target that keeps
+    thread memory gets the message appended to that memory as an assistant reply; a target
+    with no thread memory skips it.
+
+    The thread id rides the body, so an api-door id — which carries a percent-encoded
+    principal — reaches the door spelled exactly as the listing showed it.
+
+    Example: ``tai conversations send chat-line bridge:chat-line:+15550001111 --text 'On it.'``
+    """
+    ctx_obj = app_context(ctx)
+    body: dict = {"thread_id": thread_id, "text": text}
+    if address is not None:
+        body["address"] = address
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/conversations/{route_name}/thread/messages", json=body)
+    emit_result(ctx_obj, data)
+
+
+@app.command("mode-get")
+@covers(("GET", "/api/conversations/{route_name}/thread/mode"))
+def get_mode(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat-line:+15550001111).")],
+) -> None:
+    """Show a thread's control mode and where it comes from (a per-thread override, or the
+    route's default).
+
+    Example: ``tai conversations mode-get chat-line bridge:chat-line:+15550001111``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/conversations/{route_name}/thread/mode", params={"thread_id": thread_id})
+    emit_result(ctx_obj, data)
+
+
+@app.command("mode-set")
+@covers(("PUT", "/api/conversations/{route_name}/thread/mode"))
+def set_mode(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    thread_id: Annotated[str, typer.Argument(help="Thread id (e.g. bridge:chat-line:+15550001111).")],
+    mode: Annotated[str, typer.Argument(help="Control mode: 'agent' or 'manual'.")],
+) -> None:
+    """Set a thread's control mode override.
+
+    ``agent`` runs the target turn on the next inbound message; ``manual`` suppresses it so an
+    operator answers by hand, while platform control turns (pairing, greeting) still run. The
+    same write grant that forgets threads sets a thread's mode.
+
+    Example: ``tai conversations mode-set chat-line bridge:chat-line:+15550001111 manual``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.put(f"/api/conversations/{route_name}/thread/mode", json={"thread_id": thread_id, "mode": mode})
     emit_result(ctx_obj, data)
 
 

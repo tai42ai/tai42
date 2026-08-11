@@ -32,6 +32,7 @@ from tai42_kit.llm.runtime import build_agent_input, validate_structured_output
 from tai42_kit.llm.settings import embedding_settings, llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
+from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -318,6 +319,65 @@ class RetrievalToolsAgent(Agent):
         response_format = kwargs.get("response_format")
         reject_untitled_response_format("retrieval_tools_agent", response_format)
         return await self._drain(self.astream(**kwargs), response_format=response_format)
+
+    async def _compile_for_append(
+        self,
+        llm_provider: str | None,
+        checkpoint_provider: str | None,
+        store_provider: str | None,
+        llm_kwargs: dict[str, Any] | None,
+    ) -> Any:
+        """Compile the retrieval graph bound to the resolved checkpointer for an append.
+
+        Resolves the model and checkpointer the same way ``_build`` does — so the
+        append reaches the SAME saver a run resolves — and compiles the graph with no
+        tools. Tool embedding and the vector index serve only tool retrieval, never
+        the message checkpoint, so neither the embedding provider nor the index is
+        resolved here and no model call is made; the store is resolved plain only
+        because the graph requires one to compile.
+        """
+        provider_settings = llm_provider_settings()
+        llm_provider = llm_provider or provider_settings.llm
+        llm = await get_llm_async(provider=llm_provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+        store_provider = store_provider or provider_settings.store
+        store = await store_registry().get_store(
+            provider=store_provider, conn_string=provider_settings.store_conn_string
+        )
+        checkpoint_provider = checkpoint_provider or provider_settings.checkpoint
+        checkpointer = await checkpoint_registry().get_checkpointer(
+            provider=checkpoint_provider, conn_string=provider_settings.checkpoint_conn_string
+        )
+        return await RetrievalToolsGraph(tools=[], llm=llm, store=store, checkpoint=checkpointer).abuild()
+
+    async def append_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        messages: list[dict[str, str]],
+        llm_provider: str | None = None,
+        checkpoint_provider: str | None = None,
+        store_provider: str | None = None,
+        llm_kwargs: dict[str, Any] | None = None,
+        langgraph_config: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> None:
+        """Append ``messages`` to the thread's stored history without running the model.
+
+        ``messages`` items are ``{"role": "user"|"assistant", "content": str}`` — an
+        unknown role or blank content raises. ``thread_id`` (or a
+        ``configurable.thread_id`` carried in ``langgraph_config``) names the thread to
+        append to; a missing one raises rather than minting a fresh thread. The graph
+        compiles over the resolved checkpointer (see :meth:`_compile_for_append`) so
+        the append lands on the SAME checkpointed thread a run reads.
+        """
+        converted = to_thread_messages(messages)
+        reject_blank_memory_keys(
+            "retrieval_tools_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None
+        )
+        config = build_run_config(langgraph_config, thread_id)
+        require_thread_id("retrieval_tools_agent.append_thread_messages", config)
+        agent = await self._compile_for_append(llm_provider, checkpoint_provider, store_provider, llm_kwargs)
+        await awrite_thread_messages(agent, config, converted)
 
 
 # The ABC ``run``/``astream`` parameters this runtime cannot honor, mapped to the

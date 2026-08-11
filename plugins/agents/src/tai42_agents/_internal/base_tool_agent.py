@@ -12,17 +12,56 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
+from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.config_util import init_langgraph_config
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
+
+
+async def _compile_tools_agent(
+    tools: list[StructuredTool],
+    llm_provider: str | None = None,
+    checkpoint_provider: str | None = None,
+    llm_kwargs: dict[str, Any] | None = None,
+    response_format: Any = None,
+) -> Any:
+    """Resolve the model and checkpointer and compile the tools agent graph.
+
+    The build every face shares, up to compile — no model invocation happens here.
+    The model resolves from the kit LLM settings (``llm_kwargs`` override the
+    defaults), the checkpointer from the checkpoint registry (so every caller
+    resolving the same ``checkpoint_provider`` reaches the same saver), and the
+    context-overflow, leading-user and tool-error middleware are attached. A ``response_format``
+    (JSON-Schema dict or pydantic class) forces the structured output onto
+    ``state["structured_response"]``; ``None`` keeps free-form text.
+    """
+    llm_provider = llm_provider or llm_provider_settings().llm
+    llm = await get_llm_async(provider=llm_provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+
+    checkpoint_provider = checkpoint_provider or llm_provider_settings().checkpoint
+    checkpointer = await checkpoint_registry().get_checkpointer(
+        provider=checkpoint_provider,
+        conn_string=llm_provider_settings().checkpoint_conn_string,
+    )
+
+    return create_agent(
+        llm,
+        tools=tools,
+        checkpointer=checkpointer,
+        middleware=[*context_overflow_middlewares(), LeadingUserMiddleware(), _tool_error_middleware],
+        debug=logging_settings().is_enabled_for("DEBUG"),
+        response_format=response_format,
+    )
 
 
 async def _build_agent_and_input(
@@ -39,30 +78,16 @@ async def _build_agent_and_input(
     """Compile the tools agent, build its input messages and run config, and ready
     the thread for the turn.
 
-    The model resolves from the kit LLM settings (``llm_kwargs`` override the
-    defaults), the checkpointer from the checkpoint registry, and the
-    context-overflow middleware is attached. A ``response_format`` (JSON-Schema
-    dict or pydantic class) forces the structured output onto
-    ``state["structured_response"]``; ``None`` keeps free-form text. The single
-    choke point every face builds through, so the thread's dangling tool_calls are
-    repaired here (once the config resolves a ``thread_id``) for every face.
-    Returns ``(agent, messages, config)``.
+    Wraps :func:`_compile_tools_agent` with the input build and the turn-start
+    repair: the single choke point every face builds through, so the thread's
+    dangling tool_calls are repaired here (once the config resolves a ``thread_id``)
+    for every face. Returns ``(agent, messages, config)``.
     """
-    llm_provider = llm_provider or llm_provider_settings().llm
-    llm = await get_llm_async(provider=llm_provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
-
-    checkpoint_provider = checkpoint_provider or llm_provider_settings().checkpoint
-    checkpointer = await checkpoint_registry().get_checkpointer(
-        provider=checkpoint_provider,
-        conn_string=llm_provider_settings().checkpoint_conn_string,
-    )
-
-    agent = create_agent(
-        llm,
-        tools=tools,
-        checkpointer=checkpointer,
-        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
-        debug=logging_settings().is_enabled_for("DEBUG"),
+    agent = await _compile_tools_agent(
+        tools,
+        llm_provider=llm_provider,
+        checkpoint_provider=checkpoint_provider,
+        llm_kwargs=llm_kwargs,
         response_format=response_format,
     )
 
@@ -74,6 +99,29 @@ async def _build_agent_and_input(
     )
     await _repair_dangling_tool_calls(agent, config)
     return agent, messages, config
+
+
+async def aappend_tools_agent_messages(
+    messages: list[BaseMessage],
+    config: dict[str, Any],
+    llm_provider: str | None = None,
+    checkpoint_provider: str | None = None,
+    llm_kwargs: dict[str, Any] | None = None,
+) -> None:
+    """Append messages to the thread's checkpoint without running the model.
+
+    Compiles the tools agent to the SAME checkpointer a run resolves (from
+    ``checkpoint_provider``) and writes the pre-converted messages through the
+    ``START`` node. No tool set is needed — the checkpoint write is
+    tool-independent — so the graph compiles with an empty tool set.
+    """
+    agent = await _compile_tools_agent(
+        [],
+        llm_provider=llm_provider,
+        checkpoint_provider=checkpoint_provider,
+        llm_kwargs=llm_kwargs,
+    )
+    await awrite_thread_messages(agent, config, messages)
 
 
 async def ainvoke_tools_agent(

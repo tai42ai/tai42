@@ -68,6 +68,7 @@ def _record(message_id: str, *, status: DeliveryStatus = DeliveryStatus.PENDING_
         channel="twilio",
         our_identity="+15550001111",
         provider_message_id=f"PID-{message_id}",
+        origin="client",
         inbound_text=f"ask {message_id}",
         delivery_status=status,
         answer_status="answered" if answered else None,

@@ -199,7 +199,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The seventeen conversation keyspaces. Every literal key string lives ONLY here. A
+    # The eighteen conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
     # exceptions are ``open_code_key`` and the two redeem-throttle keys, whose variable
@@ -253,6 +253,13 @@ class ConversationsSettings(TaiBaseSettings):
     def route_key(self, route_name: str) -> str:
         """Routing-row key for a route name (a ``:``-free slug)."""
         return f"{self.prefix}:route:{route_name}"
+
+    def mode_key(self, thread_id: str) -> str:
+        """Per-thread mode-override key → ``agent``/``manual``. Absent = no override, so the
+        route's ``initial_mode`` stands. The ``thread_id`` carries ``:`` of its own and so
+        sits LAST."""
+        _require_key_segment("thread_id", thread_id)
+        return f"{self.prefix}:mode:{thread_id}"
 
     @property
     def route_key_prefix(self) -> str:
