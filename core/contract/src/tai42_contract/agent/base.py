@@ -204,6 +204,18 @@ class Agent(ABC):
         else:
             yield StructuredFinal(data=result)
 
+    async def append_thread_messages(
+        self, *, thread_id: str, messages: list[dict[str, str]], **kwargs: Any
+    ) -> None:
+        """Append ``messages`` to ``thread_id``'s stored history WITHOUT running the agent.
+
+        Each item is ``{"role": "user"|"assistant", "content": str}``. The conversation
+        bridge calls this to record a manual-mode inbound and an operator's outbound reply
+        into the thread's memory, so a later agent turn reads them as prior context. An
+        agent with no thread memory raises :class:`NotImplementedError`.
+        """
+        raise NotImplementedError
+
     async def _drain(self, agen: AsyncIterator[StreamEvent], *, response_format: Any = None) -> Any:
         """Consume a whole event stream and return the final value (the terminal
         rule). Streaming agents' ``run`` uses this over their own ``astream``.

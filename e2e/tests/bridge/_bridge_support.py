@@ -128,21 +128,23 @@ class BridgeHarness:
         execution_key: str,
         channel: str,
         our_identity: str,
+        initial_mode: str | None = None,
         token: str | None = None,
         expect: int = 200,
     ) -> Any:
-        return await self.api(token=token).post(
-            f"/api/conversations/{route_name}",
-            json={
-                "door": "channel",
-                "target_kind": "agent",
-                "target_name": agent,
-                "execution_key": execution_key,
-                "channel": channel,
-                "our_identity": our_identity,
-            },
-            expect=expect,
-        )
+        body: dict[str, Any] = {
+            "door": "channel",
+            "target_kind": "agent",
+            "target_name": agent,
+            "execution_key": execution_key,
+            "channel": channel,
+            "our_identity": our_identity,
+        }
+        # Omitted leaves the route on its ``agent`` default; a leg that wants a
+        # ``manual``-from-the-start route names it here.
+        if initial_mode is not None:
+            body["initial_mode"] = initial_mode
+        return await self.api(token=token).post(f"/api/conversations/{route_name}", json=body, expect=expect)
 
     async def create_tool_channel_route(
         self,

@@ -24,10 +24,19 @@ the operator and Studio drive over the routing table.
   prefix or it is a 400, and a person thread not on the named route is a 404. A turn in
   flight on the thread is a 409. The thread id is a query value, the same as the transcript
   door, because it holds a percent-encoded principal that no path spelling round-trips.
+- ``POST /api/conversations/{route_name}/thread/messages`` (AUTHED) — send an operator
+  message BY HAND into a thread (no turn runs), delivered as the route identity. Body is
+  ``{thread_id, text, address}``; returns ``{message_id, thread_id}``. The ``thread_id`` and
+  ``address`` ride the body because the id holds a percent-encoded principal.
+- ``GET /api/conversations/{route_name}/thread/mode?thread_id=`` (AUTHED) — read a thread's
+  control mode and its source (``thread`` override or ``route`` default).
+- ``PUT /api/conversations/{route_name}/thread/mode`` (AUTHED) — set a thread's mode override
+  from a ``{thread_id, mode}`` body.
 
-The write doors (route create, route delete, thread delete) share ONE authority: the
-grantable ``write`` action. The same write grant that creates a route deletes routes and
-forgets threads — no per-thread owner check.
+The write doors (route create, route delete, thread delete, operator send, mode set) share
+ONE authority: the grantable ``write`` action. The same write grant that creates a route
+deletes routes, forgets threads, sends operator messages and sets a thread's mode — no
+per-thread owner check.
 
 - ``GET /api/conversation-configs`` (AUTHED) — list the per-target conversation configs
   (the ``multichannel`` opt-in + first-contact greeting), keyed ``(target_kind,
@@ -88,11 +97,16 @@ from tai42_skeleton.operations.conversations import get_conversation_config as _
 from tai42_skeleton.operations.conversations import get_conversation_message as _get_conversation_message_op
 from tai42_skeleton.operations.conversations import get_conversation_route as _get_conversation_route_op
 from tai42_skeleton.operations.conversations import get_conversation_thread as _get_conversation_thread_op
+from tai42_skeleton.operations.conversations import get_conversation_thread_mode as _get_conversation_thread_mode_op
 from tai42_skeleton.operations.conversations import list_conversation_configs as _list_conversation_configs_op
 from tai42_skeleton.operations.conversations import list_conversation_routes as _list_conversation_routes_op
 from tai42_skeleton.operations.conversations import list_conversation_threads as _list_conversation_threads_op
 from tai42_skeleton.operations.conversations import list_failed_conversations as _list_failed_conversations_op
+from tai42_skeleton.operations.conversations import (
+    send_conversation_thread_message as _send_conversation_thread_message_op,
+)
 from tai42_skeleton.operations.conversations import set_conversation_config as _set_conversation_config_op
+from tai42_skeleton.operations.conversations import set_conversation_thread_mode as _set_conversation_thread_mode_op
 from tai42_skeleton.operations.errors import NotSupportedError
 
 logger = logging.getLogger(__name__)
@@ -248,6 +262,91 @@ delete_conversation_thread = register_operation_route(
     path="/api/conversations/{route_name}/thread",
     method="DELETE",
     context_extractor=_extract_thread_delete_query,
+    action="write",
+)
+
+
+async def _extract_thread_message(request: Request) -> dict:
+    """The operator-send body ``{thread_id, text, address}`` as the operation's flat fields.
+    A non-object body, a missing/blank ``thread_id`` or a non-string ``text``/``address`` is
+    a loud 400 here; the operation owns the blank-text and thread-belongs guards.
+
+    ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
+    ``{principal}/{end user}`` address, which no path spelling round-trips."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object of {thread_id, text, address}") from None
+    thread_id = body.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise BadRequestError("thread_id is required and must be a non-blank string") from None
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise BadRequestError("text is required and must be a string") from None
+    address = body.get("address")
+    if address is not None and not isinstance(address, str):
+        raise BadRequestError("address must be a string or absent") from None
+    return {"thread_id": thread_id, "text": text, "address": address}
+
+
+async def _extract_thread_mode_query(request: Request) -> dict:
+    """The mode read door's ``?thread_id=``. Rides the query for the same reason the
+    transcript door's does — the id carries a percent-encoded principal. A missing one is a
+    loud 400 here; a blank one is the operation's own 400."""
+    thread_id = request.query_params.get("thread_id")
+    if thread_id is None:
+        raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/thread/mode?thread_id=...")
+    return {"thread_id": thread_id}
+
+
+async def _extract_thread_mode_body(request: Request) -> dict:
+    """The mode write body ``{thread_id, mode}`` as the operation's flat fields. A non-object
+    body, a missing/blank ``thread_id`` or a non-string ``mode`` is a loud 400 here; the
+    operation validates the mode vocabulary and the thread-belongs guard."""
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise BadRequestError("invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise BadRequestError("body must be a JSON object of {thread_id, mode}") from None
+    thread_id = body.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise BadRequestError("thread_id is required and must be a non-blank string") from None
+    mode = body.get("mode")
+    if not isinstance(mode, str):
+        raise BadRequestError("mode is required and must be a string") from None
+    return {"thread_id": thread_id, "mode": mode}
+
+
+# The operator-send and mode doors sit under the same literal ``thread`` segment as the
+# thread delete, one level deeper (``/thread/messages``, ``/thread/mode``), so they never
+# capture the ``{route_name}`` read/delete doors above.
+send_conversation_thread_message = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_send_conversation_thread_message_op),
+    path="/api/conversations/{route_name}/thread/messages",
+    method="POST",
+    context_extractor=_extract_thread_message,
+    action="write",
+)
+
+get_conversation_thread_mode = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_conversation_thread_mode_op),
+    path="/api/conversations/{route_name}/thread/mode",
+    method="GET",
+    context_extractor=_extract_thread_mode_query,
+    action="read",
+)
+
+set_conversation_thread_mode = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_conversation_thread_mode_op),
+    path="/api/conversations/{route_name}/thread/mode",
+    method="PUT",
+    context_extractor=_extract_thread_mode_body,
     action="write",
 )
 

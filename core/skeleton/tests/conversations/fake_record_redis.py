@@ -125,6 +125,10 @@ class FakeRecordRedis:
         return entries[start:stop]
 
     async def expire(self, key: str, seconds: int) -> bool:
+        # As redis EXPIRE: a TTL only lands on a key that EXISTS, and a missing key is left
+        # absent (never recreated), so the command reports whether it applied.
+        if not any(key in store for store in (self._strings, self._hashes, self._lists, self._zsets)):
+            return False
         self.ttl_ms[key] = seconds * 1000
         return True
 

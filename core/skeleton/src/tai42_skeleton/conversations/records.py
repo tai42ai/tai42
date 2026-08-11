@@ -1217,7 +1217,8 @@ class ConversationRecordStore:
 
     async def drop_route_threads(self, route_name: str) -> None:
         """Delete a route's thread indexes — every per-thread transcript ZSET the route's
-        thread index names, then the index itself. Neither carries a TTL and the prune pass
+        thread index names and each thread's mode override, then the index itself. Neither the
+        transcript indexes nor the route index carry a TTL and the prune pass
         only walks LIVE routes, so a deleted route's indexes are unreachable unless its
         delete reclaims them here. The records themselves are left to their own retention
         TTL.
@@ -1239,6 +1240,7 @@ class ConversationRecordStore:
                     break
                 for thread_id in members:
                     await awaited(r.delete(self.settings.thread_index_key(route_name, thread_id)))
+                    await awaited(r.delete(self.settings.mode_key(thread_id)))
                 await awaited(r.zrem(key, *members))
             await awaited(r.delete(key))
 
@@ -1274,9 +1276,9 @@ class ConversationRecordStore:
 
     async def drop_thread(self, route_name: str, thread_id: str) -> int:
         """Delete one thread under ``route_name`` outright — every answer record its transcript
-        index names, that index, and the thread's membership in the route index. Returns the
-        number of record ROWS removed (an index member whose row already expired counts 0 yet
-        is still unindexed).
+        index names, that index, the thread's membership in the route index, and its mode
+        override. Returns the number of record ROWS removed (an index member whose row already
+        expired counts 0 yet is still unindexed).
 
         RETRYABLE: draining the transcript index reclaims the route member with the last
         record (the same atomic step a record delete takes), so an interrupted run leaves the
@@ -1300,6 +1302,7 @@ class ConversationRecordStore:
                     removed += int(await eval_script(r, _DELETE_LUA, len(keys), *keys, message_id, thread_id))
             await awaited(r.delete(thread_key))
             await awaited(r.zrem(route_key, thread_id))
+            await awaited(r.delete(self.settings.mode_key(thread_id)))
         return removed
 
     # -- outbound reverse index (keyspace 3) ---------------------------------

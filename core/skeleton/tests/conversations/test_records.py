@@ -38,6 +38,7 @@ def _record(message_id: str = "m1", door: str = "channel", **over) -> Conversati
         "channel": "twilio" if door == "channel" else None,
         "our_identity": "+15550001111" if door == "channel" else None,
         "callback_url": "https://cb.example/x" if door == "api" else None,
+        "origin": "client",
         "inbound_text": f"ask {message_id}",
         "caller_principal": "alice" if door == "api" else None,
         "answer_status": "answered",

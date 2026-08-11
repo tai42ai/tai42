@@ -22,6 +22,7 @@ from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
+from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import target_config as target_config_module
 from tai42_skeleton.conversations import turn as turn_module
@@ -184,6 +185,7 @@ def env(monkeypatch):
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(ledger_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
     # Stub the execution-identity authorization seam so the bridge is tested in isolation.
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
 
@@ -1101,6 +1103,7 @@ async def test_redrive_resumes_a_stranded_pending_record(env, monkeypatch):
         client_address="+15550002222",
         channel="twilio",
         our_identity="+15550001111",
+        origin="client",
         inbound_text="ask stranded",
         answer_status="answered",
         answer="resumed",
@@ -1132,6 +1135,7 @@ def _answered_channel_record(message_id: str):
         client_address="+15550002222",
         channel="twilio",
         our_identity="+15550001111",
+        origin="client",
         inbound_text="ask already out",
         answer_status="answered",
         answer="already out",
@@ -1207,6 +1211,7 @@ async def test_redrive_races_executor_delivers_once(env, monkeypatch):
         client_address="user-7",
         callback_url="https://cb.example/x",
         caller_principal="alice",
+        origin="client",
         inbound_text="ask once",
         answer_status="answered",
         answer="once",
@@ -1260,6 +1265,7 @@ async def test_the_wait_paths_claim_locks_out_a_racing_callback_delivery(env, mo
             client_address="user-7",
             callback_url="https://cb.example/x",
             caller_principal="alice",
+            origin="client",
             inbound_text="ask once",
             answer_status="answered",
             answer="once",
@@ -1385,6 +1391,7 @@ async def test_missing_channel_in_the_length_map_is_a_loud_failure(env, monkeypa
         client_address="+15550002222",
         channel="not-in-the-map",
         our_identity="+15550001111",
+        origin="client",
         inbound_text="ask hello",
         answer_status="answered",
         answer="hello",
@@ -1426,6 +1433,7 @@ async def test_a_routed_channel_that_is_not_registered_is_a_loud_failure(env, mo
             client_address="+15550002222",
             channel="twilio",
             our_identity="+15550001111",
+            origin="client",
             inbound_text="ask hello",
             answer_status="answered",
             answer="hello",
@@ -1509,6 +1517,7 @@ def _intake_record(message_id: str, provider_message_id: str):
         channel="twilio",
         our_identity="+15550001111",
         provider_message_id=provider_message_id,
+        origin="client",
         inbound_text=f"ask {message_id}",
         delivery_status=DeliveryStatus.ACCEPTED,
         created_at=now,

@@ -136,19 +136,26 @@ def _allowed(root: str) -> bool:
     )
 
 
-# Program run in the subprocess: bind a stub app to the ``tai42_app`` handle (the
-# agent modules register through ``tai42_app.agents.agent(name)`` at import time,
-# so the handle must be bound first, exactly as the host binds it before importing
-# a manifest module), import tai42_agents and every submodule, then print each
-# imported root that is NOT on the allowlist. A submodule that fails to import
-# propagates as an uncaught exception, giving a non-zero exit the parent turns
-# into a loud failure.
+# Program run in the subprocess: install a meta-path finder that simulates the
+# shipped install (below), bind a stub app to the ``tai42_app`` handle (the agent
+# modules register through ``tai42_app.agents.agent(name)`` at import time, so the
+# handle must be bound first, exactly as the host binds it before importing a
+# manifest module), import tai42_agents and every submodule, then print each
+# imported root that is NOT on the allowlist.
+#
+# The finder makes the walk deterministic regardless of what the shared workspace
+# venv holds: it blocks every non-stdlib, non-allowlisted root, so an OPTIONAL
+# third-party integration inside a dependency (e.g. urllib3's ``import socks``,
+# tenacity's tornado hook) degrades exactly as it would on a clean install -- its
+# library swallows the ImportError -- instead of leaking a co-installed but
+# undeclared package into the graph. A REQUIRED non-allowlisted import is not
+# swallowed: the finder's ImportError propagates as an uncaught exception, so the
+# submodule import crashes the walk (the pre-existing failed-import handling) and
+# the non-zero exit names the root in the parent's failure.
 _CHILD_PROGRAM = f"""
 import importlib
 import pkgutil
 import sys
-
-from tai42_contract.app import tai42_app
 
 PACKAGE = {PACKAGE!r}
 ALLOWED_FIRST_PARTY = {set(ALLOWED_FIRST_PARTY)!r}
@@ -171,6 +178,26 @@ def _allowed(root):
         or root in ALLOWED_THIRD_PARTY
         or _is_runtime_artifact(root)
     )
+
+
+class _CleanEnvFinder:
+    # A non-stdlib, non-allowlisted root is treated as not installed, so importing
+    # it raises like a clean shipped environment: an optional integration is caught
+    # by its own library and degrades, a required import propagates and fails loudly.
+    def find_spec(self, fullname, path=None, target=None):
+        root = fullname.partition(".")[0]
+        if _allowed(root):
+            return None
+        raise ModuleNotFoundError(
+            root + " is not a dependency of the shipped {PACKAGE} wheel; "
+            "blocked to simulate the clean install",
+            name=fullname,
+        )
+
+
+sys.meta_path.insert(0, _CleanEnvFinder())
+
+from tai42_contract.app import tai42_app
 
 
 class _StubAgents:

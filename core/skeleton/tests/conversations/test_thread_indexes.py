@@ -52,6 +52,7 @@ def _record(message_id: str, *, created_at: float, thread_id: str = _THREAD, **o
         "client_address": "+15550002222",
         "channel": "twilio",
         "our_identity": "+15550001111",
+        "origin": "client",
         "inbound_text": f"inbound {message_id}",
         "answer_status": "answered",
         "answer": f"answer {message_id}",

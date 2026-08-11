@@ -6,6 +6,8 @@ from __future__ import annotations
 import time
 
 import pytest
+from pydantic import BaseModel
+from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.conversations import records as records_module
@@ -58,12 +60,41 @@ class _DictManager(BaseConversationsManager):
         return dict(self.rows)
 
 
-class _FakeAgents:
-    def __init__(self, names: set[str]) -> None:
-        self._names = names
+class _AgentInput(BaseModel):
+    user_message: str = ""
 
-    def all_agents(self) -> dict[str, object]:
-        return {name: object() for name in self._names}
+
+class _MemoryAgent(Agent):
+    """An agent that holds thread memory — implements ``append_thread_messages``, so it can
+    serve manual mode."""
+
+    tool_name = "memory"
+    ToolInput = _AgentInput
+
+    async def run(self, *, user_message: str = "", **kwargs):
+        return ""
+
+    async def append_thread_messages(self, *, thread_id, messages, **kwargs) -> None:
+        return None
+
+
+class _MemorylessAgent(Agent):
+    """An agent that leaves ``append_thread_messages`` the ABC default, so it cannot serve
+    manual mode."""
+
+    tool_name = "memoryless"
+    ToolInput = _AgentInput
+
+    async def run(self, *, user_message: str = "", **kwargs):
+        return ""
+
+
+class _FakeAgents:
+    def __init__(self, agents: dict[str, Agent]) -> None:
+        self._agents = agents
+
+    def all_agents(self) -> dict[str, Agent]:
+        return dict(self._agents)
 
 
 class _FakeTools:
@@ -79,7 +110,7 @@ class _FakeTools:
 
 
 class _FakeApp:
-    def __init__(self, agents: set[str], tools: set[str]) -> None:
+    def __init__(self, agents: dict[str, Agent], tools: set[str]) -> None:
         self.agents = _FakeAgents(agents)
         self.tools = _FakeTools(tools)
 
@@ -112,7 +143,12 @@ def wired(monkeypatch, record_redis):
 
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(instance, "app", _FakeApp({"relay"}, {"echo-tool"}), raising=False)
+    monkeypatch.setattr(
+        instance,
+        "app",
+        _FakeApp({"relay": _MemoryAgent(), "mute": _MemorylessAgent()}, {"echo-tool"}),
+        raising=False,
+    )
     return manager
 
 
@@ -132,6 +168,69 @@ async def test_create_api_route_mints_and_shows_the_secret_once(wired):
     assert wired.rows["chat"].callback_secret == result["callback_secret"]
     # The route view withholds the secret.
     assert "callback_secret" not in result["route"]
+
+
+async def test_create_defaults_initial_mode_to_agent_and_surfaces_it(wired):
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    # The default surfaces in the stored row and the public view.
+    assert wired.rows["chat"].initial_mode == "agent"
+    assert result["route"]["initial_mode"] == "agent"
+
+
+async def test_create_stores_a_manual_initial_mode(wired):
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        initial_mode="manual",
+    )
+    assert wired.rows["chat"].initial_mode == "manual"
+    assert result["route"]["initial_mode"] == "manual"
+
+    got = await ops.get_conversation_route("chat")
+    assert got["initial_mode"] == "manual"
+
+
+async def test_create_manual_on_a_memoryless_agent_is_allowed(wired):
+    # Manual is valid for EVERY target: an agent that leaves append_thread_messages the ABC
+    # default holds no thread memory to feed, so its manual-mode inbound records silently — the
+    # create never refuses on target memory.
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="mute",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        initial_mode="manual",
+    )
+    assert result["created"] is True
+    assert wired.rows["chat"].initial_mode == "manual"
+
+
+async def test_create_manual_on_a_tool_target_is_allowed(wired):
+    # A tool target holds no thread memory to append, so manual mode is always allowed for it.
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+        initial_mode="manual",
+    )
+    assert result["created"] is True
+    assert wired.rows["chat"].initial_mode == "manual"
 
 
 async def test_create_channel_route_carries_no_secret(wired):
@@ -440,6 +539,7 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
                 client_address=f"alice/user-{index}",
                 caller_principal="alice",
                 callback_url="https://example.com/cb",
+                origin="client",
                 inbound_text="ask",
                 answer_status="answered",
                 answer="the answer",
@@ -514,6 +614,7 @@ async def _seed_thread_on(route_name: str, *, door: str, thread_id: str) -> None
             callback_url="https://example.com/cb" if door == "api" else None,
             channel="twilio" if door == "channel" else None,
             our_identity="+15550001111" if door == "channel" else None,
+            origin="client",
             inbound_text="ask",
             answer_status="answered",
             answer="the answer",
@@ -707,6 +808,7 @@ async def _seed_record(*, message_id: str, route_name: str, thread_id: str) -> N
             client_address="+15550001111",
             channel="twilio",
             our_identity="+15550001111",
+            origin="client",
             inbound_text="ask",
             answer_status="answered",
             answer="the answer",
@@ -729,6 +831,7 @@ async def _seed_accepted(*, message_id: str, route_name: str, thread_id: str) ->
             client_address="+15550001111",
             channel="twilio",
             our_identity="+15550001111",
+            origin="client",
             inbound_text="ask",
             delivery_status=DeliveryStatus.ACCEPTED,
             created_at=now,
@@ -824,6 +927,111 @@ async def test_delete_thread_with_a_turn_in_flight_is_a_409(wired, record_redis,
     # Refused before any teardown: the intake record stands and the checkpoint is untouched.
     assert checkpoint_saver.deleted == []
     assert settings.record_key("live") in record_redis._hashes
+    assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
+
+
+async def test_delete_thread_waits_behind_an_in_flight_operator_send(wired, record_redis, checkpoint_saver):
+    # The thread delete's teardown takes the thread's per-thread FIFO — the SAME lock an
+    # operator send and an in-flight turn hold — so a delete cannot interleave an in-flight
+    # operator send's checkpoint + record writes: it lands only once the holder releases.
+    import asyncio
+
+    from tai42_skeleton.conversations import caps as caps_module
+
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_record(message_id="m0", route_name="chat", thread_id=_THREAD)
+
+    caps_module._CAPS_CACHE.clear()
+    caps = caps_module.get_turn_caps()
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _hold_the_thread() -> None:
+        caps.reserve_thread_slot(_THREAD)
+        async with caps.run_reserved(_THREAD):
+            holding.set()
+            await release.wait()
+
+    holder = asyncio.create_task(_hold_the_thread())
+    await asyncio.wait_for(holding.wait(), 1.0)
+
+    delete = asyncio.create_task(ops.delete_conversation_thread("chat", _THREAD))
+    # While the holder keeps the thread, the delete is blocked before any teardown: the
+    # checkpoint is untouched.
+    await asyncio.sleep(0.05)
+    assert not delete.done()
+    assert checkpoint_saver.deleted == []
+
+    # The holder releases the thread; only now does the delete's teardown proceed.
+    release.set()
+    await holder
+    result = await delete
+
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    assert checkpoint_saver.deleted == [_THREAD]
+
+
+async def test_delete_thread_rechecks_the_live_intake_under_the_lock(wired, record_redis, checkpoint_saver):
+    # The in-flight guard is checked AGAIN under the FIFO: an intake admitted after the cheap
+    # outer check but before the delete holds the lock is caught in-lock and 409s, so its turn
+    # — queued behind the delete's lock — never runs after the teardown and re-creates the
+    # checkpoint. Deterministic simulation: a holder pins the lock, the delete passes the outer
+    # check and blocks on it, an accepted intake is seeded while it waits, then the holder
+    # releases and the delete's in-lock re-check finds the intake.
+    import asyncio
+
+    from tai42_skeleton.conversations import caps as caps_module
+
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_record(message_id="m0", route_name="chat", thread_id=_THREAD)
+
+    caps_module._CAPS_CACHE.clear()
+    caps = caps_module.get_turn_caps()
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _hold_the_thread() -> None:
+        caps.reserve_thread_slot(_THREAD)
+        async with caps.run_reserved(_THREAD):
+            holding.set()
+            await release.wait()
+
+    holder = asyncio.create_task(_hold_the_thread())
+    await asyncio.wait_for(holding.wait(), 1.0)
+
+    delete = asyncio.create_task(ops.delete_conversation_thread("chat", _THREAD))
+    # The delete clears the outer check (no live intake yet) and blocks on the held lock: it is
+    # alive and has torn nothing down.
+    await asyncio.sleep(0.05)
+    assert not delete.done()
+    assert checkpoint_saver.deleted == []
+
+    # A turn is admitted while the delete waits behind the lock.
+    await _seed_accepted(message_id="slipped-in", route_name="chat", thread_id=_THREAD)
+
+    release.set()
+    await holder
+    # The delete acquires the lock, re-checks, and refuses — from within the lock, never a
+    # teardown that would strand the admitted turn's memory half-forgotten.
+    with pytest.raises(ConflictError, match="turn in flight"):
+        await delete
+    assert checkpoint_saver.deleted == []
+    settings = ConversationsSettings()
+    assert settings.record_key("m0") in record_redis._hashes
     assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
 
 

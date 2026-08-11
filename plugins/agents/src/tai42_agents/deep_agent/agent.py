@@ -35,6 +35,7 @@ from tai42_kit.llm.runtime import build_agent_input
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
+from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -256,6 +257,47 @@ class DeepAgent(Agent):
             self._astream_built(agent, agent_input, config, interrupt_on, response_format=response_format),
             response_format=response_format,
         )
+
+    async def append_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        messages: list[dict[str, str]],
+        llm_provider: str | None = None,
+        checkpoint_provider: str | None = None,
+        store_provider: str | None = None,
+        llm_kwargs: dict[str, Any] | None = None,
+        langgraph_config: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> None:
+        """Append ``messages`` to the thread's stored history without running the model.
+
+        ``messages`` items are ``{"role": "user"|"assistant", "content": str}`` — an
+        unknown role or blank content raises. ``thread_id`` (or a
+        ``configurable.thread_id`` carried in ``langgraph_config``) names the thread to
+        append to; a missing one raises rather than minting a fresh thread. The deep
+        agent compiles the SAME way a run does (over the resolved checkpointer and
+        store) but with no tools or sub-agents — the checkpoint write is
+        tool-independent — and no model call is made.
+        """
+        converted = to_thread_messages(messages)
+        reject_blank_memory_keys("deep_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None)
+        config = build_run_config(langgraph_config, thread_id)
+        require_thread_id("deep_agent.append_thread_messages", config)
+        agent = await self._resolve_and_build(
+            tools=[],
+            subagents=[],
+            skills=None,
+            inline_skills=None,
+            system_message="",
+            response_format=None,
+            interrupt_on=None,
+            llm_provider=llm_provider,
+            checkpoint_provider=checkpoint_provider,
+            store_provider=store_provider,
+            llm_kwargs=llm_kwargs,
+        )
+        await awrite_thread_messages(agent, config, converted)
 
     @staticmethod
     def _run_config(
