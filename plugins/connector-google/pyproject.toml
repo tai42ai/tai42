@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — this plugin's only dependency. It registers a
     # ProviderDescriptor through the tai42_app handle; it imports no engine code.
-    "tai42-contract>=1.6,<2",
+    "tai42-contract>=1.7,<2",
 ]
 
 [project.urls]
