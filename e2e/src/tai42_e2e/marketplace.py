@@ -55,7 +55,7 @@ _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # (``db migrate``/``db status``) — :meth:`MarketplaceService._apply_ddl` drives
 # that CLI path and nothing older. An unresolvable pin fails the out-of-band
 # install loudly rather than silently resolving an older ``db init``-only ref.
-_MARKETPLACE_PIN = "6fc75eb4dd75222065c50868ba208a8b61b6d098"
+_MARKETPLACE_PIN = "1ed22b88474094606445f07a0bb9238044d9a5bc"
 
 
 def _registry_venv_dir() -> Path:

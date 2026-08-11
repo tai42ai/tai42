@@ -68,4 +68,4 @@ async def test_registry_outage_fails_loudly_then_recovers(
 
     # Recovery is part of the spec: the read proxy works again once the registry is back.
     recovered = await stack.api().get("/api/marketplace/search?q=probe")
-    assert isinstance(recovered["items"], list)
+    assert isinstance(recovered["listings"], list)
