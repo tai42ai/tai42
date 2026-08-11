@@ -22,7 +22,7 @@ from _market_support import (
     wait_tool_live,
 )
 
-from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, BETA_REF, MarketplaceService
+from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, MarketplaceService
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
@@ -43,12 +43,12 @@ async def test_cli_plugins_parity(
 
     # Browse.
     search = ok_json(run_cli(env, "search", "probe"))
-    assert ALPHA_REF in {row["ref"] for row in search["listings"]}
+    assert ALPHA_REF in {row["ref"] for row in search["items"]}
 
     faceted = ok_json(run_cli(env, "search", "probe", "--kind", "tool", "--tag", "alpha", "--sort", "name"))
-    faceted_refs = {row["ref"] for row in faceted["listings"]}
-    assert ALPHA_REF in faceted_refs
-    assert BETA_REF not in faceted_refs
+    faceted_names = {row["item"]["name"] for row in faceted["items"]}
+    assert _TOOL in faceted_names
+    assert "beta_marker" not in faceted_names
 
     categories = ok_json(run_cli(env, "categories"))
     assert "utilities" in categories

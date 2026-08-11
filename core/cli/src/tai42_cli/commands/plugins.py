@@ -92,7 +92,7 @@ def search(
         ctx_obj,
         data,
         ["ref", "display_name", "latest_version", "trust_tier", "downloads"],
-        items_key="listings",
+        items_key="items",
     )
 
 

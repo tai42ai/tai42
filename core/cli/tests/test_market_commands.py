@@ -24,7 +24,7 @@ def _capture():
         captured["path"] = request.url.path
         captured["query"] = request.url.query.decode()
         captured["body"] = json.loads(request.content) if request.content else None
-        return data_response(captured.get("_payload", {"listings": []}))
+        return data_response(captured.get("_payload", {"items": []}))
 
     return handler, captured
 

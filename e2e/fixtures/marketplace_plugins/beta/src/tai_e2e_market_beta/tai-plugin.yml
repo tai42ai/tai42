@@ -19,10 +19,8 @@ provides:
     module: tai_e2e_market_beta.tools
     description: "Return a fixed marker payload identifying the beta fixture."
     tags: [probe]
-    group: probe-suite
   - kind: extension
     name: beta_marker
     module: tai_e2e_market_beta.extensions
     description: "Branch a tool into a variant that stamps a beta marker onto its result."
     tags: [beta]
-    group: probe-suite

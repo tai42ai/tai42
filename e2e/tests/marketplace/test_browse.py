@@ -26,14 +26,14 @@ from tai42_e2e.stack import TaiStack
 pytestmark = pytest.mark.backendless
 
 
-def _listings(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    listings = payload["listings"]
-    assert isinstance(listings, list)
-    return listings
+def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload["items"]
+    assert isinstance(items, list)
+    return items
 
 
 def _refs(payload: dict[str, Any]) -> set[str]:
-    return {row["ref"] for row in _listings(payload)}
+    return {row["ref"] for row in _items(payload)}
 
 
 async def test_seeded_catalog_is_browsable(marketplace_service: MarketplaceService) -> None:
@@ -52,42 +52,15 @@ async def test_full_text_query_matches_probes(marketplace_service: MarketplaceSe
 async def test_kind_facet(marketplace_service: MarketplaceService) -> None:
     api = marketplace_service.api
 
-    # kind= selects LISTINGS carrying at least one item of that kind, grouped or
-    # not. Only beta ships an extension item, but beta groups BOTH its items (a
-    # tool and an extension) under one family, so its kinds array — which
-    # summarizes UNGROUPED items only — is empty and the family surfaces in groups.
-    extensions = _listings(await api.get("/api/v1/search?kind=extension"))
+    extensions = _items(await api.get("/api/v1/search?kind=extension"))
     assert len(extensions) == 1
+    assert extensions[0]["item"]["kind"] == "extension"
     assert extensions[0]["ref"] == BETA_REF
-    assert extensions[0]["kinds"] == []
-    assert extensions[0]["groups"] == [{"name": "probe-suite", "count": 2}]
 
-    tools = _listings(await api.get("/api/v1/search?kind=tool"))
+    tools = _items(await api.get("/api/v1/search?kind=tool"))
     assert {row["ref"] for row in tools} == {ALPHA_REF, BETA_REF, GAMMA_REF}
+    assert all(row["item"]["kind"] == "tool" for row in tools)
     assert len(tools) == 3
-    by_ref = {row["ref"]: row for row in tools}
-    # alpha and gamma surface their tool ungrouped, so it appears in kinds with
-    # its name; beta's tool is grouped, so it appears only in the group count.
-    assert by_ref[ALPHA_REF]["kinds"] == [{"kind": "tool", "count": 1, "names": ["e2e_market_probe"]}]
-    assert by_ref[GAMMA_REF]["kinds"] == [{"kind": "tool", "count": 1, "names": ["e2e_market_gamma_probe"]}]
-    assert by_ref[BETA_REF]["kinds"] == []
-    assert by_ref[BETA_REF]["groups"] == [{"name": "probe-suite", "count": 2}]
-
-
-async def test_kinds_aggregation_over_latest_version(marketplace_service: MarketplaceService) -> None:
-    # Each row summarizes the listing's latest published version two ways: kinds
-    # counts only its UNGROUPED items, each with its item names ASC, ordered
-    # count DESC then kind ASC; groups counts its logical families, count DESC
-    # then name ASC. Beta's latest ships two items both under one group, so its
-    # kinds is empty and its group counts two; alpha's and gamma's each ship one
-    # ungrouped tool and no groups.
-    listings = {row["ref"]: row for row in _listings(await marketplace_service.api.get("/api/v1/search"))}
-    assert listings[BETA_REF]["kinds"] == []
-    assert listings[BETA_REF]["groups"] == [{"name": "probe-suite", "count": 2}]
-    assert listings[ALPHA_REF]["kinds"] == [{"kind": "tool", "count": 1, "names": ["e2e_market_probe"]}]
-    assert listings[ALPHA_REF]["groups"] == []
-    assert listings[GAMMA_REF]["kinds"] == [{"kind": "tool", "count": 1, "names": ["e2e_market_gamma_probe"]}]
-    assert listings[GAMMA_REF]["groups"] == []
 
 
 async def test_tags_facet(marketplace_service: MarketplaceService) -> None:
@@ -101,18 +74,26 @@ async def test_category_facet(marketplace_service: MarketplaceService) -> None:
     assert _refs(payload) == {ALPHA_REF}
 
 
-async def test_sort_name_orders_by_listing_name(marketplace_service: MarketplaceService) -> None:
-    # sort=name orders rows by listing name ASC. The seeded listing names
-    # (e2e-alpha, e2e-beta, e2e-gamma) sort to the alpha, beta, gamma order.
-    listings = _listings(await marketplace_service.api.get("/api/v1/search?sort=name"))
-    assert [row["ref"] for row in listings] == [ALPHA_REF, BETA_REF, GAMMA_REF]
+async def test_sort_name_groups_items_by_listing(marketplace_service: MarketplaceService) -> None:
+    # sort=name orders by listing name, then item name (l.name ASC, i.name ASC,
+    # i.id ASC), so one listing's items stay contiguous. For the seeded catalog
+    # that is alpha's item, then beta's two (beta_marker < e2e_market_beta_probe),
+    # then gamma's — NOT the globally item-name-sorted order.
+    items = _items(await marketplace_service.api.get("/api/v1/search?sort=name"))
+    names = [row["item"]["name"] for row in items]
+    assert names == [
+        "e2e_market_probe",
+        "beta_marker",
+        "e2e_market_beta_probe",
+        "e2e_market_gamma_probe",
+    ]
 
 
 async def test_sort_downloads_returns_complete_set(marketplace_service: MarketplaceService) -> None:
     # Order is registry-internal policy; only completeness is asserted here.
     payload = await marketplace_service.api.get("/api/v1/search?sort=downloads")
     assert _refs(payload) == {ALPHA_REF, BETA_REF, GAMMA_REF}
-    assert payload["total"] == len(_listings(payload))
+    assert payload["total"] == len(_items(payload))
 
 
 async def test_contract_facet(marketplace_service: MarketplaceService) -> None:
@@ -121,10 +102,10 @@ async def test_contract_facet(marketplace_service: MarketplaceService) -> None:
     # facet probes are derived from that same band (inside it → all three; below
     # its lower bound → none) to stay correct across release-version windows.
     inside_version, below_version = contract_facet_probe_versions()
-    inside = _listings(await api.get(f"/api/v1/search?contract={inside_version}"))
+    inside = _items(await api.get(f"/api/v1/search?contract={inside_version}"))
     assert {row["ref"] for row in inside} == {ALPHA_REF, BETA_REF, GAMMA_REF}
 
-    outside = _listings(await api.get(f"/api/v1/search?contract={below_version}"))
+    outside = _items(await api.get(f"/api/v1/search?contract={below_version}"))
     assert outside == []
 
 
