@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from jinja2 import TemplateError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
@@ -37,6 +37,15 @@ class ResourceGet(BaseModel):
 
     resource_id: str
     template_kwargs: dict[str, Any] | None = None
+
+
+class ResourceGetQuery(BaseModel):
+    """The fetch-as-is door's ``?resource_id=`` query. ``resource_id`` is REQUIRED — a client
+    generated without it names no resource to load and is answered 400.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    resource_id: str = Field(min_length=1, description="The id (path) of the stored resource to load.")
 
 
 @operation(

@@ -47,7 +47,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -224,7 +224,27 @@ class MarketplaceUpdate(BaseModel):
     secret_keys: list[str] | None = None
 
 
-@operation(summary="Search the marketplace", tags=["marketplace"], errors=[UpstreamError])
+class MarketplaceSearchQuery(BaseModel):
+    """The marketplace search door's facets: a repeated ``?tags=`` array plus single-valued
+    facets.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    q: str | None = Field(default=None, description="Free-text search query.")
+    kind: str | None = Field(default=None, description="Restrict to one item kind.")
+    category: str | None = Field(default=None, description="Restrict to one category.")
+    tags: list[str] = Field(default_factory=list, description="Restrict to these tags; repeat the parameter per tag.")
+    namespace: str | None = Field(default=None, description="Restrict to one publisher namespace.")
+    tier: str | None = Field(default=None, description="Restrict to one tier.")
+    contract: str | None = Field(default=None, description="Restrict to one contract version.")
+    sort: str | None = Field(default=None, description="Sort key.")
+    page: str | None = Field(default=None, description="1-based page number.")
+    page_size: str | None = Field(default=None, description="Items per page.")
+
+
+@operation(
+    summary="Search the marketplace", tags=["marketplace"], errors=[UpstreamError], request_model=MarketplaceSearchQuery
+)
 async def marketplace_search(
     q: str | None = None,
     kind: str | None = None,

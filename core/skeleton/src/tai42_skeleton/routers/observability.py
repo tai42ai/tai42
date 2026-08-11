@@ -51,15 +51,18 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.observability import ExportRunsQuery
 from tai42_skeleton.operations.observability import get_metrics as _get_metrics_op
 from tai42_skeleton.operations.observability import get_run_trace as _get_run_trace_op
 from tai42_skeleton.operations.observability import list_observability_runs as _list_observability_runs_op
 from tai42_skeleton.routers.observability_support import (
+    EXPORT_FORMATS,
     PAGE_CHUNK,
     RequestParseError,
     csv_safe,
     derive_run,
     map_trace,
+    one_of,
     parse_paging,
     parse_run_filter,
     parse_time_range,
@@ -198,6 +201,7 @@ async def export_run_trace(request: Request) -> Response:
     summary="Export runs as a CSV download",
     tags=["observability"],
     response_model=None,
+    query_model=ExportRunsQuery,
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
@@ -216,8 +220,8 @@ async def export_runs(request: Request) -> Response:
     except RequestParseError as exc:
         return _error(str(exc), 400)
     fmt = request.query_params.get("format", "csv")
-    if fmt not in ("csv", "json"):
-        return _error("format must be 'csv' or 'json'", 400)
+    if fmt not in EXPORT_FORMATS:
+        return _error(f"format must be {one_of(EXPORT_FORMATS)}", 400)
 
     reader = get_monitoring().reader
     # Drain pages of ``PAGE_CHUNK`` (the reader rejects oversized pages) until the

@@ -55,6 +55,16 @@ from tai42_skeleton.operations._authority import assert_execution_key_bindable, 
 from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationError
 
 
+class HookListQuery(BaseModel):
+    """The hook listing's optional ``?topic=`` filter.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    topic: str | None = Field(
+        default=None, description="Restrict the listing to hooks registered for this topic; omit for all hooks."
+    )
+
+
 class TopicVerifierBinding(BaseModel):
     """Bind a registered webhook ``verifier`` (with optional ``config``) to a
     hook topic so its deliveries are signature-verified."""
@@ -108,7 +118,7 @@ def _map_trigger_error(exc: TriggerLinkError) -> OperationError:
     return error_cls(exc.message)
 
 
-@operation(summary="List registered hooks", tags=["hooks"])
+@operation(summary="List registered hooks", tags=["hooks"], request_model=HookListQuery)
 async def list_hooks(topic: str | None = None) -> dict[str, Any]:
     """List registered hooks plus the per-topic verifier bindings.
 

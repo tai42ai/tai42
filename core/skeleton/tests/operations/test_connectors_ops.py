@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 from tai42_contract.connectors.errors import OperatorMisconfiguredError
@@ -590,6 +591,13 @@ async def test_list_connections_limit_caps_items_but_reports_full_total(monkeypa
 async def test_list_connections_invalid_health_is_400(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(BadRequestError, match="invalid health filter"):
         await conn_ops.list_connections(health="bogus")
+
+
+def test_the_published_health_filter_is_the_state_vocabulary() -> None:
+    # ``ConnectionHealthFilter`` is what the listing door publishes as the ``?health=`` value
+    # set, while ``AuthHealthState`` is what the door parses — a value in one and not the other
+    # is either an advertised filter the door 400s on or a served state no client is told about.
+    assert set(get_args(conn_ops.ConnectionHealthFilter)) == {state.value for state in AuthHealthState}
 
 
 async def test_list_connections_invalid_limit_is_400() -> None:

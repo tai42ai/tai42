@@ -121,6 +121,19 @@ class McpTargets(BaseModel):
     targets: list[str] | None = None
 
 
+class FailedMcpsQuery(BaseModel):
+    """The failed-MCP listing door's ``?targets=`` fan-out restriction, published as an
+    optional array — a repeated ``?targets=`` param a generated client sends once per worker
+    (all workers when none is given).
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    targets: list[str] = Field(
+        default_factory=list,
+        description="Restrict the listing to these worker names; repeat the parameter per worker, omit for the fleet.",
+    )
+
+
 class ManifestReplace(BaseModel):
     """A full-manifest replacement carrying the manifest TEXT verbatim — the
     PRESERVED view (``!ENV`` markers intact). The server loads it to the preserved
@@ -228,7 +241,7 @@ async def get_mcp_status() -> dict:
     return tai42_app.admin.live_mcp_status()
 
 
-@operation(summary="List MCP servers skipped by the viability check", tags=["manifest"])
+@operation(summary="List MCP servers skipped by the viability check", tags=["manifest"], request_model=FailedMcpsQuery)
 async def list_failed_mcps(targets: list[str] | None = None) -> Any:
     """List MCP servers skipped due to a failed viability check (server down or
     slow at boot or last reload). Use ``reload_mcp`` to re-attach one once healthy.

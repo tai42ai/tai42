@@ -44,11 +44,13 @@ under ``/api/conversations/{route_name}``, where a ``config`` first segment woul
 with the read-one route door.
 
 The two thread READ doors parse their query at the edge here, and both declare the query
-they take as an operation ``request_model``, so the emitted spec publishes their ``in:
-query`` parameters and a generated client sends the REQUIRED ``thread_id``. The delete door
-reads the same ``thread_id`` from the query at the edge; being a write method — whose model
-the spec would document as a body, which this door has none of — it declares no
-``request_model`` and publishes no query parameter.
+they take as an operation ``request_model``, so — being reads — the emitted spec publishes
+their ``in: query`` parameters: the listing's ``page``/``pageSize`` window, and the
+transcript's window plus its REQUIRED ``thread_id`` and its ``order``. The delete door reads
+that same ``thread_id`` from the query at the edge; being a WRITE method, an operation
+``request_model`` would be documented as a body it has none of, so it declares the query
+through the operation ``query_model`` instead — the generic channel that publishes a model's
+fields as ``in: query`` parameters for ANY method.
 
 Thin adapters over ``tai42_skeleton.operations.conversations`` — no routing logic here.
 The POST body is structurally validated at the edge (a strict 400 surface); the operation

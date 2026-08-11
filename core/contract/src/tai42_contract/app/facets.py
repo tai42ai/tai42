@@ -310,6 +310,7 @@ class AppHttp(Protocol):
         tags: list[str],
         response_model: type[BaseModel] | None,
         request_model: type[BaseModel] | None = None,
+        query_model: type[BaseModel] | None = None,
         authed: bool = True,
         destructive: bool = False,
         action: RouteAction | None = None,
@@ -328,6 +329,11 @@ class AppHttp(Protocol):
           cannot silently omit it.
         * ``request_model`` — the pydantic model of the request body; required for
           any route that reads a body, omitted (``None``) otherwise.
+        * ``query_model`` — the pydantic model whose fields are published as ``in:
+          query`` parameters for ANY method, additive to ``request_model``. A read
+          door's ``request_model`` already emits as query, so this is the only way a
+          WRITE-method door documents the query it reads at the edge; ``None`` (the
+          default) publishes no query model.
         * ``authed`` — whether the route requires the api key (default ``True``);
           emitted as the ``security`` requirement.
         * ``destructive`` — whether the route mutates in a way flagged as

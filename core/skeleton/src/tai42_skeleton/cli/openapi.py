@@ -126,27 +126,78 @@ def _register_model(model: type[BaseModel], components: dict[str, Any]) -> str:
     return model.__name__
 
 
-def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> list[dict[str, Any]]:
-    """A read method's typed ``request_model`` fields as ``in: query`` parameters.
+_NULL_BRANCH = {"type": "null"}
 
-    A read method (GET/HEAD) parses its inputs from the query string, so its model's
-    fields ARE query parameters (never a request body). Each parameter carries the
-    field's own JSON schema and is ``required`` exactly when the model marks it
-    required (a field with a default is optional). Any ``$defs`` a field schema
-    references are merged into ``components`` so the ``$ref``s resolve."""
+
+def _query_schema(prop_schema: dict[str, Any]) -> dict[str, Any]:
+    """A field's JSON schema as a QUERY parameter's schema, with nullability stripped.
+
+    A query string carries no JSON ``null``: a client omits a parameter, it never sends one
+    valued null. So pydantic's rendering of ``T | None`` — ``anyOf [T, null]`` plus
+    ``default: null`` — is collapsed to plain ``T`` with no default, and a union of several
+    real branches keeps its ``anyOf`` minus the null branch. Sibling keywords (``title``,
+    ``description``, bounds) survive the collapse. A non-nullable schema passes through."""
+    schema = dict(prop_schema)
+    branches = schema.get("anyOf")
+    if isinstance(branches, list) and _NULL_BRANCH in branches:
+        real = [branch for branch in branches if branch != _NULL_BRANCH]
+        del schema["anyOf"]
+        if len(real) == 1:
+            schema = {**real[0], **schema}
+        else:
+            schema["anyOf"] = real
+    if "default" in schema and schema["default"] is None:
+        del schema["default"]
+    return schema
+
+
+def _query_parameters(model: type[BaseModel], components: dict[str, Any]) -> list[dict[str, Any]]:
+    """A model's fields as ``in: query`` parameters — a read method's ``request_model``,
+    or any method's ``query_model``.
+
+    A model whose fields are query inputs (a GET reading its inputs from the query string,
+    or a door declaring a ``query_model``) turns each field into a query parameter, never a
+    request body. Each parameter carries the field's own JSON schema — a ``list[…]`` field
+    keeps its ``array`` schema, published as a repeated ``?name=`` param under OpenAPI's
+    default form serialization — stripped of nullability by :func:`_query_schema`, and is
+    ``required`` exactly when the model marks it required (a field with a default is
+    optional). The field's description rides on the PARAMETER, not on its schema: it is the
+    Parameter Object's own ``description`` that a generator renders, so it is moved there
+    rather than left where only a schema-aware reader would find it. Any ``$defs`` a field
+    schema references are merged into ``components`` so the ``$ref``s resolve."""
     schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
     for def_name, def_schema in schema.pop("$defs", {}).items():
         _assign_component(components, def_name, def_schema)
     required = set(schema.get("required", []))
-    return [
-        {
-            "name": name,
-            "in": "query",
-            "required": name in required,
-            "schema": prop_schema,
-        }
-        for name, prop_schema in schema.get("properties", {}).items()
-    ]
+    parameters: list[dict[str, Any]] = []
+    for name, prop_schema in schema.get("properties", {}).items():
+        param_schema = _query_schema(prop_schema)
+        parameter: dict[str, Any] = {"name": name, "in": "query"}
+        description = param_schema.pop("description", None)
+        if description is not None:
+            parameter["description"] = description
+        parameter["required"] = name in required
+        parameter["schema"] = param_schema
+        parameters.append(parameter)
+    return parameters
+
+
+def _check_unique_parameters(parameters: list[dict[str, Any]], *, path: str, method: str) -> None:
+    """Refuse a route whose assembled parameters repeat a ``(name, in)`` pair.
+
+    OpenAPI forbids the duplicate, and the sources can collide unseen: a path param named
+    like a model field, a read door's ``request_model`` overlapping its ``query_model``, or
+    two fields aliased to one query key. Emitting it would ship an invalid document, so it
+    fails the emission LOUDLY naming the route and the parameter."""
+    seen: set[tuple[str, str]] = set()
+    for parameter in parameters:
+        key = (parameter["name"], parameter["in"])
+        if key in seen:
+            raise ValueError(
+                f"{method} {path} declares parameter {key[0]!r} in {key[1]} twice — "
+                "the path, the request_model, and the query_model must not claim the same name"
+            )
+        seen.add(key)
 
 
 def _json_envelope_schema(meta: RouteMetadata, components: dict[str, Any]) -> dict[str, Any]:
@@ -243,11 +294,16 @@ def _operation(meta: RouteMetadata, method: str, components: dict[str, Any]) -> 
     # it: a body-reading (write) method takes a JSON ``requestBody``; a read method
     # (GET/HEAD) reads its inputs from the query string, so the model's fields become
     # ``in: query`` parameters instead (a GET request body would misdocument the
-    # endpoint). Path parameters always precede the model-derived ones.
+    # endpoint). A ``query_model`` is additive to either: its fields are ``in: query`` for
+    # ANY method, so a WRITE-method door publishes the query it reads at the edge. Path
+    # parameters always precede the model-derived ones.
     parameters = _path_parameters(meta.path)
     if meta.request_model is not None and method_to_action(method) == "read":
         parameters = parameters + _query_parameters(meta.request_model, components)
+    if meta.query_model is not None:
+        parameters = parameters + _query_parameters(meta.query_model, components)
     if parameters:
+        _check_unique_parameters(parameters, path=meta.path, method=method)
         operation["parameters"] = parameters
 
     if meta.request_model is not None and method_to_action(method) == "write":

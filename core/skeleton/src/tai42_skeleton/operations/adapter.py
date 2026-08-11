@@ -75,7 +75,12 @@ def validation_error_fields(exc: ValidationError) -> list[dict[str, Any]]:
 
 
 def _declared_metadata(
-    op: OperationMetadata, method: str, *, authed: bool, success_status: int
+    op: OperationMetadata,
+    method: str,
+    *,
+    authed: bool,
+    success_status: int,
+    request_model: type[BaseModel] | None,
 ) -> DeclaredRouteMetadata:
     """The route's behavioral properties taken from the operation, not divined.
 
@@ -85,11 +90,14 @@ def _declared_metadata(
     them — it answers a different body (the constant-message reloading envelope with a
     ``Retry-After`` header), and ``reload_gated`` already declares it, so the emitter
     owns that response.
+
+    ``request_model`` is the model published for THIS route, so ``reads_body`` follows
+    the shape the route actually documents.
     """
     statuses: set[int] = {cls.status for cls in op.error_classes}
     if authed:
         statuses.add(401)
-    reads_body = op.request_model is not None and method in _BODY_METHODS
+    reads_body = request_model is not None and method in _BODY_METHODS
     return DeclaredRouteMetadata(
         reload_gated=op.reload_gated,
         reads_body=reads_body,
@@ -105,6 +113,7 @@ def _build_handler(
     context_extractor: ContextExtractor | None = None,
     response_headers: dict[str, str] | None = None,
     success_status: int = 200,
+    request_model: type[BaseModel] | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     reads_body = method in _BODY_METHODS
 
@@ -129,7 +138,7 @@ def _build_handler(
             except OperationError as exc:
                 return JSONResponse({"error": exc.message, **exc.extra}, status_code=exc.status)
             kwargs.update(extra)
-        elif op.request_model is not None:
+        elif request_model is not None:
             try:
                 if reads_body:
                     raw = await request.json()
@@ -138,7 +147,7 @@ def _build_handler(
             except Exception:
                 return JSONResponse({"error": "malformed request body"}, status_code=400)
             try:
-                model = op.request_model.model_validate(raw)
+                model = request_model.model_validate(raw)
             except ValidationError as exc:
                 # Field paths + error types only — never the rejected input values,
                 # which a pydantic error entry carries and could leak a secret.
@@ -207,6 +216,7 @@ def register_operation_route(
     tags: list[str] | None = None,
     authed: bool = True,
     context_extractor: ContextExtractor | None = None,
+    request_model: type[BaseModel] | None = None,
     response_headers: dict[str, str] | None = None,
     success_status: int = 200,
     action: RouteAction | None = None,
@@ -227,6 +237,11 @@ def register_operation_route(
     body the operation validates itself with its own error classes); when given it
     REPLACES the default request-model parse and ``request_model`` becomes spec
     metadata only.
+
+    ``request_model`` is the model published (and, absent a ``context_extractor``,
+    parsed) for THIS route; ``None`` inherits the operation's own. A GET fetch door and
+    a POST render door registered over one operation whose ``request_model`` is the POST
+    body override the GET's to publish only its narrower query.
 
     ``response_headers`` are static headers stamped on the SUCCESS response only (a
     caching directive the route's read carries, e.g. ``cache-control: no-cache``) —
@@ -252,7 +267,10 @@ def register_operation_route(
     op.http_method = method_upper
     op.path_params = path_params
 
-    handler = _build_handler(op, method_upper, path_params, context_extractor, response_headers, success_status)
+    route_request_model = request_model if request_model is not None else op.request_model
+    handler = _build_handler(
+        op, method_upper, path_params, context_extractor, response_headers, success_status, route_request_model
+    )
     route_tags = tags if tags is not None else list(op.tags)
     # Register over the concrete HttpSurface directly: the concrete app exposes it
     # as ``_http_surface``, the offline spec harness as ``.http``; either way the
@@ -264,11 +282,14 @@ def register_operation_route(
         name=op.name,
         summary=op.summary,
         tags=route_tags,
-        request_model=op.request_model,
+        request_model=route_request_model,
         response_model=op.response_model,
+        query_model=op.query_model,
         authed=authed,
         destructive=op.destructive,
         action=action,
-        declared=_declared_metadata(op, method_upper, authed=authed, success_status=success_status),
+        declared=_declared_metadata(
+            op, method_upper, authed=authed, success_status=success_status, request_model=route_request_model
+        ),
     )
     return decorator(handler)

@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import BaseModel, Field
 from tai42_contract.connectors.errors import ConnectorError, OperatorMisconfiguredError
 from tai42_contract.connectors.models import (
     AuthHealthState,
@@ -241,7 +242,30 @@ async def list_connector_providers() -> dict[str, Any]:
     return ProviderCatalogResponse(providers=providers, categories=categories).model_dump(mode="json")
 
 
-@operation(summary="List connections", tags=["connectors"], errors=[BadRequestError])
+#: The auth-health states the listing filter accepts — the ``AuthHealthState`` vocabulary as a
+#: type, so the emitted query parameter publishes the closed set the door parses.
+ConnectionHealthFilter = Literal["healthy", "reconnect_required", "refresh_failing"]
+
+
+class ConnectionsListQuery(BaseModel):
+    """The connections listing's optional ``?health=`` filter and ``?limit=`` page cap.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    health: ConnectionHealthFilter | None = Field(
+        default=None, description="Restrict items to this auth-health state; omit for all connections."
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=_MAX_LIST_LIMIT,
+        description="Cap the number of returned items; total still reports the full match count.",
+    )
+
+
+@operation(
+    summary="List connections", tags=["connectors"], errors=[BadRequestError], request_model=ConnectionsListQuery
+)
 async def list_connections(health: str | None = None, limit: int | None = None) -> dict[str, Any]:
     """The installed connections as secret-free views.
 

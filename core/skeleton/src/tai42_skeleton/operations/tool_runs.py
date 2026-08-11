@@ -129,6 +129,15 @@ class ToolRunSubmission(BaseModel):
     arguments: dict[str, object] = Field(default_factory=dict, description="Tool keyword arguments.")
 
 
+class ToolRunsListQuery(BaseModel):
+    """The per-tool run listing's ``?tool_name=`` query. ``tool_name`` is REQUIRED — a client
+    generated without it calls the door with no tool to list and is answered 400.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    tool_name: str = Field(min_length=1, description="The registered tool whose recent runs to list.")
+
+
 # -- Redis store -------------------------------------------------------------
 
 
@@ -610,6 +619,7 @@ async def get_run(run_id: str) -> dict:
     summary="List background tool runs for a tool",
     tags=["tool-runs"],
     errors=[BadRequestError],
+    request_model=ToolRunsListQuery,
 )
 async def list_tool_runs(tool_name: str) -> list[dict]:
     """List the recent runs for one tool, newest first.

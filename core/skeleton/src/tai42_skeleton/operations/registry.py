@@ -42,6 +42,10 @@ class OperationMetadata:
     error_classes: tuple[type[OperationError], ...] = ()
     request_model: type[BaseModel] | None = None
     response_model: type[BaseModel] | None = None
+    # A model whose fields are published as ``in: query`` parameters for ANY method,
+    # additive to ``request_model`` — the channel a WRITE-method door declares the query
+    # it reads at the edge (a read door's ``request_model`` already emits as query).
+    query_model: type[BaseModel] | None = None
 
     # Attached by the route-adapter registration (not the decorator): the route
     # template (``/api/tools/{name}``) and the HTTP method the operation serves.

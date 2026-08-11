@@ -24,7 +24,7 @@ import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from tai42_contract.monitoring import (
     MetricsFilter,
@@ -56,10 +56,37 @@ _RELATIVE_RE = re.compile(r"^(\d+)([hdw])$")
 _RELATIVE_UNIT = {"h": "hours", "d": "days", "w": "weeks"}
 _DEFAULT_FROM = "30d"
 
+# The closed value sets the query parsers accept, each a ``Literal`` type so the doors' query
+# models publish the same vocabulary the checks enforce: a value outside a set is a 400 and is
+# absent from the emitted OpenAPI parameter's enum. Each binds its members as a tuple beside
+# the type except ``RunSortKey``, whose members are the ``_SORT_FIELDS`` keys its check reads;
+# and every check is made here except the export format's, which the export door in
+# ``observability.py`` makes.
+
+#: The bucket sizes the metrics door serves; anything else is a 400.
+MetricsGranularity = Literal["hour", "day", "week"]
+GRANULARITIES: tuple[MetricsGranularity, ...] = get_args(MetricsGranularity)
+
+#: The run statuses the run filter serves: ``error`` selects error runs, ``success`` is the
+#: unfiltered listing (the absence of errors is not a trace-level clause).
+RunStatus = Literal["error", "success"]
+RUN_STATUSES: tuple[RunStatus, ...] = get_args(RunStatus)
+
+#: The run-list sort keys the door serves — the ``_SORT_FIELDS`` vocabulary as a type.
+RunSortKey = Literal["createdAt", "cost", "latencyMs", "totalTokens"]
+
+#: The sort directions the run filter serves; ``desc`` is the default.
+SortDirection = Literal["asc", "desc"]
+SORT_DIRECTIONS: tuple[SortDirection, ...] = get_args(SortDirection)
+
+#: The download formats the runs export serves; ``csv`` is the default.
+ExportFormat = Literal["csv", "json"]
+EXPORT_FORMATS: tuple[ExportFormat, ...] = get_args(ExportFormat)
+
 # Run-list sort key (frontend token) → neutral ``OrderBy.field`` on list_traces.
 # ``timestamp`` sorts natively; ``total_cost`` / ``latency`` / ``total_tokens``
 # are metric-ranked globally by the contract.
-_SORT_FIELDS = {
+_SORT_FIELDS: dict[RunSortKey, str] = {
     "createdAt": "timestamp",
     "cost": "total_cost",
     "latencyMs": "latency",
@@ -69,6 +96,14 @@ _SORT_FIELDS = {
 # Max page size the reader accepts per ``list_traces`` call; the run list caps
 # ``pageSize`` here and the export drains pages of this size up to ``_EXPORT_CAP``.
 PAGE_CHUNK = 100
+
+
+def one_of(values: tuple[str, ...]) -> str:
+    """A closed value set as refusal prose — ``'a' or 'b'``, ``'a', 'b' or 'c'`` — so the
+    message names the same tuple the check reads."""
+    quoted = [repr(value) for value in values]
+    head, last = quoted[:-1], quoted[-1]
+    return f"{', '.join(head)} or {last}" if head else last
 
 
 def _now_utc() -> datetime:
@@ -108,8 +143,8 @@ def select_granularity(t0: datetime, t1: datetime, override: str | None) -> str:
     ``RequestParseError`` (→ 400, same as a bad from/to); auto-selection applies
     only when it is absent."""
     if override:
-        if override not in ("hour", "day", "week"):
-            raise RequestParseError(f"granularity must be one of hour, day, week: {override!r}")
+        if override not in GRANULARITIES:
+            raise RequestParseError(f"granularity must be one of {', '.join(GRANULARITIES)}: {override!r}")
         return override
     span = (t1 - t0).total_seconds()
     if span <= 2 * 86400:
@@ -165,8 +200,8 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
 
     tags = _parse_tags(q.get("tags"))
     status = q.get("status")
-    if status not in (None, "", "error", "success"):
-        raise RequestParseError("status must be 'error' or 'success'")
+    if status not in (None, "", *RUN_STATUSES):
+        raise RequestParseError(f"status must be {one_of(RUN_STATUSES)}")
     level = MonitoringLevel.ERROR if status == "error" else None
 
     min_latency_ms = _q_float(q, "minLatencyMs")
@@ -202,8 +237,8 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
         if sort not in _SORT_FIELDS:
             raise RequestParseError(f"sort must be one of {sorted(_SORT_FIELDS)}")
         direction = q.get("dir", "desc")
-        if direction not in ("asc", "desc"):
-            raise RequestParseError("dir must be 'asc' or 'desc'")
+        if direction not in SORT_DIRECTIONS:
+            raise RequestParseError(f"dir must be {one_of(SORT_DIRECTIONS)}")
         order_by = OrderBy(field=_SORT_FIELDS[sort], direction=direction)
 
     return filter_, order_by

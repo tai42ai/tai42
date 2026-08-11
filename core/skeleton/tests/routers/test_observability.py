@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import get_args
 from urllib.parse import urlencode
 
 import pytest
@@ -30,6 +31,7 @@ from tai42_contract.monitoring import (
 
 from tai42_skeleton.monitoring.registry import register_monitoring, reset_monitoring
 from tai42_skeleton.routers import observability as router
+from tai42_skeleton.routers.observability_support import _SORT_FIELDS, RunSortKey
 
 _T0 = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
 _T1 = datetime(2026, 7, 1, 12, 0, 2, tzinfo=UTC)
@@ -595,3 +597,10 @@ async def test_export_runs_read_not_supported_501():
     resp = await router.export_runs(_req(""))
     assert resp.status_code == 501
     assert _json(resp)["code"] == "monitoring-read-not-supported"
+
+
+def test_the_published_sort_keys_are_the_ones_the_edge_maps():
+    # ``RunSortKey`` is what the run-list and export doors publish as the ``?sort=`` value set,
+    # while ``_SORT_FIELDS`` is what the edge actually maps — a key in one and not the other is
+    # either an advertised sort the door 400s on or a served sort no client is told about.
+    assert set(get_args(RunSortKey)) == set(_SORT_FIELDS)

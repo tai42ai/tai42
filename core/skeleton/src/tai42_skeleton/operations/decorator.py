@@ -43,6 +43,7 @@ def operation(
     errors: list[type[OperationError]] | None = None,
     request_model: type[BaseModel] | None = None,
     response_model: type[BaseModel] | None = None,
+    query_model: type[BaseModel] | None = None,
     registry: OperationRegistry | None = None,
 ) -> Callable[[_AsyncOpT], _AsyncOpT]:
     """Declare a function as an operation and register it.
@@ -58,6 +59,17 @@ def operation(
     ``authority_changing`` marks an operation that mints/scopes keys, edits policy,
     replaces the manifest, or restores/runs unshipped state — off the default MCP
     surface (tier 2), includable by an explicit ``api_tools``.
+
+    ``request_model`` types the operation's inputs: the emitted spec documents it as
+    the JSON ``requestBody`` of a write method, and as the ``in: query`` parameters of
+    a read method (which carries no body). It is also what the route adapter parses the
+    request with, UNLESS the route supplies a ``context_extractor`` — a door that parses
+    its own query/body at the HTTP edge, for which the model is spec metadata only.
+    ``query_model`` is always spec metadata only: nothing parses it, it publishes a
+    model's fields as ``in: query`` parameters for ANY method, which is how a WRITE door
+    documents the query it reads at the edge. Either model's field names — under their
+    aliases where they differ — are the WIRE keys a generated client sends, not the
+    operation's Python parameter names.
     """
 
     target_registry = registry if registry is not None else operation_registry
@@ -77,6 +89,7 @@ def operation(
             error_classes=tuple(errors or ()),
             request_model=request_model,
             response_model=response_model,
+            query_model=query_model,
         )
         target_registry.register(metadata)
         setattr(func, OPERATION_ATTR, metadata)

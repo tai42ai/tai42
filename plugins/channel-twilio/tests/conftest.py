@@ -74,6 +74,7 @@ class _StubHttp:
         tags: list[str],
         response_model: Any,
         request_model: Any = None,
+        query_model: Any = None,
         authed: bool = True,
     ) -> Callable[[Any], Any]:
         def decorator(fn: Any) -> Any:

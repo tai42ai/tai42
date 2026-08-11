@@ -157,6 +157,10 @@ class RouteMetadata:
     additional_success_statuses: tuple[int, ...]
     success_media_types: dict[str, tuple[str, ...]]
     action: RouteAction
+    # A model whose fields the emitter publishes as ``in: query`` parameters for ANY
+    # method, additive to ``request_model`` (which stays a body on a write, query on a
+    # read). It is the only way a WRITE-method door documents the query it reads.
+    query_model: type[BaseModel] | None = None
     destructive: bool = False
     # A surface served by a MOUNTED ASGI app (an MCP transport, the sub-MCP mount),
     # recorded by :meth:`RouteRegistry.record_mounted` so the registry describes the
@@ -281,6 +285,7 @@ class RouteRegistry:
         authed: bool,
         request_model: type[BaseModel] | None,
         response_model: type[BaseModel] | None,
+        query_model: type[BaseModel] | None = None,
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,
@@ -324,6 +329,7 @@ class RouteRegistry:
             authed=authed,
             request_model=request_model,
             response_model=response_model,
+            query_model=query_model,
             reload_gated=reload_gated,
             reads_body=reads_body,
             error_statuses=error_statuses,

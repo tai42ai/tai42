@@ -36,7 +36,7 @@ import pytest
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.route_registry import route_registry
+from tai42_skeleton.app.route_registry import load_api_routes, route_registry
 from tai42_skeleton.operations import reregister_operations
 from tai42_skeleton.operations.registry import operation_registry
 
@@ -53,6 +53,13 @@ def _isolate_registries():
         # keeps the replay off the duplicate-name guard.
         operation_registry.clear()
         reregister_operations()
+
+        # Force the product router surface to register BEFORE the snapshot: a test that
+        # first triggers the lazy import (e.g. ``build_openapi_spec``) would otherwise
+        # register those product routes mid-test, and the targeted deletion below — seeing
+        # them as test-added — would wipe a surface no later re-import re-records (the
+        # modules are cached), leaving a following test an empty registry.
+        load_api_routes()
 
         # Routes restore by TARGETED DELETION of the rows this test added, never a
         # whole-snapshot restore: a router records its routes once per process, so

@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import BaseModel
 from tai42_contract.app import DeclaredRouteMetadata
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.presets import PresetBody
@@ -311,11 +312,27 @@ def test_http_facet_forwarding():
         tags=["t"],
         response_model=None,
         request_model=None,
+        query_model=None,
         authed=True,
         destructive=False,
         action=None,
         declared=None,
     )
+
+
+def test_http_facet_forwards_the_query_model():
+    """A door's ``query_model`` — the model whose fields the emitter publishes as ``in: query``
+    parameters — reaches the impl surface as the class itself, so the emitted spec describes the
+    query the door reads at the edge."""
+
+    class _Query(BaseModel):
+        token: str
+
+    app = _app()
+    f = HttpFacet(app)
+    f.custom_route("/p", ["DELETE"], summary="P", tags=["t"], response_model=None, action="write", query_model=_Query)
+    _, kwargs = app._http_surface.custom_route.call_args
+    assert kwargs["query_model"] is _Query
 
 
 def test_http_facet_forwards_declared():

@@ -23,20 +23,35 @@ never mutate the store, so the operation is not destructive.
 
 from __future__ import annotations
 
+from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
-from tai42_skeleton.operations import operation_metadata_of, register_operation_route
+from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
+from tai42_skeleton.operations.resources import ResourceGetQuery
 from tai42_skeleton.operations.resources import get_resource_by_id as _get_resource_by_id_op
 
-# The plain fetch-as-is door: ``GET /api/resources/get?resource_id=...``. The adapter
-# parses the flat ``resource_id`` from the query string (a GET never reads a body), so
-# ``template_kwargs`` is always ``None`` and the resource is returned as-is. Registered
-# BEFORE the POST so the shared operation metadata's ``http_method`` ends on the POST.
+
+async def _extract_get_query(request: Request) -> dict:
+    """Read the required ``resource_id`` from the query into the operation's flat argument,
+    rejecting an absent or empty id with the explicit 400 (never a GET body)."""
+    resource_id = request.query_params.get("resource_id")
+    if not resource_id:
+        raise BadRequestError("query param 'resource_id' is required")
+    return {"resource_id": resource_id}
+
+
+# The plain fetch-as-is door: ``GET /api/resources/get?resource_id=...``. The extractor
+# reads the flat ``resource_id`` from the query string (a GET never reads a body), so the
+# resource is returned as-is; the published query is ``ResourceGetQuery`` (``resource_id``
+# alone — ``template_kwargs`` is a body input the render POST takes). Registered BEFORE the
+# POST so the shared operation metadata's ``http_method`` ends on the POST.
 fetch_resource = register_operation_route(
     tai42_app,
     operation_metadata_of(_get_resource_by_id_op),
     path="/api/resources/get",
     method="GET",
+    context_extractor=_extract_get_query,
+    request_model=ResourceGetQuery,
     action="read",
 )
 

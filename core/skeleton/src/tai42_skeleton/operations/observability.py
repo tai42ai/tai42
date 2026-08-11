@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
+from pydantic import BaseModel, Field
 from tai42_contract.monitoring import (
     MetricsFilter,
     MetricsView,
@@ -34,6 +35,12 @@ from tai42_contract.monitoring import (
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.routers.observability_support import (
+    PAGE_CHUNK,
+    ExportFormat,
+    MetricsGranularity,
+    RunSortKey,
+    RunStatus,
+    SortDirection,
     _safe_query,
     derive_run,
     map_model_rows,
@@ -51,10 +58,80 @@ _METRICS = ["count", "totalCost", "totalTokens", "latency"]
 _READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
 
 
+class MetricsQuery(BaseModel):
+    """The metrics door's optional time window and granularity.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    from_: str | None = Field(
+        default=None,
+        alias="from",
+        description="Range start as an ISO instant or a relative token (e.g. ``30d``); defaults to 30 days ago.",
+    )
+    to: str | None = Field(
+        default=None, description="Range end as an ISO instant or a relative token; defaults to now."
+    )
+    granularity: MetricsGranularity | None = Field(
+        default=None, description="Bucket size; auto-selected from the span when omitted."
+    )
+
+
+class RunFilterQuery(BaseModel):
+    """The run time window, advanced filters, and sort shared by the run-list and export doors
+    (exactly what ``parse_time_range`` + ``parse_run_filter`` read at the HTTP edge).
+
+    Spec metadata only — the doors parse their query at the HTTP edge."""
+
+    from_: str | None = Field(
+        default=None,
+        alias="from",
+        description="Range start as an ISO instant or a relative token (e.g. ``30d``); defaults to 30 days ago.",
+    )
+    to: str | None = Field(
+        default=None, description="Range end as an ISO instant or a relative token; defaults to now."
+    )
+    tags: str | None = Field(
+        default=None, description='Tag filter as a JSON list (``["a","b"]``) or a comma-separated string.'
+    )
+    status: RunStatus | None = Field(default=None, description="Restrict to ``error`` runs; ``success`` is unfiltered.")
+    min_cost: float | None = Field(default=None, alias="minCost", description="Inclusive lower bound on run cost.")
+    max_cost: float | None = Field(default=None, alias="maxCost", description="Inclusive upper bound on run cost.")
+    min_tokens: float | None = Field(
+        default=None, alias="minTokens", description="Inclusive lower bound on token count."
+    )
+    max_tokens: float | None = Field(
+        default=None, alias="maxTokens", description="Inclusive upper bound on token count."
+    )
+    min_latency_ms: float | None = Field(
+        default=None, alias="minLatencyMs", description="Inclusive lower bound on latency in milliseconds."
+    )
+    max_latency_ms: float | None = Field(
+        default=None, alias="maxLatencyMs", description="Inclusive upper bound on latency in milliseconds."
+    )
+    sort: RunSortKey | None = Field(default=None, description="Sort key.")
+    dir: SortDirection | None = Field(default=None, description="Sort direction; defaults to ``desc``.")
+
+
+class RunsListQuery(RunFilterQuery):
+    """The run-list door's paging atop the shared run filter."""
+
+    page: int = Field(default=1, ge=1, description="1-based page number.")
+    page_size: int = Field(
+        default=50, ge=1, alias="pageSize", description=f"Items per page; capped to {PAGE_CHUNK}, never refused."
+    )
+
+
+class ExportRunsQuery(RunFilterQuery):
+    """The export door's output format atop the shared run filter."""
+
+    format: ExportFormat = Field(default="csv", description="Download format; defaults to ``csv``.")
+
+
 @operation(
     summary="Query observability metrics",
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
+    request_model=MetricsQuery,
 )
 async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     """Aggregate metrics over the time range via the contract's ``query_metrics``.
@@ -103,6 +180,7 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     summary="List observability runs",
     tags=["observability"],
     errors=[BadRequestError, NotSupportedError],
+    request_model=RunsListQuery,
 )
 async def list_observability_runs(
     t0: datetime,

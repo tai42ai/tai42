@@ -222,7 +222,11 @@ async def _settle(timeout: float = 2.0) -> None:
         tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
         if not tasks:
             await asyncio.sleep(0)
-            if not any(not t.done() for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS)):
+            # Recompute after the yield: a task can appear between the two checks, so wait on
+            # the fresh list (asyncio.wait raises on an empty set), and return only when it
+            # is still empty.
+            tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+            if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
 

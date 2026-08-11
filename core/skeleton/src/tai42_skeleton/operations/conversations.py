@@ -299,12 +299,9 @@ TRANSCRIPT_ORDERS = get_args(TranscriptOrder)
 class ThreadWindowQuery(BaseModel):
     """The ``?page=``/``?pageSize=`` window the route thread listing takes.
 
-    Spec metadata only: a GET carries no body and the door parses its own query at the HTTP
-    edge, so this model is what the emitted OpenAPI publishes as the door's ``in: query``
-    parameters — and therefore what a generated client sends. Its field names are the QUERY
-    keys, not the operation's Python parameter names."""
+    Spec metadata only — the door parses its query at the HTTP edge."""
 
-    page: int = Field(default=1, ge=1, description="1-based page number, newest activity first.")
+    page: int = Field(default=1, ge=1, le=MAX_THREAD_PAGE, description="1-based page number, newest activity first.")
     page_size: int = Field(
         default=50,
         ge=1,
@@ -314,15 +311,29 @@ class ThreadWindowQuery(BaseModel):
 
 
 class TranscriptQuery(ThreadWindowQuery):
-    """The transcript door's query on top of the shared window. ``thread_id`` is REQUIRED —
-    a client generated without it calls the door with no thread to read and is answered
-    400."""
+    """The transcript door's query on top of the shared window. ``thread_id`` is REQUIRED and
+    holds at least one non-whitespace character — a client generated without it calls the door
+    with no thread to read, and a blank one names no thread; both are answered 400."""
 
-    page: int = Field(default=1, ge=1, description="1-based page number, in the requested ``order``.")
-    thread_id: str = Field(description="The thread to read, as the send door returned it.")
+    page: int = Field(
+        default=1, ge=1, le=MAX_THREAD_PAGE, description="1-based page number, in the requested ``order``."
+    )
+    thread_id: str = Field(min_length=1, pattern=r"\S", description="The thread to read, as the send door returned it.")
     order: TranscriptOrder = Field(
         default="asc",
         description="``asc`` reads the transcript oldest first; ``desc`` is the live-tail order.",
+    )
+
+
+class ThreadDeleteQuery(BaseModel):
+    """The thread-delete door's ``?thread_id=`` query. ``thread_id`` is REQUIRED and holds at
+    least one non-whitespace character — a client generated without it calls the door with no
+    thread to forget, and a blank one names no thread; both are answered 400.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    thread_id: str = Field(
+        min_length=1, pattern=r"\S", description="The thread to forget, as the send door returned it."
     )
 
 
@@ -641,6 +652,7 @@ async def _delete_thread_checkpoint(thread_id: str) -> None:
     summary="Delete a conversation thread",
     tags=["conversations"],
     errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError],
+    query_model=ThreadDeleteQuery,
 )
 async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[str, Any]:
     """Forget ONE conversation thread: its agent checkpoint, its answer records and its thread

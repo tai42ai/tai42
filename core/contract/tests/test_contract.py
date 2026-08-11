@@ -566,17 +566,19 @@ def test_connector_token_store_put_exposes_compare_and_set():
 def test_custom_route_carries_self_describing_metadata():
     # custom_route registers a route AND its OpenAPI metadata: summary + tags +
     # response_model are keyword-only REQUIRED (no default, so a route cannot
-    # silently omit them); request_model + authed are keyword-only with defaults.
+    # silently omit them); request_model + query_model + authed are keyword-only
+    # with defaults.
     from tai42_contract.app import AppHttp
 
     sig = inspect.signature(AppHttp.custom_route)
-    for name in ("summary", "tags", "response_model", "request_model", "authed"):
+    for name in ("summary", "tags", "response_model", "request_model", "query_model", "authed"):
         assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
     empty = inspect.Parameter.empty
     assert sig.parameters["summary"].default is empty
     assert sig.parameters["tags"].default is empty
     assert sig.parameters["response_model"].default is empty
     assert sig.parameters["request_model"].default is None
+    assert sig.parameters["query_model"].default is None
     assert sig.parameters["authed"].default is True
 
 
