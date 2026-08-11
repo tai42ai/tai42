@@ -144,8 +144,13 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
 # the version-tags PUT (neither reload-gated) declare NO 503 at all and are absent
 # from this set.
 _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
+    # The operator thread doors — the forget-thread DELETE and the operator-send POST — declare
+    # the per-thread FIFO's full-queue UnavailableError (retriable), and neither is reload-gated,
+    # so each carries that 503 alone.
+    ("DELETE", "/api/conversations/{route_name}/thread"),
     ("GET", "/api/schedules"),
     ("GET", "/api/schedules/server-datetime"),
+    ("POST", "/api/conversations/{route_name}/thread/messages"),
 }
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {

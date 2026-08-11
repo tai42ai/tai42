@@ -204,9 +204,7 @@ class Agent(ABC):
         else:
             yield StructuredFinal(data=result)
 
-    async def append_thread_messages(
-        self, *, thread_id: str, messages: list[dict[str, str]], **kwargs: Any
-    ) -> None:
+    async def append_thread_messages(self, *, thread_id: str, messages: list[dict[str, str]], **kwargs: Any) -> None:
         """Append ``messages`` to ``thread_id``'s stored history WITHOUT running the agent.
 
         Each item is ``{"role": "user"|"assistant", "content": str}``. The conversation
