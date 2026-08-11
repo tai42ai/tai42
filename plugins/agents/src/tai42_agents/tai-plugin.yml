@@ -55,6 +55,7 @@ provides:
     tags:
       - retrieval
       - tools
+    group: tools-agents
   - kind: agent
     name: tools_agent
     module: tai42_agents.tools_agent
@@ -63,6 +64,7 @@ provides:
       presets).
     tags:
       - tools
+    group: tools-agents
   - kind: agent
     name: mcp_tools_agent
     module: tai42_agents.mcp_tools_agent
@@ -72,6 +74,7 @@ provides:
     tags:
       - mcp
       - tools
+    group: tools-agents
   - kind: agent
     name: vqa_agent
     module: tai42_agents.vqa_agent

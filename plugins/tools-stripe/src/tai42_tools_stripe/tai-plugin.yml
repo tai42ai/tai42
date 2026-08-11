@@ -32,6 +32,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: payment-confirm
   - kind: tool
     name: create_stripe_checkout
     module: tai42_tools_stripe.tools.create_stripe_checkout
@@ -39,6 +40,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: payment-sessions
   - kind: tool
     name: create_stripe_payment_link
     module: tai42_tools_stripe.tools.create_stripe_payment_link
@@ -48,6 +50,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: payment-sessions
   - kind: tool
     name: create_stripe_webhook_endpoint
     module: tai42_tools_stripe.tools.create_stripe_webhook_endpoint
@@ -57,6 +60,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: webhook-endpoints
   - kind: tool
     name: delete_stripe_webhook_endpoint
     module: tai42_tools_stripe.tools.delete_stripe_webhook_endpoint
@@ -64,6 +68,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: webhook-endpoints
   - kind: tool
     name: expire_stripe_checkout
     module: tai42_tools_stripe.tools.expire_stripe_checkout
@@ -71,6 +76,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: payment-sessions
   - kind: tool
     name: list_stripe_webhook_endpoints
     module: tai42_tools_stripe.tools.list_stripe_webhook_endpoints
@@ -78,6 +84,7 @@ provides:
     tags:
       - stripe
       - payments
+    group: webhook-endpoints
   - kind: tool
     name: reconcile_stripe_payments
     module: tai42_tools_stripe.tools.reconcile_stripe_payments
@@ -85,3 +92,4 @@ provides:
     tags:
       - stripe
       - payments
+    group: payment-confirm

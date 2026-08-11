@@ -32,6 +32,7 @@ provides:
     tags:
       - whatsapp
       - provisioning
+    group: message-templates
   - kind: tool
     name: list_whatsapp_templates
     module: tai42_tools_whatsapp.tools.list_whatsapp_templates
@@ -41,6 +42,7 @@ provides:
     tags:
       - whatsapp
       - provisioning
+    group: message-templates
   - kind: tool
     name: delete_whatsapp_template
     module: tai42_tools_whatsapp.tools.delete_whatsapp_template
@@ -48,6 +50,7 @@ provides:
     tags:
       - whatsapp
       - provisioning
+    group: message-templates
   - kind: tool
     name: subscribe_whatsapp_app
     module: tai42_tools_whatsapp.tools.subscribe_whatsapp_app
