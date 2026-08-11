@@ -23,8 +23,21 @@ def test_create_carries_the_initial_mode(monkeypatch: pytest.MonkeyPatch) -> Non
     result = run_cli(
         monkeypatch,
         handler,
-        ["conversations", "create", "chat", "--door", "api", "--target-name", "relay",
-         "--execution-key", "svc", "--callback-url", "https://cb.example/x", "--initial-mode", "manual"],
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "api",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--callback-url",
+            "https://cb.example/x",
+            "--initial-mode",
+            "manual",
+        ],
     )
     assert result.exit_code == 0, result.output
 

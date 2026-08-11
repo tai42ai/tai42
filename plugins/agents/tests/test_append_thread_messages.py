@@ -276,9 +276,7 @@ class TestToolsAgentAppend:
     def test_invalid_role_raises(self) -> None:
         agent = tai42_app.agents.get_agent("tools_agent")
         with pytest.raises(ValueError, match="role 'system'"):
-            asyncio.run(
-                agent.append_thread_messages(thread_id="t", messages=[{"role": "system", "content": "x"}])
-            )
+            asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "system", "content": "x"}]))
 
     def test_blank_content_raises(self) -> None:
         agent = tai42_app.agents.get_agent("tools_agent")
@@ -459,9 +457,7 @@ class TestRetrievalAgentAppend:
     def test_invalid_role_raises(self) -> None:
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")
         with pytest.raises(ValueError, match="role 'assistant '"):
-            asyncio.run(
-                agent.append_thread_messages(thread_id="t", messages=[{"role": "assistant ", "content": "x"}])
-            )
+            asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "assistant ", "content": "x"}]))
 
     def test_blank_content_raises(self) -> None:
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")

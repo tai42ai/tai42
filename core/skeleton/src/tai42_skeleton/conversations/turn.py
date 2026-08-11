@@ -655,9 +655,7 @@ async def _target_outcome(
         return await _manual_target_outcome(route, intake, text)
     if route.target_kind == "tool":
         return await _run_tool_turn(route, text, intake.client_address, person, params)
-    answer_status, answer, error_detail = await _run_agent_turn(
-        route, text, intake.thread_id, intake.client_address
-    )
+    answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
     return _ResolvedOutcome(answer_status=answer_status, answer=answer, error=error_detail)
 
 

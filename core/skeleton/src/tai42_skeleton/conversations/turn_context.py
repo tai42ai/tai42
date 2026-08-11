@@ -33,9 +33,7 @@ class BridgeTurnContext:
     client_address: str
 
 
-_current_bridge_turn: ContextVar[BridgeTurnContext | None] = ContextVar(
-    "tai42_current_bridge_turn", default=None
-)
+_current_bridge_turn: ContextVar[BridgeTurnContext | None] = ContextVar("tai42_current_bridge_turn", default=None)
 
 
 def current_bridge_turn() -> BridgeTurnContext | None:
