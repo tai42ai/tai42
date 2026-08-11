@@ -472,6 +472,74 @@ def test_item_tags_are_bounded():
         )
 
 
+def test_item_group_is_optional_and_defaults_to_none():
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    # A standalone item declares no family: the field is absent (base kwargs omit
+    # it) and also accepts an explicit None.
+    item = PluginItem(kind=PluginItemKind.TOOL, name="x", module="a.b", description="d")
+    assert item.group is None
+    assert PluginItem(kind=PluginItemKind.TOOL, name="x", module="a.b", description="d", group=None).group is None
+
+
+@pytest.mark.parametrize("value", ["core", "web-tools", "group_1", "0"])
+def test_item_group_accepts_tag_shaped_labels(value: str):
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    item = PluginItem(kind=PluginItemKind.TOOL, name="x", module="a.b", description="d", group=value)
+    assert item.group == value
+
+
+def test_item_group_rejects_malformed_labels():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    for bad in ("Core", "-lead", "with space", "core\n", "co\nre", ""):
+        with pytest.raises(ValidationError, match="group"):
+            PluginItem(kind=PluginItemKind.TOOL, name="x", module="a.b", description="d", group=bad)
+
+
+def test_provides_accepts_shared_cross_kind_and_single_member_groups():
+    from tai42_contract.plugins import PluginSpec
+
+    # Two items may share one group, a group may span kinds, and a group may have
+    # a single member — every arrangement is legal structural self-description.
+    provides = [
+        {
+            "kind": "tool",
+            "name": "generate_uuid",
+            "module": "tai42_toolbox.tools.generate_uuid",
+            "description": "Generate a random UUID.",
+            "group": "core",
+        },
+        {
+            "kind": "tool",
+            "name": "parse_uuid",
+            "module": "tai42_toolbox.tools.parse_uuid",
+            "description": "Parse a UUID.",
+            "group": "core",
+        },
+        {
+            "kind": "agent",
+            "name": "uuid_agent",
+            "module": "tai42_toolbox.agents.uuid_agent",
+            "description": "An agent over the UUID tools.",
+            "group": "core",
+        },
+        {
+            "kind": "tool",
+            "name": "flip_coin",
+            "module": "tai42_toolbox.tools.flip_coin",
+            "description": "Flip a coin.",
+            "group": "random",
+        },
+    ]
+    spec = PluginSpec(**_spec_kwargs(provides=provides))
+    groups = [item.group for item in spec.provides]
+    assert groups == ["core", "core", "core", "random"]
+
+
 def test_descriptions_must_be_non_empty_single_lines():
     from pydantic import ValidationError
 

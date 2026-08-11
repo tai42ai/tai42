@@ -344,6 +344,13 @@ class PluginItem(BaseModel):
     The item shape is kind-conditional (a model validator enforces it, loud
     both ways): an ``mcp-server`` item carries ``mcp`` transport config and no
     ``module``; every other kind carries ``module`` and no ``mcp``.
+
+    ``group`` is an OPTIONAL logical family label the author may put on any item
+    of any kind: items sharing a value belong to one family, and a consumer may
+    summarize the ``provides`` index by group. It is purely a structural
+    self-description of the plugin — cross-kind groups and single-member groups
+    are both legal, and absent means the item stands alone. It carries a tag's
+    charset discipline.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -354,6 +361,7 @@ class PluginItem(BaseModel):
     mcp: MCPConfig | None = None
     description: str
     tags: list[str] = Field(default_factory=list)
+    group: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -382,6 +390,15 @@ class PluginItem(BaseModel):
     @classmethod
     def _check_item_tags(cls, value: list[str]) -> list[str]:
         return _check_tags(value)
+
+    @field_validator("group")
+    @classmethod
+    def _check_group(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not TAG_RE.fullmatch(value):
+            raise ValueError(f"group {value!r} must match {TAG_RE.pattern}")
+        return value
 
     @model_validator(mode="after")
     def _shape_by_kind(self) -> PluginItem:
