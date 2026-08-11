@@ -139,9 +139,10 @@ def test_send_thread_message_rejected_without_auth(monkeypatch):
 
 def test_get_thread_mode_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
-    assert client.get(
-        "/api/conversations/chat/thread/mode", params={"thread_id": "bridge:chat:+1"}
-    ).status_code in (401, 403)
+    assert client.get("/api/conversations/chat/thread/mode", params={"thread_id": "bridge:chat:+1"}).status_code in (
+        401,
+        403,
+    )
 
 
 def test_set_thread_mode_rejected_without_auth(monkeypatch):
