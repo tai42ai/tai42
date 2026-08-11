@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: channel-whatsapp
 package: tai42-channel-whatsapp
-version: 0.7.0
+version: 0.8.0
 description: >-
   Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask_user
   questions to a human on WhatsApp and bridges the reply back.
