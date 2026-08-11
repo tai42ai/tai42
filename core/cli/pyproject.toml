@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-cli"
-version = "1.1.1"
+version = "1.2.0"
 description = "Command-line client for operating a tai42 server over its HTTP API."
 readme = "README.md"
 requires-python = ">=3.13"
