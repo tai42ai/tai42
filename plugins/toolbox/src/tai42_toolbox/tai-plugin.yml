@@ -38,7 +38,6 @@ provides:
     description: Generate embeddings for a single string or a list of strings.
     tags:
       - embeddings
-    group: embeddings
   - kind: tool
     name: generate_uuid
     module: tai42_toolbox.tools.generate_uuid
@@ -51,7 +50,6 @@ provides:
     description: Pad each embedding vector with zeros up to a target dimension.
     tags:
       - embeddings
-    group: embeddings
   - kind: tool
     name: request
     module: tai42_toolbox.tools.request
@@ -64,14 +62,14 @@ provides:
     description: Branch a tool into a variant that runs many instances at once.
     tags:
       - batch
-    group: tool-variants
+    group: extensions
   - kind: extension
     name: cache
     module: tai42_toolbox.extensions.cache
     description: Branch a tool into a variant that memoizes results by call arguments.
     tags:
       - cache
-    group: tool-variants
+    group: extensions
   - kind: extension
     name: chain
     module: tai42_toolbox.extensions.chain
@@ -80,7 +78,7 @@ provides:
       tool.
     tags:
       - chain
-    group: tool-variants
+    group: extensions
   - kind: extension
     name: output_schema
     module: tai42_toolbox.extensions.output_schema
@@ -89,18 +87,18 @@ provides:
       output schema and validates every result against it.
     tags:
       - schema
-    group: tool-variants
+    group: extensions
   - kind: extension
     name: prometheus_metrics
     module: tai42_toolbox.extensions.prometheus
     description: Branch a tool into a variant that records a Prometheus call metric.
     tags:
       - metrics
-    group: tool-variants
+    group: extensions
   - kind: extension
     name: proxy
     module: tai42_toolbox.extensions.proxy
     description: Branch a tool into a variant that runs the wrapped tool through a proxy.
     tags:
       - proxy
-    group: tool-variants
+    group: extensions
