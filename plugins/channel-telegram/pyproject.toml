@@ -25,10 +25,10 @@ classifiers = [
 dependencies = [
     # The pure interface contract — Channel, ChannelDelivery, ChannelDeliveryError,
     # and the tai42_app handle the plugin registers through.
-    "tai42-contract>=1.7,<2",
+    "tai42-contract>=1.8,<2",
     # HttpxClient + RedisClient (redis extra) + TaiBaseSettings + the settings
     # cache registry + RedisConnectionSettings.
-    "tai42-kit[redis]>=1.5,<2",
+    "tai42-kit[redis]>=1.6,<2",
     # The whole transport: Bot API calls, the callback forward, and the error
     # types the channel classifies. No Telegram SDK — the Bot API is flat
     # JSON-over-HTTPS and there is no official Python SDK.
