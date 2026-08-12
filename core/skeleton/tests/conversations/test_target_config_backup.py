@@ -16,7 +16,7 @@ from .fake_config_redis import FakeConfigRedis, make_config_client_ctx
 
 @pytest.fixture
 def store(monkeypatch) -> ConversationTargetConfigStore:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeConfigRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_config_client_ctx(fake))
     return ConversationTargetConfigStore(ConversationsSettings())

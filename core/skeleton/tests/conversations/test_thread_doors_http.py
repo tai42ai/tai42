@@ -42,7 +42,7 @@ def _router():
 
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     # An operation leaf is popped and re-imported by the reload suites, so both seams are
     # patched where the REGISTERED handler resolves them: the operation function's own
     # globals, and the records module sys.modules currently holds (what the operation body
@@ -186,7 +186,7 @@ class _RecordingSaver:
 def delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     """The delete door mounted over the same fake redis, with the checkpoint access path
     stubbed so the door's memory delete is captured rather than dialled at a real provider."""
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     fake.seed_route("chat")
     monkeypatch.setattr(

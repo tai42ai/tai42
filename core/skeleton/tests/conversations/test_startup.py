@@ -54,7 +54,7 @@ def order(monkeypatch) -> list[str]:
 async def test_startup_redrives_intake_then_delivery(monkeypatch, order):
     # Intake re-drive FIRST: it gives every stranded ``accepted`` record a terminal outcome
     # the delivery re-drive then picks up. The sweep is established separately (post-swap).
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     await _router()._redrive_pending_conversations()
     assert order == ["redrive_accepted", "redrive_pending"]
 
@@ -69,7 +69,7 @@ async def test_post_swap_starts_the_sweep_with_a_backend(monkeypatch, order):
     # The sweep is (re)established on the serving loop at boot and after every epoch swap —
     # not by the on_startup re-drive, so it survives a reload rather than dying on the
     # throwaway build-thread loop.
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     _router()._start_conversations_delivery_sweep()
     assert order == ["start_delivery_sweep"]
 
@@ -81,7 +81,7 @@ async def test_post_swap_is_a_no_op_without_a_backend(monkeypatch, order):
 
 
 async def test_shutdown_stops_the_sweep_with_a_backend(monkeypatch, order):
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     await _router()._stop_conversations_delivery_sweep()
     assert order == ["stop_delivery_sweep"]
 

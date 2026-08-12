@@ -43,7 +43,7 @@ def _router():
 
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeConfigRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_config_client_ctx(fake))
     router = _router()

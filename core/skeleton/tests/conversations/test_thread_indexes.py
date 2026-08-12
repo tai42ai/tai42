@@ -25,7 +25,7 @@ _THREAD = "bridge:line:+15550002222"
 
 @pytest.fixture(autouse=True)
 def _redis_backend(monkeypatch):
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
 
 
 @pytest.fixture

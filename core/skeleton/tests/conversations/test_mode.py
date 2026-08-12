@@ -45,7 +45,7 @@ def _turn_context(thread_id: str = "bridge:line:+15550002222") -> BridgeTurnCont
 
 @pytest.fixture
 def fake(monkeypatch) -> FakeRecordRedis:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     redis = FakeRecordRedis()
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(redis))
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(redis))

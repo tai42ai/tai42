@@ -178,7 +178,7 @@ async def _fake_bind(execution_key, *, bound_fingerprint):
 
 @pytest.fixture
 def env(monkeypatch):
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_GRACE_SECONDS", "1")
     caps_module._CAPS_CACHE.clear()
     fake = FakeRecordRedis()

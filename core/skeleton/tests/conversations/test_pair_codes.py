@@ -22,7 +22,7 @@ _CODE_RE = re.compile(r"^LINK-[A-Z0-9]{8}$")
 
 @pytest.fixture(autouse=True)
 def _redis_backend(monkeypatch):
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
 
 
 def _store(monkeypatch, fake: FakeRecordRedis) -> ConversationPairCodeStore:
