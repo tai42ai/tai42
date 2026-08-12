@@ -118,7 +118,7 @@ class _FakeApp:
 @pytest.fixture
 def record_redis(monkeypatch) -> FakeRecordRedis:
     """The answer/record store's redis, behind the ops that reach the thread indexes."""
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     return fake

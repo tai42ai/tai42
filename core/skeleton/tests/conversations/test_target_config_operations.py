@@ -44,7 +44,7 @@ class _FakeApp:
 def wired(monkeypatch) -> FakeConfigRedis:
     """Backend ON, config store over a fake redis, an agent ``assistant`` and a tool
     ``lookup`` registered — the standard happy-path environment."""
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeConfigRedis()
     monkeypatch.setattr(store_module, "client_ctx", make_config_client_ctx(fake))
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: object())

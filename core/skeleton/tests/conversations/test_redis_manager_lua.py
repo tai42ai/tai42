@@ -24,7 +24,7 @@ _NAMES_KEY = "conversations:route_names"
 
 @pytest.fixture(autouse=True)
 def _conversations_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
 
 
 @pytest.fixture

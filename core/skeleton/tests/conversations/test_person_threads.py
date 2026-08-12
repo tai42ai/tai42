@@ -127,7 +127,7 @@ def _person_record(
 
 @pytest.fixture
 def fake(monkeypatch) -> FakeRecordRedis:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fk = FakeRecordRedis()
     ctx = make_record_client_ctx(fk)
     monkeypatch.setattr(records_module, "client_ctx", ctx)

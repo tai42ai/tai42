@@ -110,7 +110,7 @@ def _record(
 
 @pytest.fixture
 def store(monkeypatch) -> ConversationRecordStore:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     # The create writes the thread indexes only while the route still routes, and the
     # fake routing table these doors read holds exactly this one name.

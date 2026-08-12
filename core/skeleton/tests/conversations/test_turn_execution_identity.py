@@ -162,7 +162,7 @@ def ac(monkeypatch) -> FakeAccessControlPg:
 
 @pytest.fixture
 def store(monkeypatch) -> ConversationRecordStore:
-    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     caps_module._CAPS_CACHE.clear()
     fake = FakeRecordRedis()
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
