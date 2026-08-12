@@ -783,6 +783,33 @@ async def test_plugin_list_and_bare_studio_not_public_via_pattern(monkeypatch):
     assert await v.resolve_resource_ids("/api/plugins/x/studio", method="GET") == []
 
 
+async def test_studio_asset_public_alone_despite_protected_route_row(monkeypatch):
+    # The always-public pattern tier is AUTHORITATIVE, not additive: a studio-asset path
+    # that ALSO carries a protected route row resolves the public id ALONE (the row's id
+    # dropped), so the door opens. An additive grant would leave {public, row-id} — deny
+    # wins (CASE B) — and the ESM-imported bundle, which cannot send an auth header, 401s.
+    settings = AccessControlSettings()
+    pg = FakeAccessControlPg()
+    pg.add_route("/api/plugins/x/studio/main-abc123.js", "plugins-scope")
+    _wire(monkeypatch, pg)
+    v = _verifier(settings)
+    assert await v.resolve_resource_ids("/api/plugins/x/studio/main-abc123.js", method="GET") == [
+        settings.public_resource_id
+    ]
+
+
+async def test_studio_pattern_under_reserved_prefix_denied_even_with_row(monkeypatch):
+    # The authoritative carve-out never fires for a reserved path: a pattern that matches
+    # a reserved control-plane path grants nothing even when a route row pins it public —
+    # it falls through to the reserved-drop and, being reserved, resolves to nothing.
+    settings = AccessControlSettings(always_public_route_patterns=(r"/api/auth/deep/secret",))
+    pg = FakeAccessControlPg()
+    pg.add_route("/api/auth/deep/secret", settings.public_resource_id)
+    _wire(monkeypatch, pg)
+    v = _verifier(settings)
+    assert await v.resolve_resource_ids("/api/auth/deep/secret", method="GET") == []
+
+
 def test_always_public_route_patterns_reserved_rejected():
     # A pattern that can match a reserved control-plane path is rejected at construction:
     # a public pattern cannot target the never-public surface.

@@ -471,6 +471,25 @@ async def test_spa_deeplink_reaches_shell_unauthenticated(monkeypatch):
     assert _status(sent) == 200
 
 
+async def test_studio_asset_served_unauthenticated_despite_protected_row(monkeypatch):
+    # End-to-end door repro: a studio-asset path that ALSO carries a protected route row
+    # is served public (200) to an unauthenticated caller — the pattern tier resolves the
+    # public id ALONE (CASE B), never {public, row-id} which deny-wins to 401. This is the
+    # path an ESM-imported plugin bundle takes, unable to carry an auth header.
+    pg = FakeAccessControlPg()
+    pg.add_route("/api/plugins/x/studio/main-abc123.js", "plugins-scope")
+    mw = _real_guard(monkeypatch, pg)
+    sent = await _drive(
+        mw,
+        _http_scope(
+            path="/api/plugins/x/studio/main-abc123.js",
+            user=UnauthenticatedUser(),
+            auth=AuthCredentials(),
+        ),
+    )
+    assert _status(sent) == 200
+
+
 async def test_h4_terminal_deny_unmatched_control_plane(monkeypatch):
     # H4: an UNMATCHED /api or /mcp path terminal-denies (JSON 401/403), NEVER the shell.
     mw = _real_guard(monkeypatch, FakeAccessControlPg())

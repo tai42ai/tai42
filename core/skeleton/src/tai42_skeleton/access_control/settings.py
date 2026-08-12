@@ -166,7 +166,8 @@ class AccessControlSettings(TaiBaseSettings):
     # Public-regardless-of-table route PATTERNS: the pattern analog of
     # ``always_public_path_prefixes`` for a public surface no fixed prefix can reach.
     # Default: the plugin studio-asset door (an ``authed=False`` static-UI route under a
-    # variable ``{name}``). A full-match resolves public; the reserved-drop still applies.
+    # variable ``{name}``). A non-reserved full-match resolves public ALONE (any
+    # table-derived id for that path dropped); a match under a reserved prefix grants nothing.
     always_public_route_patterns: tuple[str, ...] = (r"/api/plugins/[^/]+/studio/.+",)
 
     path_patterns: dict[str, str] = {}  # noqa: RUF012
@@ -261,10 +262,11 @@ class AccessControlSettings(TaiBaseSettings):
                 (re.compile(pattern), template) for pattern, template in self.path_patterns.items()
             ]
 
-        # Compile the always-public route patterns; an invalid regex fails loudly. A
-        # pattern that can match a reserved (never-public) path is rejected here too, so a
-        # public pattern can never target the control plane — the runtime reserved-drop is
-        # a backstop, not the only guard (mirrors the reserved/always-public disjointness).
+        # Compile the always-public route patterns; an invalid regex fails loudly. The
+        # reserved probes below are a SHALLOW best-effort pre-filter: they full-match each
+        # reserved prefix and one child, rejecting an obviously-reserved pattern at load. A
+        # deeper reserved match (e.g. ``/api/auth/x/y``) passes this load; the authoritative
+        # guard is the runtime reserved check in resolution, which is subtree-wide.
         compiled_always_public: list[Pattern] = []
         for pattern in self.always_public_route_patterns:
             try:
