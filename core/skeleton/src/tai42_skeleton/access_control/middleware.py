@@ -142,7 +142,11 @@ class ResourceGuardMiddleware:
 
         # CASE B: Public Route — deny wins: a path is public only when public
         # is the ONLY resolved resource id. If it also matched a protected
-        # route, an over-broad public pattern must not open that route.
+        # route, an over-broad public pattern must not open that route. A path with a
+        # protected route row may still arrive here as [public] alone: the verifier's
+        # settings-level always-public pattern tier (an authoritative door like the plugin
+        # studio-asset route) resolves the public id ALONE for it — that decision lives in
+        # ``resolve_resource_ids``, and this statement stays true for the id set it hands us.
         is_public = set(resource_ids) == {self.public_id}
 
         if is_public:

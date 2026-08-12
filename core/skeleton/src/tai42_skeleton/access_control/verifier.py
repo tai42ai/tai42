@@ -201,6 +201,19 @@ class AccessControlVerifier(TokenVerifier):
         if is_always_public_prefix(path, self.settings):
             return [self.settings.public_resource_id]
 
+        # Always-public route patterns (e.g. the plugin studio-asset door) are
+        # AUTHORITATIVE for a non-reserved path: the pattern tier resolves the public id
+        # ALONE, so the door opens regardless of a protected route row the same path
+        # carries. Additive would never open it — a plugin bundle loads as a native ESM
+        # import that cannot send an auth header, and a public id alongside a protected id
+        # is deny-wins (CASE B). Hoisted ABOVE the route-table tiers, mirroring the prefix
+        # short-circuit above: it needs only path + settings, so the door's hot path skips
+        # the store reads whose ids it would only discard. A pattern that matches a RESERVED
+        # path grants nothing: it falls through to the tiers and the reserved-drop below, so
+        # the control plane is never public.
+        if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
+            return [self.settings.public_resource_id]
+
         # Read the current policy version once (a single cheap GET) and thread it
         # through every cached route/pattern read below, so a management route
         # re-point that bumped the version is a cross-worker cache miss here and is
@@ -240,20 +253,14 @@ class AccessControlVerifier(TokenVerifier):
                 if pattern.fullmatch(path) and (route := await self._fetch_route_data(template, version)):
                     found_ids.add(route)
 
+        public = self.settings.public_resource_id
+
         # The reserved management prefixes are never public: drop the public marker
         # for a reserved-prefix path even if a route row or a dynamic pattern resolved
         # it, so the control plane can never be served unauthenticated regardless of
         # what the route table holds (a route row, a pattern whose template names a
         # reserved url, or a public pattern that fullmatches a reserved path). An
         # otherwise-unmapped reserved path then resolves to nothing and is denied.
-        public = self.settings.public_resource_id
-
-        # Always-public route patterns (e.g. the plugin studio-asset door): public
-        # regardless of the route table. Placed before the reserved-drop, so a pattern that
-        # matched a reserved path is still dropped and can never open the control plane.
-        if matches_always_public_route_pattern(path, self.settings):
-            found_ids.add(public)
-
         if public in found_ids and self._is_reserved_prefix(path):
             found_ids.discard(public)
 
