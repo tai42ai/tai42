@@ -4979,7 +4979,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5032,7 +5032,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5089,7 +5089,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5144,7 +5144,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5187,7 +5187,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5273,7 +5273,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5316,7 +5316,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5505,7 +5505,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "1.8.0"
+version = "1.9.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5556,7 +5556,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "1.6.0"
+version = "1.7.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5743,7 +5743,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "1.6.0"
+version = "1.7.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5972,7 +5972,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.10.1"
+version = "1.11.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },

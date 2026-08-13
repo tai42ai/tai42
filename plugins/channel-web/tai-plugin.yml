@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: channel-web
 package: tai42-channel-web
-version: 0.7.0
+version: 0.8.0
 description: >-
   Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat
   page, delivers ask_user questions into it, and bridges the reply back.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-web
-contract: '>=1.8,<2'
+contract: '>=1.9,<2'
 categories:
   - channels
 tags:
