@@ -27,6 +27,7 @@ from makefun import create_function
 from pydantic_core import to_jsonable_python
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
+from tai42_contract.tools import ToolRefsExtractor
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.binding import _UNSET
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.extensions import ExtensionRegistry
     from tai42_skeleton.manifest import Manifest
     from tai42_skeleton.tools.registry import ToolRegistry
+    from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +362,10 @@ class ToolBinding:
     @property
     def _mcp_bound_tools(self) -> dict[str, set[str]]:
         return self._app._mcp_bound_tools
+
+    @property
+    def _tool_refs_registry(self) -> "ToolRefsRegistry":
+        return self._app._tool_refs_registry
 
     def _require_manifest(self) -> "Manifest":
         manifest = self._manifest
@@ -697,7 +703,7 @@ class ToolBinding:
 
     # -- registration ----------------------------------------------------------
 
-    def tool(self, *args, force=False, **kwargs) -> Any:
+    def tool(self, *args, force=False, tool_refs: "ToolRefsExtractor | None" = None, **kwargs) -> Any:
         func_to_register = None
         decorator_args = args
 
@@ -714,13 +720,23 @@ class ToolBinding:
 
             name = kwargs.get("name") or (func.name if isinstance(func, Tool) else func.__name__)
             module = "" if isinstance(func, Tool) else func.__module__
-            bind_func = self.bind_tool_func(*decorator_args, **kwargs)
-            return bind_func(func) if force or self._manifest.should_include_tool(name, module) else func
+            if not (force or self._manifest.should_include_tool(name, module)):
+                return func
+            # A manifest-excluded tool registers nothing (returned above); only an
+            # included tool's declared refs extractor lands, keyed by its bound name.
+            if tool_refs is not None:
+                self._tool_refs_registry.register(name, tool_refs)
+            return self.bind_tool_func(*decorator_args, **kwargs)(func)
 
         if func_to_register is not None:
             return decorator(func_to_register)
 
         return decorator
+
+    def tool_refs_extractor(self, name: str) -> "ToolRefsExtractor | None":
+        """The declared tool-references extractor a base tool registered under
+        ``name``, or ``None`` when it declared none."""
+        return self._tool_refs_registry.get(name)
 
     def toolkit(self, *args, **kwargs):
         func_to_register = None
