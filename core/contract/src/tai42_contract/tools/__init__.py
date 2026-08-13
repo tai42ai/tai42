@@ -7,7 +7,7 @@ registration sub-protocol. Vendor return types (fastmcp ``Tool``, langchain
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_checkable
 
 from pydantic import BaseModel
@@ -21,6 +21,13 @@ if TYPE_CHECKING:
 # Preserves the decorated callable's type through ``tool`` / ``toolkit`` so
 # ``@app.tools.tool`` keeps the wrapped function's signature instead of ``Any``.
 F = TypeVar("F", bound=Callable[..., Any])
+
+#: A base tool's declared tool-references extractor: given a preset's baked
+#: ``fixed_kwargs``, returns the tool names a preset of THIS base composes. The
+#: platform never knows a base tool's config shape — the base tool declares how to
+#: read composed tool names out of its own ``fixed_kwargs``. Every entry must be a
+#: string; a non-string / None entry is a plugin bug the reader raises on.
+ToolRefsExtractor = Callable[[dict[str, Any]], Iterable[str]]
 
 
 class ToolInfo(BaseModel):
@@ -42,11 +49,16 @@ class AppTools(Protocol):
 
     # Bare ``@app.tools.tool`` decorates the function directly (returns it
     # unchanged); parameterized ``@app.tools.tool(...)`` returns the decorator.
-    # Both keep the wrapped function's type.
+    # Both keep the wrapped function's type. ``tool_refs`` is the optional declared
+    # extractor for the composed tool names a preset of this base tool carries in
+    # its baked ``fixed_kwargs`` (registered only when the manifest includes the
+    # tool).
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
-    def tool(self, *args: Any, force: bool = False, **kwargs: Any) -> Callable[[F], F]: ...
+    def tool(
+        self, *args: Any, force: bool = False, tool_refs: ToolRefsExtractor | None = None, **kwargs: Any
+    ) -> Callable[[F], F]: ...
 
     @overload
     def toolkit(self, target: F, /) -> F: ...
@@ -74,5 +86,10 @@ class AppTools(Protocol):
 
     def unregister_tool_base(self, tool_name: str) -> list[str]: ...
 
+    # The declared tool-references extractor a base tool registered under ``name``,
+    # or ``None`` when it declared none — the preset reference collector consults it
+    # for a body's ``base_tool``.
+    def tool_refs_extractor(self, name: str) -> ToolRefsExtractor | None: ...
 
-__all__ = ["AppTools", "ToolInfo"]
+
+__all__ = ["AppTools", "ToolInfo", "ToolRefsExtractor"]

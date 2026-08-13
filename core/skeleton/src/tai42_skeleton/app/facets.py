@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
+    from tai42_contract.tools import ToolRefsExtractor
     from tai42_contract.versioning import VersionedStore
     from tai42_contract.webhooks import WebhookVerifier
 
@@ -93,6 +94,11 @@ class ToolsFacet(_Facet):
 
     def unregister_tool_base(self, tool_name: str) -> list[str]:
         return self._app._tool_binding.unregister_tool_base(tool_name)
+
+    def tool_refs_extractor(self, name: str) -> ToolRefsExtractor | None:
+        """The declared tool-references extractor a base tool registered under
+        ``name``, or ``None`` when it declared none."""
+        return self._app._tool_binding.tool_refs_extractor(name)
 
     def base_of(self, name: str) -> str:
         """The base tool ``name`` was produced from (``name`` itself for a base or

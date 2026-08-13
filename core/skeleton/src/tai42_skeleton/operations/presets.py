@@ -282,32 +282,75 @@ def _spec_reference_error(
     return None
 
 
-def _node_references_tool(node: dict[str, Any], target: str) -> bool:
-    """Whether a spec node names ``target`` in its ``tool_names`` at any depth,
+def _referenced_tool_names(node: dict[str, Any]) -> set[str]:
+    """Every tool name a spec node composes in its ``tool_names`` at any depth,
     recursing ``subagents`` — the SAME traversal :func:`_spec_reference_error` walks,
     read-only. Only ``tool_names`` can name a preset: inline ``presets`` entries and a
     ``base_tool`` are rejected at authoring if they name a preset, so neither is
-    scanned here."""
+    scanned here. This is the builtin ``fixed_kwargs`` walk the combined collector
+    :func:`_preset_references` unions with the base tool's declared extractor."""
+    names: set[str] = set()
     tool_names = node.get("tool_names", [])
-    if isinstance(tool_names, list) and target in tool_names:
-        return True
+    if isinstance(tool_names, list):
+        names.update(name for name in tool_names if isinstance(name, str))
     subagents = node.get("subagents", [])
     if isinstance(subagents, list):
         for entry in subagents:
-            if isinstance(entry, dict) and _node_references_tool(entry, target):
-                return True
-    return False
+            if isinstance(entry, dict):
+                names.update(_referenced_tool_names(entry))
+    return names
+
+
+def _preset_references(body: PresetBody) -> set[str]:
+    """Every tool name a preset body composes as tools: the UNION of the builtin
+    ``fixed_kwargs`` walk (:func:`_referenced_tool_names`) and the names the base
+    tool's DECLARED ``tool_refs`` extractor reads from ``fixed_kwargs`` (only when one
+    is registered for ``body.base_tool``). Population intersection, self-exclusion and
+    sorting are the callers' concern. The extractor is called raw: an exception
+    propagates loudly, and a non-string entry it returns is a plugin bug raised here —
+    never silently dropped, never an empty-list fallback."""
+    names = _referenced_tool_names(body.fixed_kwargs)
+    extractor = instance.app.tools.tool_refs_extractor(body.base_tool)
+    if extractor is not None:
+        for entry in extractor(body.fixed_kwargs):
+            if not isinstance(entry, str):
+                raise TypeError(
+                    f"tool_refs extractor for base tool {body.base_tool!r} returned a non-string reference {entry!r}"
+                )
+            names.add(entry)
+    return names
+
+
+def _reference_maps(bodies: dict[str, PresetBody]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """The ``uses`` and ``used_by`` maps over the active preset population, built in one
+    pass. ``uses[X]`` is the sorted OTHER preset names X's active body composes as tools
+    (the combined collector :func:`_preset_references`, intersected with the population
+    so base and foreign tools never appear); ``used_by[X]`` is the sorted OTHER presets
+    whose active bodies compose X. Self is never listed on either side. Every population
+    name is a key on both maps, empty when it has no references."""
+    population = set(bodies)
+    uses: dict[str, set[str]] = {name: set() for name in bodies}
+    used_by: dict[str, set[str]] = {name: set() for name in bodies}
+    for name, body in bodies.items():
+        for referenced in _preset_references(body) & population:
+            if referenced == name:
+                continue
+            uses[name].add(referenced)
+            used_by[referenced].add(name)
+    return (
+        {name: sorted(names) for name, names in uses.items()},
+        {name: sorted(names) for name, names in used_by.items()},
+    )
 
 
 def _referencing_presets(old_name: str, bodies: dict[str, PresetBody]) -> list[str]:
-    """Every OTHER preset whose ACTIVE body's ``fixed_kwargs`` composes ``old_name``
-    as a tool (``tool_names`` at any depth) — the referees a rename would strand,
-    sorted for a stable, fully-listed 409. Only active bodies are walked: a
-    non-active historical version may still name the old tool, loud at
-    authoring / run time if ever rolled back (delete's existing posture)."""
-    return sorted(
-        name for name, body in bodies.items() if name != old_name and _node_references_tool(body.fixed_kwargs, old_name)
-    )
+    """Every OTHER preset whose ACTIVE body composes ``old_name`` as a tool (the
+    combined collector :func:`_preset_references`, so a DECLARED reference counts too)
+    — the referees a rename would strand, sorted for a stable, fully-listed 409. Only
+    active bodies are walked: a non-active historical version may still name the old
+    tool, loud at authoring / run time if ever rolled back (delete's existing
+    posture)."""
+    return sorted(name for name, body in bodies.items() if name != old_name and old_name in _preset_references(body))
 
 
 async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -> str | None:
@@ -452,12 +495,22 @@ async def _write_validator_error(body: PresetBody) -> str | None:
 # -- record views ------------------------------------------------------------
 
 
-def _store_record_view(name: str, active_version: int, body: PresetBody) -> dict[str, Any]:
+def _store_record_view(
+    name: str,
+    active_version: int,
+    body: PresetBody,
+    *,
+    uses: list[str],
+    used_by: list[str],
+) -> dict[str, Any]:
     """A store-backed record row: identity + active-body fields + the
     ``conflicted`` flag (name in the quarantine map) with its ``conflicted_reason``
-    (the human-readable cause, ``null`` when not conflicted). Takes the
-    already-fetched active ``body`` so the caller batches the read (the list route)
-    or reuses one read (the get route) rather than round-tripping per row."""
+    (the human-readable cause, ``null`` when not conflicted), plus the ``uses`` /
+    ``used_by`` cross-references (sorted OTHER active presets this body composes, and
+    that compose it — see :func:`_reference_maps`). Takes the already-fetched active
+    ``body`` and this row's two reference lists so the caller batches the reads (the
+    list route) or reuses one read (the get route) rather than round-tripping per
+    row."""
     mgr = instance.app.preset_manager
     return {
         "name": name,
@@ -468,6 +521,8 @@ def _store_record_view(name: str, active_version: int, body: PresetBody) -> dict
         "output_schema": body.output_schema,
         "conflicted": mgr.is_quarantined(name),
         "conflicted_reason": mgr.quarantine_reason(name),
+        "uses": uses,
+        "used_by": used_by,
     }
 
 
@@ -479,9 +534,14 @@ def _new_record_view(
     output_schema: dict[str, Any] | None,
     *,
     active_version: int,
+    uses: list[str],
+    used_by: list[str],
 ) -> dict[str, Any]:
-    """The record shape a fresh create returns — built from the just-applied spec
-    (a fresh preset is never conflicted), so no extra store read is needed."""
+    """The record shape a fresh create returns — the identity + active-body fields
+    from the just-applied spec (a fresh preset is never conflicted), plus this row's
+    ``uses`` / ``used_by`` cross-references (see :func:`_reference_maps`), computed by
+    the caller from the post-write active-body population so the create response
+    parses under the same record schema as the list / get rows."""
     return {
         "name": name,
         "base_tool": base_tool,
@@ -491,6 +551,8 @@ def _new_record_view(
         "output_schema": output_schema,
         "conflicted": False,
         "conflicted_reason": None,
+        "uses": uses,
+        "used_by": used_by,
     }
 
 
@@ -551,11 +613,21 @@ async def list_presets() -> list[dict[str, Any]]:
         records = await instance.app.presets.store.list_presets()
         # One batched active-body read instead of a per-record round-trip (N+1).
         bodies = await instance.app.presets.list_active_bodies()
+        # Both cross-reference maps in one pass over the population.
+        uses_map, used_by_map = _reference_maps(bodies)
         # ``records`` and ``bodies`` are two separate reads; a preset deleted between
         # them is gone from ``bodies`` — skip it rather than KeyError, it is no longer
         # a live row to list.
         rows = [
-            _store_record_view(rec.name, rec.active_version, bodies[rec.name]) for rec in records if rec.name in bodies
+            _store_record_view(
+                rec.name,
+                rec.active_version,
+                bodies[rec.name],
+                uses=uses_map[rec.name],
+                used_by=used_by_map[rec.name],
+            )
+            for rec in records
+            if rec.name in bodies
         ]
     return rows
 
@@ -697,8 +769,20 @@ async def create_preset(
         raise register_exc
     await instance.app.emit_list_changed("tool")
     await _fanout_reload(name)
+    # Cross-references from the post-write population — the new body may already
+    # compose other presets (``uses``), and a sibling authored against this name is
+    # picked up too (``used_by``); one source of truth with the list / get rows.
+    bodies = await instance.app.presets.list_active_bodies()
+    uses_map, used_by_map = _reference_maps(bodies)
     return _new_record_view(
-        name, base_tool, description, extensions, output_schema, active_version=record.active_version
+        name,
+        base_tool,
+        description,
+        extensions,
+        output_schema,
+        active_version=record.active_version,
+        uses=uses_map.get(name, []),
+        used_by=used_by_map.get(name, []),
     )
 
 
@@ -707,14 +791,21 @@ async def create_preset(
 
 @operation(summary="Get a preset", tags=["presets"], errors=[NotFoundError])
 async def get_preset(name: str) -> dict[str, Any]:
-    """The store record + the active ``fixed_kwargs``; 404 for an absent name."""
+    """The store record + the active ``fixed_kwargs`` + the ``uses`` / ``used_by``
+    cross-references; 404 for an absent name."""
     try:
         record = await instance.app.presets.store.get_preset(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
-    # Fetch the active body ONCE and pass it into the record view + the response.
-    body = await instance.app.presets.store.get_active_body(name)
-    view = _store_record_view(name, record.active_version, body)
+    # Read the active-body population so this row's references compute identically to
+    # the list route. A name gone between the record read and here was deleted
+    # concurrently — a genuine 404, never a silent KeyError.
+    bodies = await instance.app.presets.list_active_bodies()
+    if name not in bodies:
+        raise NotFoundError(f"preset {name!r} not found")
+    body = bodies[name]
+    uses_map, used_by_map = _reference_maps(bodies)
+    view = _store_record_view(name, record.active_version, body, uses=uses_map[name], used_by=used_by_map[name])
     view["fixed_kwargs"] = body.fixed_kwargs
     return view
 

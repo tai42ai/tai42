@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.presets.manager import PresetManager
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.template import ResourceManager
+    from tai42_skeleton.tools import ToolRefsRegistry
     from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -277,6 +278,10 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _write_validator_registry(self) -> "PresetWriteValidatorRegistry":
         return self._serving_core._write_validator_registry
+
+    @property
+    def _tool_refs_registry(self) -> "ToolRefsRegistry":
+        return self._serving_core._tool_refs_registry
 
     @property
     def _backup_registry(self) -> "BackupRegistry":
@@ -720,6 +725,11 @@ class TaiMCPLifecycleMixin(ABC):
         # update()/reload — the manifest's tool modules re-run their
         # register_write_validator() call each start(). Mirrors the resets above.
         self._write_validator_registry.reset()
+
+        # Reset so a dropped tool-references declaration doesn't linger across
+        # update()/reload — the manifest's tool modules re-run their
+        # @app.tools.tool(tool_refs=...) decorator each start(). Mirrors the reset above.
+        self._tool_refs_registry.reset()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep

@@ -26,7 +26,7 @@ import tai42_contract
 # (webhook_verifiers + channels), so the distinct-name union (57) is three
 # fewer than the pair count (60).
 EXPECTED_FACADE = {
-    # tools (11)
+    # tools (12)
     "tool",
     "toolkit",
     "get_tool",
@@ -38,6 +38,7 @@ EXPECTED_FACADE = {
     "register_tool_info",
     "unregister_tool_info",
     "unregister_tool_base",
+    "tool_refs_extractor",
     # agents (3)
     "agent",
     "get_agent",
@@ -204,11 +205,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 61 (sub-protocol, member) pairs over 58 distinct names — ``store`` is
+    # 62 (sub-protocol, member) pairs over 59 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 58, f"union={len(union)}"
-    assert total == 61 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 59, f"union={len(union)}"
+    assert total == 62 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_namespaces():
