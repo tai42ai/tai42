@@ -7,13 +7,18 @@
  * four-field edit dialog. An effectively hidden tool is excluded outright — unhiding
  * is a CLI/API operation (overlay `hidden:false`), never a screen toggle.
  *
+ * The list paginates client-side (24 entries per page by default) over a catalog larger
+ * than one page, and the shell-owned `?tags=` deep link filters the whole current
+ * directory BEFORE the page slice — so every navigation here scopes the list with it,
+ * keeping each asserted tool inside a single page.
+ *
  * Every fixture is SEEDED through the API and, where the UI mutates state (the edit
  * dialog), the effect is read back through the API — so a green assertion proves the
  * served bundle drove the real overlay store, not a client-only illusion. The overlay
  * is DB-backed and this stack is shared/serial, so each test cleans up the rows and
  * folders it created.
  */
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { apiHeaders, seedCredential, uniq } from './helpers';
 
 /** The tools whose overlay a test may touch; reset before and after so a shared,
@@ -61,6 +66,23 @@ async function createFolder(request: APIRequestContext, name: string): Promise<s
   return ((await res.json()) as { data: { id: string } }).data.id;
 }
 
+/** Navigate to a scoped tools URL and wait for GET responses on `/api/tools/tags` and
+ *  `/api/tool-meta`. While those reads are pending every tool lacks tags and overlay
+ *  state, so an absence assertion could hold for the wrong reason — navigations that
+ *  assert absence go through here. The waits resolve on the wire (the shell issues a
+ *  second `/api/tool-meta` read, so that leg may resolve on either); the gap to the
+ *  committed merge is covered by each call site's rendered anchor. */
+async function gotoToolsSettled(page: Page, url: string): Promise<void> {
+  const sideReads = ['/api/tools/tags', '/api/tool-meta'].map((path) =>
+    page.waitForResponse(
+      (response) =>
+        response.url().includes(path) && response.request().method() === 'GET' && response.ok(),
+    ),
+  );
+  await page.goto(url);
+  await Promise.all(sideReads);
+}
+
 test.beforeEach(async ({ request }) => {
   await resetOverlay(request);
 });
@@ -77,7 +99,8 @@ test('display name + merged native/overlay tags render; edit dialog round-trips 
   await upsert(request, 'e2e_echo', { display_name: displayName, tags: [overlayTag] });
 
   await seedCredential(page);
-  await page.goto('/tools');
+  // Few tools bear `e2e`, so the scoped list fits one page.
+  await page.goto('/tools?tags=e2e');
 
   // The tool renders its display name; its real name stays visible for identity. The
   // flat explorer lists each tool once and the aria-label is exact, so no group scoping
@@ -87,19 +110,16 @@ test('display name + merged native/overlay tags render; edit dialog round-trips 
   await expect(link).toContainText(displayName);
   await expect(link).toContainText('e2e_echo');
 
-  // MERGED tags: e2e_echo carries BOTH its native `e2e` tag and its overlay tag. The
-  // flat explorer proves the merge through the tag-chip OR filter — selecting either tag
-  // keeps the tool, so both are on its merged set. The tag is reached through the
-  // shell-owned `?tags=` param (a deep-link the app owns): a selected tag is always
-  // surfaced as a PRESSED chip regardless of the visible-chip cap, which collapses the
-  // rest into a static "+N more". The native leg:
-  await page.goto('/tools?tags=e2e');
+  // MERGED tags: e2e_echo carries BOTH its native `e2e` tag and its overlay tag, and the
+  // tag-chip OR filter keeps the tool under either — so both are on its merged set. The
+  // native leg is the filter already applied above; a selected tag is always surfaced as
+  // a PRESSED chip regardless of the visible-chip cap (which collapses the rest into a
+  // static "+N more"), so the pressed chip proves the filter UI reflects it.
   await expect(
     page
       .getByRole('group', { name: 'Filter tools by tag' })
       .getByRole('button', { name: /^e2e \(/ }),
   ).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeVisible();
 
   // The overlay leg — filtering by the overlay tag keeps the tool and its chip is pressed,
   // proving the overlay tag merged onto the native set.
@@ -139,13 +159,16 @@ test('folder explorer: a filed tool lives inside its folder, reached via the bre
   await upsert(request, 'e2e_echo', { folder_id: folderId });
 
   await seedCredential(page);
-  await page.goto('/tools');
+  // Folders are never tag-filtered, so the `e2e` filter narrows only the tool list: the
+  // folder stays offered and the absence assertions run against a short, fully-merged
+  // list.
+  await gotoToolsSettled(page, '/tools?tags=e2e');
 
-  // At the root the tool is NOT listed; its folder is offered as a subfolder to open.
-  // `exact` so a longer-named tool at the root never substring-matches e2e_echo.
-  await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeHidden();
+  // At the root the folder is offered as a subfolder to open; the filed tool is NOT
+  // listed. `exact` so a longer-named tool at the root never substring-matches e2e_echo.
   const folderButton = page.getByRole('button', { name: folderName });
   await expect(folderButton).toBeVisible();
+  await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeHidden();
 
   // Opening the folder navigates inward; the breadcrumb shows the path and the tool
   // appears in the folder's flat list.
@@ -168,9 +191,21 @@ test('a hidden tool is excluded from the list; unhiding via the API reveals it',
   await upsert(request, 'generate_uuid', { hidden: true });
 
   await seedCredential(page);
-  await page.goto('/tools');
+  // The toolbox declares the native `uuid` tag on generate_uuid alone, so the list the
+  // tool is asserted absent from — and then present in — is one page long.
+  await gotoToolsSettled(page, '/tools?tags=uuid');
 
-  // Hidden: absent from the list, with no screen affordance to reveal it.
+  // The filter row overflows into a static "+N more" only once the tags read has
+  // COMMITTED — before that the vocabulary holds just the Untagged bucket and the
+  // synthesized selected chip, and the same empty state renders for the wrong reason —
+  // so the overflow anchors the absence assertions to the merged list.
+  await expect(
+    page.getByRole('group', { name: 'Filter tools by tag' }).getByText(/^\+\d+ more$/),
+  ).toBeVisible();
+
+  // Hidden: the merged scoped list is genuinely empty and the tool absent, with no
+  // screen affordance to reveal it.
+  await expect(page.getByText('No tools match')).toBeVisible();
   await expect(page.getByRole('link', { name: `Open tool generate_uuid` })).toBeHidden();
 
   // Unhide is a CLI/API operation (`tai tool-meta … --visibility shown`, i.e. overlay
