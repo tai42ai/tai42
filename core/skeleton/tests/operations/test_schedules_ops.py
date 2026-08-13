@@ -296,10 +296,12 @@ async def test_create_permission_denied_from_the_dispatch_passes_through(install
     _assert_nothing_logged_server_side(caplog)
 
 
-async def test_create_authorizes_the_submitted_tool_with_merged_arguments(install, monkeypatch) -> None:
-    # The submitted tool is authorized against the live caller — on the exact merged
-    # arguments the dispatch fires (schedule keys win on collision) — before scheduling.
-    install(_FakeTools(_MARKERS | {"send"}, run_result="ok"))
+async def test_create_authorizes_the_submitted_tool_with_the_translated_dispatch(install, monkeypatch) -> None:
+    # A friendly ``cron`` on a base tool is translated onto the ``<tool>_schedule_task``
+    # branch: the submitted tool authorized against the live caller is that branch, on the
+    # exact arguments the dispatch fires — the tool kwargs plus the translated schedule
+    # keys, with a deterministically derived name.
+    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_result="ok"))
     seen: list[tuple] = []
 
     async def _spy(tool_name, arguments):
@@ -308,13 +310,23 @@ async def test_create_authorizes_the_submitted_tool_with_merged_arguments(instal
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _spy)
     out = await schedules_ops.create_schedule("send", {"to": "x"}, {"cron": "* * * * *"})
     assert out == "ok"
-    assert seen == [("send", {"to": "x", "cron": "* * * * *"})]
+    assert len(seen) == 1
+    name, arguments = seen[0]
+    assert name == "send_schedule_task"
+    assert arguments == {
+        "to": "x",
+        "backend_schedule_name": arguments["backend_schedule_name"],
+        "backend_schedule": "* * * * *",
+    }
+    assert arguments["backend_schedule_name"].startswith("send_")
 
 
 async def test_create_denied_tool_is_refused_before_scheduling(install, monkeypatch) -> None:
     # A denial from the submitted-tool authorization is the caller's 403, raised before the
     # tool is ever dispatched to the scheduling backend.
-    install(_FakeTools(_MARKERS | {"write_env"}, run_exc=RuntimeError("must not be scheduled")))
+    install(
+        _FakeTools(_MARKERS | {"write_env", "write_env_schedule_task"}, run_exc=RuntimeError("must not be scheduled"))
+    )
 
     async def _deny(tool_name, arguments):
         raise PermissionDenied("access denied: POST /api/config/env is not permitted")
@@ -330,7 +342,7 @@ async def test_create_unsettled_operation_surface_is_503(install, monkeypatch) -
     # (503), the second source of the status this door declares. It fires before the
     # dispatch, so nothing is scheduled, and it reaches the caller retriable rather than
     # flattened into a 500.
-    install(_FakeTools(_MARKERS | {"send"}, run_exc=RuntimeError("must not be scheduled")))
+    install(_FakeTools(_MARKERS | {"send", "send_schedule_task"}, run_exc=RuntimeError("must not be scheduled")))
 
     async def _unsettled(tool_name, arguments):
         raise OperationSurfaceUnsettledError("the operation surface is being rebuilt — retry shortly")

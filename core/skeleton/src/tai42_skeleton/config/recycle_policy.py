@@ -52,6 +52,7 @@ TIER2_K8S_REFUSED_KEYS: frozenset[str] = frozenset(
         "TAI_RATE_LIMIT_REDIS_URL",
         "HOOKS_REDIS_URL",
         "CONNECTOR_STORE_REDIS_URL",
+        "FLOW_REDIS_URL",
         "MEMORY_REDIS_PASSWORD",
         "LLM_PROVIDER_CHECKPOINT_CONN_STRING",
         "LLM_PROVIDER_STORE_CONN_STRING",
@@ -77,8 +78,8 @@ TIER2_K8S_REFUSED_KEYS: frozenset[str] = frozenset(
 # Tier 2 (compose) — the ``x-tai-app-env`` anchor's keys MINUS the X-classified
 # deployment bare reads (shape marker + sentinel path, refused on the X axis and never
 # recyclable), so ``TAI_SUPERVISED`` is excluded. Every service reuses the one anchor,
-# so this key set IS the compose deployment-value pinning; the Tier-1 bus URL the
-# anchor also carries stays in the set (refused on its own axis as well).
+# so this key set IS the compose deployment-value pinning; the Tier-1 bus URLs the
+# anchor also carries stay in the set (refused on their own axis as well).
 TIER2_COMPOSE_REFUSED_KEYS: frozenset[str] = frozenset(
     {
         "TAI_CONFIG_MODE",
@@ -88,6 +89,7 @@ TIER2_COMPOSE_REFUSED_KEYS: frozenset[str] = frozenset(
         "ACCESS_CONTROL_ENABLE",
         "ACCESS_CONTROL_ALWAYS_PUBLIC_PATH_PREFIXES",
         "TAI_BUS_REDIS_URL",
+        "TAI_DEFAULT_REDIS_URL",
         "SUB_MCP_REDIS_URL",
         "ARQ_REDIS_URL",
         "CELERY_BROKER_URL",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from fastmcp import Context
+from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_rq.callback import CallbackSchema, callback_execution, prepare_backend_kwargs
 
@@ -39,6 +40,18 @@ async def test_callback_execution_runs_tool_with_expr_output(app):
     result = await callback_execution(10, callback)
     assert result == "chained-result"
     assert app.tools.run_calls == [("next", {"value": 10})]
+
+
+async def test_callback_execution_runs_tool_detached(app):
+    # A worker execution has no live caller, so the callback's tool observes the
+    # detached flag set; the flag never leaks past the callback.
+    app.tools.run_result = "chained-result"
+    callback = CallbackSchema(tool="next", condition=". > 5", expr="{value: .}")
+
+    await callback_execution(10, callback)
+
+    assert app.tools.detached_seen == [True]
+    assert in_detached_run() is False
 
 
 async def test_callback_execution_without_condition_always_runs(app):

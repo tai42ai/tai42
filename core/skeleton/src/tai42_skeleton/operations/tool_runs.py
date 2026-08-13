@@ -52,6 +52,7 @@ from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
@@ -281,21 +282,35 @@ class ToolRunStore:
 # -- supervisor --------------------------------------------------------------
 
 
+def _enroll_supervisor(task: asyncio.Task[None]) -> None:
+    """Register ``task`` in the drain registry and tag it with the epoch that ADMITTED
+    its run, so a whole-server drain cancels-and-awaits it and an epoch retire drains
+    exactly this generation's runs — sequencing its terminal write ahead of the pooled
+    clients' close. A ``None`` epoch (a loop-less unit context) tags nothing."""
+    from tai42_skeleton.app.epoch import current_epoch_or_none
+
+    _SUPERVISORS.add(task)
+    epoch = current_epoch_or_none()
+    if epoch is not None:
+        _SUPERVISOR_EPOCH[task] = epoch.number
+
+
+def _discard_supervisor(task: asyncio.Task[None]) -> None:
+    """Drop the drain registry's strong reference and epoch tag for a finished
+    supervisor. Reserves no ``_ACTIVE_RUNS`` slot to release — the caller that reserved
+    one (the submit door) releases it in its own done-callback."""
+    _SUPERVISORS.discard(task)
+    _SUPERVISOR_EPOCH.pop(task, None)
+
+
 def _spawn_supervisor(run_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
     """Detach the task that runs ``tool_name`` and persists its outcome.
 
     The task must be spawned HERE so it copies the submitting context: that carries a
     bound execution identity into the run, which is what authorizes the dispatch
     :func:`_supervise` makes long after the submitting fire released its binding."""
-    from tai42_skeleton.app.epoch import current_epoch_or_none
-
     task = asyncio.create_task(_supervise(run_id, tool_name, arguments))
-    _SUPERVISORS.add(task)
-    # Tag the run with the epoch that admitted it, so an epoch retire drains exactly
-    # this generation's runs. ``None`` epoch (a loop-less unit context) tags nothing.
-    epoch = current_epoch_or_none()
-    if epoch is not None:
-        _SUPERVISOR_EPOCH[task] = epoch.number
+    _enroll_supervisor(task)
     task.add_done_callback(lambda t: _on_supervisor_done(t, run_id, tool_name))
 
 
@@ -310,8 +325,7 @@ def _on_supervisor_done(task: asyncio.Task[None], run_id: str, tool_name: str) -
     the ``run_id``/``tool_name`` makes it a timely, attributable signal. A
     cancellation (test teardown / shutdown) is the normal stop and stays silent."""
     global _ACTIVE_RUNS
-    _SUPERVISORS.discard(task)
-    _SUPERVISOR_EPOCH.pop(task, None)
+    _discard_supervisor(task)
     # Release the concurrency slot the submit door reserved for this run. Every
     # spawned supervisor reaches this callback exactly once, so the count returns
     # to the submit door's increment.
@@ -342,7 +356,17 @@ async def _refresh_liveness_loop(r: Any, store: ToolRunStore, run_id: str, setti
         await asyncio.sleep(cadence)
 
 
-async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
+async def _supervise(
+    run_id: str, tool_name: str, arguments: dict[str, Any], *, propagate_failure: bool = False
+) -> None:
+    """Run ``tool_name`` and persist its terminal record, refreshing liveness while it runs.
+
+    ``propagate_failure`` governs a RAISING tool: the failure is recorded either way, but
+    when set the ORIGINAL exception is re-raised AFTER the record is written, so an inline
+    caller's own failure surfacing (the hooks fan-out's per-hook error log) still fires.
+    The detached submit supervisor leaves it off — it is the top of its task, with no caller
+    to propagate to, so a recorded failure is the whole outcome (a re-raise would only reach
+    the done-callback's generic task-failure log)."""
     settings = tool_runs_settings()
     store = ToolRunStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -350,6 +374,10 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
         # Bind this run's id as the interaction origin for the tool body, so a
         # question the tool raises through ``ask_user`` is attributed to the run.
         origin_token = set_interaction_origin(run_id)
+        # Detached: this run has no live caller holding a connection, so the agent run
+        # budget does not apply — covers a background submit AND a store-ON hook fire.
+        detached_token = mark_detached_run()
+        tool_error: Exception | None = None
         try:
             try:
                 result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
@@ -380,9 +408,10 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
                     )
                 raise
             except Exception as exc:
-                # No open request to propagate to — persist the raised error as
-                # record data so the requester reads it. Logged too; never dropped.
+                # Persist the raised error as record data so the requester reads it; logged
+                # too, never dropped. An inline caller additionally re-raises it below.
                 logger.exception("tool-run %s (%s) failed", run_id, tool_name)
+                tool_error = exc
                 fields = {"status": _FAILED, "finished_at": _now().isoformat(), "error": str(exc)}
             else:
                 fields = {"status": _SUCCEEDED, "finished_at": _now().isoformat(), "result": result_json}
@@ -397,11 +426,80 @@ async def _supervise(run_id: str, tool_name: str, arguments: dict[str, Any]) -> 
                     tool_name,
                     fields["status"],
                 )
+            # Terminal record written; only now let the failure propagate to an inline
+            # caller so its own surfacing runs on top of the recorded failure.
+            if tool_error is not None and propagate_failure:
+                raise tool_error
         finally:
+            reset_detached_run(detached_token)
             reset_interaction_origin(origin_token)
             refresher.cancel()
             with suppress(asyncio.CancelledError):
                 await refresher
+
+
+async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
+    """Execute ``tool_name`` under the CURRENTLY bound execution identity, writing the
+    SAME full run-record lifecycle (running -> succeeded/failed) a background submit
+    writes — so a hook- or trigger-dispatched fire is listable via ``GET /api/tool-runs``
+    and gettable by run id exactly as a submitted run, attributed to and indexed under the
+    fire's execution key.
+
+    Store OFF (no tool-run Redis configured): the tool still runs, unrecorded — the same
+    OFF semantics as the rest of the tool-run surface, no error and no warning.
+
+    Reserves NO ``max_concurrent_runs`` slot and detaches no supervisor task: the run is
+    awaited inline and its capacity is the CALLER's to bound (the hooks manager's
+    ``max_workers`` semaphore), never the submit door's per-worker slot pool. A failure
+    creating the record propagates loudly to the caller."""
+    if not tool_runs_store_configured():
+        # Detached, store OFF: run unrecorded but still with no live caller, so the
+        # agent run budget is skipped here exactly as on the store-ON path. The tool is
+        # thread-offloaded like every other execution site, so a synchronous tool never
+        # blocks the event loop — the OFF branch only skips recording, not the offload.
+        detached_token = mark_detached_run()
+        try:
+            await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
+        finally:
+            reset_detached_run(detached_token)
+        return
+
+    settings = tool_runs_settings()
+    store = ToolRunStore(settings.key_prefix)
+    # The owning identity is the fire's own bound key — request_identity reads it from the
+    # bound execution identity — so the record is attributed and per-identity indexed
+    # exactly as a restricted submit's is.
+    user_id, _restricted = request_identity()
+    run_id = secrets.token_urlsafe(16)
+    started = _now()
+    async with client_ctx(RedisClient, settings.redis) as r:
+        await store.create_run(
+            r, run_id, tool_name, started.isoformat(), started.timestamp(), settings, user_id=user_id
+        )
+    # Run under a supervisor task ENROLLED in the drain registry exactly like a submitted
+    # run — so a drain (process shutdown or an epoch retire) cancels-and-awaits it and its
+    # terminal write lands BEFORE the pooled clients close, never leaving a completed run
+    # stuck ``running`` to reconcile to ``lost``. The task reserves NO ``max_concurrent_runs``
+    # slot (its capacity is the hooks manager's ``max_workers`` semaphore), so its
+    # done-callback only clears the registry, never the submit door's ``_ACTIVE_RUNS`` count.
+    # The run is still awaited INLINE, so ``propagate_failure`` re-raises a tool failure to
+    # the fan-out's per-hook error log exactly as a direct await would.
+    task = asyncio.create_task(_supervise(run_id, tool_name, arguments, propagate_failure=True))
+    _enroll_supervisor(task)
+    task.add_done_callback(_discard_supervisor)
+    try:
+        await task
+    except asyncio.CancelledError:
+        # A drain cancelled the enrolled run task directly: its terminal ``failed`` write
+        # already landed and the task is done — surface the cancellation. If instead THIS
+        # awaiting context was cancelled (e.g. the request drain severs the firing request)
+        # the run task is still live: propagate the cancel so it writes its terminal record,
+        # then await it — never orphaning the enrolled task nor double-cancelling a done one.
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        raise
 
 
 async def drain_supervisors(

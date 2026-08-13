@@ -5,6 +5,7 @@ lifecycle calls :meth:`reset` on every start/reload so a dropped agent doesn't
 linger; the importer then re-fires each agents-module's decorator.
 """
 
+import asyncio
 import copy
 import inspect
 import logging
@@ -17,9 +18,11 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
 from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.detached_util import in_detached_run
 
+from tai42_skeleton.agent.settings import agent_run_settings
 from tai42_skeleton.agent.thread_reservation import run_kwargs_from_tool_input
-from tai42_skeleton.exceptions.exceptions import TaiValidationError
+from tai42_skeleton.exceptions.exceptions import TaiValidationError, TurnTimeoutError
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -197,7 +200,27 @@ class AgentBinding:
             supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
-            return await self.get_agent(name).run(**run_kwargs)
+            # None = unbounded await. When set, the context manager cancels the
+            # turn on expiry (no orphaned run left continuing) and surfaces a
+            # loud, typed error; an inner ``TimeoutError`` the turn's own work
+            # raised (which the cm did not cause) passes through unchanged. Read
+            # the setting BEFORE creating ``run`` so a settings-validation error
+            # cannot leave an un-awaited coroutine behind.
+            timeout = agent_run_settings().run_timeout_seconds
+            run = self.get_agent(name).run(**run_kwargs)
+            # The run budget guards a live caller's held connection; a detached run
+            # (a background submit or a hook/trigger fire) has no caller and runs
+            # unbounded, exactly as if the setting were unset.
+            if timeout is None or in_detached_run():
+                return await run
+            cm = asyncio.timeout(timeout)
+            try:
+                async with cm:
+                    return await run
+            except TimeoutError:
+                if cm.expired():
+                    raise TurnTimeoutError(f"turn exceeded the {timeout:g}s run timeout") from None
+                raise
 
         # makefun's ``func_impl`` is typed ``Callable[[Any], Any]`` but it accepts
         # any callable (it drives the separate ``signature`` above); the ``**arguments``

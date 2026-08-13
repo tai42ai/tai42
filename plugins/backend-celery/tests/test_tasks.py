@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_celery.core import tasks as tasks_module
 from tai42_backend_celery.core.tasks import AsyncTask, prevent_celery_stream_capture, run_tool, tool_execution
@@ -68,6 +69,14 @@ async def test_run_tool_pops_tool_name_arg(stub_app) -> None:
 async def test_run_tool_missing_tool_name_raises(stub_app) -> None:
     with pytest.raises(KeyError):
         await run_tool(a=1)
+
+
+async def test_run_tool_runs_the_tool_detached(stub_app) -> None:
+    # A worker execution has no live caller, so the tool observes the detached
+    # flag set; the flag never leaks past the run.
+    await run_tool(backend_tool_name="my_tool", a=1)
+    assert stub_app.tools.detached_seen == [True]
+    assert in_detached_run() is False
 
 
 def test_tool_execution_runs_tool_through_app(stub_app) -> None:

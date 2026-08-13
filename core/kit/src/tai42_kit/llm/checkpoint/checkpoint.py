@@ -13,6 +13,19 @@ logger = logging.getLogger(__name__)
 CleanupFn = Callable[[], Awaitable[None]]
 Resource = Any
 
+# Resolution order: the conn string first, then the base Redis namespace. The
+# offload needs a module-capable Redis, so the message also names the module
+# requirement a plain Redis can't meet. Shared verbatim by the boot gate.
+REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE = (
+    not_configured_message(
+        "the Redis checkpoint",
+        "LLM_PROVIDER_CHECKPOINT_CONN_STRING",
+        "the base Redis URL REDIS_URL / TAI_DEFAULT_REDIS_URL",
+    )
+    + " The target Redis must provide the JSON and search modules (RedisJSON +"
+    + " RediSearch); a plain Redis fails mid-run on FT.* commands."
+)
+
 
 async def create_checkpoint_resource(
     provider: str,
@@ -109,7 +122,7 @@ async def create_checkpoint_resource(
                 # An unset conn string means the base Redis namespace.
                 conn_string = RedisConnectionSettings().redis_url
             if conn_string is None:
-                raise ValueError(not_configured_message("the Redis checkpoint", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
+                raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
 
             from langgraph.checkpoint.redis import AsyncRedisSaver
 

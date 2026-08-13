@@ -110,16 +110,21 @@ async def test_delete_501_when_backend_absent(install):
 # -- POST /api/schedules -----------------------------------------------------
 
 
-async def test_create_merges_kwargs_schedule_wins(install):
-    fake = install(_FakeTools(_MARKERS | {"send_report"}, run_result={"scheduled": True}))
+async def test_create_translates_cron_to_the_branch(install):
+    # A friendly ``cron`` on a base tool is translated onto the ``<tool>_schedule_task``
+    # branch's ``backend_schedule``; the tool's own kwargs ride along and the base tool is
+    # never dispatched with a cadence key merged into its arguments.
+    fake = install(_FakeTools(_MARKERS | {"send_report", "send_report_schedule_task"}, run_result={"scheduled": True}))
     body = (
-        b'{"tool_name": "send_report", "tool_kwargs": {"to": "a", "cron": "tool"},'
-        b' "schedule_kwargs": {"cron": "sched"}}'
+        b'{"tool_name": "send_report", "tool_kwargs": {"to": "a"},'
+        b' "schedule_kwargs": {"cron": "0 9 * * *", "backend_schedule_name": "nightly"}}'
     )
     resp = await router.create_schedule(_body_req(body))
     assert resp.status_code == 200
     assert _json(resp) == {"data": {"scheduled": True}}
-    assert fake.run_calls == [("send_report", {"to": "a", "cron": "sched"})]
+    assert fake.run_calls == [
+        ("send_report_schedule_task", {"to": "a", "backend_schedule_name": "nightly", "backend_schedule": "0 9 * * *"})
+    ]
 
 
 async def test_create_defaults_kwargs_to_empty(install):

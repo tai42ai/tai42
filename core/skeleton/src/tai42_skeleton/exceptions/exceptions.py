@@ -4,3 +4,7 @@ class TaiMCPServerError(Exception):
 
 class TaiValidationError(TaiMCPServerError):
     """Raised when validating tool/extension parameters or return values fails."""
+
+
+class TurnTimeoutError(TaiMCPServerError):
+    """Raised when a synchronous agent run exceeds the configured run timeout."""

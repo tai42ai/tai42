@@ -74,6 +74,10 @@ class BaseHooksManager(ABC):
         The bind must stay HERE, inside the per-hook coroutine: a contextvar set inside a
         task is invisible to its siblings, which is what gives each fanned-out hook its
         own key rather than a sibling's or the server's unbounded authority."""
+        # Imported at call time: the operation module runs a module-level app-lifecycle
+        # decorator, so a top-level import would force it to load before the app is bound.
+        from tai42_skeleton.operations.tool_runs import run_recorded
+
         writer = get_monitoring().writer
         with writer.start_span(name="hook_run_tool", kind=SpanKind.CHAIN):
             writer.update_current_span(
@@ -100,7 +104,7 @@ class BaseHooksManager(ABC):
             # minted by someone with no relation to the topic.
             tool_input = {**event_input, **(tool_kwargs_override or {}), **(hook.tool_kwargs or {})}
             async with bind_execution_identity(hook.execution_key, bound_fingerprint=hook.execution_key_fingerprint):
-                await tai42_app.tools.run_tool(hook.tool, tool_input)
+                await run_recorded(hook.tool, tool_input)
 
     async def _run_hook_with_limit(
         self, hook: HookParams, payload: dict[str, Any], tool_kwargs_override: dict[str, Any] | None = None

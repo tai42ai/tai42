@@ -56,10 +56,17 @@ async def test_redis_none_conn_string_raises_named_error_without_url(monkeypatch
     # guard runs first).
     fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
-    with pytest.raises(
-        ValueError, match=r"Redis checkpoint is not configured: set REDIS_URL \(or TAI_DEFAULT_REDIS_URL\)\."
-    ):
+    with pytest.raises(ValueError, match="LLM_PROVIDER_CHECKPOINT_CONN_STRING") as excinfo:
         await cp.create_checkpoint_resource("redis", None)
+    message = str(excinfo.value)
+    assert message == cp.REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE
+    assert message == (
+        "the Redis checkpoint is not configured: set "
+        "LLM_PROVIDER_CHECKPOINT_CONN_STRING (or the base Redis URL "
+        "REDIS_URL / TAI_DEFAULT_REDIS_URL). The target Redis must provide "
+        "the JSON and search modules (RedisJSON + RediSearch); a plain Redis "
+        "fails mid-run on FT.* commands."
+    )
 
 
 async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):

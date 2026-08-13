@@ -18,6 +18,7 @@ from typing import Any
 from celery import Task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_backend_celery.core.app import celery_app
 from tai42_backend_celery.core.callback import CallbackSchema, callback_execution
@@ -91,7 +92,13 @@ class AsyncTask(Task):
 async def run_tool(**kwargs: Any) -> Any:
     """Pop the dispatch-injected tool name and run that tool with the rest."""
     tool_name = kwargs.pop(celery_settings().tool_name_arg)
-    return await tai42_app.tools.run_tool(tool_name, kwargs)
+    # A worker executes a dequeued task with no live caller holding a
+    # connection, so the agent run budget does not apply.
+    detached_token = mark_detached_run()
+    try:
+        return await tai42_app.tools.run_tool(tool_name, kwargs)
+    finally:
+        reset_detached_run(detached_token)
 
 
 @celery_app.task(

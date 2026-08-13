@@ -41,19 +41,21 @@ from the caught exception, never third-party data), so naming it is a bounded, a
 disclosure. The admin-fenced ``run_tool`` door keeps the full error message; these
 doors do not.
 
-The caller-named tool's authorization is decided at schedule CREATION, run through the
-full tool-edge decision against the live submitter (a fenced/secret target is
-admin-only) — the later recurring firing has no live caller and runs anonymous/system,
-so creation is the only edge the inner tool reaches.
+The resolved dispatch target's authorization is decided at schedule CREATION, run
+through the full tool-edge decision against the live submitter (a fenced/secret target
+is admin-only) — the later recurring firing has no live caller and runs
+anonymous/system, so creation is the only edge the inner tool reaches.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.data import text_to_md5
 
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -77,6 +79,97 @@ _DELETE_TOOL = "backend_delete_schedule"
 _MARKER_TOOLS = (_LIST_TOOL, _DELETE_TOOL)
 _NO_BACKEND_MESSAGE = "no installed backend exposes scheduling tools"
 _TIME_TOOL = "current_time_info"
+
+# A schedule fires the branch tool ``<tool_name>_schedule_task`` (the backend's
+# ``schedule_task`` extension), reading its cadence from two EXPERT keys. The friendly
+# create form gives the cadence instead as ``cron`` (a crontab STRING) or the structured
+# crontab fields, which the door translates onto ``backend_schedule``.
+_SCHEDULE_BRANCH_SUFFIX = "_schedule_task"
+_SCHEDULE_EXTENSION = "schedule_task"
+_EXPERT_SCHEDULE_KEY = "backend_schedule"
+_SCHEDULE_NAME_KEY = "backend_schedule_name"
+_CRON_KEY = "cron"
+# The crontab fields ``normalize_schedule``'s crontab branch reads; a friendly create
+# maps whichever are given onto ``{"type": "crontab", ...}``.
+_CRONTAB_FIELD_KEYS = frozenset({"minute", "hour", "day_of_month", "month_of_year", "day_of_week"})
+
+
+def _derive_schedule_name(tool_name: str, tool_kwargs: dict[str, Any], backend_schedule: Any) -> str:
+    """A deterministic name when the caller gives none: the tool plus a fingerprint of the
+    full schedule spec (tool, its arguments, the cadence). An identical re-add resolves to
+    the same name and updates that schedule in place; any change of arguments or cadence
+    yields a distinct name, so repeated adds never clobber a different schedule."""
+    spec = json.dumps(
+        {"tool_name": tool_name, "tool_kwargs": tool_kwargs, "backend_schedule": backend_schedule},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"{tool_name}_{text_to_md5(spec)[:12]}"
+
+
+async def _resolve_schedule_dispatch(
+    tool_name: str, tool_kwargs: dict[str, Any], schedule_kwargs: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Resolve the (tool name, arguments) the create door dispatches.
+
+    Expert shape — the caller named a schedule branch or passed ``backend_schedule`` —
+    dispatches the named tool with schedule keys merged over the tool's own (schedule keys
+    win on collision), unchanged. The friendly shape translates a ``cron`` crontab string
+    or the structured crontab fields onto the ``<tool_name>_schedule_task`` branch's
+    ``backend_schedule``; an empty ``schedule_kwargs`` dispatches the named tool once. Any
+    other key on a base tool is a malformed request, and cadence keys never reach the base
+    tool's arguments (the silent run-once path)."""
+    if tool_name.endswith(_SCHEDULE_BRANCH_SUFFIX) or _EXPERT_SCHEDULE_KEY in schedule_kwargs:
+        return tool_name, {**tool_kwargs, **schedule_kwargs}
+
+    keys = set(schedule_kwargs)
+    stray = sorted(keys - ({_CRON_KEY, _SCHEDULE_NAME_KEY} | _CRONTAB_FIELD_KEYS))
+    if stray:
+        raise BadRequestError(
+            f"unrecognized schedule parameter(s) {stray} for base tool {tool_name!r}: a cadence is given as "
+            f"{_CRON_KEY!r} (a crontab string) or the crontab fields {sorted(_CRONTAB_FIELD_KEYS)}, "
+            f"optionally with an explicit {_SCHEDULE_NAME_KEY!r}"
+        )
+
+    cron_given = _CRON_KEY in keys
+    struct_given = bool(_CRONTAB_FIELD_KEYS & keys)
+    if not cron_given and not struct_given:
+        if _SCHEDULE_NAME_KEY in keys:
+            raise BadRequestError(
+                f"{_SCHEDULE_NAME_KEY!r} given without a cadence: add {_CRON_KEY!r} or the crontab fields"
+            )
+        return tool_name, {**tool_kwargs}
+    if cron_given and struct_given:
+        raise BadRequestError(
+            f"ambiguous cadence: give either {_CRON_KEY!r} or the crontab fields "
+            f"{sorted(_CRONTAB_FIELD_KEYS)}, not both"
+        )
+
+    branch_name = f"{tool_name}{_SCHEDULE_BRANCH_SUFFIX}"
+    tools = await tai42_app.tools.get_tools()
+    if branch_name not in tools:
+        raise NotFoundError(
+            f"tool {tool_name!r} cannot be scheduled on a cadence: its {branch_name!r} vehicle is not registered — "
+            f"the tool must carry the backend's {_SCHEDULE_EXTENSION!r} extension"
+        )
+
+    if cron_given:
+        cron_value = schedule_kwargs[_CRON_KEY]
+        if not isinstance(cron_value, str):
+            raise BadRequestError(f"{_CRON_KEY!r} must be a crontab string, not {type(cron_value).__name__}")
+        backend_schedule: Any = cron_value
+    else:
+        backend_schedule = {
+            "type": "crontab",
+            **{field: schedule_kwargs[field] for field in _CRONTAB_FIELD_KEYS & keys},
+        }
+    schedule_name = schedule_kwargs.get(_SCHEDULE_NAME_KEY) or _derive_schedule_name(
+        tool_name, tool_kwargs, backend_schedule
+    )
+    # Schedule keys win on collision so the backend's scheduling parameters cannot be
+    # shadowed by the tool's own arguments.
+    return branch_name, {**tool_kwargs, _SCHEDULE_NAME_KEY: schedule_name, _EXPERT_SCHEDULE_KEY: backend_schedule}
 
 
 class ScheduleCreate(BaseModel):
@@ -166,23 +259,21 @@ async def create_schedule(tool_name: str, tool_kwargs: dict[str, Any], schedule_
     surface — matching ``run_tool`` and ``submit_run``."""
     if not await _scheduling_backend_present():
         raise NotSupportedError(_NO_BACKEND_MESSAGE)
-    # Schedule keys win on collision so the backend's scheduling parameters cannot be
-    # shadowed by the tool's own arguments.
-    arguments: dict[str, Any] = {**tool_kwargs, **schedule_kwargs}
+    dispatch_name, arguments = await _resolve_schedule_dispatch(tool_name, tool_kwargs, schedule_kwargs)
     # The recurring firing has no live caller, so this creation is the ONLY edge the inner
     # tool reaches — decide it here, over the exact arguments the dispatch below fires.
-    await authorize_submitted_tool(tool_name, arguments)
+    await authorize_submitted_tool(dispatch_name, arguments)
     try:
-        return await tai42_app.tools.run_tool(tool_name, arguments)
+        return await tai42_app.tools.run_tool(dispatch_name, arguments)
     except UnknownToolError as exc:
-        if exc.tool_name == tool_name:
-            raise NotFoundError(f"unknown tool: {tool_name}") from exc
-        logger.exception("create-schedule %r raised unknown-tool %r during execution", tool_name, exc.tool_name)
+        if exc.tool_name == dispatch_name:
+            raise NotFoundError(f"unknown tool: {dispatch_name}") from exc
+        logger.exception("create-schedule %r raised unknown-tool %r during execution", dispatch_name, exc.tool_name)
         raise OperationFailed(f"schedule creation failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
         raise
     except Exception as exc:
-        logger.exception("create-schedule %r raised during execution", tool_name)
+        logger.exception("create-schedule %r raised during execution", dispatch_name)
         raise OperationFailed(f"schedule creation failed ({type(exc).__name__})") from exc
 
 

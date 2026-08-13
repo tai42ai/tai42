@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import sys
 import warnings
 from typing import cast
 
@@ -20,9 +21,12 @@ import pytest
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from pydantic.json_schema import PydanticJsonSchemaWarning
+from tai42_kit.settings import reset_all_settings
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.agent.thread_reservation import ReservedThreadNamespaceError
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.tools.binding import _derive_input_schema
@@ -392,5 +396,109 @@ def test_the_run_tool_allows_an_unreserved_thread():
                 {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "user-42"}}},
             )
             assert answer == "user-42"
+
+    asyncio.run(run())
+
+
+# -- the run timeout ----------------------------------------------------------
+
+
+def _sleeper_manifest() -> Manifest:
+    return Manifest.model_validate(
+        {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["sleeper"]}]}
+    )
+
+
+@pytest.fixture
+def set_run_timeout(monkeypatch: pytest.MonkeyPatch):
+    # Set the run timeout via env, drop the settings cache so the accessor rereads
+    # it, and drop it again on teardown so the value cannot leak into later tests.
+    def _set(value: str) -> None:
+        monkeypatch.setenv("TAI_AGENT_RUN_TIMEOUT_SECONDS", value)
+        reset_all_settings()
+
+    yield _set
+    reset_all_settings()
+
+
+def _sleeper_completed() -> bool:
+    # The agents module is popped from sys.modules and re-imported on each
+    # app_context enter, so the SleeperAgent that ran mutates the LIVE module
+    # object; read the flag off that one, not a stale import binding.
+    return sys.modules["tests.agent._fixtures"].sleeper_completed
+
+
+def test_run_timeout_off_by_default_runs_unbounded():
+    # No env set: the timeout is None, the run tool awaits the turn unbounded, and a
+    # turn slower than any nonexistent limit still completes.
+    async def run() -> None:
+        async with app.app_context(_sleeper_manifest()):
+            assert await app.tools.run_tool("sleeper", {"seconds": 0.05}) == "done"
+
+    asyncio.run(run())
+    assert _sleeper_completed() is True
+
+
+def test_run_timeout_set_allows_a_run_under_the_limit(set_run_timeout):
+    set_run_timeout("5")
+
+    async def run() -> None:
+        async with app.app_context(_sleeper_manifest()):
+            assert await app.tools.run_tool("sleeper", {"seconds": 0.0}) == "done"
+
+    asyncio.run(run())
+    assert _sleeper_completed() is True
+
+
+def test_run_timeout_exceeded_raises_typed_error_and_cancels_the_turn(set_run_timeout):
+    set_run_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_sleeper_manifest()):
+            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s run timeout"):
+                await app.tools.run_tool("sleeper", {"seconds": 5})
+
+    asyncio.run(run())
+    # The turn was cancelled on expiry, not left running past the deadline.
+    assert _sleeper_completed() is False
+
+
+def test_detached_run_ignores_the_timeout_and_runs_unbounded(set_run_timeout):
+    # A detached run (a background submit or a hook/trigger fire) has no live caller
+    # holding a connection, so the run budget does not apply: with the detached flag
+    # set, a turn far slower than the limit still completes and no TurnTimeoutError is
+    # raised — exactly as if the setting were unset.
+    set_run_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_sleeper_manifest()):
+            token = mark_detached_run()
+            try:
+                assert await app.tools.run_tool("sleeper", {"seconds": 0.2}) == "done"
+            finally:
+                reset_detached_run(token)
+
+    asyncio.run(run())
+    # The turn ran to its end past the deadline rather than being cancelled on expiry.
+    assert _sleeper_completed() is True
+
+
+def _inner_timeout_manifest() -> Manifest:
+    return Manifest.model_validate(
+        {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["inner_timeout"]}]}
+    )
+
+
+def test_inner_timeout_error_passes_through_not_reclassified(set_run_timeout):
+    # A builtin TimeoutError raised by the turn's OWN work (e.g. a jq budget abort)
+    # under a generous run timeout reaches the caller unchanged — the wrapper must
+    # not mistake it for the turn overrunning its limit.
+    set_run_timeout("300")
+
+    async def run() -> None:
+        async with app.app_context(_inner_timeout_manifest()):
+            with pytest.raises(TimeoutError, match=r"inner budget exceeded") as excinfo:
+                await app.tools.run_tool("inner_timeout", {"seconds": 0.0})
+            assert not isinstance(excinfo.value, TurnTimeoutError)
 
     asyncio.run(run())

@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.detached_util import in_detached_run
 
 
 class RecordingTools:
@@ -28,6 +29,9 @@ class RecordingTools:
         self.run_calls: list[tuple[str, dict[str, Any]]] = []
         self.run_result: Any = None
         self.run_error: Exception | None = None
+        # The detached flag observed inside each call — a worker execution has no
+        # live caller, so the tool must run detached and the run budget be skipped.
+        self.detached_seen: list[bool] = []
 
     def tool(self, *args: Any, **kwargs: Any) -> Any:
         tags = kwargs.get("tags", set())
@@ -45,6 +49,7 @@ class RecordingTools:
 
     async def run_tool(self, key: str, arguments: dict[str, Any], **kwargs: Any) -> Any:
         self.run_calls.append((key, arguments))
+        self.detached_seen.append(in_detached_run())
         if self.run_error is not None:
             raise self.run_error
         return self.run_result
@@ -149,6 +154,7 @@ def _reset_stub() -> AsyncIterator[None] | Any:
     stub_app.tools.run_calls.clear()
     stub_app.tools.run_result = None
     stub_app.tools.run_error = None
+    stub_app.tools.detached_seen.clear()
     stub_app.monitoring.active.writer.shutdown_calls = 0
     stub_app.monitoring.active.writer.flush_calls = 0
     stub_app.storage.resource_manager.templates.clear()

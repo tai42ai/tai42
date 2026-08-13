@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.utils.detached_util import in_detached_run
 
 # -- The recording stub app ------------------------------------------------------
 
@@ -29,6 +30,9 @@ class StubTools:
         self.registered: dict[str, Callable[..., Any]] = {}
         self.tags: dict[str, set[str]] = {}
         self.run_tool_mock = AsyncMock(return_value=None)
+        # The detached flag observed inside each call — a worker execution has no
+        # live caller, so the tool must run detached and the run budget be skipped.
+        self.detached_seen: list[bool] = []
 
     def tool(self, *args: Any, force: bool = False, **kwargs: Any) -> Any:
         tags = kwargs.get("tags", set())
@@ -43,6 +47,7 @@ class StubTools:
         return register
 
     async def run_tool(self, key: str, arguments: dict[str, Any], **kwargs: Any) -> Any:
+        self.detached_seen.append(in_detached_run())
         return await self.run_tool_mock(key, arguments)
 
 
@@ -163,6 +168,7 @@ def stub_app() -> StubApp:
 @pytest.fixture(autouse=True)
 def _reset_stub_run_tool() -> None:
     _stub_app.tools.run_tool_mock = AsyncMock(return_value=None)
+    _stub_app.tools.detached_seen.clear()
     _stub_app.admin.calls.clear()
     # A fresh, pre-set boot-ready latch per test: the stub app is process-global,
     # so a reused Event would stay bound to a prior test's (closed) loop.

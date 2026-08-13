@@ -119,12 +119,12 @@ def _track_peak_concurrency(app):
     state = {"in_flight": 0, "peak": 0}
     original_run_tool = app.tools.run_tool
 
-    async def tracking_run_tool(name, tool_input):
+    async def tracking_run_tool(name, tool_input, *, offload_sync=False):
         state["in_flight"] += 1
         state["peak"] = max(state["peak"], state["in_flight"])
         try:
             await asyncio.sleep(0)  # yield so co-scheduled hooks can overlap
-            return await original_run_tool(name, tool_input)
+            return await original_run_tool(name, tool_input, offload_sync=offload_sync)
         finally:
             state["in_flight"] -= 1
 

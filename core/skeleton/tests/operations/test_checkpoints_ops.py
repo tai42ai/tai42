@@ -161,8 +161,9 @@ def test_projects_as_a_schedulable_tool() -> None:
 
 
 async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A scheduler-capable backend (marker tools present) plus the projected sweep tool:
-    # the create-schedule door dispatches it by name, so the sweep is schedulable.
+    # A scheduler-capable backend (marker tools present) plus the projected sweep tool and
+    # its ``schedule_task`` vehicle: the create-schedule door translates a cadence onto that
+    # branch, so the sweep is schedulable.
     class _FakeTools:
         def __init__(self, registered: set[str]) -> None:
             self._registered = registered
@@ -175,7 +176,9 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) 
                 raise UnknownToolError(key)
             return {"scheduled": key, "arguments": arguments}
 
-    fake = _FakeTools({"backend_list_schedules", "backend_delete_schedule", "sweep_checkpoints"})
+    fake = _FakeTools(
+        {"backend_list_schedules", "backend_delete_schedule", "sweep_checkpoints", "sweep_checkpoints_schedule_task"}
+    )
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake))
 
     # The submitted-tool authorization runs the full HTTP-edge decision against the live
@@ -188,4 +191,8 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(schedules_ops, "authorize_submitted_tool", _allow)
 
     result = await schedules_ops.create_schedule("sweep_checkpoints", {}, {"cron": "0 3 * * *"})
-    assert result == {"scheduled": "sweep_checkpoints", "arguments": {"cron": "0 3 * * *"}}
+    # The friendly cron is translated onto the sweep's ``schedule_task`` vehicle: the branch
+    # is dispatched with the cadence as ``backend_schedule`` under a derived name.
+    assert result["scheduled"] == "sweep_checkpoints_schedule_task"
+    assert result["arguments"]["backend_schedule"] == "0 3 * * *"
+    assert result["arguments"]["backend_schedule_name"].startswith("sweep_checkpoints_")

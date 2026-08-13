@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from rq.exceptions import NoSuchJobError
+from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_rq import tasks
 from tai42_backend_rq.callback import CallbackSchema
@@ -32,6 +33,21 @@ async def test_tool_execution_dispatches_and_closes_clients(app, monkeypatch):
     assert result == {"out": 1}
     assert app.tools.run_calls == [("my_tool", {"x": 5})]
     assert closed == [True]
+
+
+async def test_tool_execution_runs_the_tool_detached(app, monkeypatch):
+    # A worker execution has no live caller, so the tool observes the detached
+    # flag set; the flag never leaks past the job.
+    async def fake_shutdown() -> None:
+        pass
+
+    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+
+    arg_name = rq_settings().tool_name_arg
+    await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+
+    assert app.tools.detached_seen == [True]
+    assert in_detached_run() is False
 
 
 async def test_tool_execution_missing_tool_name_raises_but_still_cleans_up(app, monkeypatch):

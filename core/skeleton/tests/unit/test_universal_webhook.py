@@ -90,7 +90,7 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
 
             assert resp.background is not None
             await resp.background()
-            run_tool.assert_awaited_once_with("run_event_flow", {"id": 7, "source": "webhook"}, offload_sync=False)
+            run_tool.assert_awaited_once_with("run_event_flow", {"id": 7, "source": "webhook"}, offload_sync=True)
 
     asyncio.run(run())
 
