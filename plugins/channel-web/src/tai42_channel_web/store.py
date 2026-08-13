@@ -460,6 +460,7 @@ async def append_question(
     options: list[str] | None,
     timeout_at: datetime,
     callback_url: str | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> str:
     """Append one ``chat.question`` entry (the UI renders the per-format widget) and
     return its id.
@@ -467,7 +468,11 @@ async def append_question(
     ``callback_url`` is a bearer ticket for the interaction, so it is carried in the
     frame ONLY when the widget itself must open it (the ``external`` format);
     otherwise the key is absent and the ticket never leaves the server, where every
-    other format answers by interaction id through this plugin's own door."""
+    other format answers by interaction id through this plugin's own door.
+
+    ``schema`` is the ``form`` question's JSON answer schema — display-input material
+    the page's form widget renders, never a secret — carried in the frame ONLY when
+    present (non-None exactly for the ``form`` format); otherwise the key is absent."""
     entry_id = _mint_id()
     data: dict[str, Any] = {
         "id": entry_id,
@@ -480,6 +485,8 @@ async def append_question(
     }
     if callback_url is not None:
         data["callback_url"] = callback_url
+    if schema is not None:
+        data["schema"] = schema
     await _append(identity, address, QUESTION_EVENT, data)
     return entry_id
 

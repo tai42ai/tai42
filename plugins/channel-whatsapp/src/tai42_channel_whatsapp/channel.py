@@ -9,7 +9,10 @@ reservation is written BEFORE the send so a reply racing the send response is
 still matchable, and a failed send releases the reservation and raises. A
 ``select`` ask renders natively where it fits — interactive reply buttons for a
 few short options, an interactive list for more, and the numbered-text fallback
-past those caps — and the human may always type an option instead of tapping.
+past those caps — and the human may always type an option instead of tapping. A
+``form`` ask is also Tier-2: it renders as an in-chat WhatsApp Flow (created and
+published once per answer schema, then reused), and the completed form returns as
+an ``nfm_reply`` matched by the delivery's ``interaction_id`` as the flow token.
 
 Freeform sends (questions, replies, media) go to any requested recipient: Meta's
 own 24-hour customer-service window is the fence (a send outside it is rejected,
@@ -22,9 +25,10 @@ this channel has no default recipient.
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from tai42_contract.channels import (
     ChannelDelivery,
@@ -35,18 +39,31 @@ from tai42_contract.channels import (
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.client import (
+    create_flow,
+    delete_flow,
+    publish_flow,
+    send_flow,
     send_image,
     send_interactive_buttons,
     send_interactive_list,
     send_message,
     send_template,
 )
-from tai42_channel_whatsapp.correlation import is_known_contact, release_pending, reserve_pending
+from tai42_channel_whatsapp.correlation import (
+    cache_flow_id,
+    get_cached_flow_id,
+    is_known_contact,
+    release_pending,
+    reserve_pending,
+)
+from tai42_channel_whatsapp.flows import build_flow
 from tai42_channel_whatsapp.settings import (
     WhatsAppSettings,
     require_delivery_setting,
     whatsapp_settings,
 )
+
+logger = logging.getLogger(__name__)
 
 # Tier-1 answer formats resolve via the callback link, not a WhatsApp reply.
 _TIER1_FORMATS = frozenset({"confirm", "external"})
@@ -63,6 +80,82 @@ _LIST_ROW_TITLE_MAX_CHARS = 24  # list-row title
 _INTERACTIVE_BODY_MAX_CHARS = 1024  # interactive body text
 # The list-opening button label (its own 20-char cap); a fixed, generic prompt.
 _LIST_BUTTON_LABEL = "Choose an option"
+
+# A Flow's name on Meta, the schema-hash suffix making it a deterministic label
+# for operator legibility — NOT a uniqueness key: Meta does not enforce flow-name
+# uniqueness. One Flow per distinct answer schema comes from the cache plus the
+# orphan-draft cleanup, never from the name.
+_FLOW_NAME_PREFIX = "tai42-form-"
+
+
+async def _resolve_flow_id(waba_id: str, schema_hash: str, flow_json: dict[str, Any]) -> str:
+    """The published flow id for this schema under ``waba_id``: the cached id, else
+    create + publish + store a new Flow. Every step is loud — a create, publish, or
+    store failure raises and never falls back to another answer format.
+
+    A publish or cache failure AFTER a successful create strands the draft on Meta,
+    and the central retry re-enters create under the same name — so the draft is
+    best-effort deleted before re-raising the original error; a delete that itself
+    fails is logged without masking it.
+    """
+    cached = await get_cached_flow_id(waba_id, schema_hash)
+    if cached is not None:
+        return cached
+    flow_id = await create_flow(waba_id=waba_id, name=f"{_FLOW_NAME_PREFIX}{schema_hash}", flow_json=flow_json)
+    try:
+        await publish_flow(flow_id)
+        await cache_flow_id(waba_id, schema_hash, flow_id)
+    except Exception:
+        try:
+            await delete_flow(flow_id)
+        except Exception:
+            logger.exception("failed to delete orphaned draft flow %s after resolve failure", flow_id)
+        raise
+    return flow_id
+
+
+async def _deliver_form(
+    settings: WhatsAppSettings, phone_number_id: str, target: str, delivery: ChannelDelivery
+) -> None:
+    """Deliver a form ask as a WhatsApp Flow (Tier-2: reserve BEFORE send).
+
+    The Flow is built and its schema validated BEFORE any network work — an
+    unsupported schema raises here, before the ``CHANNEL_WHATSAPP_WABA_ID`` gate,
+    the reservation, or a send. The reservation carries the answer schema (so an
+    inbound Flow response is coerced to its types) and the question text (so a
+    door-rejected answer is re-asked with a fresh Flow), and uses the
+    ``interaction_id`` as the ``flow_token`` correlating the completed form. A
+    failure resolving the
+    Flow or sending releases the reservation and raises — never a fallback format.
+    """
+    if delivery.schema is None:
+        raise ChannelDeliveryError(f"form delivery {delivery.interaction_id} is missing its schema")
+    flow_json, schema_hash = build_flow(delivery.schema)
+    waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+
+    await reserve_pending(
+        phone_number_id=phone_number_id,
+        wa_id=target,
+        callback_url=delivery.callback_url,
+        timeout_at=delivery.timeout_at,
+        interaction_id=delivery.interaction_id,
+        schema=delivery.schema,
+        question=delivery.question,
+    )
+    try:
+        flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
+        await send_flow(
+            phone_number_id=phone_number_id,
+            to=target,
+            body_text=delivery.question,
+            flow_id=flow_id,
+            flow_token=delivery.interaction_id,
+        )
+    except Exception:
+        # Any create/publish/store/send failure frees the pair instead of holding
+        # it until its TTL.
+        await release_pending(phone_number_id=phone_number_id, wa_id=target)
+        raise
 
 
 def _render_link(delivery: ChannelDelivery) -> str:
@@ -214,6 +307,9 @@ class WhatsAppChannel:
     # notify_user capability guard reads these before dispatching either.
     supports_media_notifications: ClassVar[bool] = True
     supports_template_notifications: ClassVar[bool] = True
+    # This channel renders a form ask as a WhatsApp Flow; the ask_user helper reads
+    # this before handing a form delivery over.
+    supports_form_delivery: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Resolve the destination ``wa_id``, then push the question to it.
@@ -242,6 +338,10 @@ class WhatsAppChannel:
         if delivery.answer_format in _TIER1_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
             await send_message(phone_number_id=phone_number_id, to=target, body=_render_link(delivery))
+            return
+
+        if delivery.answer_format == "form":
+            await _deliver_form(settings, phone_number_id, target, delivery)
             return
 
         # Reserve before send: a fast reply's webhook can beat the send response,

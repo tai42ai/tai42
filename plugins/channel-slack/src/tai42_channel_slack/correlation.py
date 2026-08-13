@@ -1,6 +1,6 @@
 """Plugin-owned correlation store over kit's pooled ``RedisClient``.
 
-Two key families:
+Three key families:
 
 * ``channel:slack:corr:<ts>`` -> callback_url. Written after a successful
   ``chat.postMessage`` (the posted ``ts`` is the thread anchor every in-thread
@@ -10,13 +10,20 @@ Two key families:
   (SET NX EX) whose TTL outlives Slack's retry ladder. A handler that fails AFTER
   claiming releases the claim before re-raising, so the retry reprocesses the
   event instead of vanishing behind the dedupe key.
+* ``channel:slack:form:<interaction_id>`` -> a JSON record
+  (``{callback_url, schema, question, timeout_at}``). Written BEFORE a ``form``
+  question's ``chat.postMessage`` (reserve-before-send: released if the send
+  fails), holding the state the interactivity door needs to open the modal and
+  forward the submission. TTL = the question's remaining budget; keyed by the
+  interaction id, so no NX guard is needed.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
@@ -26,6 +33,7 @@ from tai42_channel_slack.settings import SlackRedisSettings, slack_redis_setting
 
 _CORR_KEY = "channel:slack:corr:{ts}"
 _DEDUPE_KEY = "channel:slack:event:{event_id}"
+_FORM_KEY = "channel:slack:form:{interaction_id}"
 
 # Outlives Slack's full retry ladder (immediate, ~1 min, ~5 min) with margin.
 DEDUPE_TTL_SECONDS = 900
@@ -71,6 +79,40 @@ async def delete_correlation(thread_ts: str) -> None:
     re-forwarding)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.delete(_CORR_KEY.format(ts=thread_ts))
+
+
+async def store_form_record(
+    interaction_id: str, callback_url: str, schema: dict[str, Any], question: str, timeout_at: datetime
+) -> None:
+    """Reserve the form's state before its message is sent, TTL = budget.
+
+    Raises :class:`ChannelDeliveryError` when the budget is already spent — never
+    a non-positive-TTL write.
+    """
+    ttl = remaining_seconds(timeout_at)
+    if ttl <= 0:
+        raise ChannelDeliveryError(f"question budget already expired (timeout_at={timeout_at.isoformat()})")
+    record = json.dumps(
+        {"callback_url": callback_url, "schema": schema, "question": question, "timeout_at": timeout_at.isoformat()}
+    )
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.set(_FORM_KEY.format(interaction_id=interaction_id), record, ex=ttl)
+
+
+async def get_form_record(interaction_id: str) -> dict[str, Any] | None:
+    """The pending form's ``{callback_url, schema, question, timeout_at}`` record,
+    or ``None`` when unknown/expired (the button outlived its question)."""
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        # decode_responses=True (the default), so GET returns str; cast confines the stub type.
+        raw = cast("str | None", await redis.get(_FORM_KEY.format(interaction_id=interaction_id)))
+    return json.loads(raw) if raw is not None else None
+
+
+async def delete_form_record(interaction_id: str) -> None:
+    """Drop a form record once its submission is terminally settled (forwarded or
+    the ticket is gone)."""
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.delete(_FORM_KEY.format(interaction_id=interaction_id))
 
 
 async def claim_dedupe(event_id: str) -> bool:

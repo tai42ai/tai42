@@ -362,11 +362,15 @@ unknown token.
   concurrent-stream cap → `503`, whose message names which ceiling was hit (this
   session's or the whole server's).
 - `POST /api/channels/web/questions/{interaction_id}/answer` — body `{answer}` →
-  `{status: "answered"}`. The answer must be one FINITE scalar (`400` for a body that
-  is not valid JSON or carries no `answer`, `413` over the body cap, `422` for a
-  non-scalar, an over-long string, or a non-finite number — `Infinity`/`NaN` would
-  forward invalid JSON and persist an unparseable transcript frame). The pending
-  record must belong to the caller's own conversation — both its web route identity
+  `{status: "answered"}`. The answer is one FINITE scalar (a `text` / `confirm` /
+  `select` answer) or a JSON object (a `form` answer, bounded by its serialized UTF-8
+  size — at most 32 KiB — rather than the scalar character cap): `400` for a body that
+  is not valid JSON or carries no `answer`, `413` over the body cap, `422` for a value
+  that is neither scalar nor object, an over-long string, a non-finite number, or a
+  form object over its byte cap or carrying a non-finite number (`Infinity`/`NaN`
+  would forward invalid JSON and persist an unparseable transcript frame). The
+  callback door stays authoritative on the answer's format and schema match. The
+  pending record must belong to the caller's own conversation — both its web route identity
   and its address (a foreign one is reported as not found, never as
   "exists, but not yours"); the answer is then forwarded to the interactions callback
   and a `chat.answered` frame appended on success. A callback door that reports the
@@ -403,10 +407,13 @@ conversation bridge sets `sender_identity` (the web route identity) and a bare
 visitor-id `recipient`; `notify_user` never sets `sender_identity` (that field is
 the bridge's), so its `recipient` carries the same `"<identity>:<visitor-id>"`
 composite a delivery uses. A composite that is not of that shape raises
-`ChannelDeliveryError`. All four answer formats (`text` / `confirm` / `select` /
-`external`) are delivered as transcript entries the page renders as widgets; only
-the `external` entry carries the interaction's `callback_url`, because only its
-widget opens one. The channel sends plain text only (no media, no templates).
+`ChannelDeliveryError`. All five answer formats (`text` / `confirm` / `select` /
+`form` / `external`) are delivered as transcript entries the page renders as widgets;
+the `form` entry carries the interaction's answer schema, which the page renders as a
+schema-driven form widget (the visitor's answer posts back as a JSON object through
+this plugin's own answer door), and only the `external` entry carries the
+interaction's `callback_url`, because only its widget opens one. The channel sends
+plain text only (no media, no templates).
 
 ## Security
 

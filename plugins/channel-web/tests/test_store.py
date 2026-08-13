@@ -221,6 +221,20 @@ async def test_append_question_carries_the_callback_only_when_given(fake_redis: 
     assert _data(_entries(fake_redis)[0])["callback_url"] == CALLBACK
 
 
+async def test_append_question_carries_the_form_schema_only_when_given(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    await append_question(IDENTITY, VISITOR_ID, "int-1", "Your details", "form", None, _deadline(), schema=schema)
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["schema"] == schema
+    # The schema is display-input material for the form widget, never a callback ticket.
+    assert "callback_url" not in payload
+
+
+async def test_append_question_omits_the_schema_when_none(fake_redis: FakeRedis):
+    await append_question(IDENTITY, VISITOR_ID, "int-1", "Which env?", "select", ["a", "b"], _deadline())
+    assert "schema" not in _data(_entries(fake_redis)[0])
+
+
 async def test_append_answered_carries_answer(fake_redis: FakeRedis):
     await append_answered(IDENTITY, VISITOR_ID, "int-1", {"choice": "staging"})
     entry = _entries(fake_redis)[0]

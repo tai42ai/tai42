@@ -83,6 +83,42 @@ async def test_answer_invalid_value_raises_bad_request(wired):
         await ops.answer_interaction("p1", "not-a-bool")
 
 
+async def test_answer_form_schema_mismatch_names_the_field(wired):
+    # The 400 text names the failing field (its json_path), so a human on any
+    # surface can tell WHICH field failed — not a bare "is not of type 'integer'".
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    await wired.store.add(wired.fake, _req(wired.store, AnswerFormat.FORM, payload={"schema": schema}), idle_ttl=86400)
+    with pytest.raises(BadRequestError, match="at count: 'abc' is not of type 'integer'"):
+        await ops.answer_interaction("p1", {"count": "abc"})
+
+
+def test_schema_error_message_field_paths():
+    # ``_schema_mismatch`` returns ``(message, field)``: a field-level error names the
+    # field (``$``-root and leading ``.`` stripped) in BOTH the message and the bare
+    # ``field``; a root-level error and a pathless validator carry ``field=None`` and
+    # fall back to the bare message.
+    root = ops._schema_mismatch(
+        {"y": 1}, {"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}
+    )
+    assert root == ("answer does not match schema: 'x' is a required property", None)
+    field = ops._schema_mismatch({"count": "abc"}, {"type": "object", "properties": {"count": {"type": "integer"}}})
+    assert field == ("answer does not match schema at count: 'abc' is not of type 'integer'", "count")
+    nested = ops._schema_mismatch(
+        {"a": {"b": "x"}},
+        {"type": "object", "properties": {"a": {"type": "object", "properties": {"b": {"type": "integer"}}}}},
+    )
+    assert nested == ("answer does not match schema at a.b: 'x' is not of type 'integer'", "a.b")
+    # A malformed stored schema raises SchemaError, whose json_path points into the
+    # schema (``properties.x.type``) — a location no answering human owns; the message
+    # carries NO "at ..." path, only the bare reason, and the field is ``None``.
+    schema_error = ops._schema_mismatch({"x": 1}, {"type": "object", "properties": {"x": {"type": "bogus"}}})
+    assert schema_error is not None
+    message, field_path = schema_error
+    assert field_path is None
+    assert "at " not in message
+    assert message.startswith("answer does not match schema: ")
+
+
 def test_validate_answer_external_is_a_server_bug(wired):
     # EXTERNAL is rejected by the answer door before ``_validate_answer`` runs, so a
     # direct call is the defensive server-bug path — a loud 500, never a 4xx.

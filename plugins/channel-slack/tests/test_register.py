@@ -34,6 +34,20 @@ def test_import_registers_channel_and_inbound_route(stub_app):
     assert route.tags == ["channels"]
 
 
+def test_import_registers_the_interactivity_route(stub_app):
+    _import_register_module(stub_app)
+
+    route = stub_app.http.routes["/api/channels/slack/interactive"]
+    assert route.methods == ["POST"]
+    assert route.authed is False
+    assert route.summary
+    assert route.tags == ["channels"]
+
+
+def test_slack_channel_advertises_form_delivery():
+    assert SlackChannel.supports_form_delivery is True
+
+
 def test_duplicate_registration_raises(stub_app):
     _import_register_module(stub_app)
 

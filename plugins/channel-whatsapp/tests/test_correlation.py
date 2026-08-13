@@ -12,6 +12,8 @@ from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     PendingQuestionExistsError,
     already_seen,
+    cache_flow_id,
+    get_cached_flow_id,
     is_known_contact,
     mark_known_contact,
     mark_seen,
@@ -167,6 +169,38 @@ async def test_text_pending_has_no_options_or_interaction_id(fake_redis: FakeRed
     assert popped.interaction_id is None
 
 
+async def test_form_pending_round_trips_schema(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    timeout_at = _deadline()
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-9", schema=schema)
+
+    popped = await pop_pending(_PNID, _WA)
+
+    assert popped == PendingQuestion(
+        callback_url=_CALLBACK, timeout_at=timeout_at, interaction_id="int-9", schema=schema
+    )
+
+
+async def test_non_form_pending_has_no_schema(fake_redis: FakeRedis):
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
+
+    popped = await pop_pending(_PNID, _WA)
+
+    assert popped is not None
+    assert popped.schema is None
+
+
+async def test_flow_id_cache_round_trip_has_no_ttl(fake_redis: FakeRedis):
+    assert await get_cached_flow_id("WABA-1", "hash-abc") is None
+
+    await cache_flow_id("WABA-1", "hash-abc", "flow-77")
+
+    assert await get_cached_flow_id("WABA-1", "hash-abc") == "flow-77"
+    key = "channel:whatsapp:flow:WABA-1:hash-abc"
+    assert key in fake_redis.store
+    assert key not in fake_redis.ttls  # a published Flow persists on Meta — no TTL
+
+
 async def test_known_contact_marker_round_trip_uses_window_ttl(fake_redis: FakeRedis):
     assert await is_known_contact(_PNID, _WA) is False
 
@@ -204,6 +238,8 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
         mark_seen("wamid.ABC"),
         mark_known_contact(_PNID, _WA),
         is_known_contact(_PNID, _WA),
+        get_cached_flow_id("WABA-1", "hash-abc"),
+        cache_flow_id("WABA-1", "hash-abc", "flow-1"),
     ):
         with pytest.raises(ValueError, match="CHANNEL_WHATSAPP_REDIS_URL"):
             await call

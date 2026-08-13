@@ -45,7 +45,14 @@ def test_no_env_constructs_cleanly_all_none(no_whatsapp_env):
     assert settings.app_secret is None
     assert settings.verify_token is None
     assert settings.default_phone_number_id is None
+    assert settings.waba_id is None
     assert settings.allowed_recipients == []
+
+
+def test_waba_id_reads_from_env(no_whatsapp_env, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "WABA-100")
+    reset_all_settings()
+    assert WhatsAppSettings().waba_id == "WABA-100"
 
 
 def test_allowed_recipients_comma_string_splits_strips_and_drops_empties(no_whatsapp_env, monkeypatch):

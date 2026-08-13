@@ -13,8 +13,10 @@ platform api key):
 
 Meta's signature scheme carries no timestamp, so the ``wamid`` dedupe is the
 replay guard. A reply matching a pending question is forwarded as ``{"answer":
-<text verbatim, outer whitespace stripped>}``; on a correlation miss the message
-enters the conversation bridge instead.
+<value>}`` — the text verbatim (outer whitespace stripped) for a text reply, the
+resolved option for an interactive tap, or the schema-coerced dict for a
+completed Flow form (``nfm_reply``); on a correlation miss the message enters the
+conversation bridge instead.
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -34,16 +38,19 @@ from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
+from tai42_channel_whatsapp.client import send_flow, send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     already_seen,
+    get_cached_flow_id,
     mark_known_contact,
     mark_seen,
     peek_pending,
     pop_pending,
     restore_pending,
 )
-from tai42_channel_whatsapp.settings import whatsapp_settings
+from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,31 @@ _DELIVERY_RECEIPTS = {
     "sent": DeliveryReceipt.DELIVERED,
     "delivered": DeliveryReceipt.DELIVERED,
 }
+
+# How many times a door-rejected form answer is recovered by re-sending a fresh
+# Flow before the guest is told it could not be processed and the ask is left to
+# time out. Each re-send spends a slot of the callback door's own rate limit
+# (keyed on this server's egress IP, shared across every channel), so the loop is
+# bounded — matching the web channel's answer-restore cap in spirit.
+_MAX_FORM_REJECTIONS = 5
+
+# The lead-in prefixed to the door's own rejection message in a re-sent Flow body.
+_FORM_REJECTION_LEAD = "Your last answer could not be accepted:"
+# Shown once when the re-send cap is spent — the ask then times out on its side.
+_FORM_UNPROCESSABLE = "Sorry, your form could not be processed."
+# Shown in place of a 400 body that is not this platform's error envelope (a proxy
+# or WAF page); the guest is never shown an intermediary's content.
+_CALLBACK_REJECTION_OPAQUE = "the answer could not be accepted"
+# The door's own rejection line is bounded before it rides the guest-facing re-sent
+# Flow body — it names the failing field, never an intermediary's whole page.
+_DOOR_REJECTION_MAX_CHARS = 500
+# Meta caps interactive.body.text at 1024 chars (WhatsApp Cloud API interactive
+# message limit); a longer body is a non-retryable param error that fails the
+# re-send forever, stranding the guest with neither the Flow nor a final message.
+_FLOW_BODY_MAX_CHARS = 1024
+# The lead + bounded door line alone always fit the cap, so the overflow fallback
+# (drop the whole question) is guaranteed deliverable — verified, not assumed.
+assert len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS <= _FLOW_BODY_MAX_CHARS
 
 
 class SignatureRejectedError(Exception):
@@ -129,9 +161,10 @@ def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejec
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
 
 
-async def _forward_answer(callback_url: str, answer: str) -> httpx.Response:
+async def _forward_answer(callback_url: str, answer: str | dict[str, Any]) -> httpx.Response:
     """POST ``{"answer": <value>}`` to the interaction's callback door and return
-    its response; the caller applies the status policy."""
+    its response; the caller applies the status policy. ``answer`` is a string for a
+    text/select reply or a dict for a completed form (Flow) reply."""
     async with tai42_app.clients.client_ctx(HttpxClient, timeout=whatsapp_settings().http_timeout_seconds) as (client):
         return await client.post(callback_url, json={"answer": answer})
 
@@ -373,7 +406,12 @@ async def _handle_interactive(message: dict[str, Any], phone_number_id: str, wa_
     """
     if await already_seen(wamid):
         return
-    reply_id, title = _extract_interactive_reply(message.get("interactive"))
+    interactive = message.get("interactive")
+    if isinstance(interactive, dict) and interactive.get("type") == "nfm_reply":
+        # A completed WhatsApp Flow form arrives as an nfm_reply, not a button/list tap.
+        await _handle_form_reply(interactive, phone_number_id, wa_id, wamid)
+        return
+    reply_id, title = _extract_interactive_reply(interactive)
 
     # Decide before destructively popping: peek the pending ask and check the tap
     # against it. A non-answer must not remove the pending — bridge and leave it.
@@ -399,15 +437,117 @@ async def _handle_interactive(message: dict[str, Any], phone_number_id: str, wa_
     await _forward_to_callback(phone_number_id, wa_id, answer, wamid, popped)
 
 
+def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
+    """The parsed form response from an ``nfm_reply``, or ``None`` when malformed.
+
+    Meta wraps the completed form as a JSON string in
+    ``interactive.nfm_reply.response_json``; a missing field, a non-string value,
+    invalid JSON, or a JSON value that is not an object all yield ``None`` (the
+    caller bridges instead of forwarding).
+    """
+    nfm = interactive.get("nfm_reply")
+    if not isinstance(nfm, dict):
+        return None
+    raw = nfm.get("response_json")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _coerce_value(value: Any, prop: Any) -> Any:
+    """One form value coerced to its schema type. Flow number inputs arrive as
+    strings, so ``integer``/``number``/``boolean`` are coerced ONLY when the value
+    is a string (an OptIn may already deliver a bool). A value that fails coercion
+    is returned raw — the door's 400 path then restores the pending ask."""
+    if not isinstance(prop, dict) or not isinstance(value, str):
+        return value
+    prop_type = prop.get("type")
+    try:
+        if prop_type == "integer":
+            return int(value)
+        if prop_type == "number":
+            number = float(value)
+            # A non-finite float (inf/nan from e.g. "1e999"/"nan") passes jsonschema
+            # yet serializes to null downstream; forward the raw string so the door
+            # 400s and restores, the same convention a non-numeric string takes.
+            return number if math.isfinite(number) else value
+        if prop_type == "boolean":
+            return _coerce_bool(value)
+    except ValueError:
+        return value
+    return value
+
+
+def _coerce_bool(value: str) -> bool:
+    """A ``"true"``/``"false"`` string as a bool, else raise ``ValueError``."""
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise ValueError(f"not a boolean string: {value!r}")
+
+
+def _coerce_form_answer(response: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    """The form answer forwarded to the door: ``response`` minus ``flow_token``,
+    each value coerced to its schema property's type."""
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    props = properties if isinstance(properties, dict) else {}
+    return {key: _coerce_value(value, props.get(key)) for key, value in response.items() if key != "flow_token"}
+
+
+async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str) -> None:
+    """A completed Flow form (``nfm_reply``): forward the coerced answer dict to the
+    pending form question, else bridge.
+
+    The reply matches ONLY when its ``flow_token`` equals the pending ask's
+    ``interaction_id``; a malformed ``response_json``, a missing/mismatched token,
+    or no pending ask bridges the message (its shape carries no human-readable
+    title, so a blank bridge — the same shape an uncorrelated interactive takes).
+    The pending ask is peeked before the destructive pop so a non-answer never
+    claims a live ask a concurrent genuine reply could still answer.
+    """
+    response = _extract_form_response(interactive)
+    if response is None:
+        logger.warning("whatsapp nfm_reply %s carried no JSON-object response_json; bridging", wamid)
+        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
+        return
+
+    flow_token = response.get("flow_token")
+    pending = await peek_pending(phone_number_id, wa_id)
+    if pending is None or not isinstance(flow_token, str) or flow_token != pending.interaction_id:
+        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
+        return
+
+    popped = await pop_pending(phone_number_id, wa_id)
+    if popped is None or popped.interaction_id != flow_token:
+        # A concurrent reply claimed the ask, or a different ask reserved the pair in
+        # the peek→pop gap — this form is not an answer to it; restore and bridge.
+        if popped is not None:
+            await restore_pending(phone_number_id, wa_id, popped)
+        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
+        return
+
+    answer = _coerce_form_answer(response, popped.schema)
+    await _forward_to_callback(phone_number_id, wa_id, answer, wamid, popped)
+
+
 async def _forward_to_callback(
-    phone_number_id: str, wa_id: str, answer: str, wamid: str, pending: PendingQuestion
+    phone_number_id: str, wa_id: str, answer: str | dict[str, Any], wamid: str, pending: PendingQuestion
 ) -> None:
     """Forward a correlated reply to the callback door and apply the status policy:
-    2xx answered; 404 terminal drop; 400 kept for a re-reply; anything else restores
-    the correlation and raises so Meta's retry re-resolves — the answer is never lost.
+    2xx answered; 404 terminal drop; anything else restores the correlation and raises
+    so Meta's retry re-resolves — the answer is never lost. A 400 branches on the ask
+    kind: a text/select ask is kept for a re-reply in place, while a form ask (a
+    completed Flow, which has no re-reply surface) is recovered by re-sending a fresh
+    Flow carrying the door's error (bounded).
 
-    ``answer`` is already final: a typed reply's stripped body, or the option text
-    an interactive tap resolved to.
+    ``answer`` is already final: a typed reply's stripped body, the option text an
+    interactive tap resolved to, or the coerced dict of a completed form (Flow).
     """
     try:
         forwarded = await _forward_answer(pending.callback_url, answer)
@@ -427,8 +567,13 @@ async def _forward_to_callback(
         await mark_seen(wamid)
         return
     if forwarded.status_code == 400:
-        # The door rejected THIS answer; keep the correlation so the human can
-        # re-reply, and ack (the same body would be rejected again).
+        if pending.schema is not None:
+            # A form ask: the completed Flow has no re-reply surface, so a kept
+            # correlation would strand the guest. Recover by re-sending a fresh Flow.
+            await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, forwarded)
+            return
+        # A text/select ask CAN be re-replied to in place; keep the correlation and
+        # ack (the same body would be rejected again).
         logger.warning(
             "callback door rejected the answer for %s (400); correlation kept so the human can re-reply", wamid
         )
@@ -441,6 +586,108 @@ async def _forward_to_callback(
     raise AnswerForwardError(
         f"interactions callback rejected the answer: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
     )
+
+
+async def _recover_form_rejection(
+    phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, forwarded: httpx.Response
+) -> None:
+    """Recover a form answer the callback door rejected (400) by re-sending a fresh
+    Flow for the SAME interaction, bounded by ``_MAX_FORM_REJECTIONS``.
+
+    The pending record is already popped by the caller. Ordering is load-bearing for
+    Meta's redelivery:
+
+    * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
+      same cached flow id, body = the question plus the door's error line), then keep
+      the pending alive with the rejection counted and mark the wamid seen. A re-send
+      that itself fails restores the pending UNCHANGED and does NOT mark the wamid
+      seen, then raises — so Meta's redelivery re-pops the same ask, re-hits the 400,
+      and re-enters this path (the counter is spent only by a re-send that reached the
+      guest).
+    * At the cap — leave the pending popped (a later text then bridges normally), tell
+      the guest once the form could not be processed, and let the ask time out on its
+      side.
+    """
+    if pending.interaction_id is None or pending.schema is None or pending.question is None:
+        raise AnswerForwardError(
+            f"cannot recover the form rejection for {wamid}: the pending record is missing its "
+            "interaction id, schema, or question text"
+        )
+    if pending.rejections >= _MAX_FORM_REJECTIONS:
+        logger.error(
+            "form answer for %s rejected %d times (cap %d); not re-sending — telling the guest and "
+            "letting the ask time out",
+            wamid,
+            pending.rejections,
+            _MAX_FORM_REJECTIONS,
+        )
+        await send_message(phone_number_id=phone_number_id, to=wa_id, body=_FORM_UNPROCESSABLE)
+        await mark_seen(wamid)
+        return
+
+    body_text = _rejection_body(pending.question, _door_rejection_line(forwarded))
+    try:
+        flow_id = await _cached_form_flow_id(pending.schema)
+        await send_flow(
+            phone_number_id=phone_number_id,
+            to=wa_id,
+            body_text=body_text,
+            flow_id=flow_id,
+            flow_token=pending.interaction_id,
+        )
+    except Exception:
+        # A re-send that fails must NOT mark the wamid seen: restore the pending
+        # unchanged so Meta's redelivery re-pops it and re-enters this 400 path.
+        await restore_pending(phone_number_id, wa_id, pending)
+        raise
+    await restore_pending(phone_number_id, wa_id, replace(pending, rejections=pending.rejections + 1))
+    await mark_seen(wamid)
+
+
+async def _cached_form_flow_id(schema: dict[str, Any]) -> str:
+    """The published flow id for a form ask's schema, from the cache the original send
+    populated. The cache has no TTL, so a miss means the store was lost — a loud
+    failure that re-sends nothing, never a silent skip of the recovery."""
+    _, schema_hash = build_flow(schema)
+    waba_id = require_delivery_setting(whatsapp_settings().waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+    flow_id = await get_cached_flow_id(waba_id, schema_hash)
+    if flow_id is None:
+        raise AnswerForwardError(
+            f"cannot re-send a form for the rejected answer: no published flow cached for its schema under {waba_id}"
+        )
+    return flow_id
+
+
+def _rejection_body(question: str, error_line: str) -> str:
+    """The re-sent Flow's body: the question, then the door's rejection line.
+
+    When the composed body would exceed ``_FLOW_BODY_MAX_CHARS`` the question is
+    dropped WHOLE — the fresh Flow re-presents the fields, so a mid-string ellipsis
+    (forbidden by the no-silent-truncation posture) is never needed. The lead+error
+    tail is bounded (``_door_rejection_line`` caps the error at
+    ``_DOOR_REJECTION_MAX_CHARS``) so it always fits the cap."""
+    tail = f"{_FORM_REJECTION_LEAD} {error_line}"
+    full = f"{question}\n\n{tail}"
+    return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail
+
+
+def _door_rejection_line(forwarded: httpx.Response) -> str:
+    """The guest-facing error line for the re-sent Flow: the callback door's OWN 400
+    message (which names the failing field), bounded to ``_DOOR_REJECTION_MAX_CHARS``.
+    A body that is not this platform's error envelope (a proxy/WAF page) is replaced
+    and logged — the guest is never shown an intermediary's content."""
+    try:
+        payload = forwarded.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        return payload["error"][:_DOOR_REJECTION_MAX_CHARS]
+    logger.warning(
+        "callback door rejected a form answer with a 400 body that is not this platform's error envelope; "
+        "the guest is told nothing of it: %s",
+        forwarded.text[:500],
+    )
+    return _CALLBACK_REJECTION_OPAQUE
 
 
 async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: str) -> None:

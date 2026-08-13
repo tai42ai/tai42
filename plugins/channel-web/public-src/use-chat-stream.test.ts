@@ -78,6 +78,13 @@ describe('applyFrame', () => {
     expect(model.items[0]).toMatchObject({ answerFormat: 'external', callbackUrl: CALLBACK });
   });
 
+  it('carries the answer schema on the one format whose widget builds from it', () => {
+    const schema = { type: 'object', properties: { name: { type: 'string' } } };
+    const model = fold(EMPTY_MODEL, questionFrame('form', { schema }));
+
+    expect(model.items[0]).toMatchObject({ answerFormat: 'form', schema, callbackUrl: null });
+  });
+
   it('records an answered frame against the interaction, not as a row of its own', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -181,6 +188,19 @@ describe('applyFrame', () => {
       questionFrame('text', { callback_url: CALLBACK }),
     ],
     ['a callback ticket on a select question', questionFrame('select', { callback_url: CALLBACK })],
+    ['a form question with no schema at all', questionFrame('form')],
+    ['a form question whose schema is not an object', questionFrame('form', { schema: [1, 2] })],
+    ['a form question whose schema is null', questionFrame('form', { schema: null })],
+    [
+      // The schema reaches the page for the form widget alone; a scalar format that
+      // answers through this channel's own door has no business carrying one.
+      'a schema on a text question, whose format carries none',
+      questionFrame('text', { schema: { type: 'object' } }),
+    ],
+    [
+      'a callback ticket on a form question, whose ticket never leaves the server',
+      questionFrame('form', { schema: { type: 'object' }, callback_url: CALLBACK }),
+    ],
     ['an answered frame with no interaction id', frame('chat.answered', { id: 'a' })],
     ['an unknown event', frame('chat.something', { id: 'x' })],
   ])('surfaces %s as malformed rather than dropping it', (_label, bad) => {

@@ -33,6 +33,9 @@ class WhatsAppSettings(TaiBaseSettings):
     api_base_url: str = "https://graph.facebook.com/v23.0"
     # phone_number_id used as the sender when no sender_identity is routed (ask_user).
     default_phone_number_id: str | None = None
+    # WhatsApp Business Account id that owns Flows; required only on the form-delivery
+    # path (a form ask is rendered as a WhatsApp Flow created under this WABA).
+    waba_id: str | None = None
     # Whitelist of wa_ids a caller-requested recipient must be on (ask_user only).
     # NoDecode hands the raw env string to the validator (comma-separated or JSON).
     allowed_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)

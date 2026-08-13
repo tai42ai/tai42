@@ -7,7 +7,8 @@ question to a Telegram chat as a `sendMessage` — the caller's requested
 recipient if it is on the operator allowlist, otherwise the operator-configured
 default chat — a
 ForceReply for typed `text`/`select` answers, a tappable URL button opening the
-interaction callback door for `confirm`/`external` — and bridges the human's
+interaction callback door for `confirm`/`external`, a `web_app` webview button
+for `form` — and bridges the human's
 typed reply back to the interactions store through its own verified webhook
 route. Outbound is plain HTTPS over a pooled `httpx` client; there is no
 Telegram SDK dependency (the Bot API is flat JSON-over-HTTPS).
@@ -77,7 +78,7 @@ tool parameter, never visible to the LLM:
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `CHANNEL_TELEGRAM_BOT_TOKEN` | — | Bot credential from BotFather (required) |
-| `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | `[]` | Whitelist of chats a caller-supplied recipient may name (numeric id — negative for groups — or `@username`), as a comma-separated string or a JSON list |
+| `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | `[]` | Whitelist of chats a caller-supplied recipient may name (numeric id — negative for groups — or `@username`), as a comma-separated string or a JSON list. A group or channel recipient cannot receive `form` questions — Telegram allows the `web_app` button in private chats only |
 | `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` | — | The chat questions go to when the caller names no recipient (trusted; not checked against the allowlist) |
 | `CHANNEL_TELEGRAM_WEBHOOK_SECRET` | — | `setWebhook` secret_token; verified on every inbound update (required) |
 | `CHANNEL_TELEGRAM_PUBLIC_BASE_URL` | — | This deployment's public base URL (required) |
@@ -114,8 +115,14 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
      budget). A `select` question lists its options as guided text.
    - **`confirm` / `external` (tap):** the message carries a tappable URL
      button opening the callback door directly — no correlation state, no
-     inbound involvement. (`form` has no single-reply mapping and is rejected
-     before delivery.)
+     inbound involvement.
+   - **`form` (webview):** the message carries a `web_app` button opening the
+     schema-rendered callback page as an in-chat webview; the page POSTs the
+     answer straight to the callback door, so like the tap forms there is no
+     correlation state and no inbound involvement. Advertised by the
+     `supports_form_delivery` capability flag. Telegram accepts a `web_app`
+     button in a PRIVATE chat only, so a `form` question to a group or channel
+     recipient fails the send where every other format succeeds.
 3. The human replies in Telegram. Telegram POSTs the update to this plugin's
    own public route `POST /api/channels/telegram/inbound`, registered by
    `setWebhook` at startup with a shared `secret_token`.

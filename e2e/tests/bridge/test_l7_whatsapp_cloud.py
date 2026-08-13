@@ -55,6 +55,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# The smallest form answer schema: a text field and an integer field, both required — the
+# integer is what the Flow returns as a string and the coercion turns back into an int.
+_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {"label": {"type": "string"}, "amount": {"type": "integer"}},
+    "required": ["label", "amount"],
+}
+
+
 def _fresh_wa_id() -> str:
     """A distinct human wa_id per leg, so no two asks contend for the single
     pending-question slot on one ``(phone_number_id, wa_id)`` pair."""
@@ -372,6 +381,60 @@ async def test_stale_button_tap_restores_pending_ask(bridge: BridgeHarness, uniq
         await cancel_and_join(ask_task)
 
     assert resolved == options[1]
+
+
+async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-form-q")
+    good_answer = {"label": uniq("l7-form-label"), "amount": 4}
+    wa_id = _fresh_wa_id()
+
+    async def ask() -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask_user",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": _FORM_SCHEMA,
+                },
+            )
+        return result.data
+
+    ask_task = asyncio.create_task(ask())
+    try:
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+        # The form ask is an interactive Flow send; its schema was created + published once
+        # (uncached), and the send opens exactly that published flow.
+        assert send["type"] == "interactive"
+        interactive = send["payload"]["interactive"]
+        assert interactive["type"] == "flow"
+        assert len(bridge.fake_whatsapp.flows) == 1
+        created = bridge.fake_whatsapp.flows[0]["id"]
+        assert bridge.fake_whatsapp.published_flows == [created]
+        params = interactive["action"]["parameters"]
+        assert params["flow_id"] == created
+        flow_token = params["flow_token"]
+
+        # The completed form returns as an nfm_reply matched by the flow token; a Flow number
+        # input arrives as a string, so the answer carries ``"4"``.
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID,
+            wa_id=wa_id,
+            response={"flow_token": flow_token, "label": good_answer["label"], "amount": "4"},
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    # The Flow response is coerced to the schema's types (``"4"`` -> ``4``) and the
+    # ``flow_token`` dropped — the caller gets the validated dict.
+    assert resolved == good_answer
 
 
 async def test_notify_media_sends_body_then_one_image_per_item(

@@ -217,15 +217,37 @@ def test_delivery_unknown_answer_format_rejected():
         ChannelDelivery(**_delivery_kwargs(answer_format="carrier-pigeon"))
 
 
-def test_delivery_form_answer_format_rejected():
+def test_delivery_form_answer_format_accepted_with_schema():
+    from tai42_contract.channels import ChannelDelivery
+
+    # "form" is channel-deliverable behind the channel's ``supports_form_delivery``
+    # flag; the delivery carries the form's JSON answer schema.
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    delivery = ChannelDelivery(**_delivery_kwargs(answer_format="form", schema=schema))
+    assert delivery.answer_format == "form"
+    assert delivery.schema == schema
+
+
+def test_delivery_form_requires_schema():
     from pydantic import ValidationError
 
     from tai42_contract.channels import ChannelDelivery
 
-    # "form" is a valid AnswerFormat but not channel-deliverable: a multi-field
-    # form has no single-reply mapping, so the model itself rejects it.
-    with pytest.raises(ValidationError, match="answer_format"):
+    # A form delivery with no schema (or an empty one) has nothing to render.
+    with pytest.raises(ValidationError, match="requires a non-empty schema"):
         ChannelDelivery(**_delivery_kwargs(answer_format="form"))
+    with pytest.raises(ValidationError, match="requires a non-empty schema"):
+        ChannelDelivery(**_delivery_kwargs(answer_format="form", schema={}))
+
+
+def test_delivery_non_form_forbids_schema():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelDelivery
+
+    # A schema is meaningful only for "form"; any other format rejects it.
+    with pytest.raises(ValidationError, match="carries no schema"):
+        ChannelDelivery(**_delivery_kwargs(schema={"type": "object"}))
 
 
 def test_delivery_recipient_defaults_to_none_and_accepts_an_address():
@@ -383,12 +405,14 @@ def test_capability_flags_do_not_tighten_structural_channel_check():
 def test_channel_delivery_shape_is_unchanged():
     from tai42_contract.channels import ChannelDelivery
 
-    # The ask_user delivery path deliberately gains NO media/template fields.
+    # The ask_user delivery path carries the form ``schema`` but deliberately gains
+    # NO media/template fields.
     assert set(ChannelDelivery.model_fields) == {
         "interaction_id",
         "recipient",
         "question",
         "answer_format",
+        "schema",
         "options",
         "callback_url",
         "timeout_at",

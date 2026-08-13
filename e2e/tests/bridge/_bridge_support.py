@@ -315,6 +315,28 @@ class BridgeHarness:
             valid=valid,
         )
 
+    def whatsapp_nfm_reply(
+        self,
+        *,
+        phone_number_id: str,
+        wa_id: str,
+        response: dict[str, Any],
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuinely-signed completed-Flow reply (``nfm_reply``) from ``wa_id`` to the
+        ``phone_number_id`` the form ask was sent FROM. ``response`` is the filled form
+        values (Flow inputs arrive as strings) plus the ``flow_token`` the send carried
+        (the pending ask's ``interaction_id``)."""
+        return self.fake_whatsapp.build_nfm_reply(
+            app_secret=self.whatsapp_secret,
+            phone_number_id=phone_number_id,
+            wa_id=wa_id,
+            response=response,
+            wamid=wamid,
+            valid=valid,
+        )
+
     def whatsapp_status(
         self, *, phone_number_id: str, wamid: str, status: str, recipient_id: str = "", valid: bool = True
     ) -> SignedInbound:

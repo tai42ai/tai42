@@ -14,10 +14,12 @@ Four doors:
   for external-format answers (the server-to-server / confirm-form claim path).
   Sensitive data rides the JSON body here.
 * ``GET /api/interactions/callback/{ticket}`` — the UNAUTHENTICATED redirect
-  door. GET never mutates state (link scanners prefetch these URLs); it serves a
-  byte-constant page: for confirm/external questions the confirm page whose form
-  POSTs back to the same URL, for text/select an informational awaiting-reply
-  page (a bare confirm tap carries no value answer).
+  door. GET never mutates state (link scanners prefetch these URLs). It serves a
+  page by the question's answer format: for confirm/external the byte-constant
+  confirm page whose form POSTs back to the same URL; for a channel-delivered
+  ``form`` a schema-rendered HTML form that POSTs ``{"answer": {...}}`` as JSON
+  to the same URL; for text/select an informational awaiting-reply page (a bare
+  confirm tap carries no value answer).
 
 The callback ticket is a bearer capability minted by the ``ask_user`` helper;
 it is never deleted, single-use is enforced by the answered-state guard in
@@ -38,6 +40,7 @@ and the tail; clients de-duplicate by ``interaction_id``.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 from datetime import UTC, datetime
@@ -60,6 +63,7 @@ from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
+from tai42_skeleton.interactions.form_schema import channel_form_fields
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
     INTERACTIONS_NOT_CONFIGURED_MESSAGE,
@@ -116,6 +120,20 @@ _HTML_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
 }
+# The form page needs its own inline submit script (a native form cannot build the
+# typed ``{"answer": {...}}`` JSON body) plus a same-origin fetch back to this
+# callback URL. The CSP widens only to a constant inline ``script-src`` and a
+# ``connect-src``/``form-action`` pinned to ``'self'`` — no external origins, no
+# ``unsafe-eval`` — over the same locked-down ``default-src 'none'`` base.
+_FORM_HTML_HEADERS = {
+    **_BASE_HEADERS,
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "connect-src 'self'; form-action 'self'"
+    ),
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
 
 # Byte-constant pages: zero interpolation of any request-derived value. The
 # confirm form posts to the SAME URL (empty action preserves the query string).
@@ -148,6 +166,136 @@ _REPLY_PAGE = (
     "<p>Answer this question by replying on the channel where you received it.</p>\n"
     "</body></html>\n"
 )
+
+# The constant submit script for the form page: it reads the rendered fields,
+# coerces number inputs to numbers and checkboxes to booleans, omits empty
+# optional fields, and POSTs ``{"answer": {...}}`` as JSON to THIS same callback
+# URL. On 200 (answered or already_answered) it swaps to a done state; on 400 it
+# renders the door's own error text and lets the visitor retry. The script body
+# is a constant — only the field markup above it is schema-derived (and escaped).
+_FORM_SUBMIT_SCRIPT = """<script>
+(function () {
+  var form = document.getElementById('askform');
+  var err = document.getElementById('err');
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    err.textContent = '';
+    var answer = {};
+    var fields = form.querySelectorAll('[data-field]');
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i];
+      var name = el.getAttribute('data-field');
+      var kind = el.getAttribute('data-kind');
+      if (kind === 'boolean') {
+        answer[name] = el.checked;
+      } else if (kind === 'number') {
+        if (el.value !== '') { answer[name] = Number(el.value); }
+      } else {
+        if (el.value !== '') { answer[name] = el.value; }
+      }
+    }
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer: answer })
+    }).then(function (resp) {
+      if (resp.status === 200) {
+        document.body.innerHTML = '<h1>Done</h1><p>Your response has been submitted.</p>';
+        return;
+      }
+      if (resp.status === 400) {
+        resp.json().then(function (data) {
+          err.textContent = (data && data.error) ? data.error : 'Invalid submission, please check your answers.';
+        }).catch(function () {
+          err.textContent = 'Invalid submission, please check your answers.';
+        });
+        return;
+      }
+      err.textContent = 'Submission failed, please try again.';
+    }).catch(function () {
+      err.textContent = 'Network error, please try again.';
+    });
+  });
+})();
+</script>
+"""
+
+
+class _FormRenderError(Exception):
+    """Raised when a stored form question's schema cannot be rendered into a page —
+    a schema outside the channel-deliverable subset (``form_schema``). ``ask_user``
+    refuses such a schema before persisting, so a form record that reaches the GET
+    door MUST render; failing to is a server bug (a record that bypassed
+    ``ask_user``), so it surfaces as a loud 500 with a logged reason, never a blank
+    or half-rendered page silently dropping fields."""
+
+
+def _render_field(name: str, prop: dict[str, Any], is_required: bool) -> str:
+    """Render one subset-validated schema property into an escaped form control:
+    ``string`` (``enum`` -> ``<select>``, else text), ``boolean`` -> checkbox,
+    ``integer``/``number`` -> number input. The property is pre-validated by
+    ``channel_form_fields`` (the one subset definition), so its type is always a
+    scalar and any ``enum`` is a non-empty list of strings; an unexpected type is a
+    server bug and raises ``_FormRenderError``. ``data-field``/``data-kind`` drive
+    the submit script's typed collection."""
+    esc_name = html.escape(name, quote=True)
+    esc_label = html.escape(str(prop.get("title") or name))
+    req_attr = " required" if is_required else ""
+    ptype = prop.get("type")
+    if ptype == "string":
+        enum = prop.get("enum")
+        if enum is not None:
+            # A leading blank option lets an optional select stay empty and forces a
+            # required one (with the ``required`` attr) to a real choice on submit.
+            parts = ['<option value="">—</option>']
+            for choice in enum:
+                text = str(choice)
+                parts.append(f'<option value="{html.escape(text, quote=True)}">{html.escape(text)}</option>')
+            control = f'<select data-field="{esc_name}" data-kind="string"{req_attr}>' + "".join(parts) + "</select>"
+        else:
+            control = f'<input data-field="{esc_name}" data-kind="string" type="text"{req_attr}>'
+    elif ptype == "boolean":
+        # A checkbox always submits a boolean (checked/unchecked), so the field is
+        # always present — no ``required`` attribute, which would force it checked.
+        control = f'<input data-field="{esc_name}" data-kind="boolean" type="checkbox">'
+    elif ptype in ("integer", "number"):
+        step = ' step="1"' if ptype == "integer" else ' step="any"'
+        control = f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{req_attr}>'
+    else:
+        raise _FormRenderError(f"form schema property {name!r} has unsupported type {ptype!r}")
+    return f"<label>{esc_label}<br>{control}</label>"
+
+
+def _render_form_page(format_payload: dict[str, Any] | None) -> str:
+    """Render the schema-driven HTML form for a channel-delivered form question,
+    over the SAME subset walk (``channel_form_fields``) that ``ask_user`` enforces
+    at ask time. A schema outside the subset raises ``_FormRenderError``; the GET
+    door maps that to a loud 500 (the server-bug backstop for a record that
+    bypassed ``ask_user``)."""
+    schema = (format_payload or {}).get("schema")
+    try:
+        fields = channel_form_fields(schema)
+    except ValueError as exc:
+        raise _FormRenderError(str(exc)) from exc
+    rows = [_render_field(name, prop, is_required) for name, prop, is_required in fields]
+    fields_html = "\n".join(rows)
+    return (
+        "<!doctype html>\n"
+        '<html lang="en"><head><meta charset="utf-8"><title>Respond</title>\n'
+        "<style>body{font-family:system-ui,sans-serif;margin:3rem;max-width:40rem}"
+        "label{display:block;margin:1rem 0}input,select{font-size:1rem;margin-top:.3rem}"
+        "button{font-size:1rem;padding:.6rem 1.4rem;margin-top:1rem}"
+        "#err{color:#b00020;margin-top:1rem}</style></head><body>\n"
+        "<h1>Respond</h1>\n"
+        '<form id="askform">\n'
+        f"{fields_html}\n"
+        '<div id="err" role="alert"></div>\n'
+        '<button type="submit">Submit</button>\n'
+        "</form>\n"
+        f"{_FORM_SUBMIT_SCRIPT}"
+        "</body></html>\n"
+    )
+
 
 # The free-form label recorded on an answer delivered through the callback door.
 _EXTERNAL_ANSWERED_BY = "external-callback"
@@ -539,9 +687,9 @@ async def _claim_external(
     """Validate (if a schema was declared), then atomically claim the answer."""
     schema = (state.request.format_payload or {}).get("schema")
     if schema is not None:
-        message = _schema_mismatch(answer, schema)
-        if message is not None:
-            return _callback_json({"error": message}, 400)
+        mismatch = _schema_mismatch(answer, schema)
+        if mismatch is not None:
+            return _callback_json({"error": mismatch[0]}, 400)
     return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, answer)
 
 
@@ -660,7 +808,12 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
         try:
             validated = _validate_answer(state.request, value)
         except _AnswerInvalid as exc:
-            return _callback_json({"error": str(exc)}, 400)
+            # The failing field's dotted path rides as an optional ``field`` key so a
+            # channel can pin the error on the right control; absent when unlocated.
+            body: dict[str, Any] = {"error": str(exc)}
+            if exc.field is not None:
+                body["field"] = exc.field
+            return _callback_json(body, 400)
         return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, validated)
 
     # EXTERNAL: verbatim payload semantics. Dispatch on the body FIRST —
@@ -709,6 +862,16 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore) -> Re
         return PlainTextResponse(_CALLBACK_GET_NOT_FOUND, status_code=404, headers=_BASE_HEADERS)
     if state.status == "answered":
         return HTMLResponse(_DONE_PAGE, headers=_HTML_HEADERS)
+    if state.request.answer_format is AnswerFormat.FORM:
+        # A channel-delivered form needs a real answer surface: render its schema
+        # server-side. An unrenderable schema on a form record is a server bug —
+        # answer a loud 500 with a logged reason, never a blank/half-rendered page.
+        try:
+            page = _render_form_page(state.request.format_payload)
+        except _FormRenderError:
+            logger.exception("form callback GET: unrenderable schema for interaction %s", interaction_id)
+            return PlainTextResponse("Internal Server Error", status_code=500, headers=_BASE_HEADERS)
+        return HTMLResponse(page, headers=_FORM_HTML_HEADERS)
     if state.request.answer_format in (AnswerFormat.CONFIRM, AnswerFormat.EXTERNAL):
         # Only these formats map the confirm form's empty-body POST to an
         # answer (confirm -> True, external -> the query-param payload).

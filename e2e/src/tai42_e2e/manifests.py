@@ -797,6 +797,10 @@ BRIDGE_WHATSAPP_PHONE_ID_C = "333000333000333"
 # The human wa_id on the far end (the ``client_address``); allowlisted so an ask_user over
 # whatsapp can deliver to it.
 BRIDGE_WHATSAPP_CLIENT = "15559003333"
+# The WhatsApp Business Account id owning Flows — the form-delivery path creates a
+# form ask's Flow under it (only the mock leg needs a fixed value; a real leg reads
+# the operator's own WABA from env).
+BRIDGE_WHATSAPP_WABA_ID = "waba000111000111"
 
 # Cost-cap bounds: max concurrent turns per worker; max turns per client_address per hour.
 BRIDGE_MAX_CONCURRENT_TURNS = 4
@@ -847,6 +851,8 @@ def _bridge_whatsapp_env(res: StackResources, *, real: bool) -> dict[str, str]:
         "CHANNEL_WHATSAPP_API_BASE_URL": _require_stub(res.whatsapp_api_base_url, "whatsapp"),
         "CHANNEL_WHATSAPP_REDIS_URL": res.redis_url,
         "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID": BRIDGE_WHATSAPP_PHONE_ID,
+        # The WABA a form ask's WhatsApp Flow is created under (form-delivery path only).
+        "CHANNEL_WHATSAPP_WABA_ID": BRIDGE_WHATSAPP_WABA_ID,
         "CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS": BRIDGE_WHATSAPP_CLIENT,
     }
 

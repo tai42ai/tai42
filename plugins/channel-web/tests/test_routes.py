@@ -1162,16 +1162,61 @@ async def test_answer_missing_answer_key(web_env, stub_app, registered_session: 
     assert resp.status_code == 400
 
 
-@pytest.mark.parametrize("answer", [{"nested": "object"}, ["a", "b"], None])
-async def test_answer_rejects_a_non_scalar_value(
+@pytest.mark.parametrize("answer", [["a", "b"], None])
+async def test_answer_rejects_a_non_scalar_non_object_value(
     web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx, answer
 ):
-    # A web question is text / confirm / select, so its answer is one scalar; the
-    # record is never claimed for a value the door will not forward.
+    # A web answer is one scalar (text/confirm/select) or a form object; a list or a
+    # bare null is neither, and the record is never claimed for a value the door will
+    # not forward.
     await _seed_question()
     resp = await _handler(stub_app, _ANSWER)(_answer_request(answer=answer))
     assert resp.status_code == 422
     assert fake_httpx.calls == []
+    assert "channel:web:question:int-1" in registered_session.store
+
+
+async def test_answer_forwards_a_form_object(web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx):
+    # A form answer is a JSON object; it is forwarded as-is and persisted into the
+    # chat.answered frame. The callback door validates it against the stored schema —
+    # this door only bounds its shape and size.
+    await _seed_question()
+    fake_httpx.responses.append(response(200, json={"data": {"status": "answered"}}))
+    answer = {"name": "Ada", "count": 3}
+
+    resp = await _handler(stub_app, _ANSWER)(_answer_request(answer=answer))
+
+    assert resp.status_code == 200
+    assert fake_httpx.calls[0]["json"] == {"answer": answer}
+    answered = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert answered["answer"] == answer
+
+
+async def test_answer_rejects_an_oversized_object(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx
+):
+    # An object whose serialized size exceeds the object cap is a precise 422 (it fits
+    # under the body cap), never forwarded, and the record is kept.
+    await _seed_question()
+    answer = {"blob": "x" * (33 * 1024)}
+    resp = await _handler(stub_app, _ANSWER)(_answer_request(answer=answer))
+    assert resp.status_code == 422
+    assert "serialize to at most" in _body(resp)["error"]
+    assert fake_httpx.calls == []
+    assert "channel:web:question:int-1" in registered_session.store
+
+
+async def test_answer_rejects_a_non_finite_number_inside_an_object(
+    web_env, stub_app, registered_session: FakeRedis, fake_httpx: FakeHttpx
+):
+    # ``json.loads`` accepts ``Infinity`` nested in an object; forwarding it would emit
+    # invalid JSON to the callback door AND persist a bad token into the transcript.
+    await _seed_question()
+    resp = await _handler(stub_app, _ANSWER)(_answer_request(raw_body=b'{"answer": {"x": Infinity}}'))
+    assert resp.status_code == 422
+    assert _body(resp)["error"] == "answer object must contain only finite numbers"
+    assert fake_httpx.calls == []
+    assert _TRANSCRIPT_KEY not in registered_session.streams
     assert "channel:web:question:int-1" in registered_session.store
 
 

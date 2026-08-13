@@ -33,6 +33,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
 
 from tai42_skeleton.access_control.user import clamp_write_audience
+from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore, PruneResult
@@ -207,9 +208,18 @@ async def ask_user(
     A set channel forces the ticket + callback-URL mint for EVERY answer format
     (the channel bridges the reply back through the public callback door),
     forbids ``link`` and ``verifier`` (the channel owns delivery, and its
-    forward is unsigned), and rejects ``answer_format="form"`` (a multi-field
-    form has no single-reply mapping on a chat/SMS medium). An unknown name
-    raises ``ValueError`` before any state is written. The timeout budget bounds
+    forward is unsigned). ``answer_format="form"`` is delivered only over a
+    channel that advertises ``supports_form_delivery``; a channel without the
+    flag refuses the form loudly, naming the channel. A channel form's ``schema``
+    must fall in the channel-deliverable subset (it is answered on the
+    server-rendered callback page): root ``{"type": "object"}`` with a non-empty
+    ``properties`` map; every property a scalar
+    ``string``/``boolean``/``integer``/``number``; ``enum`` only on a ``string``
+    property, a non-empty list of strings; a ``required`` list naming only
+    declared properties. A schema outside the subset raises ``ValueError`` naming
+    the offending property, before any state is written (a non-channel form keeps
+    full schema freedom). An unknown name raises ``ValueError`` before any state
+    is written. The timeout budget bounds
     the WHOLE ask — the delivery attempts, their backoff sleeps, AND the answer
     wait together — so delivery time shrinks the answer wait, and a delivery phase
     that consumes the whole budget leaves no wait and times out. A delivery failure
@@ -278,9 +288,20 @@ async def ask_user(
             # answered. Reject loudly, never persist an unanswerable question.
             raise ValueError("verifier is forbidden when a channel is set (the channel forward is unsigned)")
         if fmt is AnswerFormat.FORM:
-            # A multi-field form has no single-reply mapping on a chat/SMS
-            # medium; the channel-supported set is text|confirm|select|external.
-            raise ValueError("answer_format 'form' is not supported over a channel")
+            if not getattr(channel_obj, "supports_form_delivery", False):
+                # A form is delivered only over a channel that advertises the
+                # ``supports_form_delivery`` capability; a channel without it can
+                # never surface a multi-field form, so refuse loudly naming it.
+                raise ValueError(f"channel {channel!r} does not deliver form questions")
+            if schema is not None:
+                # A channel form is answered on the server-rendered callback page,
+                # so its schema must fall in the renderable subset — refuse anything
+                # richer here, BEFORE any state is written (a missing schema is left
+                # to ``_build_payload``'s own "requires a schema" guard). Normalize
+                # once (pydantic model -> JSON schema) and carry the dict forward so
+                # nothing re-normalizes it.
+                schema = _normalize_schema(schema)
+                validate_channel_form_schema(schema)
         if options is not None and fmt is not AnswerFormat.SELECT:
             raise ValueError("options are only valid with answer_format 'select'")
         if recipient is not None and (not isinstance(recipient, str) or not recipient.strip()):
@@ -444,6 +465,9 @@ async def ask_user(
             question=question,
             answer_format=fmt.value,
             options=options,
+            # For a form the normalized schema rides the delivery; ``_build_payload``
+            # already required and normalized it above (before any persist).
+            schema=(format_payload or {}).get("schema") if fmt is AnswerFormat.FORM else None,
             callback_url=callback_url,
             timeout_at=timeout_at,
         )

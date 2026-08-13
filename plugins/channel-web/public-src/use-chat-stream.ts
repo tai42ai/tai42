@@ -16,29 +16,42 @@
  * bad entry on a healthy stream must not stick.
  */
 import { useEffect, useRef, useState } from 'react';
+import type { JsonSchema } from '@tai42/studio-sdk';
 
 import { isSessionMissing, isStoreOff, openChatStream } from '@/api';
 import { readSseFrames, type SseFrame } from '@/sse';
 
-/** The answer shapes a channel-delivered question can take (the contract's
- * channel-deliverable set — `form` is never delivered to a channel). */
-export type AnswerFormat = 'text' | 'confirm' | 'select' | 'external';
+/** The permissive schema type the form widget renders, re-exported so a question
+ * consumer types against one import. */
+export type { JsonSchema };
+
+/** The answer shapes a channel-delivered question can take. `form` IS delivered to
+ * this channel — the page advertises `supports_form_delivery` and renders a
+ * schema-driven form widget for it. */
+export type AnswerFormat = 'text' | 'confirm' | 'select' | 'form' | 'external';
 
 const ANSWER_FORMATS: ReadonlySet<string> = new Set<AnswerFormat>([
   'text',
   'confirm',
   'select',
+  'form',
   'external',
 ]);
 
-/** The interactions callback door — the answer sink an `external` question sends
- * the visitor to. It is an interaction bearer ticket, so it reaches the page for
- * that one format and is `null` for the other three, which answer by interaction
- * id through this channel's own door. Ticket and format travel as ONE type, so a
- * widget that reads the ticket has the format that guarantees it. */
-export type QuestionTicket =
-  | { readonly answerFormat: 'external'; readonly callbackUrl: string }
-  | { readonly answerFormat: Exclude<AnswerFormat, 'external'>; readonly callbackUrl: null };
+/** The format-dependent extras a question row carries, keyed by the format that
+ * decides whether the wire carries each: the interactions callback ticket for
+ * `external` (the one widget that opens it), the JSON answer schema for `form` (the
+ * one widget that builds an answer from it), and neither for the scalar formats.
+ * Extras and format travel as ONE type, so a widget that reads an extra has the
+ * format that guarantees it. */
+export type QuestionFacet =
+  | { readonly answerFormat: 'external'; readonly callbackUrl: string; readonly schema: null }
+  | { readonly answerFormat: 'form'; readonly callbackUrl: null; readonly schema: JsonSchema }
+  | {
+      readonly answerFormat: 'text' | 'confirm' | 'select';
+      readonly callbackUrl: null;
+      readonly schema: null;
+    };
 
 /** Everything a question row carries apart from its ticket. */
 interface QuestionBase {
@@ -67,7 +80,7 @@ export type ChatItem =
        * without a key — the agent's own messages included. */
       readonly clientMessageId: string | null;
     }
-  | (QuestionBase & QuestionTicket);
+  | (QuestionBase & QuestionFacet);
 
 /** The folded stream: the ordered items, a fast id index for the dedupe, and the
  * interaction ids a `chat.answered` frame has settled. */
@@ -126,17 +139,27 @@ function clientMessageIdOf(raw: unknown): string | null | undefined {
   return raw === undefined ? null : undefined;
 }
 
-/** The callback ticket, by the format that decides whether the wire carries one:
- * present and a string for `external` — the only widget that opens it — and
- * ABSENT for the other three, whose ticket never leaves the server. Any other
- * spelling (a missing external ticket, a non-string, an explicit null, a ticket on
- * a format that answers here) is a frame this page will not render: `undefined`
- * says malformed. */
-function ticketOf(raw: unknown, format: AnswerFormat): QuestionTicket | undefined {
+/** The format-dependent extras, validated together by the format that decides
+ * whether the wire carries each: `external` carries a string callback ticket and no
+ * schema; `form` carries an object schema and no ticket; the scalar formats carry
+ * neither. Any other spelling — a missing/non-string ticket, a missing/non-object
+ * schema, or either extra on a format that carries none — is a frame this page will
+ * not render: `undefined` says malformed. */
+function facetOf(
+  callbackRaw: unknown,
+  schemaRaw: unknown,
+  format: AnswerFormat,
+): QuestionFacet | undefined {
   if (format === 'external') {
-    return typeof raw === 'string' ? { answerFormat: format, callbackUrl: raw } : undefined;
+    if (typeof callbackRaw !== 'string' || schemaRaw !== undefined) return undefined;
+    return { answerFormat: format, callbackUrl: callbackRaw, schema: null };
   }
-  return raw === undefined ? { answerFormat: format, callbackUrl: null } : undefined;
+  if (format === 'form') {
+    if (callbackRaw !== undefined || !isRecord(schemaRaw)) return undefined;
+    return { answerFormat: format, callbackUrl: null, schema: schemaRaw };
+  }
+  if (callbackRaw !== undefined || schemaRaw !== undefined) return undefined;
+  return { answerFormat: format, callbackUrl: null, schema: null };
 }
 
 /** Add or replace one item, keeping arrival order. A redelivered entry (the
@@ -183,15 +206,16 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
   }
 
   if (frame.event === 'chat.question') {
-    const { interaction_id, question, answer_format, callback_url, timeout_at, ts } = payload;
+    const { interaction_id, question, answer_format, callback_url, schema, timeout_at, ts } =
+      payload;
     const options = optionsOf(payload.options);
     if (typeof interaction_id !== 'string') return { kind: 'malformed', event: frame.event };
     if (typeof question !== 'string') return { kind: 'malformed', event: frame.event };
     if (typeof answer_format !== 'string' || !ANSWER_FORMATS.has(answer_format)) {
       return { kind: 'malformed', event: frame.event };
     }
-    const ticket = ticketOf(callback_url, answer_format as AnswerFormat);
-    if (ticket === undefined) return { kind: 'malformed', event: frame.event };
+    const facet = facetOf(callback_url, schema, answer_format as AnswerFormat);
+    if (facet === undefined) return { kind: 'malformed', event: frame.event };
     if (!isTimestamp(timeout_at) || !isTimestamp(ts)) {
       return { kind: 'malformed', event: frame.event };
     }
@@ -206,7 +230,7 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
         options,
         timeoutAt: timeout_at,
         ts,
-        ...ticket,
+        ...facet,
       }),
     };
   }
