@@ -11,4 +11,9 @@ class ClientDisconnectedError(Exception):
     """
 
 
-__all__ = ["ClientDisconnectedError"]
+class ClientConnectError(ClientDisconnectedError):
+    """Raised when a pooled client could not be (re)built — connect/init failed; a
+    subclass so unavailable-client handling catches both."""
+
+
+__all__ = ["ClientConnectError", "ClientDisconnectedError"]

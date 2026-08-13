@@ -52,6 +52,7 @@ _TOKEN_EXPIRED_CODE = "token_expired"
 _RECONNECT_REQUIRED_CODE = "reconnect_required"
 _REFRESH_FAILING_CODE = "refresh_failing"
 _AUTH_EXPIRED_CODE = "auth_expired"
+_UPSTREAM_MCP_UNAVAILABLE_CODE = "upstream_mcp_unavailable"
 
 
 # The ``_meta`` token key and error prefix are the cross-repo wire contract with
@@ -236,6 +237,25 @@ def managed_auth_error_result(
     return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(type="text", text=text)])
 
 
+def upstream_mcp_unavailable_result(config: TaiMCPConfig) -> mcp.types.CallToolResult:
+    """Build an error ``CallToolResult`` for an upstream MCP whose pooled session
+    died and did not come back on the one-shot reconnect.
+
+    Mirrors :func:`managed_auth_error_result`'s envelope — the connector-error
+    prefix + a ``{"code": ...}`` payload recoverable via
+    :func:`extract_connector_error_payload`. The consumer-facing message names
+    the MCP entry by its configured title; the raw disconnect text is never the
+    message (it is logged at the dispatch seam).
+    """
+    message = (
+        f"the upstream MCP {config.title!r} connection was lost and reconnection "
+        "failed; the tool call could not be completed"
+    )
+    payload = {"code": _UPSTREAM_MCP_UNAVAILABLE_CODE, "message": message}
+    text = f"{_error_prefix()}{json.dumps(payload)}"
+    return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(type="text", text=text)])
+
+
 def check_managed_transport(config: TaiMCPConfig, transport: str) -> None:
     """Allow managed entries only on transports with a token-injection path."""
     if config.is_managed and transport not in SUPPORTED_MANAGED_TRANSPORTS:
@@ -293,6 +313,31 @@ async def call_with_auth(
             meta=meta,
             timeout=mcp_dispatch_settings().call_timeout_seconds,
         )
+
+
+async def evict_pooled_session(
+    config: TaiMCPConfig,
+    transport: str,
+    mcp_client: FastMCPClient,
+) -> None:
+    """Drop the pooled MCP session a dispatch of ``config`` would reuse.
+
+    The effective config is computed through the SAME auth resolution and request
+    preparation :func:`call_with_auth` keys its pool on, so the eviction targets
+    the exact pooled entry — a managed entry (auth-merged headers/env) or a plain
+    one (unmerged). Both go through :func:`_prepare_request`, so the dispatch key
+    and the eviction key cannot drift. A probe passes on a throwaway off-pool
+    client, so a dead pooled session survives it; closing it by its exact key
+    forces the next dispatch to build a fresh session. Auth resolution or the
+    close is allowed to raise — a failed eviction surfaces as the reload op's
+    failure, never a silent leak of the corpse. The eviction targets the CURRENT
+    effective key: an OAuth-rotated token yields a new key, so a corpse left under
+    a superseded token key is not this call's target — it closes via the dispatch
+    path's disconnect handling instead.
+    """
+    auth = await resolve_managed_auth_for_config(config)
+    effective_config, _meta = _prepare_request(config, auth, transport)
+    await mcp_client.close(config=effective_config.model_dump())
 
 
 async def handle_token_expired(

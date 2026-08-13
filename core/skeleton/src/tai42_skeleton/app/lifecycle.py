@@ -33,6 +33,7 @@ from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel, write_r
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.connectors.providers.registry import reset_registry
+from tai42_skeleton.connectors.token_injection import evict_pooled_session
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
@@ -42,7 +43,8 @@ from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 from tai42_skeleton.settings.settings import CoreSettings
-from tai42_skeleton.tools import ToolRegistry
+from tai42_skeleton.tools import ToolRegistry, mcp_health
+from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
 
 if TYPE_CHECKING:
     from tai42_contract.config.manager import ConfigManager
@@ -1012,6 +1014,12 @@ class TaiMCPLifecycleMixin(ABC):
             for cfg, kind in failures:
                 self._record_failed_mcp(cfg, kind)
 
+        # Health history follows the manifest: a title dropped from config drops its
+        # history; surviving titles keep continuity across reloads. Fires on every
+        # epoch build against the CONFIGURED titles (a failed/unavailable title keeps
+        # its history), so an empty manifest clears the store.
+        mcp_health.retain({cfg.title for cfg in self._manifest.mcp or []})
+
         # Project the operation surface into MCP tools. Runs AFTER the router
         # modules registered their operations and AFTER base tools/MCPs bound (so
         # extension combos over a projected op resolve at bind time), and BEFORE
@@ -1341,6 +1349,12 @@ class TaiMCPLifecycleMixin(ABC):
         threads. ``_reload_failed_mcps_async`` therefore probes servers concurrently
         but calls this ONE server at a time; the single-server reload calls it once.
         """
+        # Heal the connection this reload manages: drop the pooled dispatch session
+        # for this title so the next dispatch builds a fresh one. The probe passed on
+        # a throwaway off-pool client, so a dead pooled session survives it and every
+        # dispatch keeps hitting the corpse until it is evicted here.
+        await self._evict_mcp_session_on_serving_loop(config)
+
         # Clean reload: drop any tools this MCP previously bound, then rebind.
         old_bound = set(self._mcp_bound_tools.get(title, set()))
         for name in sorted(old_bound):
@@ -1410,6 +1424,31 @@ class TaiMCPLifecycleMixin(ABC):
             await self.preset_manager.reconcile_bases(affected_bases)
             return
         future = asyncio.run_coroutine_threadsafe(self.preset_manager.reconcile_bases(affected_bases), loop)
+        await asyncio.wrap_future(future)
+
+    async def _evict_mcp_session_on_serving_loop(self, config: TaiMCPConfig) -> None:
+        """Evict the pooled dispatch session for ``config`` on the serving loop.
+
+        The ``FastMCPClient`` pools are per event loop and dispatch runs on the
+        serving loop, so an eviction on any other loop misses the real pool and
+        leaves the dead session in place. An admin reload runs this body on a
+        ``_run_blocking`` worker loop and marshals the eviction back onto the
+        serving loop; the reprobe pass already runs on the serving loop and awaits
+        directly, and a pure-sync boot (no serving loop bound) runs it on the
+        current loop. The transport is detected once here and reused, never
+        re-derived. A failed eviction propagates — it must not silently leave a
+        corpse in the pool.
+        """
+        transport = _detect_transport(config.config)
+
+        async def _evict() -> None:
+            await evict_pooled_session(config, transport, FastMCPClient())
+
+        loop = self._serving_loop
+        if loop is None or asyncio.get_running_loop() is loop:
+            await _evict()
+            return
+        future = asyncio.run_coroutine_threadsafe(_evict(), loop)
         await asyncio.wrap_future(future)
 
     async def _reload_failed_mcps_async(self) -> list[dict[str, Any]]:
@@ -1687,6 +1726,9 @@ class TaiMCPLifecycleMixin(ABC):
         self._refresh_manifest_mcp()
         bound = sorted(self._mcp_bound_tools.pop(title, set()))
         failed = self._failed_mcps.pop(title, None) is not None
+        # The title ceases to exist here — clear its passive health so a removed
+        # MCP leaves no residue behind in the process-wide store.
+        mcp_health.forget(title)
         if not bound and not failed:
             return {"title": title, "status": "absent"}
         for name in bound:
@@ -1759,17 +1801,25 @@ class TaiMCPLifecycleMixin(ABC):
     def _live_mcp_status(self) -> dict[str, Any]:
         """Snapshot the in-process MCP-binding state.
 
-        Returns ``{"bound": {title: [tool, ...]}, "failed": [{title, status}]}``
-        (consumed by ``GET /api/mcp_status``).
+        Returns ``{"bound": {title: [tool, ...]}, "failed": [{title, status}],
+        "health": {title: {last_success, last_error, consecutive_failures,
+        failing_since}}}`` (consumed by ``GET /api/mcp-status``). ``health`` covers
+        every bound and failed title; a never-called MCP carries the block at its
+        empty values. The four fields are this worker's passive dispatch health —
+        per-process, so a fleet report reads each worker's own.
 
         Reads race a reload worker thread mutating ``_mcp_bound_tools`` (this
         read is deliberately not reload-gated, so status keeps answering
         mid-reload), so the dict and each per-title tool set are snapshot-copied
         — single C-level ops, atomic under the GIL — before iterating.
         """
+        bound = {title: sorted(set(tools)) for title, tools in dict(self._mcp_bound_tools).items()}
+        failed = self._list_failed_mcps()
+        titles = set(bound) | {row["title"] for row in failed}
         return {
-            "bound": {title: sorted(set(tools)) for title, tools in dict(self._mcp_bound_tools).items()},
-            "failed": self._list_failed_mcps(),
+            "bound": bound,
+            "failed": failed,
+            "health": {title: mcp_health.snapshot(title) for title in sorted(titles)},
         }
 
     @abstractmethod

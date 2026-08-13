@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.connectors.models import ConnectorRef
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app import kind_status as ks
@@ -30,6 +31,8 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
 from tai42_skeleton.app.server import ServingCore
+from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
+from tai42_skeleton.connectors.token_injection import _prepare_request
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import compat as mkt_compat
@@ -37,6 +40,8 @@ from tai42_skeleton.marketplace.compat import CompatVerdict, CorePluginBootError
 from tai42_skeleton.monitoring.registry import reset_monitoring
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.tools import mcp_health
+from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
 from tests.app._fixtures.reload import reload_with
 
 if TYPE_CHECKING:
@@ -247,6 +252,133 @@ def test_reload_failed_mcps_keeps_siblings_on_one_failure():
     assert {"title": "b", "status": "error"} in out
 
 
+# -- reload evicts the pooled dispatch session --------------------------------
+
+CONN_ID = "11111111-1111-1111-1111-111111111111"
+
+
+def _managed_cfg(title="svc"):
+    return TaiMCPConfig(
+        title=title,
+        include=[],
+        config=MCPConfig(type="http", url="http://x/mcp", headers={}),
+        managed=ConnectorRef(connection_id=CONN_ID, provider_id="acme", sub_service="events"),
+    )
+
+
+class _RecordingPool:
+    """Stands in for the pooled ``FastMCPClient`` so a reload's session eviction is
+    observable: records the loop it ran on and the ``close`` connection kwargs (the
+    pool key a dispatch would look up)."""
+
+    def __init__(self, sink: list[tuple[asyncio.AbstractEventLoop, dict[str, Any]]]) -> None:
+        self._sink = sink
+
+    async def close(self, **kwargs: Any) -> None:
+        self._sink.append((asyncio.get_running_loop(), kwargs))
+
+
+def _install_recording_pool(monkeypatch, sink):
+    monkeypatch.setattr(lifecycle_module, "FastMCPClient", lambda: _RecordingPool(sink))
+
+
+def test_reload_evicts_pooled_session_under_plain_key(monkeypatch):
+    """A reload drops the pooled dispatch session for the title. A plain
+    (non-managed) entry injects nothing, so the eviction key is the raw config
+    dump — exactly the pool key a dispatch of this config uses."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+    sink: list[tuple[asyncio.AbstractEventLoop, dict[str, Any]]] = []
+    _install_recording_pool(monkeypatch, sink)
+
+    out = m._reload_mcp("svc")
+
+    assert out["status"] == "ok"
+    assert [kwargs for _loop, kwargs in sink] == [{"config": _cfg("svc").model_dump()}]
+
+
+def test_reload_eviction_uses_managed_effective_key(monkeypatch):
+    """For a managed entry the eviction key is the auth-MERGED effective config —
+    the exact key a dispatch pools under — computed through the same
+    ``_prepare_request`` path, so the two can never drift."""
+    m = _Mixin()
+    config = _managed_cfg("svc")
+    m._manifest = Manifest.model_validate({"mcp": [config.model_dump()]})
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+    sink: list[tuple[asyncio.AbstractEventLoop, dict[str, Any]]] = []
+    _install_recording_pool(monkeypatch, sink)
+
+    auth = ManagedAuth(access_token="tok")
+    monkeypatch.setattr(
+        "tai42_skeleton.connectors.token_injection.resolve_managed_auth",
+        AsyncMock(return_value=auth),
+    )
+
+    out = m._reload_mcp("svc")
+
+    assert out["status"] == "ok"
+    transport = _detect_transport(config.config)
+    expected = _prepare_request(config, auth, transport)[0].model_dump()
+    assert [kwargs for _loop, kwargs in sink] == [{"config": expected}]
+    # The merged Bearer header proves the key is NOT the raw config dump.
+    assert expected != config.model_dump()
+    assert expected["config"]["headers"]["authorization"] == "Bearer tok"
+
+
+def test_reload_eviction_runs_on_the_serving_loop(monkeypatch):
+    """The ``FastMCPClient`` pools are per event loop and dispatch runs on the
+    serving loop, so an admin reload whose body runs on a ``_run_blocking`` worker
+    loop must marshal the eviction back onto the serving loop or it misses the real
+    pool."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+    sink: list[tuple[asyncio.AbstractEventLoop, dict[str, Any]]] = []
+    _install_recording_pool(monkeypatch, sink)
+
+    serving_loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run_serving_loop() -> None:
+        asyncio.set_event_loop(serving_loop)
+        serving_loop.call_soon(ready.set)
+        serving_loop.run_forever()
+
+    thread = threading.Thread(target=_run_serving_loop, daemon=True)
+    thread.start()
+    ready.wait()
+    m._serving_loop = serving_loop
+    try:
+        # Called from a thread that is NOT the serving loop, as reload_gate.run's
+        # worker thread would call it.
+        out = m._reload_mcp("svc")
+    finally:
+        serving_loop.call_soon_threadsafe(serving_loop.stop)
+        thread.join()
+        serving_loop.close()
+
+    assert out["status"] == "ok"
+    assert [loop for loop, _kwargs in sink] == [serving_loop]
+
+
+def test_reload_eviction_failure_surfaces(monkeypatch):
+    """A failed session eviction is never a quiet log-and-continue: it propagates
+    out of the single-server reload op."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+
+    class _BoomPool:
+        async def close(self, **kwargs: Any) -> None:
+            raise RuntimeError("pool close boom")
+
+    monkeypatch.setattr(lifecycle_module, "FastMCPClient", _BoomPool)
+
+    with pytest.raises(RuntimeError, match="pool close boom"):
+        m._reload_mcp("svc")
+
+
 def test_deregister_mcp_absent_is_idempotent():
     m = _Mixin()
     assert m._deregister_mcp("never-bound") == {"title": "never-bound", "status": "absent"}
@@ -258,6 +390,20 @@ def test_deregister_mcp_bound_removes_and_reports():
     out = m._deregister_mcp("svc")
     assert out == {"title": "svc", "status": "ok", "removed": ["svc_t"]}
     assert "svc" not in m._mcp_bound_tools
+
+
+def test_deregister_mcp_forgets_health():
+    """Deregistering a title clears its passive health — the title ceases to exist,
+    so it leaves no residue in the process-wide health store."""
+    mcp_health._HEALTH.clear()
+    m = _Mixin()
+    m._mcp_bound_tools = {"svc": {"svc_t"}}
+    mcp_health.record_failure("svc", RuntimeError("down"))
+    assert "svc" in mcp_health._HEALTH
+
+    m._deregister_mcp("svc")
+
+    assert "svc" not in mcp_health._HEALTH
 
 
 def test_deregister_reconcile_marshals_onto_the_serving_loop():
@@ -475,12 +621,26 @@ def test_app_context_startup_handler_failure_raises(monkeypatch):
 
 
 def test_live_mcp_status_snapshot():
+    mcp_health._HEALTH.clear()
     m = _Mixin()
     m._mcp_bound_tools = {"svc": {"b", "a"}}
     m._failed_mcps = {"down": "unavailable"}
+    mcp_health.record_success("svc")
     status = m._live_mcp_status()
     assert status["bound"] == {"svc": ["a", "b"]}
     assert status["failed"] == [{"title": "down", "status": "unavailable"}]
+    # Every bound and failed title carries a health block.
+    assert set(status["health"]) == {"svc", "down"}
+    # A called MCP shows its last success; the four fields are always present.
+    assert status["health"]["svc"]["last_success"] is not None
+    assert status["health"]["svc"]["consecutive_failures"] == 0
+    # A never-called MCP carries the block at its empty values.
+    assert status["health"]["down"] == {
+        "last_success": None,
+        "last_error": None,
+        "consecutive_failures": 0,
+        "failing_since": None,
+    }
 
 
 # -- real-app integration -----------------------------------------------------
@@ -803,6 +963,29 @@ def test_initialize_components_binds_probed_mcp_tools(monkeypatch):
             assert "upsvc" in status["bound"]
 
     asyncio.run(run())
+
+
+def test_initialize_components_prunes_health_to_configured_titles(monkeypatch):
+    """A fresh epoch's MCP load prunes the health store to the CONFIGURED titles: a
+    title dropped from the manifest loses its history, while a configured title keeps
+    it — even when that title probed unavailable this build."""
+    mcp_health._HEALTH.clear()
+    manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    # "svc" probes unavailable this build (lands in failures), so its history must
+    # survive; "gone" is not in config and must be pruned.
+    monkeypatch.setattr(app, "_probe_mcp", AsyncMock(side_effect=TimeoutError("slow")))
+    mcp_health.record_success("svc")
+    mcp_health.record_failure("gone", RuntimeError("was removed"))
+
+    async def run():
+        async with app.app_context(manifest):
+            assert "svc" in mcp_health._HEALTH
+            assert "gone" not in mcp_health._HEALTH
+
+    try:
+        asyncio.run(run())
+    finally:
+        mcp_health._HEALTH.clear()
 
 
 def test_initialize_helpers_require_started():
