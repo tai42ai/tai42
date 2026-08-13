@@ -22,16 +22,21 @@ def _delivery(
     options: list[str] | None = None,
     timeout_in: float = 600,
     recipient: str | None = None,
+    schema: dict | None = None,
 ) -> ChannelDelivery:
     return ChannelDelivery(
         interaction_id="int-1",
         question="Which one?",
         answer_format=answer_format,
         options=options,
+        schema=schema,
         callback_url=_CALLBACK,
         timeout_at=datetime.now(UTC) + timedelta(seconds=timeout_in),
         recipient=recipient,
     )
+
+
+_FORM_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 
 
 async def test_text_ask_sends_force_reply_and_stores_correlation(http_recorder, fake_redis):
@@ -73,6 +78,31 @@ async def test_tier1_sends_url_button_and_skips_correlation(http_recorder, fake_
     assert body["text"].startswith("Which one?")
     assert "(Answer before " in body["text"]
     assert fake_redis.data == {}
+
+
+def test_channel_advertises_form_delivery():
+    # The capability flag the ask helper reads before handing a form ticket here.
+    assert TelegramChannel.supports_form_delivery is True
+
+
+async def test_form_sends_web_app_button_and_skips_correlation(http_recorder, fake_redis):
+    await TelegramChannel().deliver(_delivery(answer_format="form", schema=_FORM_SCHEMA))
+
+    assert len(http_recorder.requests) == 1
+    request = http_recorder.requests[0]
+    assert str(request.url) == f"https://api.telegram.org/bot{_TOKEN}/sendMessage"
+    body = json.loads(request.content)
+    assert body["chat_id"] == "777"
+    assert body["text"].startswith("Which one?")
+    assert "(Answer before " in body["text"]
+    # No options text — a form frame carries none.
+    assert "Reply with" not in body["text"]
+    # A web_app button (in-chat webview), not a url button; no force_reply.
+    assert body["reply_markup"] == {"inline_keyboard": [[{"text": "Fill form", "web_app": {"url": _CALLBACK}}]]}
+    assert "force_reply" not in json.dumps(body)
+    # The callback page posts the answer itself: no correlation, no inbound leg.
+    assert fake_redis.data == {}
+    assert fake_redis.ttls == {}
 
 
 async def test_already_expired_raises_without_sending(http_recorder, fake_redis):

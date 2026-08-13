@@ -1,8 +1,8 @@
 /**
  * The inline widget for one `ask_user` question, per `answer_format`:
- * a text field, a Yes/No pair, one button per option, or — for `external` — a
- * link out to the question's own callback page, which is where that format is
- * answered.
+ * a text field, a Yes/No pair, one button per option, a schema-driven form, or —
+ * for `external` — a link out to the question's own callback page, which is where
+ * that format is answered.
  *
  * A question is LIVE only while it is neither answered nor past its deadline.
  * Answered is authoritative from the transcript (`chat.answered`), so a question
@@ -18,7 +18,17 @@
  */
 import type { ReactElement } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, ExternalLinkButton, Spinner, TextInput } from '@tai42/studio-sdk';
+import {
+  Badge,
+  Button,
+  ExternalLinkButton,
+  SchemaForm,
+  Spinner,
+  TextInput,
+  defaultValueForSchema,
+  validateAgainstSchema,
+} from '@tai42/studio-sdk';
+import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 
 import type { ChatItem } from '@/use-chat-stream';
 
@@ -200,6 +210,12 @@ function QuestionControls(props: ControlsProps): ReactElement {
       return <ConfirmAnswer {...props} />;
     case 'select':
       return <SelectAnswer {...props} options={question.options ?? []} />;
+    case 'form':
+      // The answer schema reaches the page for this format alone, and the type
+      // carries that: the stream admits a `form` question only when it carries an
+      // object schema. A schema that is nonetheless not a usable object at render
+      // is a LOUD notice, never a dropped control.
+      return <FormAnswer {...props} schema={question.schema} />;
     case 'external':
       // The callback ticket reaches the page for this format alone, and the type
       // carries that: the stream admits an `external` question only when it
@@ -270,6 +286,66 @@ function SelectAnswer({
         </Button>
       ))}
       {sending ? <Spinner label="Sending your answer" /> : null}
+    </div>
+  );
+}
+
+/** A structurally-usable schema object, or not — the stream already rejects a
+ * non-object schema, so this is the defensive last line: a schema that slips through
+ * as a non-object renders the loud notice below rather than a dropped control. */
+function isSchemaObject(value: unknown): value is JsonSchema {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function FormAnswer({
+  sending,
+  onSubmit,
+  schema,
+}: ControlsProps & { readonly schema: unknown }): ReactElement {
+  if (!isSchemaObject(schema)) {
+    return <MalformedNotice message="This form is malformed: its schema must be an object." />;
+  }
+  return <SchemaFormAnswer schema={schema} sending={sending} onSubmit={onSubmit} />;
+}
+
+function SchemaFormAnswer({
+  schema,
+  sending,
+  onSubmit,
+}: {
+  readonly schema: JsonSchema;
+  readonly sending: boolean;
+  readonly onSubmit: (answer: unknown) => void;
+}): ReactElement {
+  const [value, setValue] = useState<unknown>(() => defaultValueForSchema(schema));
+  const [errors, setErrors] = useState<SchemaFormErrors>({});
+
+  // Validate before submit and feed the per-path errors back to the form; an
+  // invalid form is not sent — the answer is one-shot, so a bad object cannot be
+  // recalled once the callback door records it.
+  const submit = (): void => {
+    const found = validateAgainstSchema(schema, value);
+    setErrors(found);
+    if (Object.keys(found).length === 0) onSubmit(value);
+  };
+
+  return (
+    <div className="tcw-question-actions tcw-question-form">
+      <SchemaForm schema={schema} value={value} onChange={setValue} errors={errors} />
+      <Button type="button" variant="primary" disabled={sending} onClick={submit}>
+        {sending ? <Spinner label="Sending your answer" /> : 'Answer'}
+      </Button>
+    </div>
+  );
+}
+
+/** A LOUD inline notice for a structurally-malformed schema: a visible `alert`
+ * rather than an empty or silently-dropped control. */
+function MalformedNotice({ message }: { readonly message: string }): ReactElement {
+  return (
+    <div className="tcw-question-malformed" role="alert">
+      <Badge variant="danger">Malformed</Badge>
+      <span>{message}</span>
     </div>
   );
 }

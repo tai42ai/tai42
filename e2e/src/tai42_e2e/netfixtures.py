@@ -556,15 +556,20 @@ class FakeTelegram:
 class FakeSlack:
     """A recording stub of the Slack Web + Events API.
 
-    Serves ``chat.postMessage`` (minting a ``ts`` thread anchor). Any other path
-    answers a loud 500. Slack has no boot-time API call (its Events API Request
-    URL is configured in the dashboard, not per process start), so nothing is
-    served for startup."""
+    Serves ``chat.postMessage`` (minting a ``ts`` thread anchor, recording the
+    Block Kit ``blocks`` alongside the text so a form message's button is
+    readable) and ``views.open`` (recording the modal ``view`` the interactivity
+    door opens for a form question). Any other path answers a loud 500. Slack has
+    no boot-time API call (its Events API Request URL is configured in the
+    dashboard, not per process start), so nothing is served for startup."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
         self.port = allocate_port()
         self.posts: list[dict[str, Any]] = []
+        # The modal views ``views.open`` opened — the form leg reads the view a
+        # ``block_actions`` click drove the interactivity door to open.
+        self.views: list[dict[str, Any]] = []
         self._ts = itertools.count(1)
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
@@ -582,9 +587,28 @@ class FakeSlack:
 
     def reset(self) -> None:
         self.posts.clear()
+        self.views.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.posts if text in record["text"]]
+
+    def build_interactive(self, *, signing_secret: str, payload: dict[str, Any], valid: bool = True) -> SignedInbound:
+        """A genuine Block Kit interactivity POST for the interactivity door: the JSON
+        ``payload`` ride the single ``payload`` form field (``application/x-www-form-
+        urlencoded``), carrying a valid Slack v0 HMAC over ``v0:{ts}:{body}`` computed
+        with the signing secret. ``valid=False`` signs under the WRONG secret. The
+        caller builds the ``block_actions`` / ``view_submission`` payload shape."""
+        timestamp = str(int(time.time()))
+        body = urlencode({"payload": json.dumps(payload)}).encode()
+        key = signing_secret if valid else signing_secret + "-tampered"
+        base = b"v0:" + timestamp.encode("ascii") + b":" + body
+        digest = hmac.new(key.encode("utf-8"), base, hashlib.sha256).hexdigest()
+        headers = {
+            "content-type": "application/x-www-form-urlencoded",
+            "X-Slack-Request-Timestamp": timestamp,
+            "X-Slack-Signature": f"v0={digest}",
+        }
+        return SignedInbound(headers=headers, body=body)
 
     def build_inbound(
         self, *, signing_secret: str, channel: str, thread_ts: str, text: str, event_id: str, valid: bool = True
@@ -629,10 +653,17 @@ class FakeSlack:
                     "token": (request.headers.get("authorization", "")).removeprefix("Bearer "),
                     "channel": payload.get("channel"),
                     "text": payload.get("text", ""),
+                    "blocks": payload.get("blocks"),
                     "ts": ts,
                 }
             )
             return JSONResponse({"ok": True, "ts": ts})
+
+        @app.post("/api/views.open")
+        async def views_open(request: Request) -> JSONResponse:
+            payload = await request.json()
+            self.views.append(payload.get("view"))
+            return JSONResponse({"ok": True})
 
         _install_catch_all(app, "slack")
         return app
@@ -740,20 +771,29 @@ class FakeWhatsApp:
     """A recording stub of the Meta WhatsApp (Graph) API.
 
     Serves ``POST /{phone_number_id}/messages`` (minting a ``wamid`` for EVERY message
-    type — text, interactive buttons/list, image, template — and recording the full JSON
-    ``payload`` alongside the plain-text ``body``), recording the ``phone_number_id`` the
-    bridge sent FROM. Any other path answers a loud 500. The Cloud API has no boot-time
+    type — text, interactive buttons/list/flow, image, template — and recording the full
+    JSON ``payload`` alongside the plain-text ``body``), recording the ``phone_number_id``
+    the bridge sent FROM. It also serves the two Flow-lifecycle graph endpoints a form
+    delivery hits when the schema is uncached — ``POST /{waba_id}/flows`` (minting a flow
+    id, recorded in ``flows``) and ``POST /{flow_id}/publish`` (recorded in
+    ``published_flows``). Any other path answers a loud 500. The Cloud API has no boot-time
     call (the webhook is configured in the Meta dashboard), so nothing is served for
     startup. The builders synthesize the requests aimed at the SUT's own
     ``/api/channels/whatsapp/inbound`` door: the GET verify handshake, a genuinely
-    X-Hub-Signature-256-signed inbound text message, an interactive button/list reply,
-    and a signed status webhook."""
+    X-Hub-Signature-256-signed inbound text message, an interactive button/list reply, a
+    completed-Flow ``nfm_reply``, and a signed status webhook."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
         self.port = allocate_port()
         self.sent: list[dict[str, Any]] = []
+        # The Flows created / published on the form-delivery path (schema uncached):
+        # ``flows`` records each create's ``{waba_id, name, flow_json, id}``,
+        # ``published_flows`` the ids the publish step confirmed.
+        self.flows: list[dict[str, Any]] = []
+        self.published_flows: list[str] = []
         self._wamids = itertools.count(1)
+        self._flow_ids = itertools.count(1)
         self._server = ThreadedServer(self._build_app(), host, self.port)
 
     @property
@@ -770,6 +810,8 @@ class FakeWhatsApp:
 
     def reset(self) -> None:
         self.sent.clear()
+        self.flows.clear()
+        self.published_flows.clear()
 
     def sends_matching(self, text: str) -> list[dict[str, Any]]:
         return [record for record in self.sent if text in record["body"]]
@@ -858,6 +900,35 @@ class FakeWhatsApp:
         }
         return self._sign_batch(value, app_secret=app_secret, valid=valid)
 
+    def build_nfm_reply(
+        self,
+        *,
+        app_secret: str,
+        phone_number_id: str,
+        wa_id: str,
+        response: dict[str, Any],
+        wamid: str | None = None,
+        valid: bool = True,
+    ) -> SignedInbound:
+        """A genuine completed-Flow reply: Meta relays the filled form as an
+        ``nfm_reply`` whose ``response_json`` is the form values (Flow number inputs
+        arrive as strings) as a JSON STRING, carrying the ``flow_token`` the send set
+        (the pending ask's ``interaction_id``). Signed X-Hub-Signature-256 like
+        ``build_inbound``; ``valid=False`` signs under the WRONG secret."""
+        message_id = wamid if wamid is not None else self._mint_wamid()
+        value = {
+            "metadata": {"phone_number_id": phone_number_id},
+            "messages": [
+                {
+                    "id": message_id,
+                    "from": wa_id,
+                    "type": "interactive",
+                    "interactive": {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}},
+                }
+            ],
+        }
+        return self._sign_batch(value, app_secret=app_secret, valid=valid)
+
     def build_status(
         self,
         *,
@@ -909,6 +980,25 @@ class FakeWhatsApp:
                     "messages": [{"id": wamid}],
                 }
             )
+
+        @app.post("/{waba_id}/flows")
+        async def create_flow(waba_id: str, request: Request) -> JSONResponse:
+            payload = await request.json()
+            flow_id = f"flow_{next(self._flow_ids):08d}"
+            self.flows.append(
+                {
+                    "waba_id": waba_id,
+                    "name": payload.get("name"),
+                    "flow_json": payload.get("flow_json"),
+                    "id": flow_id,
+                }
+            )
+            return JSONResponse({"id": flow_id})
+
+        @app.post("/{flow_id}/publish")
+        async def publish_flow(flow_id: str, request: Request) -> JSONResponse:
+            self.published_flows.append(flow_id)
+            return JSONResponse({"success": True})
 
         _install_catch_all(app, "whatsapp")
         return app

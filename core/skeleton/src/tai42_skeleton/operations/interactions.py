@@ -51,7 +51,16 @@ _NO_AUTH_ANSWERED_BY = "system:no-auth"
 
 
 class _AnswerInvalid(Exception):
-    """Raised when a human-door answer fails its stored-format validation."""
+    """Raised when a human-door answer fails its stored-format validation.
+
+    ``field`` is the failing answer field's dotted path when the fault is located
+    to one (a form schema mismatch), else ``None``; the callback door surfaces it
+    as the 400 body's optional ``field`` key so a channel can pin the error on the
+    right control."""
+
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 class InteractionAnswer(BaseModel):
@@ -68,10 +77,32 @@ def _reply_ttl(request: InteractionRequest) -> int:
     return max(1, remaining)
 
 
+def _schema_error_field(exc: Exception) -> str | None:
+    """The failing ANSWER field's dotted path for a field-located
+    ``jsonschema.ValidationError`` (``count``, ``a.b``), or ``None`` when the fault
+    has no answer-field location. Only ``jsonschema.ValidationError`` locates a
+    fault in the answer: its ``.json_path`` (``$``-rooted, e.g. ``$.count``) names
+    the field. ``SchemaError`` also carries a ``.json_path``, but it points INTO the
+    stored schema (e.g. ``properties.x.type``) — a location no answering human owns
+    — so it is never surfaced; a malformed schema, a root-level ValidationError with
+    ``json_path == "$"``, and ``RecursionError`` all yield ``None``."""
+    json_path = exc.json_path if isinstance(exc, jsonschema.ValidationError) else None
+    if isinstance(json_path, str) and json_path not in ("", "$"):
+        # Drop the ``$`` root and a leading ``.`` so a top-level field reads as
+        # ``count`` rather than ``$.count``; a nested path keeps its dotted shape.
+        return json_path[1:].removeprefix(".")
+    return None
+
+
 def _schema_error_message(exc: Exception) -> str:
-    """The 400 message for a schema mismatch — ``jsonschema`` errors carry a
-    ``.message``; other validator failures fall back to ``str``."""
-    return f"answer does not match schema: {getattr(exc, 'message', str(exc))}"
+    """The 400 message for a schema mismatch, naming the failing ANSWER field (via
+    ``_schema_error_field``) when the error locates one so a human on any surface can
+    tell WHICH field failed; a pathless fault falls back to the bare message."""
+    message = getattr(exc, "message", None) or str(exc)
+    field = _schema_error_field(exc)
+    if field is not None:
+        return f"answer does not match schema at {field}: {message}"
+    return f"answer does not match schema: {message}"
 
 
 # Failures of validating/parsing untrusted input convert to a loud 400; any
@@ -81,13 +112,15 @@ def _schema_error_message(exc: Exception) -> str:
 _SCHEMA_VALIDATION_ERRORS = (jsonschema.ValidationError, jsonschema.SchemaError, RecursionError)
 
 
-def _schema_mismatch(answer: Any, schema: dict) -> str | None:
-    """Validate ``answer`` against ``schema``; return the 400 message on a
-    validation failure, ``None`` when the answer conforms."""
+def _schema_mismatch(answer: Any, schema: dict) -> tuple[str, str | None] | None:
+    """Validate ``answer`` against ``schema``; return ``(message, field)`` on a
+    validation failure — ``message`` the 400 text, ``field`` the failing answer
+    field's dotted path (``None`` for a root-level or otherwise non-locatable fault)
+    — or ``None`` when the answer conforms."""
     try:
         jsonschema.validate(answer, schema)
     except _SCHEMA_VALIDATION_ERRORS as exc:
-        return _schema_error_message(exc)
+        return _schema_error_message(exc), _schema_error_field(exc)
     return None
 
 
@@ -114,9 +147,10 @@ def _validate_answer(request: InteractionRequest, answer: Any) -> Any:
         schema = (request.format_payload or {}).get("schema")
         if not isinstance(schema, dict):
             raise _AnswerInvalid("question schema is invalid: missing or non-object schema")
-        message = _schema_mismatch(answer, schema)
-        if message is not None:
-            raise _AnswerInvalid(message)
+        mismatch = _schema_mismatch(answer, schema)
+        if mismatch is not None:
+            message, field = mismatch
+            raise _AnswerInvalid(message, field=field)
         return answer
     # EXTERNAL is rejected by the answer door before validation runs; any other
     # member reaching here is a server bug, never a client error.

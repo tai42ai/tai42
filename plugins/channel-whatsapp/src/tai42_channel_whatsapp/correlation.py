@@ -16,6 +16,10 @@ A select ask also carries its ``options`` and ``interaction_id`` so an inbound
 interactive tap (whose id is ``{interaction_id}:{index}``) maps back to the exact
 option text under the exact ask it was sent for.
 
+A published-Flow cache maps ``(waba_id, schema_hash)`` to a Meta flow id with NO
+TTL — a published Flow persists on Meta, so the id is reused for every form ask
+sharing that answer schema; a cache miss triggers a create + publish + store.
+
 A handled-``wamid`` set is the replay guard (a redelivered webhook repeats the id).
 
 A KNOWN-CONTACT marker records that a ``(phone_number_id, wa_id)`` pair sent an
@@ -31,6 +35,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
@@ -58,10 +63,23 @@ class PendingQuestion:
     # under the exact ask; a text ask leaves both None.
     options: list[str] | None = None
     interaction_id: str | None = None
+    # A form ask carries its answer schema so an inbound Flow response (nfm_reply)
+    # is coerced to the schema's types before it is forwarded; non-form asks None.
+    schema: dict[str, Any] | None = None
+    # A form ask carries its question text so a door-rejected answer can be re-asked
+    # with a fresh Flow whose body repeats the question; non-form asks None.
+    question: str | None = None
+    # Door-400 rejections already recovered by re-sending a fresh Flow. Bounds the
+    # re-send loop (see the inbound handler's cap); starts at 0.
+    rejections: int = 0
 
 
 def _pending_key(phone_number_id: str, wa_id: str) -> str:
     return f"channel:whatsapp:pending:{phone_number_id}:{wa_id}"
+
+
+def _flow_key(waba_id: str, schema_hash: str) -> str:
+    return f"channel:whatsapp:flow:{waba_id}:{schema_hash}"
 
 
 def _seen_key(wamid: str) -> str:
@@ -79,6 +97,9 @@ def _encode_pending(question: PendingQuestion) -> str:
             "timeout_at": question.timeout_at.isoformat(),
             "options": question.options,
             "interaction_id": question.interaction_id,
+            "schema": question.schema,
+            "question": question.question,
+            "rejections": question.rejections,
         }
     )
 
@@ -106,11 +127,18 @@ async def reserve_pending(
     timeout_at: datetime,
     options: list[str] | None = None,
     interaction_id: str | None = None,
+    schema: dict[str, Any] | None = None,
+    question: str | None = None,
 ) -> None:
     """Atomically reserve the pair for one question, or raise ``PendingQuestionExistsError``."""
     value = _encode_pending(
         PendingQuestion(
-            callback_url=callback_url, timeout_at=timeout_at, options=options, interaction_id=interaction_id
+            callback_url=callback_url,
+            timeout_at=timeout_at,
+            options=options,
+            interaction_id=interaction_id,
+            schema=schema,
+            question=question,
         )
     )
     ttl = _remaining_seconds(timeout_at)
@@ -136,6 +164,9 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
         timeout_at=datetime.fromisoformat(data["timeout_at"]),
         options=data.get("options"),
         interaction_id=data.get("interaction_id"),
+        schema=data.get("schema"),
+        question=data["question"],
+        rejections=data["rejections"],
     )
 
 
@@ -184,6 +215,21 @@ async def restore_pending(phone_number_id: str, wa_id: str, question: PendingQue
             phone_number_id,
             wa_id,
         )
+
+
+async def get_cached_flow_id(waba_id: str, schema_hash: str) -> str | None:
+    """The published flow id for this ``(waba_id, schema_hash)``, or ``None``."""
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        raw = await redis.get(_flow_key(waba_id, schema_hash))
+    if raw is None:
+        return None
+    return raw.decode("utf-8") if isinstance(raw, bytes) else raw
+
+
+async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
+    """Store the published flow id with NO TTL (a published Flow persists on Meta)."""
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.set(_flow_key(waba_id, schema_hash), flow_id)
 
 
 async def already_seen(wamid: str) -> bool:

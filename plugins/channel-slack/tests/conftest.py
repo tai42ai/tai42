@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -297,17 +298,26 @@ def make_delivery(
     timeout_at: datetime | None = None,
     callback_url: str = "http://gateway/api/interactions/callback/ticket-1",
     recipient: str | None = None,
+    schema: dict[str, Any] | None = None,
+    interaction_id: str = "int-1",
 ) -> ChannelDelivery:
     """A valid ``ChannelDelivery`` with a comfortably-future default budget."""
     return ChannelDelivery(
-        interaction_id="int-1",
+        interaction_id=interaction_id,
         recipient=recipient,
         question="Deploy to production?",
         answer_format=answer_format,
         options=options,
+        schema=schema,
         callback_url=callback_url,
         timeout_at=timeout_at or (datetime.now(UTC) + timedelta(minutes=10)),
     )
+
+
+def make_interactive_body(payload: dict[str, Any]) -> bytes:
+    """A Slack interactivity POST body: ``application/x-www-form-urlencoded`` with
+    the JSON envelope in the ``payload`` field (what the signature covers)."""
+    return urlencode({"payload": json.dumps(payload)}).encode()
 
 
 def make_request(body: bytes, headers: dict[str, str]) -> Request:

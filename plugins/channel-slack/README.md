@@ -52,8 +52,9 @@ uv add --editable ../tai42/plugins/channel-slack
 
 The skeleton discovers this plugin through the manifest's `channel_modules`
 field — at app load it imports every module under each named package, and
-`tai42_channel_slack.register` registers the `"slack"` channel and the inbound
-route `POST /api/channels/slack/inbound` as a side-effect. A bare
+`tai42_channel_slack.register` registers the `"slack"` channel, the Events API
+inbound route `POST /api/channels/slack/inbound`, and the interactivity route
+`POST /api/channels/slack/interactive` as a side-effect. A bare
 `import tai42_channel_slack` registers nothing (library use).
 
 ```yaml
@@ -99,10 +100,14 @@ All links: https://docs.slack.dev
    `{INTERACTIONS_PUBLIC_BASE_URL}/api/channels/slack/inbound` (the app must
    already be running so the signed `url_verification` handshake succeeds),
    and subscribe to bot events `message.channels` (and/or `message.im`).
-4. Invite the bot to every target channel; put the fallback channel id in
+4. Interactivity & Shortcuts → enable, Request URL =
+   `{INTERACTIONS_PUBLIC_BASE_URL}/api/channels/slack/interactive` — required
+   for `form` questions, whose modal is opened and submitted through this door
+   (same signing secret, verified the same way).
+5. Invite the bot to every target channel; put the fallback channel id in
    `CHANNEL_SLACK_DEFAULT_RECIPIENT` and list the ids callers may request in
    `CHANNEL_SLACK_ALLOWED_RECIPIENTS`.
-5. There is no boot-time registration call — the dashboard Request URL is the
+6. There is no boot-time registration call — the dashboard Request URLs are the
    registration.
 
 ## How an answer travels
@@ -122,14 +127,27 @@ All links: https://docs.slack.dev
    `ts → callback_url` with TTL = the question's remaining budget. For
    `confirm` and `external` questions the callback URL rides the message as a
    plain link instead — the human answers through the callback door directly,
-   and no correlation state exists.
-4. The human replies in the thread. The Slack Events API POSTs the event to
+   and no correlation state exists. For `form` questions the message carries a
+   **Fill form** button; before it is sent, a form record (`{callback_url,
+   schema, question, timeout_at}`) is stored in Redis under
+   `channel:slack:form:{interaction_id}` with TTL = the remaining budget
+   (released if the send fails).
+4. **`form` questions.** The button click reaches the interactivity door
+   `POST /api/channels/slack/interactive` as a `block_actions` payload; the door
+   verifies the signature, peeks the form record, and opens a Block Kit modal
+   (`views.open`) built from the schema — one input per property (`string` →
+   text/select, `boolean` → yes/no, `integer`/`number` → number). On submit, a
+   `view_submission` payload arrives; the door coerces the state to the schema's
+   JSON types and forwards `{"answer": {...}}` to the stored callback URL. A door
+   `2xx` closes the modal and drops the record; a `400` shows the door's message
+   on the form (record kept); a `404` shows an expired notice (record dropped).
+5. The human replies in the thread. The Slack Events API POSTs the event to
    `POST /api/channels/slack/inbound`, which reads a bounded body, verifies
    the `X-Slack-Signature` v0 HMAC over the raw bytes (constant-time,
    ±300 s replay window, fail-closed), dedupes on `event_id`, matches the
    reply's `thread_ts` against the correlation store, and forwards
    `{"answer": "<typed text>"}` to the stored callback URL.
-5. The public callback door validates the answer against the question's stored
+6. The public callback door validates the answer against the question's stored
    format and records it; the blocked `ask_user` returns it.
 
 Operational notes: answers must be typed in-thread; non-answer traffic (edits,
@@ -155,8 +173,7 @@ credentials are absent.
 
 Deferred by design: Socket Mode inbound (needs a managed background task —
 platform scope; webhook mode needs exactly the public URL the external
-interactions flow already requires), fire-and-forget `notify()`, and Block Kit
-buttons (`block_actions` interactivity) — v1 delivers plain text.
+interactions flow already requires) — the plugin runs in webhook mode only.
 
 ## License
 

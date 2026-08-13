@@ -16,11 +16,16 @@ Tier-1 (``confirm``/``external``) skip correlation: their answers travel through
 the callback door directly (delivered with the callback URL as a plain link),
 never a typed chat reply. Only ``text`` and ``select`` take the Tier-2
 typed-reply path.
+
+``form`` questions (``supports_form_delivery``) take a third path: the message
+carries a button that opens a Block Kit modal, and the answer arrives as a
+``view_submission`` on the interactivity door — the form record reserved here (in
+Redis, before the send) holds the schema and callback URL that door needs.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
@@ -28,7 +33,13 @@ from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, Chann
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_slack.client import slack_http
-from tai42_channel_slack.correlation import remaining_seconds, store_correlation
+from tai42_channel_slack.correlation import (
+    delete_form_record,
+    remaining_seconds,
+    store_correlation,
+    store_form_record,
+)
+from tai42_channel_slack.forms import FormSchemaError, build_message_blocks, build_modal_view
 from tai42_channel_slack.settings import SlackSettings, slack_settings
 
 # Answered through the callback door directly (tappable plain link), never a typed
@@ -88,19 +99,26 @@ def _resolve_recipient(settings: SlackSettings, requested: str | None) -> str:
     return requested
 
 
-async def _post_message(token: str, target: str, text: str) -> dict[str, Any]:
+async def _post_message(
+    token: str, target: str, text: str, blocks: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """POST one ``chat.postMessage`` and return its validated JSON body.
 
-    Any failure — transport error, non-200 status, non-JSON body, or ``ok`` not
-    true — raises :class:`ChannelDeliveryError`. Slack answers HTTP 200 even for
-    errors, so the JSON ``ok`` field is the ONLY success signal.
+    ``blocks`` (Block Kit) rides alongside ``text``; ``text`` is kept as the
+    notification fallback Slack requires even when blocks carry the content. Any
+    failure — transport error, non-200 status, non-JSON body, or ``ok`` not true —
+    raises :class:`ChannelDeliveryError`. Slack answers HTTP 200 even for errors,
+    so the JSON ``ok`` field is the ONLY success signal.
     """
+    payload: dict[str, Any] = {"channel": target, "text": text}
+    if blocks is not None:
+        payload["blocks"] = blocks
     try:
         async with slack_http() as client:
             response = await client.post(
                 f"{slack_settings().api_base_url}/chat.postMessage",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"channel": target, "text": text},
+                json=payload,
             )
     except httpx.HTTPError as exc:
         raise ChannelDeliveryError(f"chat.postMessage transport failure: {exc}") from exc
@@ -115,8 +133,76 @@ async def _post_message(token: str, target: str, text: str) -> dict[str, Any]:
     return body
 
 
+async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
+    """POST one ``views.open`` for a form question's modal, or raise.
+
+    Called inline from the interactivity door on a ``tai42_form_open`` click, with
+    the ``block_actions`` ``trigger_id`` (valid ~3 s). Any failure — transport
+    error, non-200 status, non-JSON body, or ``ok`` not true — raises
+    :class:`ChannelDeliveryError`; the door lets it surface as a loud 500 so Slack
+    reports the failure to open. Settings (bot token, api base) read fresh.
+    """
+    settings = slack_settings()
+    token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+    try:
+        async with slack_http() as client:
+            response = await client.post(
+                f"{settings.api_base_url}/views.open",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"trigger_id": trigger_id, "view": view},
+            )
+    except httpx.HTTPError as exc:
+        raise ChannelDeliveryError(f"views.open transport failure: {exc}") from exc
+    if response.status_code != 200:
+        raise ChannelDeliveryError(f"views.open returned HTTP {response.status_code}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ChannelDeliveryError("views.open returned a non-JSON body") from exc
+    if body.get("ok") is not True:
+        raise ChannelDeliveryError(f"views.open failed: {body.get('error', 'unknown error')}")
+
+
+async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> None:
+    """Deliver a ``form`` question: post a section + a button whose click opens the
+    Block Kit modal, after reserving the form's state.
+
+    The full modal view the click will build is composed here (and discarded)
+    BEFORE any Redis or network work — so an unmappable schema OR a modal past a
+    Slack cap (including the 100-block cap the click enforces) is a
+    :class:`ChannelDeliveryError` naming the fault, and nothing is stored or sent;
+    an uncompletable form is never delivered only to 500 at the click. The form
+    record is written (reserve-before-send) and released if the send fails, so a
+    failed post never leaves a live record with no message behind it.
+    """
+    schema = delivery.schema
+    if not schema:
+        # The contract guarantees a non-empty schema for a form; a gap here is a
+        # delivery failure, not a silent plain-text send.
+        raise ChannelDeliveryError("form answer_format requires a non-empty schema")
+    try:
+        # Compose the exact modal the click will build, discarding it — same
+        # single source of truth, so every cap it enforces is enforced here.
+        build_modal_view(delivery.interaction_id, delivery.question, schema)
+        message_blocks = build_message_blocks(delivery.question, delivery.interaction_id)
+    except FormSchemaError as exc:
+        raise ChannelDeliveryError(str(exc)) from exc
+    await store_form_record(
+        delivery.interaction_id, delivery.callback_url, schema, delivery.question, delivery.timeout_at
+    )
+    try:
+        await _post_message(token, target, delivery.question, blocks=message_blocks)
+    except ChannelDeliveryError:
+        # Reserve-before-send: a failed post releases the reservation so no live
+        # form record dangles without a message.
+        await delete_form_record(delivery.interaction_id)
+        raise
+
+
 class SlackChannel:
     """Registered under ``"slack"``; satisfies ``tai42_contract.channels.Channel``."""
+
+    supports_form_delivery: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         # Settings read fresh each call so a rotated token or changed recipient
@@ -130,6 +216,9 @@ class SlackChannel:
             raise ChannelDeliveryError(
                 f"question budget already expired (timeout_at={delivery.timeout_at.isoformat()})"
             )
+        if delivery.answer_format == "form":
+            await _deliver_form(token, target, delivery)
+            return
         body = await _post_message(token, target, _render_text(delivery))
         if delivery.answer_format in _TIER1_FORMATS:
             # Tier-1 (confirm/external): the plain link IS the answer path — no

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError
@@ -58,6 +59,13 @@ class FailingChannel(DeliverOnlyChannel):
 class BuggyChannel(DeliverOnlyChannel):
     async def deliver(self, delivery: ChannelDelivery) -> None:
         raise RuntimeError("plugin bug")
+
+
+class FormChannel(FakeChannel):
+    """A channel that advertises the ``supports_form_delivery`` capability, so a
+    ``form`` question is delivered to it (schema carried on the delivery)."""
+
+    supports_form_delivery = True
 
 
 @pytest.fixture
@@ -349,11 +357,93 @@ async def test_channel_forbids_verifier(wired, fake_channel):
     assert _empty(wired.fake)
 
 
-async def test_channel_rejects_form(wired, fake_channel):
-    # No single-reply mapping for a multi-field form on a chat/SMS medium.
-    with pytest.raises(ValueError, match="'form' is not supported over a channel"):
-        await ask_user("q", answer_format="form", schema={"type": "object"}, channel="fake", timeout=5)
+async def test_channel_without_form_capability_rejects_form(wired, fake_channel):
+    # FakeChannel does not advertise ``supports_form_delivery``: a form is refused
+    # loudly, naming the channel — nothing persisted.
+    with pytest.raises(ValueError, match="channel 'fake' does not deliver form questions"):
+        await ask_user(
+            "q", answer_format="form", schema={"type": "object", "properties": {}}, channel="fake", timeout=5
+        )
     assert _empty(wired.fake)
+
+
+async def test_form_channel_without_schema_raises_before_persist(wired):
+    # An advertising channel still requires a schema for a form; the missing-schema
+    # guard fires in ``_build_payload`` BEFORE any state is written.
+    app._channel_registry.reset()
+    tai42_app.channels.register("form", FormChannel())
+    try:
+        with pytest.raises(ValueError, match="answer_format 'form' requires a schema"):
+            await ask_user("q", answer_format="form", channel="form", timeout=5)
+        assert _empty(wired.fake)
+    finally:
+        app._channel_registry.reset()
+
+
+async def test_form_channel_delivery_carries_schema_and_loops(wired):
+    # A form over a channel that advertises the capability: the delivery carries the
+    # normalized schema, and the human's typed dict answer round-trips through the
+    # callback door back to the blocked caller.
+    schema = {"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}
+    app._channel_registry.reset()
+    channel = FormChannel()
+    tai42_app.channels.register("form", channel)
+    try:
+        task = asyncio.create_task(
+            ask_user("Fill this in", answer_format="form", schema=schema, channel="form", timeout=5)
+        )
+        iid, _gid = await await_add_event(wired.fake, wired.store)
+        delivery = await _await_delivery(channel)
+        assert delivery.answer_format == "form"
+        assert delivery.schema == schema
+
+        state = await wired.store.get_state(wired.fake, iid)
+        assert state is not None
+        assert state.request.format_payload == {"schema": schema}
+
+        resp = await router.callback(
+            _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": {"x": 7}}')
+        )
+        assert resp.status_code == 200
+        assert await task == {"x": 7}
+    finally:
+        app._channel_registry.reset()
+
+
+class _OptForm(BaseModel):
+    # A nullable pydantic field -> ``anyOf`` (no scalar ``type``): outside the
+    # channel-deliverable subset, so its JSON schema must be refused at ask time.
+    name: str | None = None
+
+
+@pytest.mark.parametrize(
+    ("schema", "match"),
+    [
+        (_OptForm, "property 'name' has type None"),
+        ({"type": "object", "properties": {"tags": {"type": "array"}}}, "property 'tags' has type 'array'"),
+        (
+            {"type": "object", "properties": {"n": {"type": "integer", "enum": [1, 2]}}},
+            "property 'n' has an enum but is not a 'string'",
+        ),
+        ({"type": "object", "properties": {}}, "non-empty object 'properties'"),
+        (
+            {"type": "object", "required": ["ghost"], "properties": {"x": {"type": "string"}}},
+            "'required' names undeclared properties",
+        ),
+    ],
+)
+async def test_channel_form_bad_schema_refused_before_persist(wired, schema, match):
+    # A channel form whose schema is outside the renderable subset is refused
+    # loudly at ask time — BEFORE any state is written (never a persisted question
+    # whose callback form page would 500 on the human).
+    app._channel_registry.reset()
+    tai42_app.channels.register("form", FormChannel())
+    try:
+        with pytest.raises(ValueError, match=match):
+            await ask_user("q", answer_format="form", schema=schema, channel="form", timeout=5)
+        assert _empty(wired.fake)
+    finally:
+        app._channel_registry.reset()
 
 
 async def test_recipient_without_channel_rejected(wired):

@@ -52,7 +52,13 @@ async def ask_user(
               answer through a public callback URL. Returns the callback payload.
         options: The allowed values; required for "select".
         schema: A JSON schema describing the answer object; required for "form",
-            optional for "external" (validates the callback payload).
+            optional for "external" (validates the callback payload). A "form"
+            delivered over a ``channel`` must use the channel-deliverable subset
+            (it is answered on a server-rendered page): root object with a
+            non-empty ``properties`` map, every property a scalar
+            (string/boolean/integer/number), ``enum`` only on a string property
+            (a non-empty list of strings), and ``required`` naming only declared
+            properties. A richer schema is rejected before the question is stored.
         group_id: An optional thread key grouping related questions.
         timeout: Seconds to wait before raising; defaults to the configured
             interactions timeout.
@@ -62,8 +68,11 @@ async def ask_user(
         channel: Optional name of a registered delivery channel that pushes the
             question to a human on an external medium (e.g. a chat or SMS
             channel) and bridges the reply back. Omit for the default inbox
-            surface. Forbids ``link`` — the channel owns delivery. An unknown
-            name is rejected before the question is stored.
+            surface. Forbids ``link`` — the channel owns delivery. A ``form``
+            question is delivered only over a channel that advertises form
+            delivery; a channel without that capability refuses it loudly, and its
+            ``schema`` must use the channel-deliverable subset (see ``schema``).
+            An unknown name is rejected before the question is stored.
         recipient: Optional per-call address (chat id, phone number, ...) the
             named channel sends to; the channel validates it against its
             operator allowlist and refuses an unlisted address. Omit to use

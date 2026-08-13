@@ -12,7 +12,11 @@ Tier-2 (``text``/``select``) carries ``reply_markup: {force_reply: true}`` so th
 reply arrives with ``reply_to_message``; the ``message_id -> callback_url``
 mapping is stored before ``deliver`` returns so the inbound door can route the
 answer. Tier-1 (``confirm``/``external``) carries a tappable URL button to the
-callback door instead — no correlation, no inbound involvement.
+callback door instead — no correlation, no inbound involvement. ``form`` carries
+a **web_app** button to the same callback door: it opens the schema-rendered
+callback page as an in-chat webview and the page POSTs the answer straight to the
+door, so like Tier-1 there is no correlation and nothing arrives on the inbound
+route.
 
 ``notify`` is fire-and-forget: ONE plain ``sendMessage`` (``chat_id`` + ``text``
 only), returning the sent ``message_id``. The recipient allowlist governs
@@ -27,7 +31,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
@@ -40,6 +44,7 @@ from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
 # Tier-1 (confirm/external) is answered at the callback door via a tappable URL
 # button; text/select are Tier-2 (ForceReply + correlation, answered by typing).
+# ``form`` also targets the callback door but through a web_app webview button.
 _TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
@@ -139,6 +144,10 @@ class TelegramChannel:
     credentials with no stale per-instance snapshot.
     """
 
+    # A ``form`` ticket is delivered as a web_app button opening the
+    # schema-rendered callback page in an in-chat webview (see ``deliver``).
+    supports_form_delivery: ClassVar[bool] = True
+
     async def deliver(self, delivery: ChannelDelivery) -> None:
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
         target = _resolve_target(delivery.recipient)
@@ -150,14 +159,26 @@ class TelegramChannel:
             )
 
         payload: dict[str, Any] = {"chat_id": target, "text": _question_text(delivery)}
-        if delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format == "form":
+            # A web_app button opens the schema-rendered callback page as an
+            # in-chat webview; that page POSTs the answer straight to the callback
+            # door, so like Tier-1 there is no correlation and no inbound leg.
+            # web_app requires an HTTPS url — the skeleton guarantees the callback
+            # base is https (or localhost), so no re-validation here. Telegram
+            # accepts a web_app button in PRIVATE chats only, so a form to a group
+            # or channel recipient fails this send (ok:false) where every other
+            # answer_format succeeds.
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": "Fill form", "web_app": {"url": delivery.callback_url}}]]
+            }
+        elif delivery.answer_format in _TIER1_FORMATS:
             payload["reply_markup"] = {"inline_keyboard": [[{"text": "Answer", "url": delivery.callback_url}]]}
         else:
             payload["reply_markup"] = {"force_reply": True, "input_field_placeholder": "Reply to answer"}
 
         data = await _send_message(token, payload, f"interaction {delivery.interaction_id}")
 
-        if delivery.answer_format in _TIER1_FORMATS:
+        if delivery.answer_format == "form" or delivery.answer_format in _TIER1_FORMATS:
             return
 
         result = data.get("result")

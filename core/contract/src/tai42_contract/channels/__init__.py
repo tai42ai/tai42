@@ -16,8 +16,9 @@ medium assigned the send (empty when the medium exposes none), never a bool.
 
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -48,62 +49,84 @@ class ChannelDeliveryError(Exception):
         self.retry_after = retry_after
 
 
-class ChannelDelivery(BaseModel):
-    """One question handed to a channel for out-of-band delivery.
+with warnings.catch_warnings():
+    # The ``schema`` field intentionally shadows pydantic's deprecated
+    # ``BaseModel.schema()`` alias (the current API is ``model_json_schema()``);
+    # the field name matches the JSON-schema payload it carries. Suppress the
+    # shadow warning at the definition site so every importer is safe regardless
+    # of its own warnings config — narrowly matched, never a blanket ignore.
+    warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
 
-    ``callback_url`` is the public ``/api/interactions/callback/{ticket}``
-    answer sink; the channel arranges for the human's reply to reach it.
-    ``recipient`` is the OPTIONAL caller-requested address (chat id, phone
-    number, ...): the channel plugin validates it against its operator-set
-    allowlist and refuses to send to an unlisted address; when omitted the
-    plugin sends to its operator-configured default recipient. It is an
-    address only, never a secret or credential.
-    """
+    class ChannelDelivery(BaseModel):
+        """One question handed to a channel for out-of-band delivery.
 
-    model_config = ConfigDict(frozen=True)
+        ``callback_url`` is the public ``/api/interactions/callback/{ticket}``
+        answer sink; the channel arranges for the human's reply to reach it.
+        ``recipient`` is the OPTIONAL caller-requested address (chat id, phone
+        number, ...): the channel plugin validates it against its operator-set
+        allowlist and refuses to send to an unlisted address; when omitted the
+        plugin sends to its operator-configured default recipient. It is an
+        address only, never a secret or credential.
+        """
 
-    interaction_id: str
-    recipient: str | None = None  # caller-requested address; None -> plugin default
-    question: str
-    answer_format: str  # channel-delivered set: "text" | "confirm" | "select" | "external"
-    # ("form" is rejected here — a multi-field form has no single-reply mapping)
-    options: list[str] | None = None  # present for select
-    callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
-    timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
+        model_config = ConfigDict(frozen=True)
 
-    @field_validator("recipient")
-    @classmethod
-    def _recipient_non_empty(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
-            raise ValueError("recipient must be a non-empty address when present")
-        return value
+        interaction_id: str
+        recipient: str | None = None  # caller-requested address; None -> plugin default
+        question: str
+        answer_format: str  # channel-delivered set: "text" | "confirm" | "select" | "form" | "external"
+        # The form's JSON answer schema; present exactly when answer_format == "form".
+        # Intentionally named ``schema`` (matches the payload it carries); shadows the
+        # deprecated ``BaseModel.schema()`` alias, which this model never uses.
+        schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
+        options: list[str] | None = None  # present for select
+        callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
+        timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
 
-    @field_validator("answer_format")
-    @classmethod
-    def _channel_deliverable_format(cls, value: str) -> str:
-        deliverable = sorted(f.value for f in AnswerFormat if f is not AnswerFormat.FORM)
-        if value == AnswerFormat.FORM or value not in AnswerFormat:
-            raise ValueError(f"answer_format must be one of {deliverable}, got {value!r}")
-        return value
+        @field_validator("recipient")
+        @classmethod
+        def _recipient_non_empty(cls, value: str | None) -> str | None:
+            if value is not None and not value.strip():
+                raise ValueError("recipient must be a non-empty address when present")
+            return value
 
-    @field_validator("timeout_at")
-    @classmethod
-    def _ensure_tz_aware(cls, value: datetime) -> datetime:
-        # A naive timeout_at compared against an aware ``now()`` raises TypeError
-        # at use time; reject it here and normalize to UTC (same strictness as
-        # InteractionRequest).
-        if value.tzinfo is None:
-            raise ValueError("timeout_at must be timezone-aware (UTC)")
-        return value.astimezone(UTC)
+        @field_validator("answer_format")
+        @classmethod
+        def _channel_deliverable_format(cls, value: str) -> str:
+            # Every AnswerFormat is channel-deliverable — "form" behind the
+            # channel's ``supports_form_delivery`` capability flag; only an
+            # unknown value is rejected.
+            if value not in AnswerFormat:
+                raise ValueError(f"answer_format must be one of {sorted(f.value for f in AnswerFormat)}, got {value!r}")
+            return value
 
-    @model_validator(mode="after")
-    def _check_options(self) -> ChannelDelivery:
-        if self.answer_format == AnswerFormat.SELECT:
-            if not self.options:
-                raise ValueError("select answer_format requires non-empty options")
-        elif self.options is not None:
-            raise ValueError(f"{self.answer_format} answer_format carries no options")
-        return self
+        @field_validator("timeout_at")
+        @classmethod
+        def _ensure_tz_aware(cls, value: datetime) -> datetime:
+            # A naive timeout_at compared against an aware ``now()`` raises TypeError
+            # at use time; reject it here and normalize to UTC (same strictness as
+            # InteractionRequest).
+            if value.tzinfo is None:
+                raise ValueError("timeout_at must be timezone-aware (UTC)")
+            return value.astimezone(UTC)
+
+        @model_validator(mode="after")
+        def _check_options(self) -> ChannelDelivery:
+            if self.answer_format == AnswerFormat.SELECT:
+                if not self.options:
+                    raise ValueError("select answer_format requires non-empty options")
+            elif self.options is not None:
+                raise ValueError(f"{self.answer_format} answer_format carries no options")
+            return self
+
+        @model_validator(mode="after")
+        def _check_schema(self) -> ChannelDelivery:
+            if self.answer_format == AnswerFormat.FORM:
+                if not self.schema:
+                    raise ValueError("form answer_format requires a non-empty schema")
+            elif self.schema is not None:
+                raise ValueError(f"{self.answer_format} answer_format carries no schema")
+            return self
 
 
 class ChannelTemplate(BaseModel):
@@ -208,19 +231,22 @@ class Channel(Protocol):
     minted. A channel never reaches the interactions store directly: the
     human's reply travels back through the delivery's public ``callback_url``.
 
-    A channel MAY advertise richer ``notify`` support with two OPTIONAL,
-    class-level capability flags — ``supports_media_notifications`` and
-    ``supports_template_notifications`` — set as plain class attributes.
-    They are a documented convention, NOT Protocol members: a channel that
-    supports the richer notify form sets the matching attribute to ``True``; a
-    channel that omits it advertises no support (absent = ``False``). Because
-    they are not part of the Protocol, a text-only channel that declares
-    neither is still a valid ``Channel`` (both structurally and under runtime
-    ``isinstance``). The central ``notify_user`` helper reads them defensively
-    with ``getattr(channel, "<flag>", False)`` and refuses a media or template
-    notification to a channel that does not advertise the matching flag, so a
-    sibling channel that reads only ``notification.message`` can never silently
-    drop the extra content.
+    A channel MAY advertise richer support with three OPTIONAL, class-level
+    capability flags — ``supports_media_notifications``,
+    ``supports_template_notifications`` (both for ``notify``) and
+    ``supports_form_delivery`` (for ``deliver``) — set as plain class
+    attributes. They are a documented convention, NOT Protocol members: a
+    channel that supports the richer form sets the matching attribute to
+    ``True``; a channel that omits it advertises no support (absent =
+    ``False``). Because they are not part of the Protocol, a text-only channel
+    that declares none is still a valid ``Channel`` (both structurally and under
+    runtime ``isinstance``). The ask/notify helpers read them defensively with
+    ``getattr(channel, "<flag>", False)`` and refuse the matching richer send to
+    a channel that does not advertise the flag: ``notify_user`` refuses a media
+    or template notification, and the ``ask_user`` helper refuses a ``form``
+    delivery, to a channel without the flag — so a channel that reads only the
+    plain fields can never silently drop the extra content. A channel that does
+    not advertise ``supports_form_delivery`` never receives a ``form`` delivery.
     """
 
     async def deliver(self, delivery: ChannelDelivery) -> None:

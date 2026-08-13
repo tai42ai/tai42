@@ -119,6 +119,22 @@ async def _seed(w, *, ticket="TKT", schema=None, budget=60, iid="i1", gid="g1", 
     return iid
 
 
+async def _seed_form(w, *, schema, ticket="TKT", iid="i1", gid="g1", budget=60) -> str:
+    now = datetime.now(UTC)
+    request = InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="Fill?",
+        answer_format=AnswerFormat.FORM,
+        format_payload={"schema": schema},
+        reply_to=w.store.reply_key(iid),
+        created_at=now,
+        timeout_at=now + timedelta(seconds=budget),
+    )
+    await w.store.add(w.fake, request, idle_ttl=86400, ticket=ticket, ticket_ttl=budget)
+    return iid
+
+
 def _json(resp) -> dict:
     return json.loads(bytes(resp.body))
 
@@ -140,6 +156,33 @@ async def test_post_valid_body_wakes_caller(wired):
     assert state is not None
     assert state.response is not None
     assert state.response.answered_by == "external-callback"
+
+
+async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
+    # The callback door's form-answer 400 body carries the failing field's dotted
+    # path as an optional ``field`` key (the same string the message embeds) so a
+    # channel can pin the error on the right control.
+    schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(
+        make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {"count": "abc"}}')
+    )
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["error"] == "answer does not match schema at count: 'abc' is not of type 'integer'"
+    assert body["field"] == "count"
+
+
+async def test_post_form_answer_root_mismatch_400_omits_field(wired):
+    # A root-level mismatch (a missing required field) has no answer-field location,
+    # so the 400 body carries NO ``field`` key.
+    schema = {"type": "object", "required": ["count"], "properties": {"count": {"type": "integer"}}}
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": {}}'))
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["error"] == "answer does not match schema: 'count' is a required property"
+    assert "field" not in body
 
 
 async def test_post_unknown_ticket_404(wired):
@@ -308,6 +351,68 @@ async def test_get_answered_done_page(wired):
     resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
     assert resp.status_code == 200
     assert b"already been answered" in bytes(resp.body)
+
+
+async def test_get_form_ticket_renders_schema_form(wired):
+    schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string", "title": "Full <name> & id"},
+            "color": {"type": "string", "enum": ["red", "blue"]},
+            "agree": {"type": "boolean"},
+            "count": {"type": "integer"},
+        },
+    }
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    body = bytes(resp.body).decode()
+    # The label is HTML-escaped — the raw angle brackets/ampersand never inject markup.
+    assert "Full &lt;name&gt; &amp; id" in body
+    assert "<name>" not in body
+    # Each control is present and typed for the submit script; ``required`` rides
+    # the required field only.
+    assert 'data-field="name" data-kind="string" type="text" required' in body
+    assert 'data-field="color" data-kind="string"' in body
+    assert "<select" in body
+    assert '<option value="red">red</option>' in body
+    assert 'data-field="agree" data-kind="boolean" type="checkbox"' in body
+    assert 'data-field="count" data-kind="number" type="number"' in body
+    # The form-page CSP widens only to a constant inline script + same-origin fetch.
+    csp = resp.headers["content-security-policy"]
+    assert "script-src 'unsafe-inline'" in csp
+    assert "connect-src 'self'" in csp
+    assert resp.headers["cache-control"] == "no-store"
+
+
+async def test_get_answered_form_ticket_returns_done_page(wired):
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    await _seed_form(wired, schema=schema)
+    prior = InteractionResponse(
+        interaction_id="i1", answer={"x": 1}, answered_by="external-callback", answered_at=datetime.now(UTC)
+    )
+    await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 200
+    assert b"already been answered" in bytes(resp.body)
+
+
+async def test_get_form_ticket_malformed_schema_500(wired):
+    # A form record whose stored schema is not a dict cannot be rendered — a server
+    # bug that answers a loud 500, never a blank page.
+    await _seed_form(wired, schema="not-a-dict")
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 500
+
+
+async def test_get_form_ticket_unsupported_property_type_500(wired):
+    # A property type outside the supported subset is a loud 500 (logged reason),
+    # never a half-rendered form silently dropping the field.
+    schema = {"type": "object", "properties": {"blob": {"type": "array"}}}
+    await _seed_form(wired, schema=schema)
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    assert resp.status_code == 500
 
 
 async def test_get_unknown_ticket_plain_404(wired):

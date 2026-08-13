@@ -20,6 +20,9 @@ are AUTHED — they carry the platform api key and declare an explicit action-cl
 * ``POST /api/channels/web/questions/{interaction_id}/answer`` — answer a pending
   question: the record must belong to the caller's own conversation, then the answer
   is forwarded to its interactions callback and a ``chat.answered`` frame appended.
+  The forwarded answer is one scalar (text/confirm/select) or a JSON object (form);
+  this door bounds only its shape and size — the callback door stays authoritative on
+  whether it matches the question's stored schema.
 * ``POST /api/channels/web/session/rotate`` — body ``{identity}``; mint a fresh
   session for that web route (the visitor's "new conversation"); the next message
   opens a conversation on the new address.
@@ -237,9 +240,16 @@ _MAX_TEXT_CHARS = 8000
 # The longest string answer the door forwards — it is persisted verbatim into the
 # transcript frame the page replays.
 _MAX_ANSWER_CHARS = 8000
-# A web question is text / confirm / select, so its answer is one scalar. ``bool`` is
-# listed for the reader; it is already an ``int`` subclass.
+# A scalar answer (text / confirm / select) is one of these. ``bool`` is listed for
+# the reader; it is already an ``int`` subclass.
 _ANSWER_TYPES = (str, bool, int, float)
+# The largest form answer the door forwards, measured as its serialized UTF-8 bytes.
+# A form answer is a structured object rather than one scalar, so it is bounded by
+# total size instead of the scalar cap's character count. Kept well under the default
+# request body cap (``max_body_bytes``), exactly as the scalar cap is: an over-large
+# object is then a precise 422 rather than an opaque 413. This bounds only what is
+# forwarded — the callback door validates the object against the question's schema.
+_MAX_ANSWER_OBJECT_BYTES = 32 * 1024
 
 # The retry key a page may put on a message POST: opaque to the server, and the only
 # thing that makes a re-POST resolve to the turn the lost first attempt started.
@@ -529,9 +539,26 @@ def _is_already_answered(response: httpx.Response) -> bool:
 
 
 def _answer_refusal(answer: Any) -> str | None:
-    """The refusal for an answer value this door will not forward, or ``None``."""
+    """The refusal for an answer value this door will not forward, or ``None``.
+
+    A scalar answer (text/confirm/select) is one string, number, or boolean; a form
+    answer is a JSON object bounded by its serialized size. The callback door stays
+    authoritative on format and schema match — this only bounds what is forwarded."""
+    if isinstance(answer, dict):
+        try:
+            # ``allow_nan=False`` rejects a non-finite float nested in the object:
+            # ``json.loads`` accepts ``Infinity``/``NaN``, and forwarding one emits
+            # invalid JSON to the callback door AND persists a bad token into the
+            # transcript, which then fails the page's own JSON parse on every reconnect
+            # for the whole transcript TTL. It also measures the exact forwarded bytes.
+            serialized = json.dumps(answer, allow_nan=False)
+        except ValueError:
+            return "answer object must contain only finite numbers"
+        if len(serialized.encode("utf-8")) > _MAX_ANSWER_OBJECT_BYTES:
+            return f"answer object must serialize to at most {_MAX_ANSWER_OBJECT_BYTES} bytes"
+        return None
     if not isinstance(answer, _ANSWER_TYPES):
-        return "answer must be a string, number, or boolean"
+        return "answer must be a string, number, boolean, or object"
     if isinstance(answer, float) and not math.isfinite(answer):
         # ``json.loads`` accepts ``Infinity``/``NaN`` and overflows ``1e999`` to inf.
         # Forwarding one emits invalid JSON to the callback door AND persists a

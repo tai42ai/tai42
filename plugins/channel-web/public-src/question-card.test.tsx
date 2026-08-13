@@ -8,7 +8,7 @@ import {
   secondsLeft,
   type QuestionItem,
 } from '@/question-card';
-import type { AnswerFormat } from '@/use-chat-stream';
+import type { AnswerFormat, JsonSchema } from '@/use-chat-stream';
 
 afterEach(() => {
   cleanup();
@@ -27,12 +27,18 @@ function freezeClock(): void {
   vi.setSystemTime(T0);
 }
 
-/** Only `external` reaches the page with a callback ticket, so every other format
- * is built without one — the widget tests below all render that shape. The ticket
- * is the format's own, so it is not something an override can change. */
+/** The default answer schema a `form` question renders with. */
+const FORM_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: { note: { type: 'string' } },
+};
+
+/** The format-dependent extras are the format's own, so they are not something an
+ * override can change: only `external` reaches the page with a callback ticket, and
+ * only `form` with an answer schema. */
 function question(
   format: AnswerFormat,
-  overrides: Partial<Omit<QuestionItem, 'answerFormat' | 'callbackUrl'>> = {},
+  overrides: Partial<Omit<QuestionItem, 'answerFormat' | 'callbackUrl' | 'schema'>> = {},
 ): QuestionItem {
   const base = {
     kind: 'question',
@@ -44,15 +50,17 @@ function question(
     ts: new Date().toISOString(),
     ...overrides,
   } as const;
-  return format === 'external'
-    ? { ...base, answerFormat: format, callbackUrl: CALLBACK }
-    : { ...base, answerFormat: format, callbackUrl: null };
+  if (format === 'external')
+    return { ...base, answerFormat: format, callbackUrl: CALLBACK, schema: null };
+  if (format === 'form')
+    return { ...base, answerFormat: format, callbackUrl: null, schema: FORM_SCHEMA };
+  return { ...base, answerFormat: format, callbackUrl: null, schema: null };
 }
 
 /** An `external` question pointing at `url` — the one format whose widget opens
  * the ticket it was given. */
 function externalQuestion(url: string): QuestionItem {
-  return { ...question('external'), answerFormat: 'external', callbackUrl: url };
+  return { ...question('external'), answerFormat: 'external', callbackUrl: url, schema: null };
 }
 
 /** One turn of the card's self-rescheduling clock. React commits the tick's state
@@ -174,6 +182,26 @@ describe('QuestionCard', () => {
 
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
     expect(screen.getByText('Open to answer')).toBeInTheDocument();
+  });
+
+  it('builds and sends the object for the schema-driven form format', async () => {
+    const user = userEvent.setup();
+    const { onAnswer, onAnswered } = renderCard(question('form'));
+
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { note: 'ship it' });
+  });
+
+  it('shows a loud notice for a form whose schema is not an object, never a dropped control', () => {
+    // The stream already rejects a non-object schema, so this is the defensive last
+    // line — a schema that slips through non-object is a visible alert, not silence.
+    const malformed = { ...question('form'), schema: null } as unknown as QuestionItem;
+    renderCard(malformed);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/malformed/i);
   });
 
   it('settles into a badge with no controls once answered', () => {

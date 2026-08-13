@@ -74,6 +74,7 @@ function pendingQuestion(): ChatItem {
     answerFormat: 'confirm',
     options: null,
     callbackUrl: null,
+    schema: null,
     timeoutAt: new Date(Date.now() + 600_000).toISOString(),
     ts: TS,
   };

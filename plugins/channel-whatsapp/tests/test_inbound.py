@@ -9,11 +9,21 @@ from collections.abc import Awaitable, Callable
 import httpx
 import pytest
 from starlette.responses import Response
+from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
+from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_whatsapp.correlation import reserve_pending
-from tai42_channel_whatsapp.inbound import AnswerForwardError
+from tai42_channel_whatsapp.flows import build_flow
+from tai42_channel_whatsapp.inbound import (
+    _CALLBACK_REJECTION_OPAQUE,
+    _FLOW_BODY_MAX_CHARS,
+    _FORM_REJECTION_LEAD,
+    _FORM_UNPROCESSABLE,
+    _MAX_FORM_REJECTIONS,
+    AnswerForwardError,
+)
 from tests.conftest import (
     PHONE_NUMBER_ID,
     WA_ID,
@@ -729,6 +739,425 @@ async def test_status_type_confused_field_is_acked_not_500(handler, stub_app, ca
     assert result.status_code == 200
     assert stub_app.conversations.status_calls == []
     assert any("missing string id/status" in record.message for record in caplog.records)
+
+
+# --- Form (Flow) replies: nfm_reply -------------------------------------------
+
+_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "note": {"type": "string"},
+        "qty": {"type": "integer"},
+        "amount": {"type": "number"},
+        "agree": {"type": "boolean"},
+    },
+    "required": ["note"],
+}
+
+
+_FORM_QUESTION = "Deploy to prod?"
+_WABA_ID = "WABA-100"
+
+
+def _flow_cache_key() -> str:
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    return f"channel:whatsapp:flow:{_WABA_ID}:{schema_hash}"
+
+
+@pytest.fixture
+def waba_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Add the WABA id the form re-send path resolves the cached flow id under."""
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", _WABA_ID)
+    reset_all_settings()
+
+
+def _seed_flow_cache(fake_redis: FakeRedis, flow_id: str = "flow-cached") -> None:
+    """The published-flow cache entry the original form send left behind."""
+    fake_redis.store[_flow_cache_key()] = flow_id
+
+
+def _set_stored_rejections(fake_redis: FakeRedis, rejections: int) -> None:
+    """Rewrite the pending form record's rejection counter in place (drive the cap)."""
+    data = json.loads(fake_redis.store[_PENDING_KEY])
+    data["rejections"] = rejections
+    fake_redis.store[_PENDING_KEY] = json.dumps(data)
+
+
+def _stored_rejections(fake_redis: FakeRedis) -> int:
+    """The pending form record's current rejection counter."""
+    return json.loads(fake_redis.store[_PENDING_KEY])["rejections"]
+
+
+async def _seed_pending_form(
+    interaction_id: str = "int-1", callback_url: str = _CALLBACK, question: str = _FORM_QUESTION
+) -> None:
+    delivery = make_delivery(callback_url=callback_url, question=question)
+    await reserve_pending(
+        PHONE_NUMBER_ID,
+        WA_ID,
+        delivery.callback_url,
+        delivery.timeout_at,
+        interaction_id=interaction_id,
+        schema=_FORM_SCHEMA,
+        question=delivery.question,
+    )
+
+
+def form_reply_payload(response: dict, *, wamid: str = _WAMID, wa_id: str = WA_ID) -> dict:
+    """A signed-inbound envelope carrying one completed Flow form (``nfm_reply``);
+    ``response`` is serialized into ``response_json`` exactly as Meta delivers it."""
+    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}}
+    message = {"id": wamid, "from": wa_id, "type": "interactive", "interactive": interactive}
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "15551112222", "phone_number_id": PHONE_NUMBER_ID},
+                            "messages": [message],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _door_400() -> httpx.Response:
+    """A callback-door 400 in the platform envelope, naming the failing field."""
+    return response(400, json={"error": "note: bad", "field": "note"})
+
+
+def _flow_accepted(wamid: str = "wamid.RESEND") -> httpx.Response:
+    """A Cloud-API accept for a re-sent Flow message."""
+    return response(200, json={"messages": [{"id": wamid}]})
+
+
+async def test_form_reply_forwards_coerced_answer_dict(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    await _seed_pending_form()
+    fake_httpx.responses.append(response(200))
+
+    result = await handler(
+        signed_request(
+            form_reply_payload({"flow_token": "int-1", "note": "ship it", "qty": "7", "amount": "3.5", "agree": True})
+        )
+    )
+
+    assert result.status_code == 200
+    assert fake_httpx.calls[0]["url"] == _CALLBACK
+    # flow_token stripped; qty string→int; amount string→float; agree bool passthrough; note string.
+    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "ship it", "qty": 7, "amount": 3.5, "agree": True}}
+    assert not await _pending_intact(fake_redis)  # consumed
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_form_reply_coerces_string_boolean(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    await _seed_pending_form()
+    fake_httpx.responses.append(response(200))
+
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "agree": "true"})))
+
+    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "agree": True}}
+
+
+async def test_form_reply_bad_coercion_re_sends_flow_naming_field(
+    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A decimal in an integer field is forwarded raw (int("3.5") fails); the door
+    # rejects it (400 naming the field) and the reply is recovered by re-sending a
+    # fresh Flow whose body repeats the question and names the failing field.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, json={"error": "answer at qty: 3.5 is not an integer", "field": "qty"}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "qty": "3.5"})))
+
+    assert result.status_code == 200
+    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "qty": "3.5"}}  # raw, uncoerced
+    resend = fake_httpx.calls[1]["json"]  # recovered by a fresh Flow
+    assert resend["interactive"]["type"] == "flow"
+    assert resend["interactive"]["action"]["parameters"]["flow_token"] == "int-1"
+    assert resend["interactive"]["action"]["parameters"]["flow_id"] == "flow-cached"
+    body = resend["interactive"]["body"]["text"]
+    assert _FORM_QUESTION in body  # the question is repeated
+    assert "qty" in body  # the door's field-naming error rides the body
+    assert await _pending_intact(fake_redis)  # kept for the re-submission
+    assert _stored_rejections(fake_redis) == 1
+
+
+@pytest.mark.parametrize("raw_number", ["1e999", "nan", "inf"])
+async def test_form_reply_non_finite_number_forwarded_raw(
+    raw_number: str, waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A value parsing to inf/nan passes jsonschema yet serializes to null
+    # downstream; it is forwarded raw so the door 400s and the reply is recovered.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, json={"error": "amount: not finite", "field": "amount"}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(
+        signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "amount": raw_number}))
+    )
+
+    assert result.status_code == 200
+    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "amount": raw_number}}  # raw, uncoerced
+    assert fake_httpx.calls[1]["json"]["interactive"]["type"] == "flow"  # recovered by a fresh Flow
+    assert await _pending_intact(fake_redis)
+    assert _stored_rejections(fake_redis) == 1
+
+
+async def test_form_reply_door_400_re_sends_fresh_flow(waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A door-rejected form answer is recovered by re-sending a fresh Flow for the
+    # SAME interaction: same flow_token, the cached flow id, the door's error in the
+    # body, the correlation kept alive with the rejection counted.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, json={"error": "note: must not be blank", "field": "note"}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    assert len(fake_httpx.calls) == 2
+    assert fake_httpx.calls[0]["url"] == _CALLBACK  # the answer forward
+    assert fake_httpx.calls[1]["url"].endswith(f"/{PHONE_NUMBER_ID}/messages")  # the fresh Flow send
+    resend = fake_httpx.calls[1]["json"]
+    assert resend["interactive"]["type"] == "flow"
+    params = resend["interactive"]["action"]["parameters"]
+    assert params["flow_token"] == "int-1"  # same interaction — reply matching unchanged
+    assert params["flow_id"] == "flow-cached"  # reuses the cached flow id
+    assert resend["interactive"]["body"]["text"] == (
+        f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} note: must not be blank"
+    )
+    assert _stored_rejections(fake_redis) == 1  # counter incremented
+    assert await _pending_intact(fake_redis)  # pending kept
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_form_rejection_long_question_drops_question_keeps_error(
+    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A question long enough to overflow Meta's 1024-char interactive.body.text cap is
+    # dropped WHOLE from the re-sent Flow body (never a mid-string ellipsis): the fresh
+    # Flow re-presents the fields, so the body carries only the bounded lead+error tail
+    # — which always fits — and the send succeeds with counter/pending unchanged.
+    long_question = "Q" * (_FLOW_BODY_MAX_CHARS + 100)
+    await _seed_pending_form(question=long_question)
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, json={"error": "note: must not be blank", "field": "note"}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_REJECTION_LEAD} note: must not be blank"  # tail only — the question is gone
+    assert long_question not in body  # no question
+    assert not body.startswith("Q")  # not even a chopped prefix of it
+    assert "…" not in body  # no ellipsis
+    assert "..." not in body
+    assert len(body) <= _FLOW_BODY_MAX_CHARS  # fits the vendor cap
+    assert _stored_rejections(fake_redis) == 1  # counter incremented, same as the short-question path
+    assert await _pending_intact(fake_redis)  # pending kept
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_form_rejection_body_at_cap_boundary_keeps_question(
+    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The cap is inclusive: a body whose length is EXACTLY the cap keeps the question,
+    # and one char more would drop it. Pins the <= boundary against the constant.
+    error = "note: must not be blank"
+    tail = f"{_FORM_REJECTION_LEAD} {error}"
+    question = "Q" * (_FLOW_BODY_MAX_CHARS - len(tail) - len("\n\n"))
+    await _seed_pending_form(question=question)
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, json={"error": error, "field": "note"}))
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
+    assert body == f"{question}\n\n{tail}"  # question kept at exactly the cap
+    assert len(body) == _FLOW_BODY_MAX_CHARS
+    assert _stored_rejections(fake_redis) == 1
+    assert await _pending_intact(fake_redis)
+
+
+async def test_form_rejection_cap_stops_re_send_and_bridges(
+    waba_env, stub_app, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # Two rejections under the cap each re-send; the one that reaches the cap does
+    # NOT re-send — the guest gets one plain final message, the pending is popped, and
+    # a later text bridges normally.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    _set_stored_rejections(fake_redis, _MAX_FORM_REJECTIONS - 2)
+
+    # First rejection: under the cap → re-send, counter +1.
+    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.RS1")])
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R1")))
+    assert fake_httpx.calls[-1]["json"]["interactive"]["type"] == "flow"
+    assert _stored_rejections(fake_redis) == _MAX_FORM_REJECTIONS - 1
+
+    # Second rejection: still under the cap → second re-send, now at the cap.
+    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.RS2")])
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R2")))
+    assert fake_httpx.calls[-1]["json"]["interactive"]["type"] == "flow"
+    assert _stored_rejections(fake_redis) == _MAX_FORM_REJECTIONS
+
+    # Third rejection: at the cap → NO flow send, one plain final message, popped.
+    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.FINAL")])
+    with caplog.at_level("ERROR"):
+        result = await handler(
+            signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R3"))
+        )
+
+    assert result.status_code == 200
+    final = fake_httpx.calls[-1]["json"]
+    assert final["type"] == "text"  # a plain message, never another flow
+    assert final["text"]["body"] == _FORM_UNPROCESSABLE
+    assert not await _pending_intact(fake_redis)  # popped, not restored
+    assert any(f"cap {_MAX_FORM_REJECTIONS}" in record.message for record in caplog.records)
+
+    # A later inbound text now bridges normally — the pending is gone.
+    await handler(signed_request(message_payload(wamid="wamid.TXT", text="hello")))
+    assert len(stub_app.conversations.accept_calls) == 1
+
+
+async def test_form_rejection_re_send_failure_raises_and_keeps_pending(
+    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A re-send that itself fails (5xx) propagates out of the webhook so Meta
+    # redelivers; the pending is restored UNCHANGED and the wamid is NOT marked seen,
+    # so the redelivery re-pops the same ask and re-enters the 400 path.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(_door_400())  # the answer forward is rejected
+    fake_httpx.responses.append(response(500, text="graph down"))  # the re-send itself fails
+
+    with pytest.raises(ChannelDeliveryError, match="HTTP 500"):
+        await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert await _pending_intact(fake_redis)  # restored for the redelivery
+    assert _stored_rejections(fake_redis) == 0  # a failed re-send does not spend the cap
+    assert _SEEN_KEY not in fake_redis.store  # not marked seen — redelivery re-enters
+
+
+async def test_form_rejection_cache_miss_raises_loudly(waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # The published-flow cache has no TTL, so a miss at re-send time means the store
+    # was lost — a loud failure that re-sends nothing, restoring the pending unchanged
+    # for Meta's redelivery, never a silent skip.
+    await _seed_pending_form()  # no flow-cache entry seeded
+    fake_httpx.responses.append(_door_400())
+
+    with pytest.raises(AnswerForwardError, match="no published flow cached"):
+        await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert await _pending_intact(fake_redis)
+    assert _stored_rejections(fake_redis) == 0
+    assert _SEEN_KEY not in fake_redis.store
+
+
+async def test_form_rejection_non_envelope_400_shows_opaque_line(
+    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # A 400 body that is not this platform's error envelope (a proxy/WAF page) is not
+    # shown to the guest: the re-sent Flow carries a fixed opaque line instead, and the
+    # raw body is logged.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    fake_httpx.responses.append(response(400, text="<html>blocked by WAF</html>"))
+    fake_httpx.responses.append(_flow_accepted())
+
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
+    assert "blocked by WAF" not in body  # the intermediary's content never reaches the guest
+    assert any("not this platform's error envelope" in record.message for record in caplog.records)
+
+
+async def test_form_reply_flow_token_mismatch_bridges_and_keeps_pending(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    await _seed_pending_form(interaction_id="int-1")
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-999", "note": "x"})))
+
+    assert result.status_code == 200
+    assert not fake_httpx.calls  # not forwarded
+    assert await _pending_intact(fake_redis)  # the live ask is untouched
+    assert len(stub_app.conversations.accept_calls) == 1  # bridged like an uncorrelated interactive
+
+
+async def test_form_reply_malformed_response_json_bridges(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    await _seed_pending_form()
+    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": "{not json"}}
+    payload = interactive_payload(interactive=interactive)
+
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(payload))
+
+    assert result.status_code == 200
+    assert not fake_httpx.calls  # nothing forwarded
+    assert await _pending_intact(fake_redis)  # the live ask is untouched
+    assert len(stub_app.conversations.accept_calls) == 1  # bridged
+    assert any("response_json" in record.message for record in caplog.records)
+
+
+async def test_form_reply_non_object_response_json_bridges(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    await _seed_pending_form()
+    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(["not", "an", "object"])}}
+    payload = interactive_payload(interactive=interactive)
+
+    result = await handler(signed_request(payload))
+
+    assert result.status_code == 200
+    assert not fake_httpx.calls
+    assert await _pending_intact(fake_redis)
+    assert len(stub_app.conversations.accept_calls) == 1
+
+
+async def test_form_reply_missing_response_json_bridges(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # An nfm_reply whose nfm_reply object carries no response_json string is bridged.
+    await _seed_pending_form()
+    interactive = {"type": "nfm_reply", "nfm_reply": {"foo": "bar"}}
+    payload = interactive_payload(interactive=interactive)
+
+    result = await handler(signed_request(payload))
+
+    assert result.status_code == 200
+    assert not fake_httpx.calls
+    assert await _pending_intact(fake_redis)
+    assert len(stub_app.conversations.accept_calls) == 1
+
+
+async def test_form_reply_door_5xx_restores_and_raises(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    await _seed_pending_form()
+    fake_httpx.responses.append(response(500, text="oops"))
+
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
+        await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert await _pending_intact(fake_redis)  # restored — Meta's retry re-resolves
+    assert _SEEN_KEY not in fake_redis.store
 
 
 async def test_unknown_change_shape_is_acked(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):

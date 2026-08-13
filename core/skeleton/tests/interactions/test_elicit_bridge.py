@@ -12,7 +12,6 @@ from fastmcp.server.elicitation import AcceptedElicitation
 from pydantic import BaseModel
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.interactions import elicit_bridge
 from tai42_skeleton.interactions.helper import InteractionTimeoutError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import context_bridge
@@ -32,7 +31,7 @@ def _patch_ask_user(monkeypatch, answer=None, *, raises=None):
             raise raises
         return answer
 
-    monkeypatch.setattr(elicit_bridge, "ask_user", fake_ask_user)
+    monkeypatch.setattr("tai42_skeleton.interactions.helper.ask_user", fake_ask_user)
     return calls
 
 

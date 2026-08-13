@@ -11,14 +11,18 @@ from tai42_channel_slack.correlation import (
     DEDUPE_TTL_SECONDS,
     claim_dedupe,
     delete_correlation,
+    delete_form_record,
     get_callback_url,
+    get_form_record,
     release_dedupe,
     store_correlation,
+    store_form_record,
 )
 
 pytestmark = pytest.mark.usefixtures("slack_env")
 
 _CALLBACK = "http://gateway/api/interactions/callback/ticket-9"
+_SCHEMA = {"type": "object", "properties": {"full_name": {"type": "string"}}, "required": ["full_name"]}
 
 
 def _deadline(seconds: float = 300) -> datetime:
@@ -60,6 +64,50 @@ async def test_delete_correlation_removes_mapping(fake_redis):
     assert await get_callback_url("11.22") is None
 
 
+async def test_store_form_record_writes_json_and_positive_ttl(fake_redis):
+    import json
+
+    timeout_at = datetime.now(UTC) + timedelta(seconds=120)
+
+    await store_form_record("int-9", _CALLBACK, _SCHEMA, "Give details", timeout_at)
+
+    key = "channel:slack:form:int-9"
+    record = json.loads(fake_redis.store[key])
+    assert record == {
+        "callback_url": _CALLBACK,
+        "schema": _SCHEMA,
+        "question": "Give details",
+        "timeout_at": timeout_at.isoformat(),
+    }
+    ttl = fake_redis.ttls[key]
+    assert ttl is not None
+    assert 0 < ttl <= 120
+
+
+async def test_store_form_record_expired_budget_raises_and_writes_nothing(fake_redis):
+    with pytest.raises(ChannelDeliveryError, match="budget already expired"):
+        await store_form_record("int-9", _CALLBACK, _SCHEMA, "q", datetime.now(UTC) - timedelta(seconds=1))
+
+    assert fake_redis.store == {}
+
+
+async def test_get_form_record_round_trips_and_misses(fake_redis):
+    await store_form_record("int-9", _CALLBACK, _SCHEMA, "q", datetime.now(UTC) + timedelta(seconds=60))
+
+    record = await get_form_record("int-9")
+    assert record is not None
+    assert record["schema"] == _SCHEMA
+    assert await get_form_record("nope") is None
+
+
+async def test_delete_form_record_removes_it(fake_redis):
+    await store_form_record("int-9", _CALLBACK, _SCHEMA, "q", datetime.now(UTC) + timedelta(seconds=60))
+
+    await delete_form_record("int-9")
+
+    assert await get_form_record("int-9") is None
+
+
 async def test_claim_dedupe_first_wins_second_loses(fake_redis):
     assert await claim_dedupe("Ev1") is True
     assert await claim_dedupe("Ev1") is False
@@ -83,6 +131,9 @@ async def test_missing_redis_url_raises_on_every_store_function(monkeypatch: pyt
         store_correlation("11.22", _CALLBACK, _deadline()),
         get_callback_url("11.22"),
         delete_correlation("11.22"),
+        store_form_record("int-9", _CALLBACK, _SCHEMA, "q", _deadline()),
+        get_form_record("int-9"),
+        delete_form_record("int-9"),
         claim_dedupe("Ev1"),
         release_dedupe("Ev1"),
     ):

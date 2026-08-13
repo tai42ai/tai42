@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 from datetime import UTC, datetime
+from typing import ClassVar
 
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
 
@@ -112,8 +113,14 @@ def _split_recipient(recipient: str | None) -> tuple[str, str]:
 class WebChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol.
 
-    No capability flags: this channel sends plain text only (no media, no
+    Advertises ``supports_form_delivery`` — the chat page renders a schema-driven
+    form widget, so a ``form`` question is delivered here. It advertises no
+    notification capability: ``notify`` sends plain text only (no media, no
     templates)."""
+
+    # The page renders a schema-driven form widget, so the ask_user helper may route
+    # a ``form`` delivery here; absent this flag it never would.
+    supports_form_delivery: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Reserve the pending-question record, then append the question to the
@@ -123,10 +130,10 @@ class WebChannel:
         past its budget is refused loudly for every format. The record is reserved
         BEFORE the transcript append so the answer door can never race a question the
         store does not yet know; a failed OR CANCELLED append releases the
-        reservation and re-raises. All four formats are appended as-is — the
-        transcript entry carries the format and options, and the chat page renders
-        the widget; only the ``external`` widget also carries the callback ticket it
-        must open.
+        reservation and re-raises. Every format is appended as-is — the transcript
+        entry carries the format and options, and the chat page renders the widget;
+        the ``form`` question also carries its answer schema, and only the
+        ``external`` widget carries the callback ticket it must open.
         """
         if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
             raise ChannelDeliveryError(
@@ -154,6 +161,7 @@ class WebChannel:
                     delivery.options,
                     delivery.timeout_at,
                     callback_url=(delivery.callback_url if delivery.answer_format == _EXTERNAL_FORMAT else None),
+                    schema=delivery.schema,
                 )
                 # Set INSIDE the gate: leaving the ``async with`` is a suspension
                 # point, and a cancellation delivered there would release the

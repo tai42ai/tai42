@@ -78,6 +78,31 @@ async def test_deliver_ships_the_callback_ticket_to_the_external_widget(fake_red
     assert _only_entry(fake_redis)["callback_url"] == CALLBACK
 
 
+_FORM_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+
+
+def test_web_channel_advertises_form_delivery():
+    # The plain class attribute the ask_user helper reads with ``getattr`` before it
+    # routes a form delivery here; absent it, this channel would never receive one.
+    assert WebChannel.supports_form_delivery is True
+
+
+async def test_deliver_ships_the_form_schema_to_the_widget(fake_redis: FakeRedis):
+    await WebChannel().deliver(make_delivery(answer_format="form", options=None, schema=_FORM_SCHEMA))
+    payload = _only_entry(fake_redis)
+    assert payload["answer_format"] == "form"
+    assert payload["schema"] == _FORM_SCHEMA
+
+
+@pytest.mark.parametrize("answer_format", ["text", "confirm", "select", "external"])
+async def test_deliver_keeps_the_schema_off_a_non_form_widget(fake_redis: FakeRedis, answer_format: str):
+    # The schema is carried only for the form widget that renders it; every other
+    # format has none, so the key is absent from the frame.
+    options = ["a", "b"] if answer_format == "select" else None
+    await WebChannel().deliver(make_delivery(answer_format=answer_format, options=options))
+    assert "schema" not in _only_entry(fake_redis)
+
+
 async def test_deliver_refuses_an_identity_the_doors_could_never_read_back(fake_redis: FakeRedis):
     # The split takes the LAST colon, so this leaves the identity ``odd:name`` — which
     # the stream door refuses, so the visitor could never open that transcript and the

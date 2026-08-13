@@ -151,8 +151,16 @@ class FakeHttpx:
     ) -> httpx.Response:
         self.events.append(("http_post", url))
         self.calls.append({"url": url, "data": data, "json": json, "headers": headers, "auth": auth})
+        return self._reply("post")
+
+    async def delete(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+        self.events.append(("http_delete", url))
+        self.calls.append({"url": url, "data": None, "json": None, "headers": headers, "auth": None})
+        return self._reply("delete")
+
+    def _reply(self, verb: str) -> httpx.Response:
         if not self.responses:
-            raise AssertionError("FakeHttpx: no queued response for post")
+            raise AssertionError(f"FakeHttpx: no queued response for {verb}")
         item = self.responses.pop(0)
         if isinstance(item, Exception):
             raise item

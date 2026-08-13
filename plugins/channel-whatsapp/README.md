@@ -77,6 +77,7 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 | `CHANNEL_WHATSAPP_APP_SECRET` | yes | Meta app secret (`SecretStr`) — the `X-Hub-Signature-256` HMAC key for inbound webhooks |
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | yes | Shared token (`SecretStr`) echoed during Meta's GET webhook verification handshake |
 | `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | for ask_user | The `phone_number_id` messages are sent FROM when no sender identity is routed |
+| `CHANNEL_WHATSAPP_WABA_ID` | for form asks | The WhatsApp Business Account id that owns Flows — a `form` ask is rendered as a WhatsApp Flow created and published under this WABA. Required only on the form-delivery path |
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | for cold templates | Whitelist of `wa_id`s a **template** send may reach when the recipient is not a known contact — comma-separated or a JSON list. Freeform sends are not fenced by it |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | no (30) | Rolling "seen within N days" window admitting a template send to a `wa_id` the inbound webhook has messaged from; `0` disables known-contact tracking (allowlist-only templates) |
 | `CHANNEL_WHATSAPP_API_BASE_URL` | no | Graph API origin + pinned version (default `https://graph.facebook.com/v23.0`) |
@@ -117,10 +118,29 @@ replies** — no code to quote, no prefix. A `select` question renders natively:
 few short options become tappable **reply buttons**, more options become an
 interactive **list**, and past those platform caps it falls back to a numbered
 plaintext list. A tap answers by a question-bound id that maps back to the exact
-option text; the human may always **type** an option instead. Correlation is
-fully out-of-band: any reply (typed or tapped) from the recipient resolves the
-`(phone_number_id, wa_id)` pair's pending question, so one question can be pending
-per pair at a time; a second concurrent one is rejected loudly.
+option text; the human may always **type** an option instead. A `form` question
+renders as an in-chat **WhatsApp Flow** — one screen of typed fields the human
+fills and submits: a `string` becomes a text field, a `string` with an `enum`
+a dropdown, a `boolean` an opt-in toggle, and an `integer`/`number` a numeric
+text field. The Flow is created and published once per distinct answer schema
+(cached by a schema hash under `CHANNEL_WHATSAPP_WABA_ID`) and reused; the
+completed form returns as an `nfm_reply`, its values coerced to the schema's
+types before the answer object is forwarded. When the callback door **rejects**
+a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g. a
+minimum or pattern), a completed Flow has no re-reply surface, so the channel
+**re-sends a fresh Flow** for the same interaction: same flow token, the cached
+flow id, and a body that repeats the question with the door's error line (which
+names the failing field). This is **bounded** — after a fixed number of
+rejections the channel stops re-sending, tells the guest once the form could not
+be processed, and lets the ask time out on its own deadline. The platform
+validates the answer schema against this subset when the question is asked —
+before the question is stored — so an out-of-subset schema (nested objects,
+arrays, unions, unknown types) never reaches this send; the Flow mapping rejects
+one defensively too.
+Correlation is fully out-of-band: any reply (typed, tapped, or
+a submitted form) from the recipient resolves the `(phone_number_id, wa_id)`
+pair's pending question, so one question can be pending per pair at a time; a
+second concurrent one is rejected loudly.
 
 An agent notification (`notify_user`) may also carry **media** — images
 sent as image messages, links appended to the message text — or, for a send
@@ -166,7 +186,8 @@ retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask_user` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Guest-sent media stays inbound-dropped | Inbound non-text, non-interactive messages (image, audio, location, …) are acknowledged and debug-logged, not bridged. Outbound supports text, interactive buttons/list, image, and template |
+| Guest-sent media stays inbound-dropped | Inbound non-text, non-interactive messages (image, audio, location, …) are acknowledged and debug-logged, not bridged. Outbound supports text, interactive buttons/list, interactive Flow (form), image, and template |
+| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel |
 | Template scope is body-text | A `ChannelTemplate` carries positional body-text parameters only — header media, button, and typed (currency, date-time) parameters are out of scope |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
 

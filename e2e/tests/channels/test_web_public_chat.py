@@ -39,6 +39,15 @@ from tai42_e2e.webchat import SESSION_COOKIE, mint_unregistered_token
 
 pytestmark = pytest.mark.backendless
 
+# A minimal form answer schema: a text field and an integer field, both required — the
+# smallest shape that exercises the page widget, the by-id answer door, and the callback
+# door's schema validation (a wrong-typed field is the 400 negative).
+_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {"label": {"type": "string"}, "amount": {"type": "integer"}},
+    "required": ["label", "amount"],
+}
+
 
 def _stream_cap(stack: TaiStack) -> int:
     """The per-visitor concurrent-SSE cap this stack CONFIGURES, read back off its own
@@ -169,10 +178,11 @@ async def test_answer_door_fails_closed_without_the_owning_session(
         foreign = await case.web.answer(interaction_id, answer, cookies=other.web.cookies)
         assert foreign.status_code == 404, foreign.text
 
-        # A non-scalar answer is refused before the record is ever claimed: a web question
-        # is text / confirm / select, so its answer is one scalar.
-        non_scalar = await case.web.answer(interaction_id, {"answer": answer})
-        assert non_scalar.status_code == 422, non_scalar.text
+        # A structurally-invalid answer is refused at the door (422) before the record is
+        # claimed: the door forwards one scalar (text/confirm/select) or an object (form),
+        # so a list is neither and is rejected on shape alone, whatever the question's format.
+        bad_shape = await case.web.answer(interaction_id, [answer])
+        assert bad_shape.status_code == 422, bad_shape.text
 
         assert await is_pending(stack, stack.port_a, question)
         assert not ask_task.done()
@@ -225,6 +235,56 @@ async def test_external_question_carries_the_ticket_and_a_late_web_answer_is_409
     assert late.status_code == 409, late.text
     replayed = await case.web.frames()
     assert not any(event == "chat.answered" and data["answer"] == late_answer for event, data in replayed)
+
+
+async def test_form_over_web_delivers_the_schema_and_answers_with_a_typed_dict(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    stack = case.stack
+    question = uniq("web_form_q")
+    good_answer = {"label": uniq("web_form_label"), "amount": 3}
+
+    baseline_keys = count_correlation_keys(stack, case.correlation_prefix)
+    ask_task = _ask_over_web(case, question, answer_format="form", schema=_FORM_SCHEMA)
+    try:
+        record = await _wait_question(case, question)
+        # A form question carries its answer schema for the page's form widget and, like
+        # every by-id format, NOT the callback ticket (the visitor answers through this
+        # plugin's own door, never the callback link).
+        assert record["answer_format"] == "form"
+        assert record["schema"] == _FORM_SCHEMA
+        assert "callback_url" not in record, "a form question leaked its callback ticket"
+        await await_true(
+            lambda: count_correlation_keys(stack, case.correlation_prefix) > baseline_keys,
+            deadline=5.0,
+            message="web: form delivery reserved no pending-question record",
+        )
+
+        # An object that fails the schema is refused with the door's 400, and the question
+        # stays answerable — the record is restored, so the visitor can correct and re-send.
+        bad = await case.web.answer(record["interaction_id"], {"label": "x", "amount": "not-an-int"})
+        assert bad.status_code == 400, bad.text
+        assert await is_pending(stack, stack.port_a, question)
+        assert not ask_task.done()
+
+        # A conforming object answers by id through the plugin's own door and returns the
+        # validated dict.
+        good = await case.web.answer(record["interaction_id"], good_answer)
+        assert good.status_code == 200, good.text
+        assert good.json()["data"]["status"] == "answered"
+        resolved = await asyncio.wait_for(ask_task, timeout=15.0)
+    finally:
+        await cancel_and_join(ask_task)
+
+    # The blocked run woke on A with the whole web pipe in the middle, and the typed dict —
+    # not a bare string — is what came back.
+    assert resolved == good_answer
+    assert not await is_pending(stack, stack.port_a, question)
+    assert not await is_pending(stack, stack.port_b, question)
+    settled = await case.web.frames()
+    assert any(event == "chat.answered" and data["answer"] == good_answer for event, data in settled)
+    assert count_correlation_keys(stack, case.correlation_prefix) == baseline_keys
 
 
 async def test_stream_door_refuses_over_the_per_visitor_cap(web_case: WebChannelCase) -> None:

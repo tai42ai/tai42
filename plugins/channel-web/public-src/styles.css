@@ -358,6 +358,21 @@
   min-width: 0;
 }
 
+/* The schema-driven form stacks its fields above the submit, rather than the
+   inline row the scalar widgets use. */
+.tcw-question-form {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.tcw-question-malformed {
+  display: flex;
+  align-items: center;
+  gap: var(--tai-space-2);
+  color: var(--tai-color-err-text);
+  font-size: var(--tai-text-sm);
+}
+
 .tcw-countdown {
   margin: 0;
   color: var(--tai-color-warn-text);
