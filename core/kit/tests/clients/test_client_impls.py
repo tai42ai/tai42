@@ -14,6 +14,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.errors import ClientConnectError, ClientDisconnectedError
 
 # httpx/fastmcp ride on base deps and import unconditionally; redis/curl/postgres
 # are loaded lazily in their sections via importorskip.
@@ -303,7 +304,9 @@ async def test_mcp_create_builds_client_from_transport(monkeypatch):
 
 async def test_mcp_create_connect_timeout_raises_named(monkeypatch):
     # A connect/init that never completes is bounded by
-    # MCP_CLIENT_CONNECT_TIMEOUT_SECONDS; the raised TimeoutError names the env var.
+    # MCP_CLIENT_CONNECT_TIMEOUT_SECONDS; the failure surfaces as ClientConnectError
+    # (so the dispatch seam's unavailable-client handling catches it), the message
+    # still names the env var, and the underlying TimeoutError is chained.
     class _BlockingClient:
         def __init__(self, transport):
             pass
@@ -319,10 +322,55 @@ async def test_mcp_create_connect_timeout_raises_named(monkeypatch):
     monkeypatch.setenv("MCP_CLIENT_CONNECT_TIMEOUT_SECONDS", "0.01")
     reset_all_settings()
     try:
-        with pytest.raises(TimeoutError, match="MCP_CLIENT_CONNECT_TIMEOUT_SECONDS"):
+        with pytest.raises(ClientConnectError, match="MCP_CLIENT_CONNECT_TIMEOUT_SECONDS") as excinfo:
             await mcp_mod.FastMCPClient()._create(config={"title": "srv", "config": {"url": "http://h/mcp"}})
     finally:
         reset_all_settings()
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
+
+
+async def test_mcp_create_connect_failure_raises_client_connect_error(monkeypatch):
+    # A down upstream makes fastmcp's eager connect (__aenter__) raise a plain
+    # RuntimeError; _create wraps ANY build failure in ClientConnectError chaining
+    # the original, so the message text is preserved and the cause is the original.
+    original = RuntimeError("Client failed to connect: connection refused")
+
+    class _FailingClient:
+        def __init__(self, transport):
+            pass
+
+        async def __aenter__(self):
+            raise original
+
+        async def __aexit__(self, *a):
+            pass
+
+    monkeypatch.setattr(mcp_mod, "Client", _FailingClient)
+    monkeypatch.setattr(mcp_mod, "get_mcp_transport", lambda cfg, uds_protocol: "T")
+    with pytest.raises(ClientConnectError, match="connection refused") as excinfo:
+        await mcp_mod.FastMCPClient()._create(config={"title": "srv", "config": {"url": "http://h/mcp"}})
+    assert excinfo.value.__cause__ is original
+    # A ClientConnectError is a ClientDisconnectedError, so seam handling catches both.
+    assert isinstance(excinfo.value, ClientDisconnectedError)
+
+
+async def test_mcp_create_cancelled_propagates_unwrapped(monkeypatch):
+    # Cancellation is a BaseException, not caught by the Exception-wrapping in
+    # _create; it must propagate as CancelledError, never as ClientConnectError.
+    class _CancelledClient:
+        def __init__(self, transport):
+            pass
+
+        async def __aenter__(self):
+            raise asyncio.CancelledError
+
+        async def __aexit__(self, *a):
+            pass
+
+    monkeypatch.setattr(mcp_mod, "Client", _CancelledClient)
+    monkeypatch.setattr(mcp_mod, "get_mcp_transport", lambda cfg, uds_protocol: "T")
+    with pytest.raises(asyncio.CancelledError):
+        await mcp_mod.FastMCPClient()._create(config={"title": "srv", "config": {"url": "http://h/mcp"}})
 
 
 def test_mcp_disconnection_exceptions():
@@ -331,9 +379,15 @@ def test_mcp_disconnection_exceptions():
     exc = mcp_mod.FastMCPClient()._disconnection_exceptions()
     assert anyio.ClosedResourceError in exc
     assert anyio.BrokenResourceError in exc
+    # ConnectionError is inherited from the base isinstance set.
+    assert ConnectionError in exc
     # RuntimeError is deliberately NOT in the blanket set: it is matched by
     # message via _is_disconnection_error, never wholesale.
     assert RuntimeError not in exc
+    # httpx.TransportError is NOT in the blanket set: it is matched with the
+    # timeout carve-out via _is_disconnection_error, never wholesale (that would
+    # also evict on a slow-not-dead TimeoutException).
+    assert httpx.TransportError not in exc
 
 
 def test_mcp_runtime_error_matched_by_message_only():
@@ -347,6 +401,67 @@ def test_mcp_runtime_error_matched_by_message_only():
     assert client._is_disconnection_error(RuntimeError("caller bug")) is False
     # The declared set still matches via the base predicate.
     assert client._is_disconnection_error(anyio.ClosedResourceError()) is True
+
+
+def test_mcp_httpx_transport_error_evicts_except_timeout():
+    client = mcp_mod.FastMCPClient()
+    # A transport-level failure (connect/read error) means the connection is
+    # dead — evict.
+    assert client._is_disconnection_error(httpx.ConnectError("connection refused")) is True
+    assert client._is_disconnection_error(httpx.ReadError("read failed")) is True
+    # A timeout means slow, not dead: it must NOT evict (avoids reconnect churn).
+    assert client._is_disconnection_error(httpx.ConnectTimeout("too slow")) is False
+    assert client._is_disconnection_error(httpx.ReadTimeout("too slow")) is False
+    # A non-transport httpx error (e.g. an HTTP status) is not a disconnection.
+    assert client._is_disconnection_error(httpx.HTTPError("boom")) is False
+
+
+def test_mcp_mcperror_evicts_only_on_connection_closed_code():
+    from mcp.shared.exceptions import McpError
+    from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, ErrorData
+
+    client = mcp_mod.FastMCPClient()
+    # The connection-closed protocol code marks a dead session — evict.
+    closed = McpError(ErrorData(code=CONNECTION_CLOSED, message="connection closed"))
+    assert client._is_disconnection_error(closed) is True
+    # Any other MCP error code (tool error, internal error) is caller-visible and
+    # must not tear down the pool.
+    other = McpError(ErrorData(code=INTERNAL_ERROR, message="tool blew up"))
+    assert client._is_disconnection_error(other) is False
+
+
+def test_mcp_mcperror_evicts_on_session_terminated_shape():
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    client = mcp_mod.FastMCPClient()
+    # The streamable-http SDK's stale-session rejection after an upstream restart
+    # (HTTP 404 -> this exact code+message) marks a dead session — evict.
+    terminated = McpError(ErrorData(code=mcp_mod._SESSION_TERMINATED_CODE, message=mcp_mod._SESSION_TERMINATED_MESSAGE))
+    assert client._is_disconnection_error(terminated) is True
+    # The same code carrying a different message is not the session-terminated
+    # shape — caller-visible, must not evict.
+    nearby_code = McpError(ErrorData(code=mcp_mod._SESSION_TERMINATED_CODE, message="something else"))
+    assert client._is_disconnection_error(nearby_code) is False
+    # The session-terminated message on a different code is likewise not a match.
+    other_code = McpError(ErrorData(code=-32600, message=mcp_mod._SESSION_TERMINATED_MESSAGE))
+    assert client._is_disconnection_error(other_code) is False
+
+
+def test_mcp_dead_session_messages_evict():
+    client = mcp_mod.FastMCPClient()
+    # Each fastmcp dead-session RuntimeError message evicts the pooled corpse.
+    for message in mcp_mod._DEAD_SESSION_ERROR_MARKERS:
+        assert client._is_disconnection_error(RuntimeError(message)) is True
+    # The full fastmcp "not connected" message (superstring of the marker) matches.
+    assert (
+        client._is_disconnection_error(
+            RuntimeError("Client is not connected. Use the 'async with client:' context manager first.")
+        )
+        is True
+    )
+    # A RuntimeError from caller code carrying none of the markers does not evict.
+    assert client._is_disconnection_error(RuntimeError("something else entirely")) is False
 
 
 # ---------------------------------------------------------------------------

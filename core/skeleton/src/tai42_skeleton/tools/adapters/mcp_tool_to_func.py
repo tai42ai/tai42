@@ -33,11 +33,25 @@ from tai42_skeleton.connectors.token_injection import (
     is_token_expired,
     managed_auth_error_result,
     resolve_managed_auth_for_config,
+    upstream_mcp_unavailable_result,
 )
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
+from tai42_skeleton.tools import mcp_health
 
 logger = logging.getLogger(__name__)
+
+# C0 controls (incl. CR/LF), DEL, and the Unicode line-boundary characters
+# (U+0085 NEL, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), each mapped to
+# a visible ``\x``-prefixed hex escape so an untrusted name cannot inject a line break.
+_LOG_ESCAPE = {c: f"\\x{c:02x}" for c in (*range(0x20), 0x7F, 0x85, 0x2028, 0x2029)}
+
+
+def _log_safe(name: str) -> str:
+    """A downstream-advertised tool name rendered safe for a log line: its control
+    and line-boundary characters cannot forge or split a log record. Downstream
+    names are untrusted."""
+    return name.translate(_LOG_ESCAPE)
 
 
 def _exposed_name(field_name: str, field: FieldInfo) -> str:
@@ -228,15 +242,35 @@ async def mcp_tool_call_wrapper(
         try:
             response = await _dispatch()
         except ClientDisconnectedError:
-            # A mid-run disconnect (downstream MCP restarted) evicts the dead
-            # pooled session; the first such error gets exactly ONE fresh-session
-            # retry. A second disconnect propagates unchanged — no retry loop.
+            # An unavailable pooled session — a mid-run disconnect (downstream MCP
+            # restarted, evicting the dead session) OR a connect/init failure
+            # building the session (ClientConnectError, e.g. a down upstream on
+            # cold start) — gets exactly ONE fresh-session retry.
             logger.warning(
-                "MCP session disconnected — reconnecting once (mcp='%s' tool='%s')",
+                "MCP dispatch lost its session or could not connect — retrying once (mcp='%s' tool='%s')",
                 config.title,
-                tool_name,
+                _log_safe(tool_name),
             )
-            response = await _dispatch()
+            try:
+                response = await _dispatch()
+            except ClientDisconnectedError as exc:
+                # The retry also failed (dead session again or a connect that still
+                # could not build): the upstream MCP is unavailable. Convert to a
+                # structured tool-error result so the raw fastmcp disconnect/connect
+                # text never reaches the tool-call consumer — it lands in this log
+                # line and the health store's last_error, both operator surfaces.
+                logger.error(
+                    "MCP reconnect failed — upstream unavailable (mcp='%s' tool='%s')",
+                    config.title,
+                    _log_safe(tool_name),
+                    exc_info=True,
+                )
+                mcp_health.record_failure(config.title, exc)
+                response = upstream_mcp_unavailable_result(config)
+            else:
+                mcp_health.record_success(config.title)
+        else:
+            mcp_health.record_success(config.title)
     except (ConnectorConnectionError, ConnectorAuthExpiredError) as exc:
         # A managed call blocked on user action — invalid_grant (reconnect),
         # refresh budget exhausted, or auth still expired after a forced refresh —
@@ -245,6 +279,11 @@ async def mcp_tool_call_wrapper(
         # It then flows through the same span-annotation + output path below as any
         # tool error.
         response = managed_auth_error_result(exc)
+    except Exception as exc:
+        # Any other dispatch failure propagates raw to the caller unchanged; record
+        # the health failure first so the status op sees it, then re-raise.
+        mcp_health.record_failure(config.title, exc)
+        raise
 
     # An error response carries no usable output; annotate the active span here
     # (the extraction util is framework-agnostic and does not touch monitoring)

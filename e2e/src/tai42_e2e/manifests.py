@@ -2257,3 +2257,64 @@ def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackCo
         run_metrics=False,
         auth=False,
     )
+
+
+# ---- manifest-mcp resilience profile ------------------------------------
+#
+# A manifest ``mcp`` mount over STREAMABLE-HTTP pointed at the managed server the test owns
+# as a killable subprocess (``tai42_e2e_fixtures.managed_mcp_server --transport http``). The
+# http transport is what lets the scenario reproduce the real disconnect shapes the kit's
+# pooled ``FastMCPClient`` must evict on (an httpx transport error / an MCP connection-closed
+# frame / a collapsed session ``RuntimeError``) — a stdio child's lifetime is owned by the
+# app, so only an http server on a fixed port the test controls can be SIGKILLed and
+# restarted between tool calls. The url must be known at build time, so the fixture allocates
+# the port, launches the server, and passes ``mcp_url`` in.
+
+# The manifest title the managed server's tools are prefixed with on this server's MCP
+# surface (``resilience_<tool>``); also the ``{title}`` the reload / status ops key on.
+RESILIENCE_MCP_TITLE = "resilience"
+
+
+def resilience_mcp_tool_name(name: str) -> str:
+    """The name a managed-server tool binds under on THIS server's MCP surface: the mount
+    prefixes each tool with the manifest title (``resilience_<tool>``)."""
+    return f"{RESILIENCE_MCP_TITLE}_{name}"
+
+
+def build_resilience_mcp_stack(res: StackResources, variants: Variants, *, mcp_url: str) -> StackConfig:
+    """MULTIWORKER(1), no backend/metrics, auth off — the managed MCP server mounted over
+    streamable-http as a product-level external MCP for the connection-resilience scenario.
+
+    The single ``mcp`` entry points at ``mcp_url`` (the http endpoint of the test-owned
+    ``managed_mcp_server`` subprocess), so the app's boot-time MCP loader discovers its tools
+    (``ping`` / ``echo`` / ``reflect_env``) and binds them under the ``resilience`` title
+    prefix. One worker keeps the passive dispatch health the scenario reads from
+    ``GET /api/mcp-status`` in the same process that serves the tool calls."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [*_builtin_entries()],
+        # Exactly one transport (``url``): a plain non-managed http MCP entry, so no
+        # connector auth glue is injected — ``ping`` needs none. fastmcp infers the
+        # streamable-http transport from the ``/mcp`` path.
+        "mcp": [
+            {
+                "title": RESILIENCE_MCP_TITLE,
+                "config": {"type": "http", "url": mcp_url},
+            }
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    return StackConfig(
+        name="mcp-resilience",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=_base_env(res, variants),
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )

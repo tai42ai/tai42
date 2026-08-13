@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from tai42_contract.connectors.models import ConnectorRef
-from tai42_contract.errors import ClientDisconnectedError
+from tai42_contract.errors import ClientConnectError, ClientDisconnectedError
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 # Import the app first so ``app`` is bound, so the adapter import
@@ -32,6 +32,7 @@ from tai42_skeleton.connectors.token_injection import (
     CONNECTOR_META_TOKEN_KEY,
     extract_connector_error_payload,
 )
+from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import (
     _build_output_schema,
     mcp_tool_call_wrapper,
@@ -389,13 +390,41 @@ def test_disconnect_retries_once_and_second_attempt_succeeds(caplog):
         asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
 
     assert client.call_count == 2, "wrapper must retry exactly once after a disconnect"
-    assert "reconnecting once" in caplog.text
+    assert "retrying once" in caplog.text
     assert "local_http" in caplog.text
 
 
-def test_second_consecutive_disconnect_propagates():
-    """Two consecutive ``ClientDisconnectedError``s → the second propagates
-    unchanged (no retry loop, no swallowing)."""
+def test_second_consecutive_disconnect_returns_structured_unavailable(caplog):
+    """Two consecutive ``ClientDisconnectedError``s (the reconnect retry hit a dead
+    session too) → a structured ``upstream_mcp_unavailable`` tool-error naming the
+    MCP by title, NOT the raw fastmcp disconnect text; the full exception is logged."""
+    client = _FakeMcpClient(
+        responses=[
+            ClientDisconnectedError("first disconnect"),
+            ClientDisconnectedError("second disconnect — raw fastmcp text"),
+        ]
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    assert client.call_count == 2, "exactly one retry — the second disconnect is not retried again"
+
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "upstream_mcp_unavailable"
+    assert "local_http" in payload["message"]
+    # The raw fastmcp disconnect text is never the consumer-facing message.
+    assert "raw fastmcp text" not in payload["message"]
+    # ...but the full exception IS logged at the dispatch seam.
+    assert "upstream unavailable" in caplog.text
+
+
+def test_downstream_tool_name_control_chars_cannot_forge_log_lines(caplog):
+    """A downstream MCP advertising a tool name with a newline must not be able to
+    forge or split a log record — the control char is escaped where the name is
+    interpolated into the retry WARNING and the upstream-unavailable ERROR."""
+    hostile = "list\nFORGED admin granted"
     client = _FakeMcpClient(
         responses=[
             ClientDisconnectedError("first disconnect"),
@@ -403,10 +432,176 @@ def test_second_consecutive_disconnect_propagates():
         ]
     )
 
-    with pytest.raises(ClientDisconnectedError, match="second disconnect"):
-        asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+    with caplog.at_level(logging.WARNING), patch(_CLIENT, return_value=client):
+        asyncio.run(
+            mcp_tool_call_wrapper(
+                config=_plain_http_config(),
+                tool_name=hostile,
+                tool_input_model=_trivial_input_model(),
+                tool_arguments={},
+            )
+        )
 
-    assert client.call_count == 2, "exactly one retry — the second disconnect is not retried again"
+    tool_records = [r for r in caplog.records if "tool=" in r.getMessage()]
+    assert tool_records, "both the retry WARNING and the ERROR interpolate the tool name"
+    for record in tool_records:
+        assert "\n" not in record.getMessage(), "a raw newline could forge a second log line"
+    # The name still shows, its control character rendered as a visible escape.
+    assert any("\\x0aFORGED" in r.getMessage() for r in tool_records)
+
+
+def test_downstream_tool_name_unicode_line_separators_cannot_forge_log_lines(caplog):
+    """A downstream MCP name carrying Unicode line-boundary characters (U+2028 LINE
+    SEPARATOR, U+0085 NEL) must not be able to forge or split a log record — logging
+    and many log viewers treat these as line breaks, so each is escaped where the
+    name is interpolated into the retry WARNING and the upstream-unavailable ERROR."""
+    hostile = "list\u2028FORGED\x85admin granted"
+    client = _FakeMcpClient(
+        responses=[
+            ClientDisconnectedError("first disconnect"),
+            ClientDisconnectedError("second disconnect"),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING), patch(_CLIENT, return_value=client):
+        asyncio.run(
+            mcp_tool_call_wrapper(
+                config=_plain_http_config(),
+                tool_name=hostile,
+                tool_input_model=_trivial_input_model(),
+                tool_arguments={},
+            )
+        )
+
+    tool_records = [r for r in caplog.records if "tool=" in r.getMessage()]
+    assert tool_records, "both the retry WARNING and the ERROR interpolate the tool name"
+    for record in tool_records:
+        message = record.getMessage()
+        assert "\u2028" not in message, "a raw U+2028 could forge a second log line"
+        assert "\x85" not in message, "a raw U+0085 (NEL) could forge a second log line"
+    # The name still shows, its separators rendered as visible escapes.
+    assert any("\\x2028FORGED\\x85admin" in r.getMessage() for r in tool_records)
+
+
+# -- connect-failure at acquire time (ClientConnectError) ---------------------
+#
+# A fresh connect that fails raises ``ClientConnectError`` (a
+# ``ClientDisconnectedError`` subclass) from the pooled client's ``_create``,
+# which surfaces at the ``async with mcp_client.current(...)`` enter — before any
+# ``call_tool_mcp`` runs. These fakes raise per attempt at acquire (enter) time.
+
+
+class _AttemptScriptedClient:
+    """FastMCPClient stand-in scripted per ``current()`` attempt. Each attempt
+    either raises at acquire (async-enter) time — modelling a ``_create`` connect
+    failure that never reaches the call — or enters and its ``call_tool_mcp``
+    raises/returns the scripted body outcome."""
+
+    def __init__(self, *, attempts: list) -> None:
+        # Each attempt is a (enter_error, body) pair: ``enter_error`` (a
+        # BaseException) is raised at acquire time; otherwise ``body`` is raised
+        # (BaseException) or returned (CallToolResult) from call_tool_mcp.
+        self._attempts = list(attempts)
+        self.enter_count = 0
+        self.call_count = 0
+
+    def current(self, *, config):
+        if not self._attempts:
+            raise AssertionError("fake client out of scripted attempts")
+        enter_error, body = self._attempts.pop(0)
+        outer = self
+
+        class _Session:
+            async def __aenter__(self):
+                outer.enter_count += 1
+                if enter_error is not None:
+                    raise enter_error
+                return self
+
+            @staticmethod
+            async def __aexit__(*exc):
+                return False
+
+            @staticmethod
+            async def call_tool_mcp(name, arguments, meta=None, timeout=None):
+                outer.call_count += 1
+                if isinstance(body, BaseException):
+                    raise body
+                return body
+
+        return _Session()
+
+
+async def _run_attempts(*, client: _AttemptScriptedClient, config: TaiMCPConfig):
+    with patch(_CLIENT, return_value=client):
+        return await mcp_tool_call_wrapper(
+            config=config,
+            tool_name="list_messages",
+            tool_input_model=_trivial_input_model(),
+            tool_arguments={},
+        )
+
+
+def test_in_body_death_then_retry_connect_failure_returns_structured_unavailable(caplog):
+    """First attempt dies in the body (ClientDisconnectedError), the retry's fresh
+    connect fails at acquire time (ClientConnectError) → the wrapper converges on the
+    structured ``upstream_mcp_unavailable`` result and records a health failure."""
+    mcp_health._HEALTH.clear()
+    client = _AttemptScriptedClient(
+        attempts=[
+            (None, ClientDisconnectedError("in-body death")),
+            (ClientConnectError("MCP client connect failed: connection refused"), None),
+        ]
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(_run_attempts(client=client, config=_plain_http_config()))
+
+    assert client.enter_count == 2, "exactly one retry — the second attempt fails at connect"
+    assert client.call_count == 1, "the retry never reached call_tool_mcp — it died at acquire"
+
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "upstream_mcp_unavailable"
+    assert "local_http" in payload["message"]
+    # The raw connect text is never the consumer-facing message.
+    assert "connection refused" not in payload["message"]
+    assert "upstream unavailable" in caplog.text
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_error"]["type"] == "ClientConnectError"
+    assert health["consecutive_failures"] == 1
+    assert health["failing_since"] is not None
+
+
+def test_cold_start_both_attempts_connect_failure_returns_structured_unavailable(caplog):
+    """Cold start against a down upstream: BOTH the first dispatch and the retry
+    fail at acquire time with ClientConnectError → the same structured
+    ``upstream_mcp_unavailable`` result, health failure recorded."""
+    mcp_health._HEALTH.clear()
+    client = _AttemptScriptedClient(
+        attempts=[
+            (ClientConnectError("MCP client connect failed: connection refused"), None),
+            (ClientConnectError("MCP client connect failed: connection refused"), None),
+        ]
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(_run_attempts(client=client, config=_plain_http_config()))
+
+    assert client.enter_count == 2, "exactly one retry — both attempts fail at connect"
+    assert client.call_count == 0, "no attempt ever reached call_tool_mcp"
+
+    payload = extract_connector_error_payload(result)
+    assert payload is not None
+    assert payload["code"] == "upstream_mcp_unavailable"
+    assert "local_http" in payload["message"]
+    assert "connection refused" not in payload["message"]
+    assert "upstream unavailable" in caplog.text
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_error"]["type"] == "ClientConnectError"
+    assert health["consecutive_failures"] == 1
 
 
 def test_non_disconnect_error_is_never_retried():
@@ -475,3 +670,95 @@ def test_no_auth_forged_token_expired_does_not_force_refresh():
     sent = client.captured_configs[0]["config"]["headers"]
     assert sent.get("x_api_key") == "k"
     assert "authorization" not in {k.lower() for k in sent}
+
+
+# -- dispatch-seam health recording -------------------------------------------
+
+
+def test_dispatch_seam_records_success():
+    """A completed dispatch records a success and no failure for the config title."""
+    mcp_health._HEALTH.clear()
+    client = _FakeMcpClient(responses=[_ok_result({"result": "ok"})])
+
+    asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_success"] is not None
+    assert health["last_error"] is None
+    assert health["consecutive_failures"] == 0
+    assert health["failing_since"] is None
+
+
+def test_dispatch_seam_records_failure_on_upstream_unavailable():
+    """The second-disconnect structured-error path records a health failure — the
+    return value is unchanged (control flow is never altered by the recording)."""
+    mcp_health._HEALTH.clear()
+    client = _FakeMcpClient(
+        responses=[
+            ClientDisconnectedError("first"),
+            ClientDisconnectedError("second"),
+        ]
+    )
+
+    asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_success"] is None
+    assert health["last_error"]["type"] == "ClientDisconnectedError"
+    assert health["consecutive_failures"] == 1
+    assert health["failing_since"] is not None
+
+
+def test_dispatch_seam_records_failure_on_raw_propagation():
+    """A raw-propagating (non-disconnect) exception records a health failure first,
+    then re-raises unchanged."""
+    mcp_health._HEALTH.clear()
+
+    class _Boom(RuntimeError):
+        pass
+
+    client = _FakeMcpClient(responses=[_Boom("unrelated failure")])
+
+    with pytest.raises(_Boom, match="unrelated failure"):
+        asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_error"]["type"] == "_Boom"
+    assert health["consecutive_failures"] == 1
+
+
+def test_dispatch_seam_records_nothing_for_auth_blocked():
+    """An auth-blocked call (resolver reconnect_required) records NOTHING — the
+    seam signals connection health, not credential state, so the store stays at
+    the all-empty block for the title."""
+    mcp_health._HEALTH.clear()
+    resolver = AsyncMock(side_effect=ConnectorReconnectRequiredError("invalid_grant", connection_id=CONN_ID))
+    client = _FakeMcpClient(responses=[])
+
+    with patch(_RESOLVER, new=resolver):
+        asyncio.run(_run_wrapper(client=client, config=_managed_config()))
+
+    assert mcp_health.snapshot("google_gmail_work") == {
+        "last_success": None,
+        "last_error": None,
+        "consecutive_failures": 0,
+        "failing_since": None,
+    }
+
+
+def test_dispatch_seam_records_success_after_reconnect_retry():
+    """A first-dispatch disconnect that the one-shot retry recovers records a
+    success — last_success set and no active failure run."""
+    mcp_health._HEALTH.clear()
+    client = _FakeMcpClient(
+        responses=[
+            ClientDisconnectedError("session died — retry the operation"),
+            _ok_result({"result": "ok"}),
+        ]
+    )
+
+    asyncio.run(_run_wrapper(client=client, config=_plain_http_config()))
+
+    health = mcp_health.snapshot("local_http")
+    assert health["last_success"] is not None
+    assert health["consecutive_failures"] == 0
