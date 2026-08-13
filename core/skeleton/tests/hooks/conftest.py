@@ -21,9 +21,26 @@ from contextlib import ExitStack, asynccontextmanager
 from typing import Any
 
 import pytest
+from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
+
+
+def _bind_app_and_load_tool_runs() -> None:
+    """Bind the process app singleton and import the tool-run operation module at
+    collection, mirroring the operations/routers conftests.
+
+    The hook firing path lazily imports ``operations.tool_runs`` (for ``run_recorded``),
+    and that module registers an app-lifecycle shutdown handler at import — so its ONE-time
+    import must land under a real app, never mid-fire under a test's fake ``tai42_app``."""
+    from tai42_skeleton.app import instance
+
+    tai42_app.bind(instance.build_app())
+    import tai42_skeleton.operations.tool_runs  # noqa: F401
+
+
+_bind_app_and_load_tool_runs()
 
 
 @pytest.fixture(autouse=True)
@@ -279,7 +296,7 @@ class _FakeTools:
         self.runs: list = []
         self._raise_for = raise_for or set()
 
-    async def run_tool(self, name, tool_input):
+    async def run_tool(self, name, tool_input, *, offload_sync=False):
         self.runs.append((name, tool_input))
         if name in self._raise_for:
             raise RuntimeError(f"tool {name} failed")

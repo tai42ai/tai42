@@ -16,6 +16,7 @@ from typing import Any
 from arq.connections import ArqRedis
 from arq.jobs import Job, JobStatus
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_backend_arq.callback import CallbackSchema, callback_execution
 from tai42_backend_arq.scheduler import wait_job_result
@@ -89,7 +90,13 @@ async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
 
     try:
         tool_name = kwargs.pop(arq_settings().tool_name_arg)
-        return await tai42_app.tools.run_tool(tool_name, kwargs)
+        # A worker executes a dequeued task with no live caller holding a
+        # connection, so the agent run budget does not apply.
+        detached_token = mark_detached_run()
+        try:
+            return await tai42_app.tools.run_tool(tool_name, kwargs)
+        finally:
+            reset_detached_run(detached_token)
     finally:
         if callback:
             await ctx["redis"].enqueue_job("callback_job", ctx["job_id"], callback)

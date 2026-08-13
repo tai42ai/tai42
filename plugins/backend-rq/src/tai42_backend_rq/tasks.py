@@ -17,6 +17,7 @@ from rq.job import Job
 from tai42_contract.app import tai42_app
 from tai42_kit.clients import client_ctx, shutdown_all_clients
 from tai42_kit.clients.impl.redis import SyncRedisClient
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_backend_rq.callback import CallbackSchema, callback_execution
 from tai42_backend_rq.settings import rq_settings
@@ -41,9 +42,13 @@ async def tool_execution(*args: Any, **kwargs: Any) -> Any:
     the ``tool_name_arg`` kwarg (its absence raises). The job's pooled clients are
     closed before its fresh event loop is torn down."""
     tool_name = kwargs.pop(rq_settings().tool_name_arg)
+    # A worker executes a dequeued task with no live caller holding a
+    # connection, so the agent run budget does not apply.
+    detached_token = mark_detached_run()
     try:
         return await tai42_app.tools.run_tool(tool_name, kwargs)
     finally:
+        reset_detached_run(detached_token)
         await shutdown_all_clients()
 
 

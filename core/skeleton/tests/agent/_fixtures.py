@@ -14,6 +14,7 @@ does to a tool an agent picked up on its own.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -100,6 +101,45 @@ class NestedToolsAgent(Agent):
         this call is the shared dispatch seam."""
         [tool] = await tai42_app.tools.get_client_tools([tool_name])
         return await tool.ainvoke(arguments or {})
+
+
+class SleeperInput(BaseModel):
+    """Drives ``SleeperAgent`` to sleep ``seconds`` before returning — the slow-turn
+    stand-in for the run-timeout tests."""
+
+    seconds: float = 0.0
+
+
+# Set to True only if a ``SleeperAgent`` run reaches its end; a run cancelled by the
+# run timeout must leave it False (no orphaned turn continuing past the deadline).
+sleeper_completed = False
+
+
+@tai42_app.agents.agent("sleeper")
+class SleeperAgent(Agent):
+    tool_name = "sleeper"
+    tool_description = "Sleep, then report completion."
+    ToolInput = SleeperInput
+
+    async def run(self, seconds: float = 0.0, **kwargs) -> str:
+        global sleeper_completed
+        await asyncio.sleep(seconds)
+        sleeper_completed = True
+        return "done"
+
+
+@tai42_app.agents.agent("inner_timeout")
+class InnerTimeoutAgent(Agent):
+    """A run whose own work raises a builtin ``TimeoutError`` (standing in for an
+    inner budget abort such as the jq utility's). Under a generous run timeout the
+    caller must receive this ORIGINAL error, never a ``TurnTimeoutError``."""
+
+    tool_name = "inner_timeout"
+    tool_description = "Raise a builtin TimeoutError from inside the turn."
+    ToolInput = SleeperInput
+
+    async def run(self, seconds: float = 0.0, **kwargs) -> str:
+        raise TimeoutError("inner budget exceeded")
 
 
 class ConfigInput(BaseModel):

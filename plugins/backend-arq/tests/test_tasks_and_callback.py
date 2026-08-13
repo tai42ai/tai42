@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from arq.jobs import JobStatus
+from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_arq import callback as callback_module
 from tai42_backend_arq import tasks
@@ -51,6 +52,17 @@ async def test_tool_execution_chains_callback_even_on_failure(stub_app) -> None:
 async def test_tool_execution_missing_tool_name_raises(stub_app) -> None:
     with pytest.raises(KeyError):
         await tasks.tool_execution({"redis": _Ctx(), "job_id": "j"}, text="hi")
+
+
+async def test_tool_execution_runs_the_tool_detached(stub_app) -> None:
+    # A worker execution has no live caller, so the tool observes the detached
+    # flag set; the flag never leaks past the job.
+    ctx = {"redis": _Ctx(), "job_id": "job-9"}
+
+    await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+
+    assert stub_app.tools.detached_seen == [True]
+    assert in_detached_run() is False
 
 
 # -- callback_job ------------------------------------------------------------------------
@@ -137,6 +149,17 @@ async def test_callback_condition_pass_runs_tool(stub_app) -> None:
 
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {"x": 5})
+
+
+async def test_callback_runs_tool_detached(stub_app) -> None:
+    # A worker execution has no live caller, so the callback's tool observes the
+    # detached flag set; the flag never leaks past the callback.
+    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+
+    await callback_execution({"ok": True, "value": 5}, cb)
+
+    assert stub_app.tools.detached_seen == [True]
+    assert in_detached_run() is False
 
 
 async def test_callback_condition_fail_returns_none(stub_app) -> None:

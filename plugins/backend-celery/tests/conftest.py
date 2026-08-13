@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_kit.utils.detached_util import in_detached_run
 
 
 class _RecordingTools:
@@ -23,6 +24,9 @@ class _RecordingTools:
         self.tags: dict[str, set[str]] = {}
         self.run_tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.run_tool_result: Any = None
+        # The detached flag observed inside each call — a worker execution has no
+        # live caller, so the tool must run detached and the run budget be skipped.
+        self.detached_seen: list[bool] = []
 
     def tool(self, func: Any = None, /, *args: Any, **kwargs: Any) -> Any:
         tags = kwargs.get("tags", set())
@@ -40,6 +44,7 @@ class _RecordingTools:
 
     async def run_tool(self, key: str, arguments: dict[str, Any]) -> Any:
         self.run_tool_calls.append((key, arguments))
+        self.detached_seen.append(in_detached_run())
         return self.run_tool_result
 
 
@@ -195,6 +200,7 @@ def _reset_stub_state() -> Any:
     """Per-test isolation for the mutable parts of the process-wide stub."""
     stub_app_instance.tools.run_tool_calls.clear()
     stub_app_instance.tools.run_tool_result = None
+    stub_app_instance.tools.detached_seen.clear()
     stub_app_instance.clients.client = None
     stub_app_instance.clients.shutdown_calls = 0
     stub_app_instance.admin.calls.clear()
