@@ -5089,7 +5089,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.6.0"
+version = "0.6.1"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5743,7 +5743,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "1.7.0"
+version = "1.8.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -5972,7 +5972,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.11.0"
+version = "1.11.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
