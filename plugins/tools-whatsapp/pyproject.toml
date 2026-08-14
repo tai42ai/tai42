@@ -26,10 +26,10 @@ classifiers = [
 dependencies = [
     # The pure interface contract these tools register through — the tai42_app
     # handle and the tool facet.
-    "tai42-contract>=1.9,<2",
+    "tai42-contract>=1.10,<2",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Graph REST module wires to.
-    "tai42-kit[curl]>=1.8,<2",
+    "tai42-kit[curl]>=1.9,<2",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
