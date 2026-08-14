@@ -28,8 +28,10 @@ dependencies = [
     "tai42-contract>=1.9,<2",
     # TaiBaseSettings + settings cache, pooled Redis clients, schedule
     # normalization, and the signature helpers; [jq] compiles the callback
-    # condition/expression filters.
-    "tai42-kit[jq]>=1.7,<2",
+    # condition/expression filters. The floor names the first release carrying
+    # `tai42_kit.fork_gate`, the barrier this worker holds around each fork instant
+    # (prefork) or in-process job (solo/gevent).
+    "tai42-kit[jq]>=1.8,<2",
     # The broker stack: RQ workers/queues, the recurring-job scheduler (beat),
     # and the web dashboard.
     "rq~=2.7.0",
