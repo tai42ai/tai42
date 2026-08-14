@@ -49,6 +49,13 @@ _SETTINGS_ENV_NAMES = (
     "SOCKET_CONNECT_TIMEOUT",
     "RETRY_ON_TIMEOUT",
     "RETRY_ATTEMPTS",
+    # The unprefixed fields of ``BackendDispatchSettings``. ``MANIFEST_KEY`` is
+    # also the DEFAULT VALUE of ``manifest_key``, so a backend process that
+    # exported its resolved manifest under that name has an env var whose value
+    # is a whole manifest waiting to be read back as a key name.
+    "MANIFEST_KEY",
+    "TASK_TIMEOUT",
+    "TOOL_NAME_ARG",
 )
 
 
