@@ -582,13 +582,13 @@ class TaiMCPLifecycleMixin(ABC):
         """Map one fleet op to its local admin primitive and return its result."""
         op_name = op.get("op")
         if op_name == "reload_config":
-            return await reload_gate.run(tai42_app.admin.reload_config)
+            return await reload_gate.run(tai42_app.admin.reload_config, reimports=True)
         if op_name == "reload_mcp":
             title = _op_field(op, "title")
-            return await reload_gate.run(lambda: tai42_app.admin.reload_mcp(title))
+            return await reload_gate.run(lambda: tai42_app.admin.reload_mcp(title), reimports=False)
         if op_name == "deregister_mcp":
             title = _op_field(op, "title")
-            return await reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title))
+            return await reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title), reimports=False)
         if op_name in ("reload_tool", "remove_tool"):
             action = "reload" if op_name == "reload_tool" else "remove"
             return await tai42_app.admin.run_tool_reload(_op_field(op, "kind"), action, _op_field(op, "name"))
@@ -597,7 +597,7 @@ class TaiMCPLifecycleMixin(ABC):
             # (operations/manifest.py) rides on its self entry — so every origin's
             # payload in one FleetResult is uniform (a consumer never special-cases
             # self vs remote for this op).
-            return await reload_gate.run(tai42_app.admin.reload_failed_mcps)
+            return await reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False)
         if op_name == "list_failed_mcps":
             # Bare list, matching the self-apply shape — see reload_failed_mcps above.
             return tai42_app.admin.list_failed_mcps()

@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 from pyaml_env import parse_config
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.utils.data import dump_manifest
@@ -65,7 +66,7 @@ from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, Wor
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
-from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.app.reload_gate import FORK_QUIESCE_SECONDS, reload_gate
 from tai42_skeleton.config.boundary import (
     refuse_dangling_env_markers,
     refuse_incomplete_admin_pair,
@@ -460,7 +461,15 @@ class ConfigService:
         # serving-loop-owned lock HELD. ``drain_tolerate_driver=driven`` excuses this
         # door's own admitted request from the retire's in-flight drain; a
         # build failure re-raises here (env restored, store untouched) — STEP 4 never runs.
-        async with reload_gate.lock:
+        #
+        # HOLD THE FORK GATE TOO. This door drives ``build_and_swap`` directly rather than
+        # through ``reload_gate.run``, so it does not inherit that path's fork exclusion —
+        # yet its rebuild re-imports the manifest modules exactly the same way. A backend
+        # work loop that forks a job child mid-reimport leaves the child deadlocked on an
+        # inherited ``importlib`` per-module lock. The async façade holds the gate on a
+        # dedicated thread so ownership stays single-threaded and this loop is never
+        # blocked while job spans drain.
+        async with reload_gate.lock, fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
             # Release the loop-bound langgraph checkpoint/store pools BEFORE the build's
             # settings reset drops their per-loop registries: build_and_swap_epoch opens
             # with ``reset_all_settings()``, whose resource-registry reset REFUSES to drop
@@ -701,7 +710,7 @@ class ConfigService:
         local_failure: Exception | None = None
         local_result: dict[str, Any] | None = None
         try:
-            local_result = await reload_gate.run(self._admin.reload_config)
+            local_result = await reload_gate.run(self._admin.reload_config, reimports=True)
         except Exception as exc:
             local_failure = exc
             local = LocalApplyResult(outcome=OpOutcome.failed, error=f"{type(exc).__name__}: {exc}")

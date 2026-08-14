@@ -110,7 +110,7 @@ def test_preauth_route_stays_non_500_across_a_failed_build_and_a_success(monkeyp
             # so a successful reload establishes the epoch's dispatch handle first — the
             # same warm-up the side-effect-free harness uses.
             _patch_reload(monkeypatch, manifest=good, env=auth_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # The live epoch's probe recorded the fake provider; the route resolves it.
             status, body = await _dispatch_get(current_epoch().serving_app, PREAUTH_PATH)
@@ -122,7 +122,7 @@ def test_preauth_route_stays_non_500_across_a_failed_build_and_a_success(monkeyp
             # A REAL failing build: the live epoch (and its recorded provider) is untouched.
             _patch_reload(monkeypatch, manifest=broken, env=auth_env)
             with pytest.raises(Exception, match="totally_bogus_pkg_xyz"):
-                await reload_gate.run(app.admin.reload_config)
+                await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # The surviving epoch is the same one, and its pre-auth route still resolves the
             # provider — NON-500.
@@ -135,7 +135,7 @@ def test_preauth_route_stays_non_500_across_a_failed_build_and_a_success(monkeyp
             # A subsequent SUCCESSFUL cycle: the new epoch records + resolves its own
             # provider through the fresh serving surface — still NON-500.
             _patch_reload(monkeypatch, manifest=good, env=auth_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             assert current_epoch() is not live
             status, body = await _dispatch_get(current_epoch().serving_app, PREAUTH_PATH)
             assert status != 500, (status, body)
@@ -173,7 +173,7 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
         reset_all_settings()
         async with app.app_context(Manifest.model_validate(good)):
             _patch_reload(monkeypatch, manifest=good, env=auth_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
 
             live = current_epoch()
             live_provider = tai42_app.accounts.active_provider(PROVIDER_NAME)

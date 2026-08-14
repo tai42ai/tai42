@@ -14,6 +14,17 @@ These are the intentional exemptions — process-global by design, not cleanup t
 What an epoch owns is the serving handle the dispatch slot points at, its fresh
 FastMCP + feature collaborators (the ``ServingCore``), the per-epoch in-flight
 accounting, and the periodic loops that must retire with it.
+
+FORK INVARIANT (canonical statement in ``tai42_kit.fork_gate``): the build's
+``rebuild`` step re-imports the manifest modules (``import_or_reload_package``), so while
+a build runs no backend child may be FORKED and no in-process job may RUN — a child
+forked mid-reimport deadlocks on an inherited ``importlib`` per-module lock. Both routes
+into a build hold ``tai42_kit.fork_gate``'s exclusive side against a backend's job
+span: ``reload_gate.run(..., reimports=True)``
+(the ``reload_config`` doors, which marshal the build back onto the serving loop) and
+``ConfigService.apply_replace_env`` (the profile-apply door, which awaits
+``build_and_swap_epoch`` on the serving loop under ``fork_gate.exclusive_async``). A
+build reached by any other route must take that same exclusive side.
 """
 
 from __future__ import annotations

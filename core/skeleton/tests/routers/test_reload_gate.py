@@ -4,9 +4,10 @@ Proves the reload lock's three surfaces: a gated route answers the retriable 503
 while a reload holds the gate; the serving loop is NOT frozen during a reload
 (health + a read-only GET answer concurrently while the reload sleeps on its
 worker thread); the FastMCP session middleware rejects a tool call the same way;
-after release everything answers again; and the reload-through-gate path runs its
+after release everything answers again; the reload-through-gate path runs its
 reload on a worker thread and returns the reload result under a ``{"data": ...}``
-envelope.
+envelope; and the body runs under the process fork gate, so a forking backend's
+job child can never be alive while the manifest modules are re-imported.
 
 Handlers are driven directly (the router-test pattern); the gate is the
 process-wide :data:`reload_gate` singleton the routers import.
@@ -24,6 +25,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_kit.fork_gate import fork_gate
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, ReloadGate, reload_gate
@@ -98,9 +100,66 @@ async def test_run_offloads_to_worker_thread_and_returns_result() -> None:
         return {"status": "ok"}
 
     assert not gate.locked
-    result = await gate.run(body)
+    result = await gate.run(body, reimports=False)
     assert result == {"status": "ok"}
     assert seen["thread"] != loop_thread
+    assert not gate.locked
+
+
+# -- run(reimports=True) also excludes a forking backend's job children ------
+
+
+async def test_a_reimporting_body_holds_the_fork_gate_for_its_whole_span() -> None:
+    """A re-importing body pops and re-imports the manifest modules, so while it runs no
+    child may be forked and no in-process job may run: ``run`` holds the process fork
+    gate around it, and holds it OWNED by the thread running the body (not merely
+    pending)."""
+    gate = ReloadGate()
+    seen: dict[str, Any] = {}
+
+    def body() -> None:
+        seen["blocked"] = fork_gate.blocked
+        seen["owner"] = fork_gate._owner
+        seen["thread"] = threading.get_ident()
+
+    assert not fork_gate.blocked
+    await gate.run(body, reimports=True)
+    assert seen["blocked"] is True
+    # The hold is owned by the very thread running the body — the sync door takes the
+    # gate inline rather than through a holder thread.
+    assert seen["owner"] == seen["thread"]
+    assert not fork_gate.blocked
+    assert fork_gate._owner is None
+
+
+async def test_a_non_reimporting_body_does_not_hold_the_fork_gate() -> None:
+    """An MCP re-probe/rebind imports nothing, so it must NOT stall a forking backend's
+    jobs for its duration — the gate stays free."""
+    gate = ReloadGate()
+    seen: dict[str, Any] = {}
+
+    def body() -> None:
+        seen["blocked"] = fork_gate.blocked
+        seen["owner"] = fork_gate._owner
+
+    assert not fork_gate.blocked
+    await gate.run(body, reimports=False)
+    assert seen["blocked"] is False
+    assert seen["owner"] is None
+
+
+async def test_run_releases_the_fork_gate_when_the_body_raises() -> None:
+    """A failed reload must not leave the fork gate held — that would block every
+    subsequent job child for the process lifetime."""
+    gate = ReloadGate()
+
+    def body() -> None:
+        raise RuntimeError("reload blew up")
+
+    with pytest.raises(RuntimeError, match="reload blew up"):
+        await gate.run(body, reimports=True)
+    assert not fork_gate.blocked
+    assert fork_gate._owner is None
     assert not gate.locked
 
 
@@ -165,7 +224,7 @@ async def test_serving_loop_not_frozen_during_reload(monkeypatch: pytest.MonkeyP
         assert release.wait(timeout=5)
         return {"status": "ok", "env_keys": 3}
 
-    task = asyncio.create_task(reload_gate.run(blocking_reload))
+    task = asyncio.create_task(reload_gate.run(blocking_reload, reimports=True))
     try:
         for _ in range(500):
             if entered.is_set():

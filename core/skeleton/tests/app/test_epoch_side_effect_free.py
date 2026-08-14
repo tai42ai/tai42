@@ -115,7 +115,7 @@ def test_failed_build_leaves_the_four_registries_bit_identical(monkeypatch):
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({"default_routers": "none"})):
             _patch_reload(monkeypatch, manifest=good, env=reload_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
 
             live = current_epoch()
             live_core = live.core
@@ -126,7 +126,7 @@ def test_failed_build_leaves_the_four_registries_bit_identical(monkeypatch):
 
             _patch_reload(monkeypatch, manifest=broken, env={"ACCESS_CONTROL_ENABLE": "false", "TAI_EPOCH_NEW": "x"})
             with pytest.raises(Exception, match="totally_bogus_pkg_xyz"):
-                await reload_gate.run(app.admin.reload_config)
+                await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # The four committed registries are bit-identical to their pre-build contents.
             assert _committed_registry_snapshots() == before
@@ -178,7 +178,7 @@ def test_reload_with_open_loop_bound_checkpoint_does_not_raise(monkeypatch):
             _patch_reload(monkeypatch, manifest={"default_routers": "none"}, env={"ACCESS_CONTROL_ENABLE": "false"})
             # The reload MUST NOT raise "still holds live resources": ``reload_config``
             # closes the LLM registries before the build resets settings.
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # The reload rebuilt the registry (closed + dropped), so the live one is fresh.
             assert reg_mod.checkpoint_registry() is not reg

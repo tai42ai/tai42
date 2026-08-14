@@ -696,7 +696,7 @@ async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
     return await broadcast(
         {"op": "reload_mcp", "title": title},
         targets,
-        lambda: reload_gate.run(lambda: tai42_app.admin.reload_mcp(title)),
+        lambda: reload_gate.run(lambda: tai42_app.admin.reload_mcp(title), reimports=False),
     )
 
 
@@ -755,7 +755,7 @@ async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     return await broadcast(
         {"op": "reload_failed_mcps"},
         targets,
-        lambda: reload_gate.run(tai42_app.admin.reload_failed_mcps),
+        lambda: reload_gate.run(tai42_app.admin.reload_failed_mcps, reimports=False),
     )
 
 
@@ -776,5 +776,5 @@ async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
     return await broadcast(
         {"op": "deregister_mcp", "title": title},
         targets,
-        lambda: reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title)),
+        lambda: reload_gate.run(lambda: tai42_app.admin.deregister_mcp(title), reimports=False),
     )

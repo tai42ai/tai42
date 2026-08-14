@@ -1,3 +1,37 @@
+"""Pop-and-reimport of a manifest-named package.
+
+FORK INVARIANT (canonical statement in ``tai42_kit.fork_gate``): while this runs, no
+child may be FORKED and no in-process job may RUN. Each ``import_module`` below holds
+that module's ``importlib`` per-module lock for the span of its body, and ``importlib``
+registers no ``os.register_at_fork`` handler — a child forked here inherits the held lock
+with an owner thread that does not exist post-fork and blocks forever on the same import;
+an in-process job imports against the half-torn ``sys.modules`` this leaves behind.
+
+Two RELOAD doors reach this, and each holds ``tai42_kit.fork_gate``'s exclusive side for
+its whole body: ``reload_gate.run(..., reimports=True)`` (every ``reload_config``) and
+``ConfigService.apply_replace_env``, which drives ``build_and_swap_epoch`` directly and
+takes ``fork_gate.exclusive_async``. The other side is held by a forking backend
+(``tai42_backend_rq``'s worker) around each child spawn.
+
+BOOT is exempt and reaches this un-gated. That is safe by sequencing, not by luck: the rq
+work loop awaits ``lifecycle.wait_until_ready()`` before its first dequeue, so the boot
+import pass has finished before any child can be spawned.
+
+A future forking consumer must take that same job span. Two gaps are known and accepted:
+
+* the celery backend does not, and mostly does not need to — its prefork children are
+  re-forked from ``on_fleet_op_applied``, which runs strictly AFTER the reload body
+  returns, so its turnover is sequenced rather than concurrent. That covers only the
+  turnover celery drives; billiard's supervisor may replace a dead child on its own
+  schedule, which is not sequenced against a reload. Celery has not shown this failure
+  because its children are long-lived and rarely re-forked, not because the window is
+  closed.
+* a host-registered ``@tai42_app.admin.tool_reloader`` runs through ``run_tool_reload``,
+  which is NOT reload-gated. The built-in preset reloader imports nothing, but a consumer
+  reloader that re-imports would reach this un-gated and would need the exclusive side of
+  its own accord.
+"""
+
 import importlib
 import importlib.util
 import os
