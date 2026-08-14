@@ -1,12 +1,14 @@
 """Live verification: fleet-op delivery under load, against a real Redis and a
 real RQ prefork worker.
 
-``run_rq_worker`` runs the blocking work loop on a worker thread, so the app's
-worker-bus subscription keeps applying fleet ops on this process's loop while jobs
-run; such an apply is inherited by the next job's forked work-horse child. This
-test mutates a main-process registry from a loop coroutine while the work loop
-runs (mutating it at all proves the loop is not starved), then asserts the next
-job's real ``os.fork()`` child reads the mutated registry.
+``RqBackend.launch(["worker", ...])`` runs the blocking work loop on a daemon
+thread, so the app's worker-bus subscription keeps applying fleet ops on this
+process's loop while jobs run; such an apply is inherited by the next job's forked
+work-horse child. This test mutates a main-process registry from a loop coroutine
+while the work loop runs (mutating it at all proves the loop is not starved), then
+asserts the next job's real ``os.fork()`` child reads the mutated registry. The
+teardown cancels the launch, which is the real warm-drain path: the base requests
+the drain and awaits the work loop's own exit.
 
 Skipped when no Redis is reachable — set ``TAI_TEST_RQ_REDIS``
 (default ``redis://localhost:6379/15``) to run it.
@@ -18,13 +20,13 @@ import asyncio
 import contextlib
 import os
 import uuid
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from redis import Redis
 from rq import Queue
 
-from tai42_backend_rq.worker import run_rq_worker
+from tai42_backend_rq.backend import RqBackend
 
 # The registry a fleet op would mutate in the worker's MAIN process. A work-horse
 # child inherits its value AT FORK, so the value a job observes is the one the
@@ -80,8 +82,21 @@ async def test_next_task_forked_child_sees_a_main_process_apply() -> None:
     conn.delete(list_key)
     _APPLIED_REGISTRY = "registry-v0"
 
+    backend = cast("Any", RqBackend)()
     worker_task = asyncio.create_task(
-        run_rq_worker(_REDIS_URL, f"live-verify-{uuid.uuid4().hex}", "ERROR", False, 500, "prefork")
+        backend.launch(
+            [
+                "worker",
+                "--redis-url",
+                _REDIS_URL,
+                "--name",
+                f"live-verify-{uuid.uuid4().hex}",
+                "--loglevel",
+                "ERROR",
+                "--pool",
+                "prefork",
+            ]
+        )
     )
     try:
         # First job: its forked child reads the initial registry.

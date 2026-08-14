@@ -5,8 +5,15 @@ from __future__ import annotations
 import os
 
 import pytest
+from tai42_kit.backend import BackendDispatchSettings
+from tai42_kit.settings import registered_settings
 
 from tai42_backend_rq.settings import RqSettings, rq_settings
+
+
+def _rq_group():
+    """The ``RQ_`` env group as the settings registry sees it."""
+    return next(info for info in registered_settings() if info.name == "RqSettings")
 
 
 def test_env_prefix_is_rq():
@@ -14,12 +21,34 @@ def test_env_prefix_is_rq():
 
 
 def test_defaults_agree_with_host_backend_settings():
-    """These three mirror the host's generic backend settings — the
-    tool-dispatch seam must meet on the same values without configuration."""
+    """These three are INHERITED from the shared dispatch group rather than
+    mirrored, so the tool-dispatch seam meets on the same values by
+    construction — the env surface under ``RQ_`` is unchanged."""
+    assert issubclass(RqSettings, BackendDispatchSettings)
     settings = RqSettings()
     assert settings.manifest_key == "MANIFEST_KEY"
     assert settings.task_timeout == 300
     assert settings.tool_name_arg == "backend_tool_name"
+
+
+def test_the_dispatch_group_still_registers_under_the_rq_prefix():
+    """The shared group excludes ITSELF from the registry (own-attribute flag),
+    so this concrete side still registers, with its own prefixed env vars."""
+    fields = {field.name: field for field in _rq_group().fields}
+    assert fields["manifest_key"].env_var == "RQ_MANIFEST_KEY"
+    assert fields["tool_name_arg"].env_var == "RQ_TOOL_NAME_ARG"
+    assert fields["redis_url"].env_var == "RQ_REDIS_URL"
+
+
+def test_boot_pinned_dispatch_fields_are_recycle_class():
+    """Inheriting the shared group brings the truthful reload classes with it: a
+    forked work-horse reads the manifest env key it was GIVEN and a queued job
+    carries the kwarg name its producer used, so neither converges in-process.
+    The dispatch result timeout is read per call, so it stays hot."""
+    fields = {field.name: field for field in _rq_group().fields}
+    assert fields["manifest_key"].reload_class == "recycle"
+    assert fields["tool_name_arg"].reload_class == "recycle"
+    assert fields["task_timeout"].reload_class == "hot"
 
 
 def test_broker_defaults():

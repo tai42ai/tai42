@@ -32,6 +32,17 @@ tai backend beat
 tai backend dashboard
 ```
 
+The `worker` runtime runs RQ's work loop on a dedicated thread, so the process's
+event loop stays free for worker-bus ops. Its lifecycle is the shared one every
+backend gets: it waits for the app to finish booting before it consumes, then
+SIGTERM (or SIGINT) drains it warm — no new jobs, the current one finishes, the
+process exits after teardown — and a second signal kills the running work-horse.
+An idle worker stops within one dequeue poll (5s).
+
+`beat` and `dashboard` pull no queued work, so they run on the event loop and
+keep whatever signal handling their own CLI installs. Nothing else runs in those
+processes, so that is deliberate.
+
 ## Quirks
 
 - RQ has no disabled-schedule state, so `backend_list_schedules` always reports a

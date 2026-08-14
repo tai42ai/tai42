@@ -30,8 +30,9 @@ dependencies = [
     # normalization, and the signature helpers; [jq] compiles the callback
     # condition/expression filters. The floor names the first release carrying
     # `tai42_kit.fork_gate`, the barrier this worker holds around each fork instant
-    # (prefork) or in-process job (solo/gevent).
-    "tai42-kit[jq]>=1.8,<2",
+    # (prefork) or in-process job (solo/gevent), and `tai42_kit.backend`
+    # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
+    "tai42-kit[jq]>=1.9,<2",
     # The broker stack: RQ workers/queues, the recurring-job scheduler (beat),
     # and the web dashboard.
     "rq~=2.7.0",

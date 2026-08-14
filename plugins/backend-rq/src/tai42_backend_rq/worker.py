@@ -1,10 +1,12 @@
 """The RQ worker runtime: worker classes, fork safety, and the ``worker``
 launch entrypoint.
 
-``launch(["worker", ...])`` runs the blocking ``worker.work()`` loop on a worker
-thread (:func:`run_rq_worker`), keeping the process's event loop responsive: the
-app's bus subscription lives on that loop, so a blocked loop would starve op
-delivery.
+``launch(["worker", ...])`` drives :class:`RqWorkerRuntime`, which the shared
+``ManagedBackend`` base runs on a dedicated daemon thread — readiness gating,
+shutdown wiring and drain-on-cancellation are the base's, and this module binds
+only how RQ starts, drains and recycles. The blocking ``worker.work()`` loop has
+to stay OFF the process's event loop: the app's bus subscription lives there, so
+a blocked loop would starve op delivery.
 
 That same loop forks a work-horse per job, and the bus delivers config reloads which
 pop this process's manifest modules out of ``sys.modules`` and re-import them. A horse
@@ -22,7 +24,6 @@ thereafter), solo/gevent gate the whole in-process job — plus every scheduler 
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import signal
@@ -30,7 +31,8 @@ import sys
 import threading
 import time
 import urllib.request
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, Self
 
 import click
 from redis import Redis
@@ -39,6 +41,7 @@ from rq.exceptions import StopRequested
 from rq.timeouts import HorseMonitorTimeoutException, TimerDeathPenalty, UnixSignalDeathPenalty
 from rq.worker import WorkerStatus
 from tai42_contract.app import tai42_app
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq.settings import rq_settings
@@ -63,20 +66,15 @@ _HORSE_POLL_SECONDS = 0.25
 # gate's ERROR and the spawn proceeds unguarded.
 _FORK_GATE_WAIT_SECONDS = 120
 
-# Upper bound on the wait for the app to become ready before the work loop starts
-# — a loud backstop for a boot that never completes; a worker that times out here
-# refuses to fork against a half-built registry and exits.
-_APP_READY_TIMEOUT_SECONDS = 120
-
 
 class _TaiWorkerMixin:
     """Worker behavior shared by both worker classes.
 
     * Skips rq's signal-handler install when the work loop runs off the main
       thread (``signal.signal`` requires the main thread; shutdown then arrives
-      via :func:`request_warm_shutdown`).
+      via :meth:`RqWorkerRuntime.request_drain`).
     * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) AND returns to the
-      outer ``work`` loop each poll so an off-thread warm-shutdown request is honored
+      outer ``work`` loop each poll so an off-thread drain request is honored
       within seconds even while the worker is idle.
     * Holds a :meth:`fork_gate.job_span` around the two SCHEDULER-SPAWNING bodies — the
       start rq performs with the work loop and the re-spawn from its maintenance pass —
@@ -112,11 +110,11 @@ class _TaiWorkerMixin:
         return _DEQUEUE_POLL_SECONDS
 
     def dequeue_job_and_maintain_ttl(self, timeout: int | None, max_idle_time: int | None = None) -> Any:
-        """Honor an off-thread warm-shutdown request even while IDLE.
+        """Honor an off-thread drain request even while IDLE.
 
         rq's own idle shutdown relies on ``request_stop`` raising ``StopRequested`` INSIDE the
         blocked dequeue — a signal delivered on the worker's own (main) thread. Here the work
-        loop runs off the main thread, so :func:`request_warm_shutdown` can only set
+        loop runs off the main thread, so :meth:`RqWorkerRuntime.request_drain` can only set
         ``_stop_requested``; it cannot raise into this blocked call. And rq's
         ``dequeue_job_and_maintain_ttl`` re-loops INTERNALLY on every ``DequeueTimeout`` when
         ``max_idle_time`` is ``None`` (a continuous worker), so control never returns to the
@@ -416,79 +414,106 @@ def _build_worker(
     return worker, redis_conn
 
 
-def request_warm_shutdown(worker: Any) -> None:
-    """Ask a worker whose work loop runs on another thread for a warm shutdown.
+class RqWorkerRuntime(BackendRuntime):
+    """RQ's work loop as ONE launchable runtime: the ``worker`` subcommand.
 
-    On the main thread this drives rq's signal path: ``request_stop`` marks a busy
-    worker to stop after the current job (idle, rq raises ``StopRequested``, so the
-    stop flag is set directly). Off the main thread ``request_stop`` cannot run
-    (its ``signal.signal`` re-bind is main-thread-only), so ``_stop_requested`` —
-    the flag rq's own ``_shutdown`` sets — is set directly; the work loop honors it
-    on its next dequeue poll (bounded by ``_DEQUEUE_POLL_SECONDS``).
+    Everything host-shaped around it — the readiness gate, the composed
+    warm/cold shutdown wiring, the daemon thread the blocking loop runs on, and
+    the drain the base requests when the launch is cancelled — belongs to
+    ``ManagedBackend``. This class binds only RQ.
+
+    ``pool_turnover_required`` stays False on every pool: prefork forks a FRESH
+    work-horse per job, so the next horse inherits whatever this process's
+    registry mutation applied, and the non-forking pools run jobs in this very
+    process where the mutation already landed. There is no pool of persistent
+    workers holding a stale snapshot, so there is nothing to turn over.
     """
-    logger.warning("rq worker %r: warm shutdown requested", worker.name)
-    if threading.current_thread() is not threading.main_thread():
+
+    name = "worker"
+    mode = ExecutionMode.worker_thread
+    consumes_work = True
+    pool_turnover_required = False
+
+    def __init__(self, params: Mapping[str, Any]) -> None:
+        self._params = dict(params)
+        self._worker: CustomRQWorker | CustomRQSimpleWorker | None = None
+        self._redis_conn: Redis | None = None
+
+    @classmethod
+    def from_args(cls, args: Sequence[str]) -> Self:
+        """Parse the worker CLI's own options, strictly: an unknown or malformed
+        option raises out of click rather than being silently dropped."""
+        ctx = main.make_context("rq-worker", list(args))
+        return cls(ctx.params)
+
+    async def build(self) -> None:
+        """Construct the worker and its dedicated connection — the pool-specific
+        fork-safety setup included. Runs before the readiness gate: building an
+        engine object consumes nothing."""
+        self._worker, self._redis_conn = _build_worker(
+            self._params["redis_url"],
+            self._params["name"],
+            self._params["results_ttl"],
+            self._params["pool"],
+        )
+
+    def run_blocking(self) -> None:
+        """RQ's own work loop, on the daemon thread the base spawned."""
+        self._require_worker().work(
+            burst=self._params["burst"],
+            logging_level=self._params["loglevel"].upper(),
+            with_scheduler=True,
+        )
+
+    def request_drain(self) -> None:
+        """Stop after the current job by setting rq's OWN stop flag, always.
+
+        Never ``request_stop``: that method re-binds SIGTERM and SIGINT at the C
+        level, which wipes asyncio's signal machinery and with it the host's
+        composed chain — the main-task cancellation that guarantees teardown
+        disappears, and a second SIGTERM then raises ``SystemExit`` out of a C
+        handler and SIGKILLs the work-horse mid-job. It is also main-thread-only,
+        while this call arrives on the loop thread with the work loop elsewhere.
+
+        Setting the flag reaches the same place by the mixin's route: a busy
+        worker stops after its job, and an idle one is woken by the bounded
+        dequeue poll, which re-checks the flag and raises ``StopRequested``
+        within ``_DEQUEUE_POLL_SECONDS``. Idempotent — re-setting a set flag is
+        a no-op, which is what lets the base call this on the signal and again
+        on the cancellation path.
+        """
+        worker = self._require_worker()
+        logger.warning("rq worker %r: warm shutdown requested", worker.name)
         worker._stop_requested = True
-        return
-    try:
-        worker.request_stop(signal.SIGTERM, None)
-    except StopRequested:
-        worker._stop_requested = True
 
+    def request_terminate(self) -> None:
+        """Cold stop on a repeated signal: kill the work-horse now.
 
-async def run_rq_worker(
-    redis_url: str | None,
-    name: str | None,
-    loglevel: str,
-    burst: bool,
-    results_ttl: int,
-    pool: str,
-) -> None:
-    """Run the RQ worker on a worker thread, keeping this event loop alive.
+        Only the prefork pool has one. The non-forking pools run the job in this
+        process with nothing to kill, so the warm drain stands and the
+        supervisor's kill is the backstop.
+        """
+        worker = self._require_worker()
+        if worker.horse_pid:
+            logger.warning("rq worker %r: cold shutdown — killing work-horse %s", worker.name, worker.horse_pid)
+            worker.kill_horse()
+            return
+        logger.warning("rq worker %r: no work-horse to kill; the warm drain continues", worker.name)
 
-    The app's worker-bus subscription lives on this loop, so the blocking
-    ``worker.work()`` runs off-loop to avoid starving op delivery. Loop-level
-    SIGTERM/SIGINT handlers drive rq's warm shutdown; a cancellation of this
-    coroutine requests the same shutdown and awaits the worker's exit.
-    """
-    # The tool registry is (re)built by the boot self-resync running concurrently
-    # on the app loop; a worker consuming before it finishes would fork against a
-    # half-built registry and fail jobs permanently. Await the readiness latch
-    # first; a timeout is a boot that never completed — fail loudly.
-    try:
-        await asyncio.wait_for(tai42_app.lifecycle.wait_until_ready(), timeout=_APP_READY_TIMEOUT_SECONDS)
-    except TimeoutError as exc:
-        raise RuntimeError(
-            f"rq worker: the app did not become ready within {_APP_READY_TIMEOUT_SECONDS}s "
-            "(boot self-resync never completed); refusing to consume jobs against a half-built tool registry"
-        ) from exc
+    async def aclose(self) -> None:
+        """Release the worker's dedicated Redis connection, on every exit path."""
+        if self._redis_conn is not None:
+            self._redis_conn.close()
 
-    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool)
-    loop = asyncio.get_running_loop()
-    installed: list[signal.Signals] = []
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, request_warm_shutdown, worker)
-        except (RuntimeError, ValueError, NotImplementedError) as exc:
-            # Signal handlers need the main thread (and POSIX); without them
-            # shutdown comes via task cancellation.
-            logger.warning("cannot install %s handler for worker shutdown: %s", sig.name, exc)
-        else:
-            installed.append(sig)
+    def _require_worker(self) -> CustomRQWorker | CustomRQSimpleWorker:
+        """The built worker, or a loud refusal.
 
-    work = asyncio.ensure_future(
-        asyncio.to_thread(worker.work, burst=burst, logging_level=loglevel.upper(), with_scheduler=True)
-    )
-    try:
-        await asyncio.shield(work)
-    except asyncio.CancelledError:
-        request_warm_shutdown(worker)
-        await work
-        raise
-    finally:
-        for sig in installed:
-            loop.remove_signal_handler(sig)
-        redis_conn.close()
+        The base always builds before it runs or drains, so reaching this is a
+        broken lifecycle rather than a state to tolerate quietly.
+        """
+        if self._worker is None:
+            raise RuntimeError("rq worker runtime was driven before build() constructed the worker")
+        return self._worker
 
 
 def start_rq_worker(
@@ -502,8 +527,10 @@ def start_rq_worker(
     """Build and run the RQ worker inline, blocking the calling thread.
 
     The direct CLI path: on the main thread rq installs its own signal handlers, so
-    warm/cold shutdown behaves exactly as a plain ``rq worker``. (The host
-    ``launch`` path uses :func:`run_rq_worker` instead.)
+    warm/cold shutdown behaves exactly as a plain ``rq worker``. Nothing else runs
+    in that process, so rq owning the signals is correct there. (The host
+    ``launch`` path drives :class:`RqWorkerRuntime` instead, where the host owns
+    them.)
     """
     worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool)
     try:
