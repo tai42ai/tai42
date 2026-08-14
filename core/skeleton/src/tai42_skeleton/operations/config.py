@@ -190,7 +190,7 @@ async def reload_config(targets: list[str] | None = None) -> Any:
     return await broadcast(
         {"op": "reload_config"},
         targets,
-        lambda: reload_gate.run(tai42_app.admin.reload_config),
+        lambda: reload_gate.run(tai42_app.admin.reload_config, reimports=True),
         publish_on_local_failure=True,
     )
 

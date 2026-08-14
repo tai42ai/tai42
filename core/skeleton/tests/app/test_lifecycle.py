@@ -898,7 +898,7 @@ def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
             before = current_client_epoch()
             # Driven off the serving loop, as production does (the reload-gate worker
             # thread): a fresh epoch is built under the refreshed env and swapped in.
-            out = await reload_gate.run(app.admin.reload_config)
+            out = await reload_gate.run(app.admin.reload_config, reimports=True)
             assert out == {"status": "ok", "env_keys": 2}
             # Env refreshed into the process environment.
             assert os.environ["NEW_KEY"] == "v1"
@@ -923,14 +923,14 @@ def test_reload_config_drops_env_keys_removed_from_source(monkeypatch):
             monkeypatch.setattr(app.config.config_manager, "read_manifest", dict)
 
             monkeypatch.setattr(app.config.config_manager, "read_env", lambda: {"K1_RC": "a", "K2_RC": "b"})
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             assert os.environ["K1_RC"] == "a"
             assert os.environ["K2_RC"] == "b"
 
             # K2 removed from the source env: the next reload must drop it, not
             # leave it lingering as stale config.
             monkeypatch.setattr(app.config.config_manager, "read_env", lambda: {"K1_RC": "a"})
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             assert os.environ["K1_RC"] == "a"
             assert "K2_RC" not in os.environ
 

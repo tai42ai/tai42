@@ -97,11 +97,11 @@ def _reset_preset_registry():
 # direct call from this on-loop coroutine would freeze the serving loop and
 # deadlock (the facet raises loudly on that misuse).
 async def _reload_mcp(title: str) -> dict[str, Any]:
-    return await reload_gate.run(lambda: instance.app.admin.reload_mcp(title))
+    return await reload_gate.run(lambda: instance.app.admin.reload_mcp(title), reimports=False)
 
 
 async def _deregister_mcp(title: str) -> dict[str, Any]:
-    return await reload_gate.run(lambda: instance.app.admin.deregister_mcp(title))
+    return await reload_gate.run(lambda: instance.app.admin.deregister_mcp(title), reimports=False)
 
 
 async def _register_versioned(name: str, base_tool: str) -> None:

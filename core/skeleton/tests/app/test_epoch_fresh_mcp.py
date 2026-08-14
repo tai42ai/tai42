@@ -105,7 +105,7 @@ def test_reload_added_router_actually_serves_after_the_epoch_cycle(monkeypatch):
             _patch_reload(monkeypatch, manifest=boot_manifest, env=reload_env)
             # First reload lands epoch 1 (AC off, no headline router yet): the route is
             # absent from this generation's fresh http_app.
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             before = current_epoch().serving_app
             assert before is not None
             status, _ = await _dispatch_get(before, _HEADLINE_PATH)
@@ -114,7 +114,7 @@ def test_reload_added_router_actually_serves_after_the_epoch_cycle(monkeypatch):
             # Now reload with the router module added: the next epoch's FRESH FastMCP
             # snapshots the new route table, so the swapped-in http_app serves it.
             _patch_reload(monkeypatch, manifest=with_router, env=reload_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             after = current_epoch().serving_app
             assert after is not None
             assert after is not before
@@ -139,7 +139,7 @@ def test_failed_build_keeps_old_surface_serving_and_restores_env(monkeypatch):
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({"default_routers": "none"})):
             _patch_reload(monkeypatch, manifest=good, env=reload_env)
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             live = current_epoch()
             live_core = live.core
             # The good epoch serves the headline route.
@@ -153,7 +153,7 @@ def test_failed_build_keeps_old_surface_serving_and_restores_env(monkeypatch):
             # epoch is discarded, and the failure is raised loudly.
             _patch_reload(monkeypatch, manifest=broken, env={"ACCESS_CONTROL_ENABLE": "false", "TAI_EPOCH_NEW": "x"})
             with pytest.raises(Exception, match="totally_bogus_pkg_xyz"):
-                await reload_gate.run(app.admin.reload_config)
+                await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # Zero live-state mutation: the same epoch + core still serve.
             assert current_epoch() is live
@@ -187,7 +187,7 @@ def test_startup_handlers_run_per_epoch(monkeypatch):
             app.lifecycle.on_startup(_startup_marker)
             fired.clear()
             _patch_reload(monkeypatch, manifest={"default_routers": "none"}, env={"ACCESS_CONTROL_ENABLE": "false"})
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
             # The startup handler ran during the epoch rebuild, not just at boot.
             assert fired == [1]
 

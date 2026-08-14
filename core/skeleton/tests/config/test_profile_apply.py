@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, cast
 
 import pytest
+from tai42_kit.fork_gate import fork_gate
 
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
@@ -28,6 +30,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, FreshLife, RecycleReport, RecycleRow
+from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
 from tests._fakes.bus import FakeBus
@@ -230,6 +233,48 @@ async def test_apply_releases_llm_pools_before_the_build(monkeypatch: pytest.Mon
     )
     # Release strictly precedes the build (the ordering the kit reset contract requires).
     assert order == ["release", "build"]
+
+
+async def test_apply_holds_the_fork_gate_across_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This door drives ``build_and_swap`` directly instead of through
+    ``reload_gate.run``, so it must take the fork gate itself: its rebuild re-imports the
+    manifest modules, and a backend work loop forking a job child mid-reimport leaves the
+    child deadlocked on an inherited ``importlib`` per-module lock."""
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)  # bare — a hot-only diff is fine on bare
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    seen: dict[str, Any] = {}
+
+    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        seen["blocked"] = fork_gate.blocked
+        seen["owner"] = fork_gate._owner
+        return Epoch(number=0)
+
+    assert not fork_gate.blocked
+    await _service(store).apply_replace_env(
+        {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
+    )
+    assert seen["blocked"] is True
+    # Ownership sits on the façade's dedicated holder thread, never the serving loop's.
+    assert seen["owner"] is not None
+    assert seen["owner"] != threading.get_ident()
+    assert not fork_gate.blocked
+
+
+async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed apply must not leave the gate held — that would block every subsequent
+    job child for the process lifetime."""
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+
+    async def _build(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        raise _BuildBoom("deliberate build failure")
+
+    with pytest.raises(_BuildBoom):
+        await _service(store).apply_replace_env(
+            {"MY_APP_FLAG": "new"}, driven=True, save_previous=_PrevSpy(), build_and_swap=_build
+        )
+    assert not fork_gate.blocked
+    assert not reload_gate.locked
 
 
 # ---------------------------------------------------------------------------

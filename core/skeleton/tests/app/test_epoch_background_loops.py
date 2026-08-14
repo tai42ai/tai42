@@ -84,7 +84,7 @@ def test_advisories_poll_and_delivery_sweep_survive_a_reload(monkeypatch: pytest
 
             # Drive a REAL reload through the gate (collapses onto build_and_swap_epoch).
             _patch_reload(monkeypatch, manifest={"default_routers": "none"}, env={"ACCESS_CONTROL_ENABLE": "false"})
-            await reload_gate.run(app.admin.reload_config)
+            await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # Both loops are STILL running after the reload — re-established as fresh tasks
             # on the SAME live (not-closed) serving loop, not left dead on the build loop.
