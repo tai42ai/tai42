@@ -63,7 +63,7 @@ async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
 
     if callback.tool:
         # A worker executes a dequeued callback with no live caller holding a
-        # connection, so the agent run budget does not apply.
+        # connection, so the turn budget does not apply.
         detached_token = mark_detached_run()
         try:
             return await tai42_app.tools.run_tool(callback.tool, expr_output)
