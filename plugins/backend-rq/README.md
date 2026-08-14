@@ -93,15 +93,32 @@ is carried by the skeleton's internal worker bus, which every process — this
 backend runtime included — joins through the app context's single long-lived
 bus subscription; this backend ships no control plane of its own.
 
-## Fork safety (prefork pool)
+## Fork safety
 
-Before the first fork the worker shuts down the monitoring writer (the
-contract's fork-safe evict — the vendor client's background threads do not
-survive `fork()`), and an `os.register_at_fork` hook repeats the evict in
-every work-horse child, which then rebuilds a clean client lazily. Both steps
-log loudly; telemetry is never silently disabled. On macOS the worker also
-disables `urllib` system proxy detection, which deadlocks in forked children
-during SSL setup.
+On the prefork pool the worker shuts down the monitoring writer before the
+first fork (the contract's fork-safe evict — the vendor client's background
+threads do not survive `fork()`), and on macOS it disables `urllib` system
+proxy detection, which deadlocks in forked children during SSL setup. An
+`os.register_at_fork` hook — installed on *every* pool, since `solo` and
+`gevent` still spawn the `rq-scheduler` child — repeats the evict in each
+forked child, which then rebuilds a clean client lazily, and resets the
+fork-gate state the child inherited. Every step logs loudly; telemetry is
+never silently disabled.
+
+The fork gate is the mutual exclusion between this worker and a config
+reload. A reload pops the manifest modules out of `sys.modules` and re-imports
+them; a child forked during that window inherits a held `importlib` lock whose
+owner thread no longer exists and hangs forever on its first import. So:
+
+- **prefork** holds the gate across the `fork()` instant only — a child forked
+  outside the window is immune however long its job runs. A job that arrives
+  mid-reload waits for the re-import to finish, up to 120s, before forking.
+- **solo / gevent** run jobs in-process, with no inherited snapshot to protect
+  them, so the gate is held for the whole job. A config reload arriving while
+  one is running therefore waits for it, up to 30s.
+
+Both waits are bounded and proceed loudly (ERROR) rather than deadlocking if
+the budget is exhausted.
 
 ## Tools
 
