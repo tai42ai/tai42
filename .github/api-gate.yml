@@ -1,0 +1,8 @@
+# Release API-diff gate. Single mode switch, read by scripts/api_gate.py.
+# The allowed bump for a breaking change depends on mode AND the new version's
+# major component (never version-blind):
+#   label-honesty: >=1.0 -> only a major may carry a breaking change; 0.x -> a
+#                  minor or a major may (semver's 0.x breaking slot is the minor).
+#   strict:        only a major may carry a breaking change, for every version
+#                  (a 0.x package must reach 1.0.0 to break).
+mode: label-honesty  # strict at first public release

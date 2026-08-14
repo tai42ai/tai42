@@ -19,6 +19,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        # Full history + tags: the API-diff gate loads the package at its previous
+        # released tag to classify the surface change.
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           version: "0.11.26"
@@ -50,6 +54,17 @@ jobs:
             exit 1
           fi
           echo "component=$component" >> "$GITHUB_OUTPUT"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: API-diff gate
+        # Label-honesty gate: a breaking public-API change (griffe classification)
+        # may not publish under a bump the release label could not have produced.
+        # Runs before build so a dishonest release never reaches PyPI.
+        run: |
+          uv run --locked --only-group api-gate python scripts/api_gate.py \
+            --package "${{ steps.resolve.outputs.component }}" \
+            --dir "${{ steps.resolve.outputs.dir }}" \
+            --version "${{ steps.resolve.outputs.version }}"
       - run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
       - run: uvx twine check dist/*
       - name: Publish to PyPI

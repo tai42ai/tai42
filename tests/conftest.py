@@ -1,5 +1,5 @@
-"""Make the repo's ``scripts/`` importable from the root test suite so
-``test_range_sync`` can import the range-sync module under test."""
+"""Make the repo's ``scripts/`` importable from the root test suite so the
+root test files can import the script modules they exercise."""
 
 from __future__ import annotations
 
