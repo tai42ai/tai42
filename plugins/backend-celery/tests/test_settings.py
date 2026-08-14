@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 import pytest
+from tai42_kit.backend import BackendDispatchSettings
+from tai42_kit.settings import registered_settings
 
 from tai42_backend_celery.core.settings import CelerySettings, celery_settings
 
@@ -19,10 +21,33 @@ def test_defaults() -> None:
 
 
 def test_base_backend_fields_agree_with_host_defaults() -> None:
+    # Inherited from the shared mixin, so this side and the host cannot drift on
+    # the names or the defaults.
+    assert issubclass(CelerySettings, BackendDispatchSettings)
     settings = CelerySettings()
     assert settings.tool_name_arg == "backend_tool_name"
     assert settings.task_timeout == 300
     assert settings.manifest_key == "MANIFEST_KEY"
+
+
+@pytest.mark.parametrize("field", ["manifest_key", "tool_name_arg"])
+def test_the_dispatch_fields_are_recycle_class(field: str) -> None:
+    # Both pin wiring built at boot — a forked child reads the env key it was
+    # given, a queued job carries the kwarg name its producer used — so a change
+    # converges through a process recycle, not an in-process flip.
+    extra = CelerySettings.model_fields[field].json_schema_extra
+    assert isinstance(extra, dict)
+    assert extra["reload"] == "recycle"
+
+
+def test_the_concrete_group_still_registers() -> None:
+    # ``registry_exclude`` on the abstract mixin is an own-attribute flag, so the
+    # ``CELERY_`` group is a real settings group despite inheriting it — while the
+    # unprefixed mixin itself never registers.
+    assert CelerySettings.__dict__.get("registry_exclude") is None
+    registered = {info.name for info in registered_settings()}
+    assert "CelerySettings" in registered
+    assert "BackendDispatchSettings" not in registered
 
 
 def test_redbeat_schedule_key_is_double_colon() -> None:

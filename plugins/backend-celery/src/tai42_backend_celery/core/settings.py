@@ -1,10 +1,11 @@
 """Celery backend settings — the ``CELERY_`` env group.
 
-``tool_name_arg`` / ``task_timeout`` / ``manifest_key`` mirror the host's base
-backend settings (same names and defaults) so both sides agree without importing
-each other; ``manifest_key`` names the env var the live manifest JSON is written
-into so preforked children inherit it. ``redbeat_schedule_key`` yields the exact
-``redbeat::schedule`` zset key RedBeat maintains.
+``tool_name_arg`` / ``task_timeout`` / ``manifest_key`` come from the shared
+:class:`~tai42_kit.backend.BackendDispatchSettings` mixin, so this side and the
+host declare the dispatch surface once and cannot drift on its names, defaults or
+reload classes; ``manifest_key`` names the env var the live manifest JSON is
+written into so preforked children inherit it. ``redbeat_schedule_key`` yields the
+exact ``redbeat::schedule`` zset key RedBeat maintains.
 """
 
 from __future__ import annotations
@@ -13,10 +14,11 @@ from collections.abc import Mapping
 from typing import ClassVar
 
 from pydantic_settings import SettingsConfigDict
+from tai42_kit.backend import BackendDispatchSettings
 from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 
-class CelerySettings(DefaultNamespaceMixin, TaiBaseSettings):
+class CelerySettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="CELERY_")
 
     # The broker, result backend, and RedBeat store are all Redis URLs, so each
@@ -43,11 +45,6 @@ class CelerySettings(DefaultNamespaceMixin, TaiBaseSettings):
     # pool under load can leave children un-recycled. Live-reloading a larger pool
     # would need a non-forking pool or a full worker respawn on reload.
     worker_concurrency: int = 1
-
-    # Shared backend-settings surface (host-agreed names and defaults).
-    tool_name_arg: str = "backend_tool_name"
-    task_timeout: int = 300
-    manifest_key: str = "MANIFEST_KEY"
 
     @property
     def redbeat_schedule_key(self) -> str:
