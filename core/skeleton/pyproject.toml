@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-skeleton"
-version = "1.11.1"
+version = "1.12.0"
 description = "Open-source implementation of tai42-contract: the extended MCP server hosting tools, agents, extensions, connectors, hooks, and storage for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     # The pure interface contract this package implements.
-    "tai42-contract>=1.9,<2",
+    "tai42-contract>=1.10,<2",
     # Generic leaf helpers + pooled-client framework. Extras: the LLM stack
     # (agent facets, checkpoint/store registries), jq (hooks + policy
     # conditions), uvicorn (CLI arg parsing), redis/postgres drivers. The floor

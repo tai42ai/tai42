@@ -25,12 +25,12 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the identity
     # ABCs and the module-level identity-provider registry.
-    "tai42-contract>=1.9,<2",
+    "tai42-contract>=1.10,<2",
     # The OIDC discovery / JWKS / JWT-verify helper (tai42_kit.net.jwt). The `jwt`
     # extra is REQUIRED, not optional: that module imports joserfc at module top,
     # so tai42-kit[jwt] must resolve for this plugin to import. NO redis extra —
     # this provider validates only and holds no state.
-    "tai42-kit[jwt]>=1.8,<2",
+    "tai42-kit[jwt]>=1.9,<2",
 ]
 
 [project.urls]
