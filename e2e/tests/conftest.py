@@ -492,12 +492,14 @@ def extensions_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> 
 
 
 @pytest.fixture(scope="module")
-def monitoring_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    # The deterministic headless-init keys the compose monitoring profile sets.
+def monitoring_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
+    # The deterministic headless-init keys the compose monitoring profile sets, plus
+    # the scripted LLM stub the reference agent's run drives.
     resource_kwargs = {
         "langfuse_host": "http://127.0.0.1:3000",
         "langfuse_public_key": "pk-lf-e2e0000000000000000000000000000",
         "langfuse_secret_key": "sk-lf-e2e0000000000000000000000000000",
+        "llm_base_url": llm_stub.base_url,
     }
     yield from _boot(
         infra, tmp_path_factory.mktemp("monitoring"), build_monitoring_stack, resource_kwargs=resource_kwargs

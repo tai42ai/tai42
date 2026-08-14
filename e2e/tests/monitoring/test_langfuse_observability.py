@@ -4,11 +4,13 @@ compose ``monitoring`` profile up); skipped at collection otherwise."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import pytest
 
 from tai42_e2e import wait_for_async
+from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
 # The monitoring stack runs no backend worker; skip this module on non-default
@@ -42,4 +44,36 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
         reader_serves_data,
         deadline=60.0,
         message="observability reader never served langfuse-sourced runs",
+    )
+
+
+async def test_agent_run_trace_reaches_langfuse_and_serves_back(
+    monitoring_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    marker = uniq("agentrun")
+    llm_stub.reset()
+    # One content frame ends the agent's LLM->tool->LLM loop immediately (no tool
+    # call); the whole run is traced natively by the agents plugin's monitoring
+    # callbacks, so the marker carried in the user message rides into the trace input.
+    llm_stub.script([{"content": f"done {marker}"}])
+
+    async with monitoring_stack.mcp() as mcp:
+        await mcp.call_tool("tools_agent", {"user_message": f"trace the marker {marker}"})
+
+    api = monitoring_stack.api()
+
+    # READ side: the observability run list exposes each trace's input via
+    # ``inputPreview`` (a bounded, whole-leaf copy — the short user message is kept
+    # intact). The run-list HTTP filter has no name/input clause, so match the marker
+    # client-side over the served items: its presence proves THIS agent run's trace
+    # reached Langfuse and is served back through the platform read path only.
+    async def marker_run_served() -> bool:
+        runs = await api.get("/api/observability/runs")
+        items = runs.get("items") if isinstance(runs, dict) else None
+        return bool(items) and marker in json.dumps(items)
+
+    await wait_for_async(
+        marker_run_served,
+        deadline=60.0,
+        message="observability reader never served the marked agent run",
     )
