@@ -7,4 +7,4 @@ class TaiValidationError(TaiMCPServerError):
 
 
 class TurnTimeoutError(TaiMCPServerError):
-    """Raised when a synchronous agent run exceeds the configured run timeout."""
+    """Raised when a synchronous turn exceeds the configured turn timeout."""
