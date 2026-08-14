@@ -1,8 +1,10 @@
 """Settings and job (de)serializers for the arq backend.
 
-``ArqSettings`` reads the ``ARQ_`` env group; the shared backend-settings surface
-(``manifest_key`` / ``task_timeout`` / ``tool_name_arg``) mirrors the host's
-defaults so both sides agree without sharing code.
+``ArqSettings`` reads the ``ARQ_`` env group and mixes in
+:class:`~tai42_kit.backend.BackendDispatchSettings`, the surface the host and
+every execution backend must agree on for tool dispatch to meet
+(``manifest_key`` / ``task_timeout`` / ``tool_name_arg``): the names, defaults
+and reload classes are declared once there, under this group's own prefix.
 
 The job (de)serializers define this backend's JSON wire format. A result payload
 may carry values JSON cannot encode (above all the exception arq stores as a
@@ -25,6 +27,7 @@ from typing import Any, ClassVar
 import orjson
 from pydantic_core import to_jsonable_python
 from pydantic_settings import SettingsConfigDict
+from tai42_kit.backend import BackendDispatchSettings
 from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
 # Marker key of the tagged in-place description an unserializable value serializes to.
@@ -106,7 +109,7 @@ def job_deserializer(data: bytes) -> Any:
     return payload
 
 
-class ArqSettings(DefaultNamespaceMixin, TaiBaseSettings):
+class ArqSettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ARQ_",
     )
@@ -129,14 +132,6 @@ class ArqSettings(DefaultNamespaceMixin, TaiBaseSettings):
     # default. Must cover the longest job, and the deployment's termination grace
     # period must be >= this, or a drain still severs running work.
     job_completion_wait: int = 300
-
-    # Shared backend-settings surface (host-agreed names and defaults):
-    # ``manifest_key`` names the env var the manifest is exported under,
-    # ``task_timeout`` bounds synchronous waits on job results, ``tool_name_arg``
-    # is the kwargs key carrying the target tool name into a queued execution.
-    manifest_key: str = "MANIFEST_KEY"
-    task_timeout: int = 300
-    tool_name_arg: str = "backend_tool_name"
 
     def make_redis_settings(self, url: str | None = None) -> Any:
         """Build the arq ``RedisSettings`` for ``url`` (default: ``redis_url``),

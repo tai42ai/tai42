@@ -1,11 +1,11 @@
 """Live verification: the app-owned worker-bus subscription coexists with arq
 job execution on one event loop.
 
-arq's ``launch`` (``start_arq_worker``) runs the worker on this process's asyncio
-loop — the same loop the skeleton's one long-lived worker-bus subscription reads
-on. This backend adds no control-plane surface of its own, so the only
-reconciliation concern is that a job monopolizing the loop must not permanently
-starve the subscription's pub/sub read (fleet ops must still land).
+``ArqWorkerRuntime`` is an on-loop runtime: the worker runs on this process's
+asyncio loop — the same loop the skeleton's one long-lived worker-bus
+subscription reads on. This backend adds no control-plane surface of its own, so
+the only reconciliation concern is that a job monopolizing the loop must not
+permanently starve the subscription's pub/sub read (fleet ops must still land).
 
 An execution backend never imports ``tai42_skeleton``, so the app-owned
 subscription is modeled here over this repo's own pub/sub broker fixture

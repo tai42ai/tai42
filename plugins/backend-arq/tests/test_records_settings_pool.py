@@ -11,6 +11,8 @@ import orjson
 import pytest
 from arq.jobs import DeserializationError, SerializationError, deserialize_result, serialize_job, serialize_result
 from pydantic import BaseModel, ValidationError
+from tai42_kit.backend import BackendDispatchSettings
+from tai42_kit.settings import registered_settings
 
 from tai42_backend_arq import records
 from tai42_backend_arq.pool import RedisPoolManager
@@ -23,6 +25,9 @@ from tai42_backend_arq.settings import (
     job_deserializer,
     job_serializer,
 )
+
+# The dispatch surface the shared mixin owns, under this backend's own prefix.
+_DISPATCH_FIELDS = frozenset({"manifest_key", "task_timeout", "tool_name_arg"})
 
 # -- records ---------------------------------------------------------------------
 
@@ -100,6 +105,31 @@ def test_settings_defaults_agree_with_host_glue() -> None:
     assert settings.manifest_key == "MANIFEST_KEY"
     assert settings.task_timeout == 300
     assert settings.tool_name_arg == "backend_tool_name"
+
+
+def test_dispatch_surface_is_the_shared_group_under_this_prefix() -> None:
+    """The three dispatch fields come from the shared mixin, so the host and this
+    backend cannot drift apart on their names, defaults or reload classes — while
+    the ``ARQ_`` env surface stays exactly what it was."""
+    assert issubclass(ArqSettings, BackendDispatchSettings)
+
+    fields = {
+        field.name: field for group in registered_settings() if group.name == "ArqSettings" for field in group.fields
+    }
+    assert {name: field.env_var for name, field in fields.items() if name in _DISPATCH_FIELDS} == {
+        "manifest_key": "ARQ_MANIFEST_KEY",
+        "task_timeout": "ARQ_TASK_TIMEOUT",
+        "tool_name_arg": "ARQ_TOOL_NAME_ARG",
+    }
+    # ``manifest_key`` and ``tool_name_arg`` pin wiring built at boot (the env key
+    # a worker reads, the kwarg name a queued job carries), so they converge
+    # through a recycle rather than in place.
+    assert fields["manifest_key"].reload_class == "recycle"
+    assert fields["tool_name_arg"].reload_class == "recycle"
+    assert fields["task_timeout"].reload_class == "hot"
+
+    # The abstract group itself never claims an env surface of its own.
+    assert [group.name for group in registered_settings() if group.name == "BackendDispatchSettings"] == []
 
 
 def test_settings_key_helpers() -> None:

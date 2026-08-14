@@ -36,13 +36,30 @@ tai backend worker --max-jobs 10 --job-timeout 300
 
 Queue name, burst mode, result retention, and poll delay are worker CLI flags,
 not env vars. `worker` is the only `tai backend` subcommand this backend accepts
-— there is no beat or dashboard process, and anything else exits.
+— there is no beat or dashboard process, and anything else is refused by name.
+
+## Worker lifecycle
+
+Everything around the arq worker is the shared backend lifecycle every backend
+gets, not this plugin's own: the launch waits for the app's boot self-resync
+before the worker consumes (a worker running against a half-built tool registry
+would fail its jobs permanently), the first SIGTERM or SIGINT asks arq for a
+warm drain, a repeated one escalates to a cold stop, and the drain is awaited to
+completion before the process tears down.
+
+arq is deliberately built with its own signal handlers disabled. The host owns
+the process's signal disposition and composes every subscriber onto one handler
+per signal; arq's install would replace that outright and take the server's
+teardown with it, which is what makes a recycle drain cleanly instead of
+severing in-flight jobs.
 
 ## Quirks
 
 - `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
   host's own `BACKEND_` group. Change them in lockstep or the worker and the
-  server stop agreeing.
+  server stop agreeing. `ARQ_MANIFEST_KEY` and `ARQ_TOOL_NAME_ARG` pin wiring
+  built at boot, so a change to either converges through a process recycle
+  rather than in place.
 - `ARQ_JOB_COMPLETION_WAIT` must cover the longest job, and the deployment's
   termination grace period must be at least as long, or a drain still severs
   running work. arq cancels running jobs on signal unless this is non-zero.
