@@ -45,7 +45,11 @@ async def run_backend(extra_args):
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
     install_meta_log_redactor(scope="process")
-    settings = base_backend_settings()
+    # Only the key NAME is needed below, and this coroutine frame is suspended for the
+    # process lifetime: holding the settings MODEL here would keep a boot-epoch instance
+    # reachable past every reload's cache reset, which the stale-settings sweep reports
+    # (truthfully) as a leak. Retain the plain string instead.
+    manifest_key = base_backend_settings().manifest_key
     logger.info("Configuration mode: %s", config_mode())
     manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
 
@@ -60,7 +64,7 @@ async def run_backend(extra_args):
     # into runtimes that fork nothing (a scheduler ``beat``, a dashboard): those need
     # no manifest view, and widening the export would spread the secrets for nothing.
     if "worker" in extra_args:
-        os.environ[settings.manifest_key] = manifest.model_dump_json()
+        os.environ[manifest_key] = manifest.model_dump_json()
 
     # Every backend invocation launches inside ``app_context``: ``start()`` binds
     # the global ``tai42_app`` handle and THEN imports the manifest's
