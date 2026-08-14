@@ -28,7 +28,7 @@ dependencies = [
     "tai42-contract>=1.9,<2",
     # HttpxClient (pooled answer-forward HTTP), RedisClient (transcript store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=1.7,<2",
+    "tai42-kit[redis]>=1.8,<2",
     # Imported directly (transport error types on the answer forward).
     "httpx>=0.28",
     # Imported directly by routes.py / stream.py (Request/Response/StreamingResponse types).
