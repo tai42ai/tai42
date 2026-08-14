@@ -1,11 +1,12 @@
 """Live verification: a real prefork worker's forked child re-inherits the
-parent's mutated tool registry only after the ``on_fleet_op_applied`` successor
-confirms pool turnover.
+parent's mutated tool registry only after the pool turnover confirms.
 
 Runs a genuine Celery prefork worker (real ``fork`` / ``pool_restart`` / ``stats``
 turnover) against a Redis broker, applies a mutating op in the parent, drives the
-successor's entrypoint, and asserts through a pool child (``probe_registry``
-returns the child pid + the registry it was forked with).
+post-apply handler the shared backend base registers for this backend (op
+filtering, manifest refresh and the Celery turnover, end to end), and asserts
+through a pool child (``probe_registry`` returns the child pid + the registry it
+was forked with).
 
 Skipped when no Redis broker is reachable — set ``TAI_TEST_CELERY_BROKER``
 (default ``redis://localhost:6399/0``) to run it.
@@ -51,6 +52,16 @@ def _submit(celery_app: Any) -> list[Any]:
     return celery_app.send_task("tests.probe_registry").get(timeout=30, disable_sync_subtasks=False)
 
 
+def _bus_op_applied(stub_app: Any) -> Any:
+    """The post-apply handler the shared base wires for this backend — the real
+    seam a bus op reaches, so the live path exercised here is the shipped one."""
+    from tai42_backend_celery.core.backend import CeleryBackend, CeleryWorkerRuntime
+
+    stub_app.lifecycle.fleet_op_applied.clear()
+    CeleryBackend()._install_turnover(CeleryWorkerRuntime.from_args([]))
+    return stub_app.lifecycle.fleet_op_applied[-1]
+
+
 def _wait_worker_ready(prefork: Any, celery_app: Any, timeout: float = 40.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -73,8 +84,8 @@ def live_worker() -> Iterator[Any]:
 
     celery_app.conf.update(broker_url=_BROKER, result_backend=_BROKER)
 
-    # Wire the successor's signals (node-name capture + readiness) and its lifecycle
-    # handler, exactly as launch does.
+    # Wire the turnover's Celery signals (node-name capture + readiness), exactly
+    # as the worker runtime's ``build`` does.
     prefork._local_nodename = None
     prefork._worker_ready.clear()
     prefork.register()
@@ -116,17 +127,17 @@ def live_worker() -> Iterator[Any]:
         _state._set_task_join_will_block(False)
 
 
-def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any) -> None:
-    from tai42_backend_celery.core import prefork
+def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any, stub_app: Any) -> None:
     from tai42_backend_celery.core.app import celery_app
 
     probe = live_worker
+    bus_op_applied = _bus_op_applied(stub_app)
 
     # Seed the parent registry and re-fork so the live child is forked with it
     # (the boot child was forked before the registry was populated).
     probe.SERVED_TOOLS.clear()
     probe.SERVED_TOOLS.update({"alpha", "beta"})
-    asyncio.run(prefork._on_fleet_op_applied("reload_config"))
+    asyncio.run(bus_op_applied("reload_config"))
 
     child_pid, tools = _submit(celery_app)
     assert tools == ["alpha", "beta"]
@@ -141,20 +152,20 @@ def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any) -> N
     assert stale_tools == ["alpha", "beta"]
 
     # A query op must NOT re-fork the pool (a read never re-forks).
-    asyncio.run(prefork._on_fleet_op_applied("list_failed_mcps"))
+    asyncio.run(bus_op_applied("list_failed_mcps"))
     same_pid, _ = _submit(celery_app)
     assert same_pid == child_pid
 
-    # The successor: re-fork the pool and CONFIRM turnover (real pool_restart +
+    # The mutating op: re-fork the pool and CONFIRM turnover (real pool_restart +
     # stats poll).
-    asyncio.run(prefork._on_fleet_op_applied("deregister_mcp"))
+    asyncio.run(bus_op_applied("deregister_mcp"))
     dereg_pid, dereg_tools = _submit(celery_app)
     assert dereg_pid != child_pid  # a genuinely new child answered
     assert dereg_tools == ["alpha"]  # and it serves the post-deregister registry
 
     # --- reload_config: the parent registry gains "gamma" ---
     probe.SERVED_TOOLS.add("gamma")
-    asyncio.run(prefork._on_fleet_op_applied("reload_config"))
+    asyncio.run(bus_op_applied("reload_config"))
     reload_pid, reload_tools = _submit(celery_app)
     assert reload_pid != dereg_pid
     assert reload_tools == ["alpha", "gamma"]

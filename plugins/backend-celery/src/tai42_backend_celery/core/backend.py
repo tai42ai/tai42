@@ -1,147 +1,160 @@
-"""The Celery :class:`~tai42_contract.backend.Backend` implementation.
+"""The Celery execution backend: its launchable runtimes and their bindings.
 
-``launch(args)`` starts the Celery runtime for this process — ``worker``,
-``beat``, or ``flower``. The worker runs the Celery CLI on a worker thread so
-this process's asyncio loop (which reads the app's worker-bus subscription) stays
-alive; since Celery skips its signal handlers off the main thread, ``launch``
-installs loop-level SIGTERM/SIGINT handlers that request a warm (then cold)
-shutdown. ``beat`` and ``flower`` run nothing else on the loop, so they block it
-directly and keep Celery's native signal handling. Before starting the worker,
-``launch`` registers the prefork-pool turnover (worker-scoped) that re-forks the
-pool after every mutating bus op, then gates the worker start on the boot-ready
-latch (``wait_until_ready``) so no pool child is forked against a half-built tool
-registry.
+Every Celery runtime is the same umbrella CLI under a different subcommand, so
+each binding differs only in the argv it builds and in how it stops. ``worker``
+blocks, so the host runs it on a worker thread and this process's asyncio loop
+(which reads the app's worker-bus subscription) stays alive; ``beat`` and
+``flower`` run nothing else on that loop, so they block it deliberately and keep
+Celery's native signal handling.
+
+Everything host-shaped around these bindings — subcommand dispatch, the
+boot-readiness gate that keeps a pool child from forking against a half-built
+tool registry, the composed SIGTERM/SIGINT wiring, drain-on-cancellation, and the
+prefork-pool turnover after a registry-mutating bus op — belongs to
+:class:`~tai42_kit.backend.ManagedBackend`, which drives these objects.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import signal as signal_module
 import sys
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import ClassVar, Self
 
 from tai42_contract.app import tai42_app
-from tai42_contract.backend import Backend
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_kit.backend import BackendDispatchSettings, ManagedBackend
 
 from tai42_backend_celery.core import prefork
-
-logger = logging.getLogger(__name__)
-
-_LAUNCH_SUBCOMMANDS = frozenset({"worker", "beat", "flower"})
+from tai42_backend_celery.core.settings import celery_settings
 
 # The Celery application module handed to the Celery CLI (`-A`).
 _CELERY_APP_PATH = "tai42_backend_celery.core.app"
 
-# Upper bound on the wait for the app to become boot-ready before the worker
-# starts — a loud backstop for a boot that never completes. A worker that times
-# out here refuses to start (and fork its pool) against a half-built tool
-# registry and fails loudly.
-_APP_READY_TIMEOUT_SECONDS = 120
-
-
-async def _await_app_ready() -> None:
-    """Block until the app's boot self-resync has built the tool registry, or fail
-    loudly at the timeout.
-
-    A Celery prefork worker forks pool children that inherit the tool registry at
-    fork time; a child forked before the boot self-resync finishes inherits a
-    half-built registry and fails every job routed to it permanently. Gating the
-    whole worker start on the readiness latch means no pool child is forked until
-    the registry is built and stable. Awaited on the serving loop, so the bus
-    subscription's self-resync (which sets the latch) runs concurrently. A timeout
-    is a boot that never completed — raise rather than start against a half-built
-    registry.
-    """
-    try:
-        await asyncio.wait_for(tai42_app.lifecycle.wait_until_ready(), timeout=_APP_READY_TIMEOUT_SECONDS)
-    except TimeoutError as exc:
-        raise RuntimeError(
-            f"celery worker: the app did not become ready within {_APP_READY_TIMEOUT_SECONDS}s "
-            "(boot self-resync never completed); refusing to start the worker against a half-built tool registry"
-        ) from exc
+# Margin the drain budget adds on top of the engine's own job budget: the warm
+# drain has to outlast the longest in-flight job AND the engine's own teardown, or
+# the wait is abandoned on exactly the work it exists to protect.
+_DRAIN_MARGIN_SECONDS = 30.0
 
 
 def _celery_cli_main() -> None:
-    """Run the Celery umbrella CLI against ``sys.argv`` (set by ``launch``)."""
+    """Run the Celery umbrella CLI against ``sys.argv``."""
     from celery.__main__ import main as celery_main
 
     celery_main()
 
 
-def _request_worker_shutdown() -> None:
-    """Ask the in-process Celery worker to shut down: warm first (finish in-flight
-    tasks), a repeat request escalates to cold. Drives the ``celery.worker.state``
-    flags directly, since the worker runs off the main thread where Celery skips
-    its own signal handlers."""
-    from celery.worker import state
+class _CeleryRuntime(BackendRuntime):
+    """What every Celery runtime shares: it parses nothing of its own (the
+    options belong to the Celery CLI, which validates them) and starts by
+    handing that CLI its own subcommand plus the rest of the launch argv."""
 
-    if state.should_stop is None:
-        logger.warning("celery worker: warm shutdown requested")
-        state.should_stop = 0
-    else:
-        logger.warning("celery worker: cold shutdown requested")
+    def __init__(self, args: Sequence[str]) -> None:
+        self._args = list(args)
+
+    @classmethod
+    def from_args(cls, args: Sequence[str]) -> Self:
+        return cls(args)
+
+    def _set_argv(self) -> None:
+        """Point ``sys.argv`` at this runtime's Celery command — the CLI reads the
+        process argv rather than taking arguments."""
+        sys.argv = ["celery", "-A", _CELERY_APP_PATH, self.name, *self._args]
+
+
+class CeleryWorkerRuntime(_CeleryRuntime):
+    """The consuming runtime: a Celery worker whose prefork children persist
+    across jobs, so a registry mutation obliges a pool turnover."""
+
+    name = "worker"
+    mode = ExecutionMode.worker_thread
+    consumes_work = True
+    pool_turnover_required = True
+
+    async def build(self) -> None:
+        """Set the CLI's argv and prepare the pool turnover, both before the host
+        gates on boot-readiness: connecting Celery's setup/ready signals must
+        happen before the worker boots past them, and neither consumes work."""
+        self._set_argv()
+        prefork.register()
+
+    def run_blocking(self) -> None:
+        _celery_cli_main()
+
+    def request_drain(self) -> None:
+        """Ask the in-process worker to stop warmly, by driving
+        ``celery.worker.state`` directly: the worker runs off the main thread,
+        where Celery skips its own signal handlers.
+
+        Idempotent — a second request is the same request, and only a flag that
+        was never set is set.
+        """
+        from celery.worker import state
+
+        if state.should_stop is None:
+            state.should_stop = 0
+
+    def request_terminate(self) -> None:
+        """Cold stop: abandon in-flight tasks now."""
+        from celery.worker import state
+
         state.should_terminate = 0
 
+    async def turn_over_pool(self, *, reason: str, budget: float) -> None:
+        """Re-fork this worker's prefork pool and confirm it, off the serving loop
+        (the turnover's control I/O blocks). A raise fails the op named by
+        ``reason``, which is the point: an unconfirmed turnover means a child may
+        still serve the pre-mutation registry."""
+        await asyncio.to_thread(prefork.turnover_local_pool, reason, budget)
 
-class CeleryBackend(Backend):
+
+class _CeleryInlineRuntime(_CeleryRuntime):
+    """A Celery command that owns its process: nothing else runs on this loop, so
+    it blocks the loop deliberately and keeps Celery's native signal handling."""
+
+    mode = ExecutionMode.inline
+
+    def run_blocking(self) -> None:
+        self._set_argv()
+        _celery_cli_main()
+
+
+class CeleryBeatRuntime(_CeleryInlineRuntime):
+    """The RedBeat scheduler."""
+
+    name = "beat"
+
+
+class CeleryFlowerRuntime(_CeleryInlineRuntime):
+    """The Flower dashboard."""
+
+    name = "flower"
+
+
+class CeleryBackend(ManagedBackend):
     """Celery execution backend (see the module docstring for the design)."""
 
-    async def launch(self, args: Sequence[str]) -> None:
-        if not args:
-            raise ValueError("launch requires a subcommand: worker | beat | flower")
-        subcmd, *rest = args
-        if subcmd not in _LAUNCH_SUBCOMMANDS:
-            raise ValueError(f"Unknown Celery launch subcommand {subcmd!r}; expected one of: worker, beat, flower")
+    label = "celery"
+    runtimes: ClassVar[Mapping[str, type[BackendRuntime]]] = {
+        "worker": CeleryWorkerRuntime,
+        "beat": CeleryBeatRuntime,
+        "flower": CeleryFlowerRuntime,
+    }
 
-        sys.argv = ["celery", "-A", _CELERY_APP_PATH, subcmd, *rest]
+    @property
+    def dispatch_settings(self) -> BackendDispatchSettings:
+        """The ``CELERY_`` env group; its ``manifest_key`` is the env var the
+        re-forked pool children read the live manifest from."""
+        return celery_settings()
 
-        if subcmd != "worker":
-            # beat/flower: nothing else runs on this loop, so inline execution
-            # keeps Celery's native signal handling.
-            _celery_cli_main()
-            return
+    @property
+    def drain_timeout(self) -> float:
+        """The base's drain budget, sized to THIS deployment's Celery task budget.
 
-        # Wire the prefork-pool turnover before the worker boots (worker only).
-        prefork.register()
-        # Gate the worker start on boot-readiness: the boot self-resync builds the
-        # tool registry non-atomically, and a pool child forked before it finishes
-        # inherits a half-built registry and fails its jobs permanently. Awaiting here
-        # (before the Celery CLI spawns the pool) means no child is forked until the
-        # latch opens; the prefork-pool turnover heals later mutations but is not
-        # load-bearing at boot.
-        await _await_app_ready()
-        await self._launch_worker_off_loop()
-
-    async def _launch_worker_off_loop(self) -> None:
-        """Run the Celery worker on a worker thread, keeping this loop alive.
-
-        Loop-level SIGTERM/SIGINT handlers request a warm (then cold) shutdown; a
-        cancellation of this coroutine requests the same warm shutdown and awaits
-        the worker's exit, so no live worker thread is left behind.
-        """
-        loop = asyncio.get_running_loop()
-        installed: list[Any] = []
-        for sig in (signal_module.SIGTERM, signal_module.SIGINT):
-            try:
-                loop.add_signal_handler(sig, _request_worker_shutdown)
-            except (RuntimeError, ValueError, NotImplementedError) as e:
-                # Signal handlers need the main thread (and POSIX); without them
-                # shutdown comes via task cancellation.
-                logger.warning("cannot install %s handler for worker shutdown: %s", sig.name, e)
-            else:
-                installed.append(sig)
-        worker_run = loop.run_in_executor(None, _celery_cli_main)
-        try:
-            await asyncio.shield(worker_run)
-        except asyncio.CancelledError:
-            _request_worker_shutdown()
-            await worker_run
-            raise
-        finally:
-            for sig in installed:
-                loop.remove_signal_handler(sig)
+        Read live rather than frozen at import, so a settings epoch flip that
+        widens ``CELERY_TASK_TIMEOUT`` widens the drain with it instead of leaving
+        a warm shutdown abandoning tasks it should have waited for."""
+        return float(celery_settings().task_timeout) + _DRAIN_MARGIN_SECONDS
 
 
 # Plain call (not decorator) so ``CeleryBackend`` keeps its plain class type.

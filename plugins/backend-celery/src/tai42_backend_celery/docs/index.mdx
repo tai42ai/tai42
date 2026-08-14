@@ -41,8 +41,35 @@ tai backend beat
 tai backend flower
 ```
 
+## Worker lifecycle
+
+Everything around the Celery worker is the shared backend lifecycle every backend
+gets, not this plugin's own: the launch waits for the app's boot self-resync
+before the worker consumes (a worker running against a half-built tool registry
+would fail its jobs permanently), the worker's blocking run loop runs on a
+dedicated thread so the process's event loop stays free for worker-bus ops, the
+first SIGTERM or SIGINT asks Celery for a warm drain, a repeated one escalates to
+a cold stop, and the drain is awaited to completion before the process tears
+down.
+
+Celery is the one shipped backend whose workers PERSIST ACROSS JOBS, so it is the
+one that declares pool turnover: after a registry-mutating fleet op applies, the
+live manifest is re-exported into the env and the prefork pool is replaced and
+confirmed before the op reports `applied`. The turnover's budget is derived from
+the bus apply window (`TAI_BUS_APPLY_TIMEOUT`) less a margin, so a pool that will
+not come back reports a truthful `failed` rather than a guessed timeout.
+
+`beat` and `flower` pull no queued work, so they run on the event loop and keep
+whatever signal handling their own CLI installs. Nothing else runs in those
+processes, so that is deliberate.
+
 ## Quirks
 
+- `CELERY_MANIFEST_KEY` and `CELERY_TOOL_NAME_ARG` pin wiring built at boot — a
+  forked child reads the env key it was given and a queued job carries the kwarg
+  name its producer used — so a change to either converges through a process
+  recycle rather than in place. A profile change touching one is refused on an
+  unsupervised (`bare`) deployment shape, which has no way to recycle.
 - The concurrency cap of one is load-bearing. Celery's pool restart is advisory,
   so a wider prefork pool can miss the turnover confirmation that follows a live
   config change and turn a bus operation into a failure. Raise
