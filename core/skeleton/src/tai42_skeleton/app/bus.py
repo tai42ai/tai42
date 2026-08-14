@@ -46,6 +46,11 @@ instant the op is delivered and exactly one terminal ``applied``/``failed`` once
 op has fully applied. ``timed_out`` and ``departed`` are never wire replies — the
 publisher computes them from the presence census at the report cut.
 
+That census is taken inside :meth:`WorkerBus.publish`, which for most callers is
+AFTER their own local apply — so a publisher that must not lose a worker to a
+presence TTL fading across a slow apply hands :meth:`WorkerBus.publish` its own
+op-start census as ``expected_at_start``, and those names stay expected here.
+
 Presence lifecycle
 ------------------
 Presence is written under ``{ns}:bus:presence:{name}`` with a value carrying
@@ -534,6 +539,8 @@ class WorkerBus:
         op: dict[str, Any],
         targets: list[str] | None,
         local: LocalApplyResult | None,
+        *,
+        expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult:
         """Broadcast one op to the fleet and collect a per-worker outcome; awaited.
 
@@ -547,7 +554,16 @@ class WorkerBus:
 
         Absent targets are NOT re-raised here — a targeted publisher validates first
         via :meth:`validate_targets`, so a target that vanished between validation
-        and here is churn, reported honestly as ``departed`` rather than raised."""
+        and here is churn, reported honestly as ``departed`` rather than raised.
+
+        ``expected_at_start`` is the caller's OWN pre-side-effect census (name →
+        generation, self excluded), the answer to "who was owed a confirmation when
+        this op began". The bus censuses at publish time, which is AFTER a caller's
+        local apply; a worker whose presence TTL faded across that apply would be off
+        BOTH the expected set and the gap set, and the op would report converged
+        without ever having expected it. Every name carried in stays expected at its
+        snapshot generation, so it is either collected or given an honest computed
+        verdict. See :meth:`_carry_expected` for what it does NOT override."""
         op_name = self._op_name(op)
         self._validate_local_targets(local, targets)
 
@@ -555,7 +571,7 @@ class WorkerBus:
             return self._local_publish(op_name, targets, local)
 
         try:
-            fleet = await self._broadcast(op_name, op, targets)
+            fleet = await self._broadcast(op_name, op, targets, expected_at_start)
         except _TRANSPORT_ERRORS as exc:
             logger.error("worker bus: publish of %r failed — bus unreachable", op_name, exc_info=True)
             return FleetResult(op=op_name, reachable=False, error=f"{type(exc).__name__}: {exc}")
@@ -565,13 +581,19 @@ class WorkerBus:
         fleet.sort(key=lambda r: r.name)
         return FleetResult(op=op_name, results=fleet)
 
-    async def _broadcast(self, op_name: str, op: dict[str, Any], targets: list[str] | None) -> list[WorkerResult]:
+    async def _broadcast(
+        self,
+        op_name: str,
+        op: dict[str, Any],
+        targets: list[str] | None,
+        expected_at_start: dict[str, int] | None = None,
+    ) -> list[WorkerResult]:
         op_id = uuid.uuid4().hex
         reply_channel = f"{self._settings.reply_prefix}{op_id}"
         identity = self.identity
         async with client_ctx(RedisClient, self._settings.redis) as conn:
             r: Any = conn
-            expected, gaps = await self._classify_workers(r, targets)
+            expected, gaps = await self._classify_workers(r, targets, expected_at_start)
             # ``r.pubsub()`` is a non-I/O constructor, bound BEFORE the try so pubsub is
             # never unbound in the finally. A raising subscribe still reaches the finally,
             # which unsubscribes then ALWAYS closes the pub/sub (the aclose runs even if
@@ -602,7 +624,7 @@ class WorkerBus:
         return list(collected.values())
 
     async def _classify_workers(
-        self, r: Any, targets: list[str] | None
+        self, r: Any, targets: list[str] | None, expected_at_start: dict[str, int] | None = None
     ) -> tuple[dict[str, int | None], dict[str, WorkerResult]]:
         """Split the live fleet into the EXPECTED set (keyed name → generation, awaited
         for a reply) and the GAP set (keyed name → its actual-condition result).
@@ -613,7 +635,10 @@ class WorkerBus:
         freshness gate, minus self; every other row is a gap. Targeted: each named
         target minus self — a ready+fresh target is expected, a target present-but-gap
         carries its gap outcome, and a target absent from the census stays expected with
-        generation ``None`` so it is reported ``departed`` at the cut."""
+        generation ``None`` so it is reported ``departed`` at the cut.
+
+        This census runs at publish time; ``expected_at_start`` re-admits what the
+        caller's earlier op-start census saw — see :meth:`_carry_expected`."""
         rows = await self._scan_workers(r)
         by_name = {row.name: row for row in rows}
         self_name = self.identity.name
@@ -627,20 +652,61 @@ class WorkerBus:
                     expected[name] = row.generation
                 else:
                     gaps[name] = self._gap_result(row)
-            return expected, gaps
-        # Targets are NOT re-validated here (the caller validated); an absent target is
-        # reported as departed at the cut, a present-but-gap target as its gap outcome.
-        for name in targets:
-            if name == self_name:
-                continue
-            row = by_name.get(name)
-            if row is None:
-                expected[name] = None
-            elif self._is_ready_fresh(row):
-                expected[name] = row.generation
-            else:
-                gaps[name] = self._gap_result(row)
+        else:
+            # Targets are NOT re-validated here (the caller validated); an absent target
+            # is reported as departed at the cut, a present-but-gap target as its gap
+            # outcome.
+            for name in targets:
+                if name == self_name:
+                    continue
+                row = by_name.get(name)
+                if row is None:
+                    expected[name] = None
+                elif self._is_ready_fresh(row):
+                    expected[name] = row.generation
+                else:
+                    gaps[name] = self._gap_result(row)
+        self._carry_expected(expected, gaps, targets, expected_at_start)
         return expected, gaps
+
+    def _carry_expected(
+        self,
+        expected: dict[str, int | None],
+        gaps: dict[str, WorkerResult],
+        targets: list[str] | None,
+        expected_at_start: dict[str, int] | None,
+    ) -> None:
+        """Re-admit a worker the CALLER censused as ready+fresh at op start that this
+        publish-time census no longer sees at all.
+
+        The window is the caller's own local apply, which runs between the two censuses:
+        a worker whose presence TTL faded across it would land in neither set here, and
+        an op that never expected it would report converged without it. Re-admitted at
+        its SNAPSHOT generation, so the reply gate still discards a replacement life's
+        reply and :meth:`_computed_verdict` names the successor when the slot was retaken.
+
+        Deliberately narrow. It never overrides a live classification — a carried name
+        the census still sees keeps whatever this census decided, including a gap outcome
+        (a worker that announced ``recycling`` is departing on purpose and is reported as
+        such, not awaited). It never widens ``targets``, and never re-admits self (the
+        publisher reports itself from its own local result). Each re-admission is logged:
+        a live worker going off-census mid-op is an anomaly even when it later confirms."""
+        if not expected_at_start:
+            return
+        self_name = self.identity.name
+        allowed = None if targets is None else set(targets)
+        for name, generation in expected_at_start.items():
+            if name == self_name or name in expected or name in gaps:
+                continue
+            if allowed is not None and name not in allowed:
+                continue
+            logger.warning(
+                "worker bus: %s was ready at op start but is off the census at publish — "
+                "still expecting its confirmation at generation %s",
+                name,
+                generation,
+            )
+            expected[name] = generation
 
     def _is_ready_fresh(self, row: WorkerRow) -> bool:
         """The ready+fresh gate: a row is an expected worker only when it advertises
@@ -870,6 +936,29 @@ class WorkerBus:
             return [self._local_row()]
         async with client_ctx(RedisClient, self._settings.redis) as conn:
             return await self._scan_workers(conn)
+
+    async def expected_at_start(self) -> dict[str, int]:
+        """The siblings owed a confirmation right now, as ``{name: generation}`` — the
+        snapshot a publisher takes BEFORE its own local side effect and hands back to
+        :meth:`publish` as ``expected_at_start``.
+
+        :meth:`publish` censuses when it is called, which for a publisher that applies
+        locally first is after that apply; a worker whose presence TTL fades across the
+        apply drops off that census entirely and the op reports converged without it.
+        Reading membership here, before the side effect, makes the apply part of the
+        op's window rather than a blind spot.
+
+        Applies the SAME ready+fresh gate :meth:`_classify_workers` expects workers by,
+        with self excluded (a publisher reports itself from its own local result). Gap
+        rows are left out on purpose: they already carry no confirmation promise, so
+        carrying one back in would turn a worker that announced its own departure into a
+        wait. A busless bus sees only its own row and so snapshots nothing."""
+        self_name = self.identity.name
+        return {
+            row.name: row.generation
+            for row in await self.census()
+            if row.name != self_name and self._is_ready_fresh(row)
+        }
 
     def _local_row(self) -> WorkerRow:
         identity = self.identity

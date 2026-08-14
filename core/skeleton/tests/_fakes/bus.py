@@ -6,7 +6,9 @@ Op-level oracle tests drive the operations directly with a faked ``tai42_app`` i
 own ``local`` self entry plus one ``applied`` entry per configured remote worker —
 so a publisher's per-worker response can be asserted without a real Redis.
 ``validate_targets`` reproduces the census-membership raise so the
-validate-before-apply order is exercised.
+validate-before-apply order is exercised, and ``publish`` records each call's
+``expected_at_start`` snapshot so the same ordering is assertable for the publisher's
+op-start census (taken from ``census``, so mutating a row mid-apply is observable).
 
 ``census`` (and the ``rows`` accessor) synthesizes full :class:`WorkerRow` rows
 (identity fields + presence value) with a SETTABLE per-row PTTL, so a test can drive
@@ -31,6 +33,7 @@ from tai42_skeleton.app.bus import (
     WorkerResult,
     WorkerRow,
     WorkerState,
+    presence_fresh,
 )
 
 
@@ -60,6 +63,10 @@ class FakeBus:
         self._remote_rows = [_row(o, WorkerKind.serve, pid=2, generation=1, pttl_ms=fresh) for o in (remotes or [])]
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
         self.validate_calls: list[list[str] | None] = []
+        # The pre-apply expected-membership snapshot each publish carried, recorded
+        # SEPARATELY from ``publish_calls`` so the op/targets/local triples stay
+        # assertable as-is.
+        self.expected_at_start_calls: list[dict[str, int] | None] = []
 
     @property
     def identity(self) -> WorkerIdentity:
@@ -80,6 +87,17 @@ class FakeBus:
     async def census(self) -> list[WorkerRow]:
         return [self._self_row, *self._remote_rows]
 
+    async def expected_at_start(self) -> dict[str, int]:
+        """The real bus's op-start snapshot: the census past the ready+fresh gate, self
+        excluded. Driven through the real :func:`presence_fresh`, so a test that drops a
+        row's ``pttl_ms`` mid-apply fades that worker off the snapshot exactly as a
+        decayed presence key would."""
+        return {
+            row.name: row.generation
+            for row in self._remote_rows
+            if row.state == WorkerState.ready and presence_fresh(row.pttl_ms, self.ttl)
+        }
+
     async def validate_targets(self, targets: list[str] | None) -> None:
         self.validate_calls.append(targets)
         if targets is None:
@@ -94,8 +112,11 @@ class FakeBus:
         op: dict[str, Any],
         targets: list[str] | None,
         local: LocalApplyResult | None,
+        *,
+        expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult:
         self.publish_calls.append((op, targets, local))
+        self.expected_at_start_calls.append(expected_at_start)
         results: list[WorkerResult] = []
         if local is not None:
             results.append(

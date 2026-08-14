@@ -51,7 +51,7 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
-from tai42_skeleton.operations._broadcast import log_non_convergence
+from tai42_skeleton.operations._broadcast import log_non_convergence, snapshot_membership
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)
@@ -567,8 +567,28 @@ async def _wire_snapshot(name: str) -> dict[str, Any] | None:
 
 # -- bus fan-out -------------------------------------------------------------
 
+# The wire op names these fan-outs publish. Named once because the op-start census
+# is read under the same name the publish carries, at a different point in the
+# caller — two literals could drift into censusing one op and publishing another.
+_RELOAD_OP = "reload_tool"
+_REMOVE_OP = "remove_tool"
 
-async def _fanout_reload(name: str) -> None:
+
+async def _census_at_start(op_name: str) -> dict[str, int] | None:
+    """Pin the expected-confirmation membership BEFORE this worker's store write and
+    local rebind — the untargeted-publisher discipline
+    :func:`~tai42_skeleton.operations._broadcast.snapshot_membership` owns.
+
+    These publishers apply locally and broadcast afterwards, so ``publish``'s own
+    census is taken on the far side of the store write: a sibling whose presence
+    faded across it would simply be absent from the expected set, and the op would
+    report converged without it. The caller reads this at its true pre-apply point,
+    which is why it is a parameter of the fan-out rather than taken inside it.
+    """
+    return await snapshot_membership(instance.app.bus, op_name)
+
+
+async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) -> set[str]:
     """Broadcast a preset rebind on the worker bus so every worker re-reads the active
     body and rebinds ``name``. The op carries only ``kind`` + ``name``; each worker
     re-reads the store itself. The store write and local rebind have already landed by
@@ -578,25 +598,71 @@ async def _fanout_reload(name: str) -> None:
 
     The local apply is separate and compensation-rolled-back upstream, so this cannot
     ride ``broadcast()``'s apply-inside model — but it shares its non-convergence
-    logging so a stranded sibling is never silent."""
+    logging and its op-start census (``expected_at_start``, from
+    :func:`_census_at_start`) so a stranded sibling is never silent.
+
+    Returns the sibling names this broadcast actually ADDRESSED (self excluded) —
+    the report IS that set, expected verdicts and gap rows alike. A rename's second
+    fan-out needs it: see :func:`_union_census`."""
     report = await instance.app.bus.publish(
-        {"op": "reload_tool", "kind": "preset", "name": name},
+        {"op": _RELOAD_OP, "kind": "preset", "name": name},
         None,
         LocalApplyResult(outcome=OpOutcome.applied),
+        expected_at_start=expected_at_start,
     )
     log_non_convergence(report)
+    self_name = instance.app.bus.identity.name
+    return {result.name for result in report.results if result.name != self_name}
 
 
-async def _fanout_remove(name: str) -> None:
+async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) -> None:
     """Broadcast a preset removal on the worker bus so every worker tears ``name``
-    down. Same already-applied self entry + non-convergence logging as
-    :func:`_fanout_reload`."""
+    down. Same already-applied self entry, op-start census, and non-convergence
+    logging as :func:`_fanout_reload`."""
     report = await instance.app.bus.publish(
-        {"op": "remove_tool", "kind": "preset", "name": name},
+        {"op": _REMOVE_OP, "kind": "preset", "name": name},
         None,
         LocalApplyResult(outcome=OpOutcome.applied),
+        expected_at_start=expected_at_start,
     )
     log_non_convergence(report)
+
+
+# A worker the reload reached but no census of ours ever saw. Real generations are
+# minted by INCR and start at 1, so this is below every life: the reply gate treats
+# any reply as a successor's and the worker gets a computed verdict instead of a
+# silent pass. That is the honest reading of "it was addressed, we do not know
+# which life".
+_LIFE_UNKNOWN = 0
+
+
+def _union_census(
+    at_start: dict[str, int] | None,
+    addressed: set[str],
+    after_reload: dict[str, int] | None,
+) -> dict[str, int]:
+    """The membership a rename's REMOVE fan-out is judged against.
+
+    A rename publishes twice, and the second half cannot simply reuse the first
+    half's snapshot: a worker that joined after the snapshot was taken is not in
+    it, yet the reload broadcast reached it and told it to bind ``new_name``. Left
+    unexpected by the remove, that worker keeps the old binding and the op reports
+    converged anyway. So the expected set is the UNION of three readings, in
+    descending order of authority over the generation:
+
+    * the pre-rename snapshot — the life that was owed the rename from the start,
+      and the one :meth:`~tai42_skeleton.app.bus.WorkerBus.publish` re-admits at;
+    * a census taken after the reload broadcast — a joiner still live, at its
+      current generation;
+    * every name the reload REPORT named, which is the only reading that cannot
+      miss a worker the reload actually addressed (a joiner that faded during the
+      broadcast is in neither census), carried at :data:`_LIFE_UNKNOWN`.
+    """
+    union: dict[str, int] = dict(after_reload or {})
+    union.update(at_start or {})
+    for worker in addressed:
+        union.setdefault(worker, _LIFE_UNKNOWN)
+    return union
 
 
 # -- list --------------------------------------------------------------------
@@ -736,6 +802,11 @@ async def create_preset(
     # create below rolls back, the deleted ghost belonged to a vanished tool and needs
     # no restoring. Guarded on the overlay store: with tool_meta OFF the cascade is a
     # no-op rather than a 500 opening an absent Postgres.
+    # Pin the fleet BEFORE the first write below: the cascade, the store write and
+    # the register are all this door's local apply, and the fan-out censuses only
+    # when it publishes, on the far side of every one of them.
+    census = await _census_at_start(_RELOAD_OP)
+
     if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.delete_meta(name)
 
@@ -768,7 +839,7 @@ async def create_preset(
             raise ConflictError(f"preset name {name!r} collides with an existing tool") from register_exc
         raise register_exc
     await instance.app.emit_list_changed("tool")
-    await _fanout_reload(name)
+    await _fanout_reload(name, census)
     # Cross-references from the post-write population — the new body may already
     # compose other presets (``uses``), and a sibling authored against this name is
     # picked up too (``used_by``); one source of truth with the list / get rows.
@@ -923,6 +994,9 @@ async def save_version(
     old_extensions = active.extensions
     old_wire = await _wire_snapshot(name)
     prior_active = prior_record.active_version
+    # Same pre-write point, for the same reason: the save+reload below is the local
+    # apply the fan-out's own census would be taken after.
+    census = await _census_at_start(_RELOAD_OP)
 
     try:
         row = await store.save_version(
@@ -954,7 +1028,7 @@ async def save_version(
         await instance.app.emit_list_changed("tool")
     # The rebind fans out regardless of the emit guard: siblings must re-read the
     # active body even when the wire tool is byte-identical (a baked VALUE changed).
-    await _fanout_reload(name)
+    await _fanout_reload(name, census)
     return row.model_dump()
 
 
@@ -1013,6 +1087,8 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         raise BadRequestError(write_validator_error)
 
     prior_active = prior_record.active_version
+    # Pinned before the rollback+reload local apply — see :func:`_census_at_start`.
+    census = await _census_at_start(_RELOAD_OP)
     record = await store.rollback(name, version)
 
     # Residual re-register failure: re-point the active version back to the prior
@@ -1029,7 +1105,7 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         await instance.app.emit_list_changed("tool")
     # The rebind fans out regardless of the emit guard: siblings must re-read the
     # active body even when the wire tool is byte-identical (a baked VALUE changed).
-    await _fanout_reload(name)
+    await _fanout_reload(name, census)
     return {"name": name, "active_version": record.active_version}
 
 
@@ -1098,6 +1174,12 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
 
     # Move the store key. The pre-checks make the typed conflicts race-window catches,
     # mapped exactly as create maps its post-write errors.
+    # The pre-rename snapshot judges the RELOAD, and is the floor for the remove:
+    # both halves are one rename, so a worker owed the rename from the start stays
+    # owed it at the life it had then. The remove's set is WIDER — see the union
+    # assembled after the reload below.
+    census = await _census_at_start(_RELOAD_OP)
+
     try:
         record = await store.rename_preset(name, new_name)
     except PresetNotFoundError as exc:
@@ -1151,8 +1233,12 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # Fan out NEW FIRST — reload ``new_name`` on every worker BEFORE removing ``old``
     # (both briefly alive beats neither): the two are sequentially awaited confirmed
     # broadcasts, so every worker applies the reload before any is asked to remove.
-    await _fanout_reload(new_name)
-    await _fanout_remove(name)
+    addressed = await _fanout_reload(new_name, census)
+    # Every worker the reload actually reached is now bound to ``new_name`` and must
+    # also be told to drop the old one — including a worker that joined after the
+    # snapshot (it rehydrated the OLD name before the commit and announced itself
+    # after, so it holds a binding the store no longer knows).
+    await _fanout_remove(name, _union_census(census, addressed, await _census_at_start(_REMOVE_OP)))
     return {"name": new_name, "renamed_from": name, "active_version": record.active_version}
 
 
@@ -1182,6 +1268,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
         # preset — both require a configured store), so the hard-delete here always has
         # a store to talk to; the store-config guard below is only for the
         # non-quarantined path.
+        census = await _census_at_start(_REMOVE_OP)
         try:
             await instance.app.versioning.store.delete("preset", name)
         except Exception:
@@ -1193,13 +1280,14 @@ async def delete_preset(name: str) -> dict[str, Any]:
         if component_store_configured(SKELETON_COMPONENT):
             await instance.app.tool_meta.store.delete_meta(name)
         mgr.drop_quarantine(name)
-        await _fanout_remove(name)
+        await _fanout_remove(name, census)
         return {"name": name, "deleted": True}
 
     # A store-less deploy (no versioned store configured) can hold no preset, so a
     # name that is not quarantined is a genuine 404 without a Postgres read.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"preset {name!r} not found")
+    census = await _census_at_start(_REMOVE_OP)
     try:
         await instance.app.presets.store.soft_delete(name)
     except PresetNotFoundError as exc:
@@ -1212,7 +1300,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
     if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.delete_meta(name)
     await instance.app.emit_list_changed("tool")
-    await _fanout_remove(name)
+    await _fanout_remove(name, census)
     return {"name": name, "deleted": True}
 
 

@@ -17,11 +17,17 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from click.testing import CliRunner
+from tai42_contract.app import tai42_app
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_kit.backend import ManagedBackend
+from tai42_kit.signals import signal_chain
 
 import tai42_skeleton.cli.backend as backend
 from tai42_skeleton.connectors import meta_log_redactor
@@ -179,8 +185,6 @@ async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: p
     holder and ``launch`` receives the args. Importing the module before the
     bind instead hits the unbound ``tai42_app`` handle (AttributeError) and the
     invocation never reaches ``launch``."""
-    from tai42_contract.app import tai42_app
-
     from tai42_skeleton.app import instance
 
     real_app = instance.build_app()
@@ -367,7 +371,7 @@ def test_main_publishes_absolute_multiproc_dir(monkeypatch: pytest.MonkeyPatch) 
 
 
 async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ``run_backend`` installs a SIGTERM handler that cancels the main task; the
+    # ``run_backend`` subscribes a SIGTERM handler that cancels the main task; the
     # cancellation must unwind through ``app_context``'s teardown before surfacing.
     exited = {"value": False}
     entered = asyncio.Event()
@@ -393,17 +397,12 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
     monkeypatch.setattr(backend.instance, "build_app", lambda: app)
     monkeypatch.setattr(backend.Manifest, "model_validate", staticmethod(lambda data: _FakeManifest()))
 
-    # Capture the handler ``run_backend`` registers instead of installing a real one.
-    captured: dict[int, object] = {}
-    loop = asyncio.get_running_loop()
-    monkeypatch.setattr(loop, "add_signal_handler", lambda sig, cb, *a: captured.__setitem__(sig, cb))
-
     task = asyncio.create_task(backend.run_backend(["worker"]))
     await entered.wait()
 
-    # Deliver SIGTERM by invoking the captured handler (== main_task.cancel).
-    assert signal.SIGTERM in captured
-    captured[signal.SIGTERM]()  # type: ignore[operator]
+    # Deliver SIGTERM through the chain the launcher subscribed to.
+    assert "backend-main-task-cancel" in signal_chain.subscribers(signal.SIGTERM)
+    signal_chain._dispatch(signal.SIGTERM)
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -433,3 +432,113 @@ def test_main_catches_sigterm_cancellation_as_clean_exit(monkeypatch: pytest.Mon
 
 async def _noop_coro() -> None:
     return None
+
+
+class _ReadyLifecycle(_FakeLifecycle):
+    """Adds the two members a backend base reaches through the ``tai42_app``
+    handle: the boot-readiness latch and the post-apply fleet-op hook."""
+
+    async def wait_until_ready(self) -> None:
+        return None
+
+    def on_fleet_op_applied(self, func):
+        return func
+
+
+class _DrainingWorker(BackendRuntime):
+    """A runtime whose body returns only once its drain was requested, so a
+    severed body and a drained one are told apart."""
+
+    name = "worker"
+    mode = ExecutionMode.on_loop
+    consumes_work = True
+    latest: ClassVar[_DrainingWorker | None] = None
+
+    def __init__(self) -> None:
+        self.running = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.drained = False
+
+    @classmethod
+    def from_args(cls, args) -> _DrainingWorker:
+        cls.latest = cls()
+        return cls.latest
+
+    async def run_on_loop(self) -> None:
+        self.running.set()
+        await self.stopped.wait()
+        self.drained = True
+
+    def request_drain(self) -> None:
+        self.stopped.set()
+
+
+class _DrainingBackend(ManagedBackend):
+    label = "chain-test"
+    runtimes: ClassVar[Mapping[str, type[BackendRuntime]]] = {"worker": _DrainingWorker}
+
+
+async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One SIGTERM, two subscribers — the composed-chain regression.
+
+    The backend base wires its own drain onto SIGTERM while the launcher's
+    main-task cancellation is already there. With a raw ``add_signal_handler``
+    the second install destroys the first, so exactly one of these two
+    assertions fails: either in-flight work is severed, or ``app_context``
+    teardown is skipped. Both must hold.
+    """
+    _DrainingWorker.latest = None
+
+    class _DrainApp:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(config_manager=_FakeConfigManager())
+            self.lifecycle = _ReadyLifecycle()
+            self.torn_down = False
+
+        @asynccontextmanager
+        async def app_context(self, manifest, *, kind=None):
+            try:
+                yield
+            finally:
+                self.torn_down = True
+
+        async def run_backend(self, args) -> None:
+            await _DrainingBackend().launch(args)
+
+    app = _DrainApp()
+    monkeypatch.setattr(backend.instance, "build_app", lambda: app)
+    monkeypatch.setattr(backend.Manifest, "model_validate", staticmethod(lambda data: _FakeManifest()))
+
+    with tai42_app.bound(app):
+        task = asyncio.create_task(backend.run_backend(["worker"]))
+        worker = await _await_worker()
+
+        # BOTH are on the signal at once. A raw ``add_signal_handler`` on either
+        # side would leave exactly one here — silently, since asyncio reports no
+        # collision — and one of the two assertions below would then fail.
+        assert signal_chain.subscribers(signal.SIGTERM) == (
+            "backend-main-task-cancel",
+            "chain-test-worker-drain",
+        )
+        signal_chain._dispatch(signal.SIGTERM)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert worker.drained is True
+    assert app.torn_down is True
+    # The base's wiring is scoped to the run body and left; the launcher's
+    # subscription survived that registration AND that departure, which raw
+    # ``add_signal_handler``/``remove_signal_handler`` could not manage.
+    assert signal_chain.subscribers(signal.SIGTERM) == ("backend-main-task-cancel",)
+
+
+async def _await_worker() -> _DrainingWorker:
+    for _ in range(1000):
+        worker = _DrainingWorker.latest
+        if worker is not None and worker.running.is_set():
+            return worker
+        await asyncio.sleep(0)
+    raise AssertionError("the backend runtime never started")

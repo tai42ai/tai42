@@ -641,6 +641,139 @@ async def test_targeted_worker_replaced_mid_apply_is_departed(
     assert "generation 2" in (by_name["backend-1"].detail or "")
 
 
+# -- expected_at_start: membership pinned to op start, not to publish time -----
+#
+# publish censuses when it is called, which for every caller that applies locally first
+# is AFTER that apply. A worker whose presence fades across the apply is off that census
+# entirely — neither expected nor a gap row — so the op would report converged without
+# it. The caller hands in its own op-start census to close that window.
+
+
+async def _drop_presence(server: fakeredis.FakeServer, settings: BusSettings, name: str) -> None:
+    """Delete a presence key out from under the census — the TTL fading (or a deliberate
+    stop) during the publisher's local apply, as publish's own census would see it."""
+    client = aioredis.FakeRedis(server=server, decode_responses=True)
+    await client.delete(settings.presence_key(name))
+    await client.aclose()
+
+
+async def test_a_worker_that_fades_before_publish_is_off_the_census_entirely(wire_bus_client: None, server) -> None:
+    # WHY the snapshot is load-bearing: with no ``expected_at_start``, a live worker whose
+    # presence key is gone at publish time is not expected, not a gap row, and not in the
+    # report — the op reads as fully converged while a worker never confirmed.
+    publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+    worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+
+    async def apply(_op: dict) -> None:
+        return None
+
+    task, worker_id = await _spawn_subscriber(worker, apply)
+    try:
+        await _drop_presence(server, publisher._settings, worker_id.name)
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local)
+        assert [r.name for r in result.results] == [publisher.identity.name]
+        assert result.ok
+    finally:
+        await _stop(task)
+
+
+async def test_expected_at_start_still_collects_a_faded_workers_confirmation(wire_bus_client: None, server) -> None:
+    # The fixed window: ready+fresh at op start, presence gone by publish, worker still
+    # alive and replying. Carried in at its snapshot generation, so its terminal reply
+    # passes the generation gate and lands as ``applied`` — the confirmation is collected,
+    # not guessed at.
+    publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+    worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+
+    async def apply(_op: dict) -> dict:
+        return {"reloaded": True}
+
+    task, worker_id = await _spawn_subscriber(worker, apply)
+    try:
+        # The op-start census the publisher would have taken before its local apply.
+        at_start = {row.name: row.generation for row in await publisher.census() if row.name == worker_id.name}
+        assert at_start == {worker_id.name: worker_id.generation}
+
+        await _drop_presence(server, publisher._settings, worker_id.name)
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        result = await publisher.publish({"op": "reload_config"}, targets=None, local=local, expected_at_start=at_start)
+
+        by_name = {r.name: r for r in result.results}
+        assert by_name[worker_id.name].outcome == OpOutcome.applied
+        assert by_name[worker_id.name].payload == {"reloaded": True}
+        assert result.ok
+    finally:
+        await _stop(task)
+
+
+async def test_expected_at_start_worker_that_never_returns_is_departed_at_the_cut(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # The edge the late census was incidentally hiding: a worker that legitimately went
+    # away between op start and publish. Carrying it in cannot hang the collection — the
+    # apply deadline bounds it — and the re-checked presence makes the verdict honest:
+    # ``departed``, which drops the report off ``ok`` so the publisher logs it loudly.
+    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
+    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    at_start = {"backend-1": 1}
+    await _drop_presence(server, publisher._settings, "backend-1")
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    local = LocalApplyResult(outcome=OpOutcome.applied)
+    result = await publisher.publish({"op": "reload_config"}, targets=None, local=local, expected_at_start=at_start)
+    elapsed = loop.time() - start
+
+    by_name = {r.name: r for r in result.results}
+    assert by_name["backend-1"].outcome == OpOutcome.departed
+    assert "presence key expired" in (by_name["backend-1"].detail or "")
+    assert not result.ok
+    # Bounded by the apply deadline, never an open-ended wait on a worker that is gone.
+    assert elapsed < 2.0
+
+
+async def test_expected_at_start_never_overrides_a_live_gap_row(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # A carried name the publish-time census DOES still see keeps that census's verdict.
+    # A worker that has announced ``recycling`` is departing on purpose and converges by
+    # old-life-gone plus fresh capacity — re-admitting it would await a reply it never
+    # owed and burn the apply timeout on a planned exit.
+    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=5.0)
+    await _register_bare_presence(
+        server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.recycling
+    )
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    local = LocalApplyResult(outcome=OpOutcome.applied)
+    result = await publisher.publish(
+        {"op": "reload_config"}, targets=None, local=local, expected_at_start={"backend-1": 1}
+    )
+    elapsed = loop.time() - start
+
+    by_name = {r.name: r for r in result.results}
+    assert by_name["backend-1"].outcome == OpOutcome.recycling
+    assert elapsed < 2.0
+
+
+async def test_expected_at_start_never_widens_targets_nor_re_admits_self(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # Two names the snapshot must not smuggle into a targeted op's expected set: a worker
+    # outside ``targets`` (the op does not concern it) and the publisher's own name (it is
+    # reported from its own local result and could never reply to itself).
+    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
+    at_start = {"backend-2": 1, publisher.identity.name: 1}
+
+    result = await publisher.publish(
+        {"op": "reload_config"}, targets=["backend-1"], local=None, expected_at_start=at_start
+    )
+
+    assert [r.name for r in result.results] == ["backend-1"]
+
+
 # -- fork non-member derivation ------------------------------------------------
 
 
