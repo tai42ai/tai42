@@ -3,9 +3,7 @@ start wiring."""
 
 from __future__ import annotations
 
-import asyncio
 import os
-import signal
 import threading
 import time
 from types import SimpleNamespace
@@ -16,6 +14,7 @@ from click.testing import CliRunner
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq import worker as worker_module
+from tests.conftest import FakeRedisConn, FakeRqWorker
 
 # --- worker classes ----------------------------------------------------------
 
@@ -281,14 +280,6 @@ class FakeQueue:
         self.connection = connection
 
 
-class FakeRedisConn:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def _fake_worker_class(record: dict[str, Any]) -> type:
     class FakeWorker:
         name = "fake"
@@ -382,129 +373,223 @@ def test_build_worker_hands_a_none_name_to_the_worker_class(worker_env):
     assert worker_env["name"] is None
 
 
-# --- warm shutdown -------------------------------------------------------------
+# --- the worker runtime: the vendor binding the shared lifecycle drives ---------
 
 
-def test_request_warm_shutdown_busy_worker_defers_to_rq():
-    class BusyWorker:
-        name = "w1"
+def _built_runtime(args: list[str] | None = None, worker: Any = None, conn: Any = None) -> Any:
+    """A runtime as it stands after ``build()`` — with the engine objects the
+    base would have had it construct, injected."""
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args(args or []))
+    runtime._worker = worker if worker is not None else FakeRqWorker()
+    runtime._redis_conn = conn
+    return runtime
 
-        def __init__(self) -> None:
-            self.stops: list[Any] = []
-            self._stop_requested = False
 
-        def request_stop(self, signum: Any, frame: Any) -> None:
-            # rq's busy path: sets its own stop flag, no exception.
-            self.stops.append(signum)
-            self._stop_requested = True
+def test_the_worker_runtime_declares_a_drainable_off_loop_consumer():
+    runtime_cls = worker_module.RqWorkerRuntime
+    assert runtime_cls.name == "worker"
+    # The blocking work loop may not sit on the serving loop: the app's bus
+    # subscription lives there.
+    assert runtime_cls.mode is worker_module.ExecutionMode.worker_thread
+    assert runtime_cls.consumes_work is True
+    # rq forks a FRESH work-horse per job (and the non-forking pools run jobs in
+    # this process), so a registry mutation always reaches the next job. No
+    # persistent pool holds a stale snapshot, so there is nothing to turn over.
+    assert runtime_cls.pool_turnover_required is False
 
-    worker = BusyWorker()
-    worker_module.request_warm_shutdown(worker)
-    assert worker.stops == [signal.SIGTERM]
+
+def test_from_args_parses_the_worker_cli_options():
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args(["--pool", "solo", "-n", "w1", "--burst"]))
+
+    assert runtime._params == {
+        "redis_url": None,
+        "name": "w1",
+        "loglevel": "INFO",
+        "burst": True,
+        "results_ttl": 500,
+        "pool": "solo",
+    }
+
+
+def test_from_args_rejects_an_unknown_option():
+    """Strict parsing: a typo aborts the launch loudly instead of starting a
+    worker configured differently than the operator asked for."""
+    import click
+
+    with pytest.raises(click.UsageError):
+        worker_module.RqWorkerRuntime.from_args(["--frobnicate"])
+
+
+def test_from_args_starts_nothing(monkeypatch):
+    built: list[Any] = []
+    monkeypatch.setattr(worker_module, "_build_worker", lambda *args: built.append(args))
+
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args([]))
+
+    assert built == []
+    assert runtime._worker is None
+
+
+async def test_build_constructs_the_worker_and_its_connection(monkeypatch):
+    worker = FakeRqWorker()
+    conn = FakeRedisConn()
+    calls: list[Any] = []
+    monkeypatch.setattr(worker_module, "_build_worker", lambda *args: calls.append(args) or (worker, conn))
+
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args(["--pool", "gevent", "--redis-url", "redis://x/1"]))
+    await runtime.build()
+
+    assert calls == [("redis://x/1", None, 500, "gevent")]
+    assert runtime._worker is worker
+    assert runtime._redis_conn is conn
+
+
+def test_run_blocking_runs_rqs_own_work_loop():
+    worker = FakeRqWorker()
+    worker._stop_requested = True  # return immediately
+    runtime = _built_runtime(["--burst", "--loglevel", "debug"], worker=worker)
+
+    runtime.run_blocking()
+
+    assert worker.work_kwargs == {"burst": True, "logging_level": "DEBUG", "with_scheduler": True}
+
+
+def test_request_drain_sets_rqs_stop_flag_and_never_calls_request_stop():
+    """``request_stop`` re-binds SIGTERM/SIGINT at the C level: it removes asyncio's
+    signal machinery, and with it the host's chain and the main-task cancellation
+    that guarantees ``app_context`` teardown. The drain sets rq's own flag instead —
+    the same flag rq's ``_shutdown`` sets."""
+    worker = FakeRqWorker()
+    runtime = _built_runtime(worker=worker)
+
+    runtime.request_drain()
+
     assert worker._stop_requested is True
+    assert worker.stop_requests == []
 
 
-def test_request_warm_shutdown_idle_worker_sets_stop_flag():
-    from rq.exceptions import StopRequested
+def test_request_drain_is_idempotent():
+    """The base calls it on the signal AND again on the cancellation path, so a
+    second call must not escalate or fail."""
+    worker = FakeRqWorker()
+    runtime = _built_runtime(worker=worker)
 
-    class IdleWorker:
-        name = "w1"
+    runtime.request_drain()
+    runtime.request_drain()
 
-        def __init__(self) -> None:
-            self._stop_requested = False
-
-        def request_stop(self, signum: Any, frame: Any) -> None:
-            # rq's idle path: raises to unwind the work loop it does not run on.
-            raise StopRequested
-
-    worker = IdleWorker()
-    worker_module.request_warm_shutdown(worker)
     assert worker._stop_requested is True
+    assert worker.stop_requests == []
+    assert worker.kills == 0
 
 
-def test_request_warm_shutdown_off_main_thread_sets_flag_directly():
-    """Off the main thread rq's ``request_stop`` cannot run — its signal
-    re-bind (``signal.signal``) is main-thread-only and raises ValueError — so
-    the stop flag must be set directly, never through ``request_stop``."""
+def test_request_drain_works_off_the_main_thread():
+    """It must not touch main-thread-only APIs: the host may call it from any
+    thread it drives the lifecycle on, and ``request_stop`` would raise here."""
+    worker = FakeRqWorker()
+    runtime = _built_runtime(worker=worker)
 
-    class MainThreadOnlyWorker:
-        name = "w1"
-
-        def __init__(self) -> None:
-            self._stop_requested = False
-
-        def request_stop(self, signum: Any, frame: Any) -> None:
-            # Mirrors rq: request_stop starts by re-binding process signal
-            # handlers, which raises off the main thread.
-            raise ValueError("signal only works in main thread of the main interpreter")
-
-    worker = MainThreadOnlyWorker()
-    thread = threading.Thread(target=worker_module.request_warm_shutdown, args=(worker,))
+    thread = threading.Thread(target=runtime.request_drain)
     thread.start()
     thread.join(timeout=5)
+
     assert not thread.is_alive()
     assert worker._stop_requested is True
+    assert worker.stop_requests == []
 
 
-# --- run_rq_worker (the launch path) -------------------------------------------
+def test_an_idle_worker_stops_within_the_dequeue_poll_bound():
+    """The other half of the drain binding: the flag alone stops an IDLE worker.
+
+    rq's own idle stop depends on ``request_stop`` raising ``StopRequested``
+    inside the blocked dequeue — the very call the runtime must not make. The
+    mixin bounds each poll instead (``max_idle_time`` = ``dequeue_timeout``), so
+    a flag set from the loop thread is seen on the next poll and unwinds the
+    work loop.
+    """
+    from rq.exceptions import StopRequested
+
+    class Base:
+        def __init__(self) -> None:
+            self.name = "w1"
+            self.polls: list[Any] = []
+            self.polling = threading.Event()
+
+        def dequeue_job_and_maintain_ttl(self, timeout: Any, max_idle_time: Any = None) -> Any:
+            self.polls.append((timeout, max_idle_time))
+            self.polling.set()
+            time.sleep(0.01)
+            return None  # an idle poll that found no job
+
+    class IdleWorker(worker_module._TaiWorkerMixin, Base):
+        pass
+
+    worker = IdleWorker()
+    worker._stop_requested = False
+    runtime = _built_runtime(worker=worker)
+
+    stopped = threading.Event()
+
+    def work_loop() -> None:
+        try:
+            worker.dequeue_job_and_maintain_ttl(None)
+        except StopRequested:
+            stopped.set()
+
+    thread = threading.Thread(target=work_loop, daemon=True)
+    thread.start()
+    assert worker.polling.wait(timeout=5), "the work loop never reached its dequeue poll"
+
+    runtime.request_drain()
+
+    assert stopped.wait(timeout=5), "the idle worker never honored the drain"
+    # Each poll is bounded, which is what makes the flag observable at all.
+    assert worker.polls[0] == (worker_module._DEQUEUE_POLL_SECONDS, worker_module._DEQUEUE_POLL_SECONDS)
 
 
-class _ThreadedFakeWorker:
-    """Runs a stop-flag poll loop, like the real work loop off the main thread."""
+def test_request_terminate_kills_the_work_horse():
+    worker = FakeRqWorker(horse_pid=4242)
+    runtime = _built_runtime(worker=worker)
 
-    name = "w1"
+    runtime.request_terminate()
 
-    def __init__(self) -> None:
-        self._stop_requested = False
-        self.work_kwargs: dict[str, Any] | None = None
-        self.work_thread: threading.Thread | None = None
-
-    def request_stop(self, signum: Any, frame: Any) -> None:
-        from rq.exceptions import StopRequested
-
-        raise StopRequested
-
-    def work(self, **kwargs: Any) -> None:
-        self.work_kwargs = kwargs
-        self.work_thread = threading.current_thread()
-        while not self._stop_requested:
-            time.sleep(0.005)
+    assert worker.kills == 1
 
 
-async def test_run_rq_worker_keeps_the_loop_alive_and_stops_warm_on_cancel(monkeypatch):
-    worker = _ThreadedFakeWorker()
+def test_request_terminate_without_a_horse_leaves_the_drain_running(caplog):
+    """The non-forking pools run the job in this process: there is nothing to
+    kill, so the warm drain stands and the supervisor's kill is the backstop."""
+    worker = FakeRqWorker(horse_pid=0)
+    runtime = _built_runtime(worker=worker)
+
+    with caplog.at_level("WARNING"):
+        runtime.request_terminate()
+
+    assert worker.kills == 0
+    assert any("no work-horse to kill" in record.message for record in caplog.records)
+
+
+async def test_aclose_closes_the_connection_the_runtime_owns():
     conn = FakeRedisConn()
-    monkeypatch.setattr(worker_module, "_build_worker", lambda *args: (worker, conn))
+    runtime = _built_runtime(conn=conn)
 
-    task = asyncio.create_task(worker_module.run_rq_worker(None, "w1", "info", False, 500, "solo"))
-    # The loop stays responsive while the work loop runs on a worker thread.
-    async with asyncio.timeout(5):
-        while worker.work_thread is None:
-            await asyncio.sleep(0.005)
-    assert worker.work_thread is not threading.main_thread()
-    assert not task.done()
-    assert worker.work_kwargs == {"burst": False, "logging_level": "INFO", "with_scheduler": True}
+    await runtime.aclose()
 
-    # Cancellation requests a warm shutdown and awaits the work loop's exit.
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert worker._stop_requested is True
     assert conn.closed
 
 
-async def test_run_rq_worker_returns_when_the_work_loop_exits(monkeypatch):
-    class BurstWorker:
-        name = "w1"
+async def test_aclose_before_a_connection_exists_is_a_no_op():
+    """``aclose`` is awaited on every exit path, including one that never got
+    past ``build``."""
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args([]))
 
-        def work(self, **kwargs: Any) -> None:
-            pass
+    await runtime.aclose()
 
-    conn = FakeRedisConn()
-    monkeypatch.setattr(worker_module, "_build_worker", lambda *args: (BurstWorker(), conn))
 
-    await worker_module.run_rq_worker(None, "w1", "info", True, 500, "solo")
-    assert conn.closed
+def test_driving_the_runtime_before_build_is_refused_loudly():
+    runtime = cast("Any", worker_module.RqWorkerRuntime.from_args([]))
+
+    with pytest.raises(RuntimeError, match="before build"):
+        runtime.request_drain()
 
 
 # ---- liveness: the heartbeats a BUSY worker must keep refreshing -------------

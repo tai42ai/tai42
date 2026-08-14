@@ -11,6 +11,8 @@ fixture resets per-test knobs.
 from __future__ import annotations
 
 import fnmatch
+import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -128,7 +130,8 @@ class StubMonitoring:
 
 class StubLifecycle:
     """The app double is always ready, so ``wait_until_ready`` resolves at once —
-    the readiness gate ``run_rq_worker`` awaits before its work loop starts."""
+    the readiness gate the shared launch base awaits before a consuming runtime
+    starts."""
 
     async def wait_until_ready(self) -> None:
         return None
@@ -178,6 +181,48 @@ def app() -> StubApp:
 
 
 # --- Shared fakes ----------------------------------------------------------
+
+
+class FakeRedisConn:
+    """The dedicated connection ``build`` hands the worker runtime, so a test can
+    assert ``aclose`` released it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeRqWorker:
+    """An rq worker stand-in carrying only what the runtime touches.
+
+    ``request_stop`` exists precisely so a test can assert it is NEVER called:
+    reaching it in the real worker re-binds the process's signal handlers and
+    destroys the host's composed chain.
+    """
+
+    def __init__(self, name: str = "w1", horse_pid: int = 0) -> None:
+        self.name = name
+        self.horse_pid = horse_pid
+        self._stop_requested = False
+        self.stop_requests: list[Any] = []
+        self.kills = 0
+        self.work_kwargs: dict[str, Any] | None = None
+        self.work_thread: threading.Thread | None = None
+
+    def request_stop(self, signum: Any, frame: Any) -> None:
+        self.stop_requests.append(signum)
+
+    def kill_horse(self) -> None:
+        self.kills += 1
+
+    def work(self, **kwargs: Any) -> None:
+        """rq's blocking work loop: runs until the stop flag is set."""
+        self.work_kwargs = kwargs
+        self.work_thread = threading.current_thread()
+        while not self._stop_requested:
+            time.sleep(0.005)
 
 
 def make_client_ctx(client: Any) -> Callable[..., Any]:
