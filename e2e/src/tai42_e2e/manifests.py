@@ -1808,7 +1808,11 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
     compose-provided self-hosted Langfuse (opt-in)."""
     manifest = {
         "default_routers": "none",
-        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.observability"],
+        "routers_modules": [
+            *_CORE_ROUTERS,
+            "tai42_skeleton.routers.observability",
+            "tai42_skeleton.routers.agents",
+        ],
         # The probe entry attaches a proxy branch and (this profile) an e2e_echo monitor
         # branch, so proxy + prometheus + the monitor builtin must all load or extension
         # validation aborts boot.
@@ -1822,6 +1826,10 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
         # e2e_echo_monitor traces each standalone call as a TOOL span, giving the langfuse
         # observability test a real run to read back.
         "tools": [_probe_tools_entry(with_backend_branches=False, with_monitor_branch=True), *_builtin_entries()],
+        # The base reference agent, traced natively through the agents plugin's
+        # monitoring callbacks, gives the observability test an agent run to read back
+        # alongside the tool run.
+        "agents": [_AGENT_ENTRIES[0]],
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask_user", "reload_config"],
     }
@@ -1844,6 +1852,11 @@ def build_monitoring_stack(res: StackResources, variants: Variants) -> StackConf
     env["LANGFUSE_HOST"] = host
     env["LANGFUSE_PUBLIC_KEY"] = public_key
     env["LANGFUSE_SECRET_KEY"] = secret_key
+    # The reference agent wires a checkpointer and runs on the scripted LLM/embedding
+    # stub — pin its checkpoint/store to the in-process memory provider and point its
+    # model access at the stub, exactly as the agents stack does for this agent.
+    env.update(_memory_agent_state_env())
+    env.update(_llm_env(res))
     return StackConfig(
         name="monitoring",
         topology=Topology.MULTIWORKER,
