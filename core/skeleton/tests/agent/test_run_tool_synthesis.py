@@ -14,10 +14,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import sys
+import time
 import warnings
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from pydantic.json_schema import PydanticJsonSchemaWarning
@@ -30,6 +32,7 @@ from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.tools.binding import _derive_input_schema
+from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware, _turn_budget_armed, turn_budget
 
 
 @pytest.fixture(autouse=True)
@@ -400,7 +403,7 @@ def test_the_run_tool_allows_an_unreserved_thread():
     asyncio.run(run())
 
 
-# -- the run timeout ----------------------------------------------------------
+# -- the turn budget ----------------------------------------------------------
 
 
 def _sleeper_manifest() -> Manifest:
@@ -409,26 +412,40 @@ def _sleeper_manifest() -> Manifest:
     )
 
 
+def _plain_tools_manifest(*names: str) -> Manifest:
+    return Manifest.model_validate(
+        {"tools": [{"title": "tools", "module": "tests.agent._turn_budget_fixtures", "include": list(names)}]}
+    )
+
+
 @pytest.fixture
-def set_run_timeout(monkeypatch: pytest.MonkeyPatch):
-    # Set the run timeout via env, drop the settings cache so the accessor rereads
-    # it, and drop it again on teardown so the value cannot leak into later tests.
+def set_turn_timeout(monkeypatch: pytest.MonkeyPatch):
+    # Set the turn budget via env, drop the settings cache so the accessor rereads it,
+    # and drop it again on teardown so the value cannot leak into later tests.
     def _set(value: str) -> None:
-        monkeypatch.setenv("TAI_AGENT_RUN_TIMEOUT_SECONDS", value)
+        monkeypatch.setenv("TAI_TURN_TIMEOUT_SECONDS", value)
         reset_all_settings()
 
     yield _set
     reset_all_settings()
 
 
+def _fixture_flag(module: str, name: str) -> object:
+    # A fixtures module is popped from sys.modules and re-imported on each app_context
+    # enter, so a tool/agent that ran mutates the LIVE module object; read the flag off
+    # that one, not a stale import binding.
+    return getattr(sys.modules[module], name)
+
+
+def _budget_flag(name: str) -> object:
+    return _fixture_flag("tests.agent._turn_budget_fixtures", name)
+
+
 def _sleeper_completed() -> bool:
-    # The agents module is popped from sys.modules and re-imported on each
-    # app_context enter, so the SleeperAgent that ran mutates the LIVE module
-    # object; read the flag off that one, not a stale import binding.
-    return sys.modules["tests.agent._fixtures"].sleeper_completed
+    return bool(_fixture_flag("tests.agent._fixtures", "sleeper_completed"))
 
 
-def test_run_timeout_off_by_default_runs_unbounded():
+def test_turn_timeout_off_by_default_runs_unbounded():
     # No env set: the timeout is None, the run tool awaits the turn unbounded, and a
     # turn slower than any nonexistent limit still completes.
     async def run() -> None:
@@ -439,8 +456,8 @@ def test_run_timeout_off_by_default_runs_unbounded():
     assert _sleeper_completed() is True
 
 
-def test_run_timeout_set_allows_a_run_under_the_limit(set_run_timeout):
-    set_run_timeout("5")
+def test_turn_timeout_set_allows_a_run_under_the_limit(set_turn_timeout):
+    set_turn_timeout("5")
 
     async def run() -> None:
         async with app.app_context(_sleeper_manifest()):
@@ -450,12 +467,12 @@ def test_run_timeout_set_allows_a_run_under_the_limit(set_run_timeout):
     assert _sleeper_completed() is True
 
 
-def test_run_timeout_exceeded_raises_typed_error_and_cancels_the_turn(set_run_timeout):
-    set_run_timeout("0.05")
+def test_turn_timeout_exceeded_raises_typed_error_and_cancels_the_turn(set_turn_timeout):
+    set_turn_timeout("0.05")
 
     async def run() -> None:
         async with app.app_context(_sleeper_manifest()):
-            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s run timeout"):
+            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
                 await app.tools.run_tool("sleeper", {"seconds": 5})
 
     asyncio.run(run())
@@ -463,12 +480,12 @@ def test_run_timeout_exceeded_raises_typed_error_and_cancels_the_turn(set_run_ti
     assert _sleeper_completed() is False
 
 
-def test_detached_run_ignores_the_timeout_and_runs_unbounded(set_run_timeout):
+def test_detached_run_ignores_the_timeout_and_runs_unbounded(set_turn_timeout):
     # A detached run (a background submit or a hook/trigger fire) has no live caller
-    # holding a connection, so the run budget does not apply: with the detached flag
+    # holding a connection, so the turn budget does not apply: with the detached flag
     # set, a turn far slower than the limit still completes and no TurnTimeoutError is
     # raised — exactly as if the setting were unset.
-    set_run_timeout("0.05")
+    set_turn_timeout("0.05")
 
     async def run() -> None:
         async with app.app_context(_sleeper_manifest()):
@@ -489,11 +506,11 @@ def _inner_timeout_manifest() -> Manifest:
     )
 
 
-def test_inner_timeout_error_passes_through_not_reclassified(set_run_timeout):
+def test_inner_timeout_error_passes_through_not_reclassified(set_turn_timeout):
     # A builtin TimeoutError raised by the turn's OWN work (e.g. a jq budget abort)
-    # under a generous run timeout reaches the caller unchanged — the wrapper must
+    # under a generous turn budget reaches the caller unchanged — the wrapper must
     # not mistake it for the turn overrunning its limit.
-    set_run_timeout("300")
+    set_turn_timeout("300")
 
     async def run() -> None:
         async with app.app_context(_inner_timeout_manifest()):
@@ -502,3 +519,143 @@ def test_inner_timeout_error_passes_through_not_reclassified(set_run_timeout):
             assert not isinstance(excinfo.value, TurnTimeoutError)
 
     asyncio.run(run())
+
+
+def test_plain_tool_over_budget_raises_turn_timeout_and_cancels(set_turn_timeout):
+    # A NON-agent tool (a plain function tool) reached through the shared seam is
+    # covered by the same budget: over-budget raises the typed error and the run is
+    # cancelled on expiry (its completion flag stays False).
+    set_turn_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("slow_tool")):
+            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
+                await app.tools.run_tool("slow_tool", {"seconds": 5})
+
+    asyncio.run(run())
+    assert _budget_flag("slow_tool_completed") is False
+
+
+def test_plain_tool_under_budget_completes(set_turn_timeout):
+    set_turn_timeout("5")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("slow_tool")):
+            assert await app.tools.run_tool("slow_tool", {"seconds": 0.0}) == "slow-done"
+
+    asyncio.run(run())
+    assert _budget_flag("slow_tool_completed") is True
+
+
+def test_nested_dispatch_bounded_by_outer_window_no_rearm(set_turn_timeout):
+    # A nested dispatch through the seam (``nested_outer`` -> ``run_tool`` ->
+    # ``nested_inner``) does NOT re-arm a fresh window: the inner call sees the budget
+    # already armed by the outer call and opens none of its own, so the single OUTER
+    # window bounds the whole turn and cancels the slow inner mid-run.
+    set_turn_timeout("0.1")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("nested_outer", "nested_inner")):
+            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.1s turn timeout"):
+                await app.tools.run_tool("nested_outer", {"seconds": 5})
+
+    asyncio.run(run())
+    # The inner tool observed the budget already armed (the guard), so it opened no
+    # window of its own; the outer window cancelled it before it could complete.
+    assert _budget_flag("nested_inner_saw_armed") is True
+    assert _budget_flag("nested_inner_completed") is False
+
+
+def test_nested_turn_budget_reuses_outer_window_and_disarms_cleanly(set_turn_timeout):
+    # Directly on the arming primitive: the outer call arms the guard, a nested call
+    # sees it armed and adds no arming of its own, exiting the nested block leaves the
+    # outer arming intact, and only the outer exit disarms.
+    set_turn_timeout("5")
+
+    async def run() -> None:
+        assert _turn_budget_armed.get() is False
+        async with turn_budget():
+            assert _turn_budget_armed.get() is True
+            async with turn_budget():
+                assert _turn_budget_armed.get() is True
+            assert _turn_budget_armed.get() is True
+        assert _turn_budget_armed.get() is False
+
+    asyncio.run(run())
+
+
+def test_turn_budget_unset_runs_unbounded():
+    # No env set: the budget is None, so the arming primitive is a pure pass-through —
+    # it never arms and a block far slower than any nonexistent limit still completes.
+    async def run() -> None:
+        async with turn_budget():
+            assert _turn_budget_armed.get() is False
+            await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+
+# -- the MCP tool-call edge middleware ----------------------------------------
+
+
+def test_edge_middleware_over_budget_raises_turn_timeout(set_turn_timeout):
+    # The MCP session ``tools/call`` edge arms the budget itself (it never reaches the
+    # ``run_tool`` seam): ``TurnBudgetMiddleware.on_call_tool`` wraps ``call_next`` in
+    # the budget, so a call_next slower than the limit is cancelled on expiry and raises
+    # the typed error.
+    set_turn_timeout("0.05")
+    mw = TurnBudgetMiddleware()
+
+    async def call_next(_ctx):
+        await asyncio.sleep(5)
+        return "reached"
+
+    async def run() -> None:
+        with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
+            await mw.on_call_tool(cast("MiddlewareContext[Any]", object()), call_next)
+
+    asyncio.run(run())
+
+
+def test_edge_middleware_arms_once_nested_run_tool_sees_armed_no_rearm(set_turn_timeout):
+    # The edge middleware arms the budget BEFORE call_next runs; when call_next reaches
+    # the shared ``run_tool`` seam, the seam sees the guard already armed and opens no
+    # second window — the single edge window bounds the whole turn.
+    set_turn_timeout("5")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("nested_inner")):
+            mw = TurnBudgetMiddleware()
+
+            async def call_next(_ctx):
+                # The edge already armed the budget: the guard is set before the seam.
+                assert _turn_budget_armed.get() is True
+                return await app.tools.run_tool("nested_inner", {"seconds": 0.0})
+
+            assert await mw.on_call_tool(cast("MiddlewareContext[Any]", object()), call_next) == "inner-done"
+
+    asyncio.run(run())
+    # The seam ran under the guard the edge armed, so it opened no window of its own.
+    assert _budget_flag("nested_inner_saw_armed") is True
+    assert _budget_flag("nested_inner_completed") is True
+
+
+def test_offloaded_sync_tool_outruns_cancellation_and_completes_in_background(set_turn_timeout):
+    # Python cannot cancel a running thread: when a plain (sync) tool is offloaded via
+    # ``asyncio.to_thread`` and the budget expires, the awaiting caller is answered with
+    # ``TurnTimeoutError``, but the thread runs to completion in the background — the real
+    # boundary of the turn budget.
+    set_turn_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("blocking_sync_tool")):
+            with pytest.raises(TurnTimeoutError, match=r"turn exceeded the 0\.05s turn timeout"):
+                await app.tools.run_tool("blocking_sync_tool", {"seconds": 0.4}, offload_sync=True)
+
+    asyncio.run(run())
+    # The caller was answered on expiry, yet the offloaded thread could not be interrupted
+    # and recorded its completion in the background.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not _budget_flag("blocking_sync_completions"):
+        time.sleep(0.02)
+    assert list(_budget_flag("blocking_sync_completions")) == ["blocking_sync_tool"]

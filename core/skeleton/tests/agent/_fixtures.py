@@ -111,7 +111,7 @@ class SleeperInput(BaseModel):
 
 
 # Set to True only if a ``SleeperAgent`` run reaches its end; a run cancelled by the
-# run timeout must leave it False (no orphaned turn continuing past the deadline).
+# turn timeout must leave it False (no orphaned turn continuing past the deadline).
 sleeper_completed = False
 
 
@@ -131,7 +131,7 @@ class SleeperAgent(Agent):
 @tai42_app.agents.agent("inner_timeout")
 class InnerTimeoutAgent(Agent):
     """A run whose own work raises a builtin ``TimeoutError`` (standing in for an
-    inner budget abort such as the jq utility's). Under a generous run timeout the
+    inner budget abort such as the jq utility's). Under a generous turn timeout the
     caller must receive this ORIGINAL error, never a ``TurnTimeoutError``."""
 
     tool_name = "inner_timeout"

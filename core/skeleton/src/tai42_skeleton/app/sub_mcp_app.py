@@ -378,6 +378,12 @@ class SubMcpAppRouter:
         from tai42_skeleton.authz.middleware import AuthzMiddleware
 
         mcp.add_middleware(AuthzMiddleware(self._app))
+        # Synchronous turn budget for this sub-MCP edge, armed for the same reason and in
+        # the same innermost position as the main server (a sub-MCP ``tools/call`` reaches
+        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam).
+        from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
+
+        mcp.add_middleware(TurnBudgetMiddleware())
 
         if config.transport == "stdio":
             return None, None

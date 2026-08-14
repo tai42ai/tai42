@@ -190,6 +190,13 @@ class ServingCore:
         from tai42_skeleton.authz.middleware import AuthzMiddleware
 
         self._fast_mcp.add_middleware(AuthzMiddleware(app))
+        # Synchronous turn budget for this MCP edge: an MCP ``tools/call`` dispatches to
+        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so it arms the
+        # budget itself. Added INNERMOST (after authz/reload) so a denied or rejected call
+        # never opens a window.
+        from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
+
+        self._fast_mcp.add_middleware(TurnBudgetMiddleware())
 
         # Per-feature impl collaborators — the bodies behind the facets.
         self._tool_binding = ToolBinding(app)

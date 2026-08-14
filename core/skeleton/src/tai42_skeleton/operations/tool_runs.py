@@ -374,8 +374,8 @@ async def _supervise(
         # Bind this run's id as the interaction origin for the tool body, so a
         # question the tool raises through ``ask_user`` is attributed to the run.
         origin_token = set_interaction_origin(run_id)
-        # Detached: this run has no live caller holding a connection, so the agent run
-        # budget does not apply — covers a background submit AND a store-ON hook fire.
+        # Detached: this run has no live caller holding a connection, so the turn budget
+        # does not apply — covers a background submit AND a store-ON hook fire.
         detached_token = mark_detached_run()
         tool_error: Exception | None = None
         try:
@@ -454,7 +454,7 @@ async def run_recorded(tool_name: str, arguments: dict[str, Any]) -> None:
     creating the record propagates loudly to the caller."""
     if not tool_runs_store_configured():
         # Detached, store OFF: run unrecorded but still with no live caller, so the
-        # agent run budget is skipped here exactly as on the store-ON path. The tool is
+        # turn budget is skipped here exactly as on the store-ON path. The tool is
         # thread-offloaded like every other execution site, so a synchronous tool never
         # blocks the event loop — the OFF branch only skips recording, not the offload.
         detached_token = mark_detached_run()

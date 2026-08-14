@@ -35,6 +35,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
 from tai42_skeleton.tools.context_bridge import bridge_context
+from tai42_skeleton.tools.turn_budget import turn_budget
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -472,13 +473,26 @@ class ToolBinding:
         (``offload_sync=False``) path run inline on the event loop.
 
         A dispatch under a bound execution identity is authorized against it first, on the
-        arguments actually about to be fired (:meth:`_authorize_execution_dispatch`)."""
+        arguments actually about to be fired (:meth:`_authorize_execution_dispatch`).
+
+        The shared execution seam every in-process door flows through, so the synchronous
+        turn budget is armed here ONCE: :func:`turn_budget` guards a live caller's held
+        connection and its ContextVar keeps a nested re-dispatch from opening a fresh
+        window; a detached run (a background submit, a hook/trigger fire, a backend-worker
+        execution) runs unbounded."""
         # An agent run tool's re-dispatch (e.g. a chain TRANSFORMER re-invoking it by
         # name) materializes the _UNSET sentinel for optionals the caller never
         # supplied; strip it here so the set-fields-only contract holds and the tool's
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
+        async with turn_budget():
+            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+
+    async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
+        """Resolve ``key`` and invoke it under any bound execution identity, arguments
+        already stripped of the ``_UNSET`` sentinel. The turn budget (:meth:`run_tool`)
+        wraps this dispatch."""
         # Execution-identity seam: decided at INVOCATION, before the tool is resolved, on
         # the exact arguments this call fires. With no identity bound it is a contextvar
         # read and the path below is untouched.

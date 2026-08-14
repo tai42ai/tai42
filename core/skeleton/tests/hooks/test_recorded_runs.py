@@ -41,7 +41,7 @@ class _Tools:
     def __init__(self, raise_for: set[str] | None = None, gate: asyncio.Event | None = None) -> None:
         self.calls: list[tuple[str, dict, bool]] = []
         # The value of the detached flag observed inside each call — the fire path
-        # must run the tool as detached (no live caller), so the run budget is skipped.
+        # must run the tool as detached (no live caller), so the turn budget is skipped.
         self.detached_seen: list[bool] = []
         self._raise_for = raise_for or set()
         self._gate = gate
@@ -157,7 +157,7 @@ async def test_store_off_runs_hook_unrecorded_without_error(wired, monkeypatch, 
 
 async def test_hook_fire_runs_the_tool_detached_store_on(wired, monkeypatch):
     # Store configured: the fire runs through ``_supervise``, which flags the run as
-    # detached around the tool invocation so the agent run budget is skipped. The flag
+    # detached around the tool invocation so the turn budget is skipped. The flag
     # is sampled INSIDE the tool call (``detached_seen``); the fan-out runs each hook in
     # its own ``asyncio.gather`` child task, so the reset is only observable in that
     # task's context — the reset itself is pinned by the direct-call tests below.

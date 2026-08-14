@@ -5,6 +5,7 @@ dispatches — and survives a reload with ``AuthzMiddleware`` intact."""
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 
@@ -15,6 +16,7 @@ from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.cli.openapi import build_openapi_spec
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
+from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
 from tests.app._fixtures.reload import reload_with
 
 
@@ -177,3 +179,50 @@ def test_skeleton_projection_survives_reload():
             assert any(isinstance(m, AuthzMiddleware) for m in app._fast_mcp.middleware)
 
     asyncio.run(run())
+
+
+def _index_of(middleware, cls) -> int:
+    for i, m in enumerate(middleware):
+        if isinstance(m, cls):
+            return i
+    pytest.fail(f"{cls.__name__} middleware not found in the add-order")
+
+
+def test_turn_budget_middleware_registered_after_authz_on_main_and_sub_mcp(monkeypatch):
+    """The synchronous turn budget is armed at the MCP tool-call edge: its middleware is
+    installed on the main server AND on every sub-MCP mount, always AFTER ``AuthzMiddleware``
+    in the add-order. fastmcp runs ``reversed(self.middleware)``, so the later-added budget
+    is the innermost — a denied call never opens a window."""
+    from starlette.applications import Starlette
+
+    import tai42_skeleton.app.sub_mcp_app as sub_mod
+    from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
+
+    instances: list = []
+    real_fastmcp = sub_mod.FastMCP
+
+    class _RecordingFastMCP(real_fastmcp):
+        def __init__(self, *a, **k) -> None:
+            super().__init__(*a, **k)
+            instances.append(self)
+
+    monkeypatch.setattr(sub_mod, "FastMCP", _RecordingFastMCP)
+
+    async def run():
+        async with app.app_context(_manifest()):
+            # Main server: both middlewares present, the budget added after authz.
+            main = app._fast_mcp.middleware
+            assert _index_of(main, TurnBudgetMiddleware) > _index_of(main, AuthzMiddleware)
+
+            router = cast("SubMcpAppRouter", app.sub_app.mcp_sub_app_router)
+            async with router.lifespan(cast("Starlette", None)):
+                await router.register_sub_mcp_app("http_svc", ["sample_greet"], transport="http")
+                assert await router._get_or_build_app("http_svc") is not None
+
+    asyncio.run(run())
+
+    # Every sub-MCP mount re-adds both middlewares (the main server's never reach a
+    # sub-mount), the budget after authz there too.
+    assert instances, "no sub-MCP FastMCP was built"
+    for inst in instances:
+        assert _index_of(inst.middleware, TurnBudgetMiddleware) > _index_of(inst.middleware, AuthzMiddleware)
