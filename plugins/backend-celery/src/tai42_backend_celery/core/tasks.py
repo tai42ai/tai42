@@ -93,7 +93,7 @@ async def run_tool(**kwargs: Any) -> Any:
     """Pop the dispatch-injected tool name and run that tool with the rest."""
     tool_name = kwargs.pop(celery_settings().tool_name_arg)
     # A worker executes a dequeued task with no live caller holding a
-    # connection, so the agent run budget does not apply.
+    # connection, so the turn budget does not apply.
     detached_token = mark_detached_run()
     try:
         return await tai42_app.tools.run_tool(tool_name, kwargs)

@@ -25,7 +25,7 @@ class _RecordingTools:
         self.run_tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.run_tool_result: Any = None
         # The detached flag observed inside each call — a worker execution has no
-        # live caller, so the tool must run detached and the run budget be skipped.
+        # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
 
     def tool(self, func: Any = None, /, *args: Any, **kwargs: Any) -> Any:

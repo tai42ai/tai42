@@ -32,7 +32,7 @@ class RecordingTools:
         self.run_result: Any = None
         self.run_error: Exception | None = None
         # The detached flag observed inside each call — a worker execution has no
-        # live caller, so the tool must run detached and the run budget be skipped.
+        # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
 
     def tool(self, *args: Any, **kwargs: Any) -> Any:

@@ -1,11 +1,11 @@
-"""Marker for a detached agent run — one with no live caller holding a connection.
+"""Marker for a detached run — one with no live caller holding a connection.
 
-The run budget (``TAI_AGENT_RUN_TIMEOUT_SECONDS``) guards a live caller's held
+The turn budget (``TAI_TURN_TIMEOUT_SECONDS``) guards a live caller's held
 connection; a detached run has no caller and runs unbounded. Three execution
 classes are detached: a background submit, a hook/trigger fire, and a
 backend-worker execution of a dequeued task. Each detached entry path flags the
-context around the tool invocation and the run-tool binding reads the flag to
-skip the budget. Homed in kit so both the skeleton binding that reads it and the
+context around the tool invocation and the turn-budget arming reads the flag to
+skip the budget. Homed in kit so both the skeleton that reads it and the
 execution backends below the skeleton (which never import tai42-skeleton) can
 set it.
 """
