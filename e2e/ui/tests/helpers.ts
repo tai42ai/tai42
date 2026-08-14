@@ -134,30 +134,47 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
  *
  * Toggle-aware: when an accounts provider is installed, `/api/login/methods` is
  * non-empty and the renderer collapses the key-paste form behind a "Use an API key
- * instead" toggle. This helper waits for the methods fetch to settle (either the
- * toggle or the key field becomes visible), clicks the toggle when present, then
- * pastes the key — so it stays correct on stacks with AND without accounts. The
- * submit button is scoped to the key-paste form because a rendered password method
- * also carries a "Sign in" button (its title), which would otherwise be ambiguous.
+ * instead" toggle; with no accounts provider the key field is rendered directly.
+ *
+ * The screen paints before that read settles and re-renders into the other shape when
+ * it does, so nothing observed on the credential screen is a fact the next line can
+ * build on: the shape a look at the toggle reported can be the other one by the time
+ * the next action runs, a field that already took the key can be replaced by a fresh
+ * empty one, and a form that was filled and ticked can be torn down before its submit
+ * button is reachable. The whole key-paste interaction — expand behind the toggle when
+ * one is showing, paste, tick remember, submit — is therefore driven as ONE retried
+ * unit that only completes once the credential screen has actually been left, so a
+ * swap at any point inside it just costs an attempt. Each action carries its OWN short
+ * bound: aimed at an element the swap is about to remove, an unbounded action would
+ * wait out the whole test budget instead of failing fast into the next attempt, while
+ * the bound on the unit as a whole is what gives the fetch room to land. Re-entering is
+ * safe because the guard skips a unit that has already navigated, `fill` and `check`
+ * are unconditional writes rather than accumulating ones, and the toggle — the one
+ * step that is not idempotent on its own — converges through the retry: a click that
+ * collapsed the form leaves the toggle showing again, so the next attempt re-expands
+ * it. That is correct on stacks with AND without accounts, under either settle
+ * ordering. The submit button is scoped to the form that owns the key field because a
+ * rendered password method also carries a "Sign in" button (its title), which would
+ * otherwise be ambiguous.
+ *
+ * A full-projection session's lander navigates to its first covered feature entry —
+ * Dashboard, whose route is /observability — so that is where a completed login settles.
  */
 export async function loginViaUi(page: Page, key: string = API_KEY): Promise<void> {
   await page.goto('/login');
   const toggle = page.getByRole('button', { name: 'Use an API key instead' });
   const keyField = page.getByLabel('API key');
-  // The methods fetch resolves to one of two shapes: the toggle (accounts present,
-  // key-paste collapsed) or the key field directly (no accounts). Wait for whichever
-  // lands before deciding.
-  await expect(toggle.or(keyField).first()).toBeVisible();
-  if (await toggle.isVisible()) await toggle.click();
-  await keyField.fill(key);
-  await page.getByRole('checkbox', { name: 'Remember on this device (this browser session)' }).check();
-  // Scope to the form that owns the API-key field: on an accounts stack a password
-  // method's submit button is also labelled "Sign in".
+  const remember = page.getByRole('checkbox', { name: 'Remember on this device (this browser session)' });
   const keyForm = page.locator('form').filter({ has: keyField });
-  await keyForm.getByRole('button', { name: 'Sign in' }).click();
-  // A full-projection session's lander navigates to its first covered feature entry —
-  // Dashboard, whose route is /observability — so that is where a completed login settles.
-  await page.waitForURL('**/observability');
+  await expect(async () => {
+    if (new URL(page.url()).pathname.startsWith('/login')) {
+      if (await toggle.isVisible()) await toggle.click({ timeout: 2_000 });
+      await keyField.fill(key, { timeout: 2_000 });
+      await remember.check({ timeout: 2_000 });
+      await keyForm.getByRole('button', { name: 'Sign in' }).click({ timeout: 2_000 });
+    }
+    await page.waitForURL('**/observability', { timeout: 5_000 });
+  }).toPass({ timeout: 45_000 });
 }
 
 /**
