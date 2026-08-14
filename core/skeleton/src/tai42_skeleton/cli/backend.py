@@ -5,7 +5,9 @@ import signal
 
 import click
 from dotenv import load_dotenv
+from tai42_contract.backend import CONSUMING_RUNTIME
 from tai42_kit.logging import logging_settings, setup_logging
+from tai42_kit.signals import signal_chain
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import require_bus_for_backend, require_bus_for_k8s
@@ -25,10 +27,14 @@ async def run_backend(extra_args):
     # unhandled SIGTERM would kill the process outright and skip it. SIGINT is
     # already safe (KeyboardInterrupt → the runner cancels the task). Unix/uvloop
     # only, matching the CLI's target.
-    loop = asyncio.get_running_loop()
+    #
+    # It goes through the composed chain because a backend runtime installs its own
+    # drain handler on the same signal; asyncio's ``add_signal_handler`` is
+    # last-writer-wins, so a direct install here would be destroyed by it — taking
+    # the only guarantee of teardown with it.
     main_task = asyncio.current_task()
     assert main_task is not None
-    loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
+    signal_chain.add(signal.SIGTERM, main_task.cancel, name="backend-main-task-cancel")
 
     # Worker-bus boot rule (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE the app
     # (and its config manager) is built, so a k8s-mode busless backend refuses on the
@@ -63,7 +69,10 @@ async def run_backend(extra_args):
     # secrets and is readable by same-user process inspection, so it is not exported
     # into runtimes that fork nothing (a scheduler ``beat``, a dashboard): those need
     # no manifest view, and widening the export would spread the secrets for nothing.
-    if "worker" in extra_args:
+    # The sniff runs BEFORE the plugin module is imported, so it cannot ask the
+    # backend which of its runtimes consumes work: the name is a host/backend
+    # agreement the contract holds.
+    if CONSUMING_RUNTIME in extra_args:
         os.environ[manifest_key] = manifest.model_dump_json()
 
     # Every backend invocation launches inside ``app_context``: ``start()`` binds

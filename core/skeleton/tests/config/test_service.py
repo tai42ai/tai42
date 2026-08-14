@@ -97,13 +97,26 @@ class RetryingConfigStore(FakeConfigStore):
 
 
 class FakeReloadAdmin:
-    def __init__(self, *, result: dict[str, Any] | None = None, raise_reload: Exception | None = None) -> None:
+    """``during_reload`` runs inside the local reload, so a test can age the fleet the
+    way a slow reimporting reload does — the window the op-start membership snapshot
+    exists to cover."""
+
+    def __init__(
+        self,
+        *,
+        result: dict[str, Any] | None = None,
+        raise_reload: Exception | None = None,
+        during_reload: Callable[[], None] | None = None,
+    ) -> None:
         self._result = result if result is not None else {"status": "ok", "env_keys": 0}
         self._raise = raise_reload
+        self._during_reload = during_reload
         self.calls = 0
 
     def reload_config(self) -> dict[str, Any]:
         self.calls += 1
+        if self._during_reload is not None:
+            self._during_reload()
         if self._raise is not None:
             raise self._raise
         return self._result
@@ -117,7 +130,12 @@ class RecordingBus:
     the bus-unreachable shape (no origin list, only an error). ``publish_error`` makes
     ``publish`` RAISE that exception after recording the call — a non-transport
     broadcast fault (e.g. a redis ``ResponseError``) that the bus does not fold into a
-    returned bus-unreachable report."""
+    returned bus-unreachable report.
+
+    ``live`` is the mutable census behind ``expected_at_start``: dropping a name from it
+    mid-apply is a worker's presence fading, and ``census_error`` makes the op-start
+    census itself raise. Each publish's snapshot is recorded in
+    ``expected_at_start_calls``, separately from the ``publish_calls`` triples."""
 
     def __init__(
         self,
@@ -127,6 +145,7 @@ class RecordingBus:
         reachable: bool = True,
         error: str | None = None,
         publish_error: Exception | None = None,
+        census_error: Exception | None = None,
     ) -> None:
         self.identity = WorkerIdentity(name="serve-test", kind=WorkerKind.serve, pid=1, generation=1)
         self._remotes = remotes or []
@@ -134,12 +153,26 @@ class RecordingBus:
         self._reachable = reachable
         self._error = error
         self._publish_error = publish_error
+        self._census_error = census_error
+        self.live = set(self._remotes)
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
+        self.expected_at_start_calls: list[dict[str, int] | None] = []
+
+    async def expected_at_start(self) -> dict[str, int]:
+        if self._census_error is not None:
+            raise self._census_error
+        return dict.fromkeys(sorted(self.live), 1)
 
     async def publish(
-        self, op: dict[str, Any], targets: list[str] | None, local: LocalApplyResult | None
+        self,
+        op: dict[str, Any],
+        targets: list[str] | None,
+        local: LocalApplyResult | None,
+        *,
+        expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult:
         self.publish_calls.append((op, targets, local))
+        self.expected_at_start_calls.append(expected_at_start)
         if self._publish_error is not None:
             raise self._publish_error
         if not self._reachable:
@@ -688,6 +721,57 @@ async def test_apply_replace_broadcast_raise_after_persist_becomes_fleet_broadca
     assert admin.calls == 1
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert exc.value.report.reachable is False
+
+
+# ---------------------------------------------------------------------------
+# Expected membership is pinned to op start, not to publish time
+#
+# publish censuses when it is called — after the local reload. A worker whose presence
+# fades across a reimporting reload would drop off that census and the report would read
+# converged without it, so the pipeline snapshots membership BEFORE the reload.
+# ---------------------------------------------------------------------------
+
+
+async def test_expected_membership_is_censused_before_the_local_reload(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-w1"])
+    # The sibling is live when the op begins and its presence fades DURING the reload.
+    admin = FakeReloadAdmin(during_reload=lambda: bus.live.discard("serve-w1"))
+    service, _admin, _bus = _service(store, admin=admin, bus=bus)
+
+    await service.apply_replace({"mcp": [{"title": "new", "config": {"url": "http://new"}}]})
+
+    # Read first, so the sibling is still owed a confirmation; a snapshot taken after the
+    # reload would be empty and the op would converge without it.
+    assert bus.live == set()
+    assert bus.expected_at_start_calls == [{"serve-w1": 1}]
+
+
+async def test_op_start_census_failure_is_loud_but_never_aborts_the_reload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The snapshot rides on top of publish's own census, which degrades a dead bus to an
+    # honest unreachable report — so a census blip must not turn a survivable post-persist
+    # reload into a raise. Loud, because the op then runs on the membership the snapshot
+    # exists to correct.
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-w1"], census_error=ConnectionError("bus census unreachable"))
+    service, admin, _bus = _service(store, bus=bus)
+
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.operations._broadcast"):
+        result = await service.apply_replace({"mcp": [{"title": "new", "config": {"url": "http://new"}}]})
+
+    assert admin.calls == 1
+    assert result.fleet.ok
+    assert bus.expected_at_start_calls == [None]
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING and r.name == "tai42_skeleton.operations._broadcast"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    assert "op-start census" in warnings[0].getMessage()
 
 
 async def test_broadcast_raise_with_local_reload_failure_is_single_fleet_broadcast_error(

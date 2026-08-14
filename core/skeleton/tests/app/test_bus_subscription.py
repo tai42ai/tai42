@@ -276,3 +276,51 @@ async def test_app_context_builds_local_bus_and_manages_the_subscription(monkeyp
 
     assert app._bus_subscription_task is None
     assert task.cancelled()
+
+
+# -- drift guard: the contract's mutating-op set vs this dispatch --------------
+
+
+def test_registry_mutating_ops_match_the_dispatch() -> None:
+    """``REGISTRY_MUTATING_FLEET_OPS`` is a SECOND source of truth for op names
+    that live as literals in ``_dispatch_bus_op``. A backend base reads the
+    contract set to decide whether a pool holding a registry snapshot must be
+    turned over, so an op added here and not there turns over nothing and leaves
+    stale workers serving — silently. This test is the only thing preventing that
+    divergence.
+
+    ``list_failed_mcps`` is a query and ``recycle`` ends the process, so they are
+    the two dispatched ops that are deliberately NOT in the mutating set."""
+    import ast
+    import inspect
+    import textwrap
+
+    from tai42_contract.backend import REGISTRY_MUTATING_FLEET_OPS
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(TaiMCPLifecycleMixin._dispatch_bus_op)))
+    dispatched: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "op_name"):
+            continue
+        for comparator in node.comparators:
+            elements = comparator.elts if isinstance(comparator, ast.Tuple | ast.List | ast.Set) else [comparator]
+            dispatched.update(e.value for e in elements if isinstance(e, ast.Constant) and isinstance(e.value, str))
+
+    assert dispatched == REGISTRY_MUTATING_FLEET_OPS | {"list_failed_mcps", "recycle"}
+
+
+def test_the_bus_apply_window_matches_the_contract_agreement() -> None:
+    """The contract carries the apply window's ENV NAME and DEFAULT because a
+    backend-runtime process derives its pool-turnover budget from the env, never
+    from this settings object. Two sources of truth, so the same drift guard the
+    mutating-op set gets applies here: a default raised on one side and not the
+    other would silently put the turnover's confirm-or-raise after the
+    publisher's report cut, turning a truthful ``failed`` into a guess."""
+    from tai42_contract.backend import BUS_APPLY_TIMEOUT_DEFAULT, BUS_APPLY_TIMEOUT_ENV
+
+    from tai42_skeleton.app.bus_settings import BusSettings
+
+    field = BusSettings.model_fields["apply_timeout"]
+    prefix = BusSettings.model_config.get("env_prefix", "")
+    assert f"{prefix}apply_timeout".upper() == BUS_APPLY_TIMEOUT_ENV
+    assert field.default == BUS_APPLY_TIMEOUT_DEFAULT

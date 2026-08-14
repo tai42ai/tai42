@@ -1601,6 +1601,17 @@ class _RecordingBus:
     def __init__(self) -> None:
         self.reloaded: list[tuple[str, str]] = []
         self.removed: list[tuple[str, str]] = []
+        # The mutable census behind ``expected_at_start``: dropping a name from it
+        # mid-apply is a sibling's presence fading. Each publish's snapshot lands in
+        # ``expected_at_start_calls``, so a door that never took one is visible as a
+        # ``None`` rather than as an equally-green empty dict.
+        self.live: set[str] = set()
+        self.expected_at_start_calls: list[dict[str, int] | None] = []
+        self.census_error: Exception | None = None
+        # Workers the RELOAD broadcast reaches that no census of ours ever sees —
+        # a joiner that became ready after the op-start snapshot and faded again
+        # before the next census. The report is the only place they show up.
+        self.reload_reaches: set[str] = set()
         # A unified chronological log across BOTH ops so a cross-op ordering (rename's
         # reload-before-remove) is assertable; the per-list logs above stay for the
         # single-op cases.
@@ -1617,11 +1628,25 @@ class _RecordingBus:
             joined_at=now,
             beat_at=now,
             state=WorkerState.ready,
+            # Fresh against ``heartbeat_ttl`` below, so this row clears the same
+            # ready+fresh gate the publisher's op-start census applies.
+            pttl_ms=15_000,
         )
 
     @property
     def identity(self) -> WorkerIdentity:
         return self._identity
+
+    @property
+    def heartbeat_ttl(self) -> float:
+        return 15.0
+
+    async def expected_at_start(self) -> dict[str, int]:
+        # The snapshot excludes self, so an empty ``live`` means nothing is owed a
+        # confirmation — the lone-worker default the fan-out tests run under.
+        if self.census_error is not None:
+            raise self.census_error
+        return dict.fromkeys(sorted(self.live), 1)
 
     async def subscribe(self, callback: Any, on_ready: Any = None) -> None:
         await asyncio.Event().wait()
@@ -1632,7 +1657,10 @@ class _RecordingBus:
     async def validate_targets(self, targets: Any) -> None:
         return None
 
-    async def publish(self, op: dict[str, Any], targets: Any, local: Any) -> FleetResult:
+    async def publish(
+        self, op: dict[str, Any], targets: Any, local: Any, *, expected_at_start: dict[str, int] | None = None
+    ) -> FleetResult:
+        self.expected_at_start_calls.append(expected_at_start)
         if self.fail:
             raise RuntimeError("worker gh-2 did not confirm within timeout")
         name, kind, tool = op["op"], op["kind"], op["name"]
@@ -1642,6 +1670,11 @@ class _RecordingBus:
         elif name == "remove_tool":
             self.removed.append((kind, tool))
             self.ops.append(("remove", kind, tool))
+        reached = (
+            [WorkerResult(name=n, outcome=OpOutcome.applied) for n in sorted(self.reload_reaches)]
+            if (name == "reload_tool")
+            else []
+        )
         if self.non_converged:
             # Reachable, but a sibling never confirmed applied — reachable=True and
             # ok=False, so the publisher's non-convergence check must fire loudly.
@@ -1654,7 +1687,10 @@ class _RecordingBus:
             )
         # Mirror the real bus: a converged report (self entry applied), so the
         # publisher's non-convergence check is a no-op.
-        return FleetResult(op=name, results=[WorkerResult(name=self._identity.name, outcome=OpOutcome.applied)])
+        return FleetResult(
+            op=name,
+            results=[WorkerResult(name=self._identity.name, outcome=OpOutcome.applied), *reached],
+        )
 
 
 @pytest.fixture
@@ -2272,5 +2308,200 @@ def test_set_version_tags_bad_body_400(pg, emit):
                 _request("PUT", "/api/presets/ver/versions/1/tags", body={"tags": "nope"}, name="ver", version="1")
             )
             assert resp.status_code == 400
+
+    asyncio.run(run())
+
+
+# -- op-start census ---------------------------------------------------------
+#
+# These fan-outs apply locally and publish afterwards, so ``publish``'s own census
+# is taken on the far side of the store write. Every door therefore has to pin the
+# membership at its own pre-apply point and hand it in; a door that forgets reports
+# the post-apply fleet, and a sibling that departed mid-write converges silently.
+
+
+def test_every_reload_door_pins_the_membership_before_it_applies(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            backend.live = {"serve-2"}
+
+            await _create_versioned("wv", fixed_kwargs={"units": "v1"})
+            await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"fixed_kwargs": {"units": "v2"}})
+            )
+            await router.rollback_preset(_request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1}))
+
+            # create / save_version / rollback — none of them may publish with no
+            # snapshot at all, which is what ``None`` would mean.
+            assert backend.expected_at_start_calls == [{"serve-2": 1}] * 3
+
+    asyncio.run(run())
+
+
+def test_every_remove_door_pins_the_membership_before_it_applies(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", fixed_kwargs={"units": "v"})
+            body = PresetBody(base_tool="echo", description="d", fixed_kwargs={}, extensions=[])
+            await instance.app.versioning.store.create("preset", "weather", body.model_dump())
+            await instance.app.preset_manager.rehydrate()
+            backend.expected_at_start_calls.clear()
+            backend.live = {"serve-2"}
+
+            await router.delete_preset(_request("DELETE", "/api/presets/wv", name="wv"))
+            await router.delete_preset(_request("DELETE", "/api/presets/weather", name="weather"))
+
+            # The soft-delete door and the conflicted hard-delete door alike.
+            assert backend.expected_at_start_calls == [{"serve-2": 1}] * 2
+
+    asyncio.run(run())
+
+
+def test_a_sibling_that_departs_during_a_create_is_still_owed_a_confirmation(pg, emit, backend, monkeypatch):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            backend.live = {"serve-2"}
+            mgr = instance.app.preset_manager
+            register = mgr.register
+
+            async def _departing_register(*args, **kwargs):
+                # The sibling's presence fades WHILE this worker registers — the exact
+                # window between the pre-apply snapshot and the publish-time census.
+                backend.live.clear()
+                return await register(*args, **kwargs)
+
+            monkeypatch.setattr(mgr, "register", _departing_register)
+
+            await _create_versioned("wv", fixed_kwargs={"units": "v"})
+
+            # Read BEFORE the register, so the departed sibling is still owed a
+            # confirmation; a snapshot taken after it would be empty and the op would
+            # report converged without it.
+            assert backend.live == set()
+            assert backend.expected_at_start_calls == [{"serve-2": 1}]
+
+    asyncio.run(run())
+
+
+def test_a_sibling_that_departs_during_a_delete_is_still_owed_a_confirmation(pg, emit, backend, monkeypatch):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", fixed_kwargs={"units": "v"})
+            backend.expected_at_start_calls.clear()
+            backend.live = {"serve-2"}
+            mgr = instance.app.preset_manager
+            remove = mgr.remove
+
+            async def _departing_remove(*args, **kwargs):
+                backend.live.clear()
+                return await remove(*args, **kwargs)
+
+            monkeypatch.setattr(mgr, "remove", _departing_remove)
+
+            resp = await router.delete_preset(_request("DELETE", "/api/presets/wv", name="wv"))
+
+            assert resp.status_code == 200
+            assert backend.live == set()
+            assert backend.expected_at_start_calls == [{"serve-2": 1}]
+
+    asyncio.run(run())
+
+
+def test_rename_judges_both_halves_against_one_pre_rename_snapshot(pg, emit, backend, monkeypatch):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("old", fixed_kwargs={"units": "v"})
+            backend.expected_at_start_calls.clear()
+            backend.live = {"serve-2"}
+            mgr = instance.app.preset_manager
+            remove = mgr.remove
+
+            async def _departing_remove(*args, **kwargs):
+                backend.live.clear()
+                return await remove(*args, **kwargs)
+
+            monkeypatch.setattr(mgr, "remove", _departing_remove)
+
+            resp = await router.rename_preset(
+                _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
+            )
+
+            assert resp.status_code == 200, _err(resp)
+            # The reload and the remove are two halves of ONE rename, so both are judged
+            # against the fleet as it stood before the rename began. Re-censusing between
+            # them would judge the remove against a membership the reload already aged —
+            # hiding exactly the sibling that departed mid-rename.
+            assert backend.expected_at_start_calls == [{"serve-2": 1}, {"serve-2": 1}]
+
+    asyncio.run(run())
+
+
+def test_a_failed_op_start_census_is_loud_but_never_aborts_the_fan_out(pg, emit, backend, caplog):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            backend.census_error = RuntimeError("census read timed out")
+
+            with caplog.at_level(logging.WARNING, logger="tai42_skeleton.operations._broadcast"):
+                await _create_versioned("wv", fixed_kwargs={"units": "v"})
+
+            # Degraded, not aborted: the publish still happens, on the publish-time
+            # census the snapshot exists to correct, and the fallback is reported.
+            assert "op-start census for 'reload_tool' failed" in caplog.text
+            assert backend.expected_at_start_calls == [None]
+            assert backend.reloaded == [("preset", "wv")]
+
+    asyncio.run(run())
+
+
+def test_rename_expects_the_remove_from_every_worker_its_reload_reached(pg, emit, backend, monkeypatch):
+    """The joiner shape: S rehydrates the OLD name before the rename commits,
+    announces itself ready after it, and its presence fades again while the reload
+    broadcast runs.
+
+    S is therefore in NEITHER census — not the pre-rename snapshot (it was not ready
+    yet) and not one taken after the reload (it has faded) — yet the reload reached
+    it and told it to bind the new name. If the remove does not expect S too, S keeps
+    serving the old name and the rename reports converged with a stale sibling."""
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("old", fixed_kwargs={"units": "v"})
+            backend.expected_at_start_calls.clear()
+            # Never ready at a census, but reached by the reload broadcast.
+            backend.live = set()
+            backend.reload_reaches = {"serve-9"}
+
+            resp = await router.rename_preset(
+                _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
+            )
+
+            assert resp.status_code == 200, _err(resp)
+            reload_expected, remove_expected = backend.expected_at_start_calls
+            assert reload_expected == {}
+            # Carried at generation 0 — below every minted life — so a reply from a
+            # successor is discarded and S gets a computed verdict rather than a
+            # silent pass.
+            assert remove_expected == {"serve-9": 0}
+
+    asyncio.run(run())
+
+
+def test_rename_keeps_the_pre_rename_generation_for_a_worker_owed_it_from_the_start(pg, emit, backend):
+    # A worker present at the snapshot is re-admitted at its SNAPSHOT life, exactly
+    # as the bus's own carry-forward does; the union must not overwrite that with a
+    # later reading.
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("old", fixed_kwargs={"units": "v"})
+            backend.expected_at_start_calls.clear()
+            backend.live = {"serve-2"}
+            backend.reload_reaches = {"serve-2"}
+
+            resp = await router.rename_preset(
+                _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
+            )
+
+            assert resp.status_code == 200, _err(resp)
+            assert backend.expected_at_start_calls == [{"serve-2": 1}, {"serve-2": 1}]
 
     asyncio.run(run())

@@ -465,3 +465,35 @@ def test_recycle_rows_carry_their_own_kind() -> None:
     )
     (entry,) = profile_apply_response(outcome)["recycle"]
     assert entry == {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1}
+
+
+# ---------------------------------------------------------------------------
+# Expected membership is pinned to op start, not to publish time
+# ---------------------------------------------------------------------------
+
+
+async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The swap IS this door's local apply and it is the slowest one there is (a full
+    # epoch rebuild), so it is the widest window in which a sibling's presence can fade.
+    # The step-5 broadcast censuses only when it publishes, so membership is read at
+    # step 1 — before the swap — and handed to that publish.
+    monkeypatch.setenv("TAI_SUPERVISED", "harness")
+    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+    bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
+    sibling = next(row for row in bus.rows if row.name == "serve-b")
+
+    async def fading_swap(env: dict[str, str], *, drain_tolerate_driver: bool) -> Epoch:
+        sibling.pttl_ms = 0
+        return Epoch(number=0)
+
+    orch, _seen = _orchestrate_spy()
+    await _service(store, bus).apply_replace_env(
+        {"TAI_BUS_NAMESPACE": "new"},
+        driven=True,
+        save_previous=_PrevSpy(),
+        build_and_swap=fading_swap,
+        orchestrate=orch,
+    )
+
+    assert sibling.pttl_ms == 0
+    assert bus.expected_at_start_calls == [{"serve-b": 1}]

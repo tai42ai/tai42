@@ -78,7 +78,12 @@ from tai42_skeleton.config.boundary import (
 from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, CapabilityReport, capability_report
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.operations._broadcast import FleetBroadcastError, fleet_fanout, log_non_convergence
+from tai42_skeleton.operations._broadcast import (
+    FleetBroadcastError,
+    fleet_fanout,
+    log_non_convergence,
+    snapshot_membership,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterator
@@ -124,10 +129,20 @@ class _ReloadAdmin(Protocol):
 
 
 class _FleetPublisher(Protocol):
-    """The worker-bus publish surface the pipeline broadcasts through."""
+    """The worker-bus publish surface the pipeline broadcasts through, plus the op-start
+    census it reads BEFORE each local apply — ``publish`` censuses only when it is
+    called, so the membership a report is judged against is captured through
+    ``expected_at_start`` and handed back in."""
+
+    async def expected_at_start(self) -> dict[str, int]: ...
 
     async def publish(
-        self, op: dict[str, Any], targets: list[str] | None, local: LocalApplyResult | None
+        self,
+        op: dict[str, Any],
+        targets: list[str] | None,
+        local: LocalApplyResult | None,
+        *,
+        expected_at_start: dict[str, int] | None = None,
     ) -> FleetResult: ...
 
 
@@ -408,7 +423,8 @@ class ConfigService:
 
         1. ``_validate_replace`` (X-band payload refusal + dangling ``!ENV`` + backend-
            needs-bus); diff the proposed env against the stored env; refuse a recycle-
-           class diff the deployment shape cannot carry; read the applier's own identity.
+           class diff the deployment shape cannot carry; read the applier's own identity
+           and the fleet membership the step-5 report is judged against.
         2. Snapshot the current stored env as the reserved ``@previous`` version.
         3. ``build_and_swap_epoch(profile_env, drain_tolerate_driver=driven)`` holding the
            reload gate — ``driven`` excuses THIS door's own still-admitted request from
@@ -450,6 +466,12 @@ class ConfigService:
         bus = cast("WorkerBus", self._bus)
         self_identity = bus.identity
 
+        # STEP 1d — pin the expected-confirmation membership BEFORE the swap in STEP 3.
+        # The swap is this door's local apply; the STEP 5 broadcast censuses only when it
+        # publishes, so without this a sibling whose presence faded across the rebuild
+        # would never be expected and the reload would report converged without it.
+        at_start = await snapshot_membership(self._bus, "reload_config")
+
         # STEP 2 (persist reserved snapshot) — save the CURRENT stored env as @previous
         # BEFORE the swap. A later failed build leaves it harmlessly reflecting the
         # unchanged live state.
@@ -487,7 +509,7 @@ class ConfigService:
         # STEP 5 — broadcast the reload to the fleet (each sibling re-reads the persisted
         # store), then roll a recycle for the recycle-class diff. The applier's own recycle
         # is deferred to the post-response self-exit, reported as the applier self-entry.
-        fleet = await self._broadcast_profile_reload()
+        fleet = await self._broadcast_profile_reload(at_start)
         recycle_report: RecycleReport | None = None
         if recycle_diff_keys:
             recycle_report = await orchestrate(
@@ -507,16 +529,22 @@ class ConfigService:
             fleet=fleet,
         )
 
-    async def _broadcast_profile_reload(self) -> FleetResult:
+    async def _broadcast_profile_reload(self, expected_at_start: dict[str, int] | None) -> FleetResult:
         """Broadcast the profile apply's reload to the whole fleet AFTER the local swap
         already landed (the swap IS this worker's local apply, so no second local reload
         runs here). Mirrors the post-persist contract: a raw broadcast failure surfaces as
         a :class:`FleetBroadcastError` carrying the honest bus-unreachable report, never a
         raw exception, so the committed env change is never hidden behind a broadcast
-        fault."""
+        fault.
+
+        ``expected_at_start`` is the caller's PRE-SWAP membership snapshot. The swap is
+        this door's local apply and it is the slowest one in the codebase (a full epoch
+        rebuild), so it is exactly the window in which a sibling's presence can fade
+        unnoticed — the snapshot has to be read before the swap, hence passed in rather
+        than taken here."""
         local = LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "ok"})
         try:
-            report = await self._bus.publish({"op": "reload_config"}, None, local)
+            report = await self._bus.publish({"op": "reload_config"}, None, local, expected_at_start=expected_at_start)
         except Exception as broadcast_error:
             error = f"{type(broadcast_error).__name__}: {broadcast_error}"
             report = FleetResult(op="reload_config", reachable=False, error=error)
@@ -707,6 +735,10 @@ class ConfigService:
         unconfirmed worker on the happy path is a loud ERROR log and an explicit
         report entry, but the call returns successfully."""
         op_name = "reload_config"
+        # Pin the expected membership BEFORE the local reload — a reimporting reload is
+        # slow enough for a sibling's presence to fade across it, and the publish census
+        # below would then never expect a worker that was live when the op began.
+        at_start = await snapshot_membership(self._bus, op_name)
         local_failure: Exception | None = None
         local_result: dict[str, Any] | None = None
         try:
@@ -718,7 +750,7 @@ class ConfigService:
             local = LocalApplyResult(outcome=OpOutcome.applied, payload=local_result)
 
         try:
-            report = await self._bus.publish({"op": op_name}, None, local)
+            report = await self._bus.publish({"op": op_name}, None, local, expected_at_start=at_start)
         except Exception as broadcast_error:
             # The persist already committed, so a raw broadcast failure must not escape
             # the post-persist contract. Surface it as a FleetBroadcastError carrying

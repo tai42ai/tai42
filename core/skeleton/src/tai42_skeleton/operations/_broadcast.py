@@ -3,10 +3,12 @@
 Every operation that changes runtime state on this worker AND must reach the rest
 of the fleet applies its change locally, then broadcasts it over the app's worker
 bus (``instance.app.bus``). :func:`broadcast` is that shared step: it enforces the
-two invariants every publisher shares — targets are validated against the presence
-census BEFORE any local side effect, and the worker applies locally only when it is
-itself a target — then awaits the confirmed broadcast and returns the per-worker
-fleet report.
+three invariants every publisher shares — targets are validated against the presence
+census BEFORE any local side effect, the expected-confirmation membership of an
+untargeted op is snapshotted BEFORE that side effect too (a local apply must not be a
+blind spot in which a worker can fade off the census unreported), and the worker
+applies locally only when it is itself a target — then awaits the confirmed broadcast
+and returns the per-worker fleet report.
 
 Failure discipline splits the callers into two disciplines, selected by
 ``publish_on_local_failure``:
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
@@ -134,6 +136,48 @@ def log_non_convergence(report: FleetResult) -> None:
     logger.error("worker bus: op %r did not fully converge — unconfirmed workers: %s", report.op, unconfirmed)
 
 
+class CensusPublisher(Protocol):
+    """The op-start census seam :func:`snapshot_membership` reads — the one method of
+    :class:`~tai42_skeleton.app.bus.WorkerBus` it needs, so a publisher typed against a
+    narrower bus protocol satisfies it structurally."""
+
+    async def expected_at_start(self) -> dict[str, int]: ...
+
+
+async def snapshot_membership(bus: CensusPublisher, op_name: str) -> dict[str, int] | None:
+    """Pin the expected-confirmation membership to op START, before the caller's local
+    side effect can age it out — the shared discipline for every UNTARGETED publisher.
+
+    Whole-fleet only, by construction: an untargeted op's expected set IS the census,
+    and :meth:`~tai42_skeleton.app.bus.WorkerBus.publish` takes that census after the
+    caller has already applied locally. A TARGETED op needs no snapshot — its expected
+    set is the caller's explicit list, so a named target whose presence fades mid-apply
+    is already carried into the report as ``departed``.
+
+    Best-effort, and ``None`` when the census does not answer: ``publish`` takes its own
+    census and degrades a dead bus to an honest unreachable report, so a blip here must
+    NOT abort an op that would otherwise survive it. Loud, because the op then runs on
+    exactly the post-apply membership this snapshot exists to correct.
+
+    Called by every untargeted publisher, so the ordering rule and its failure
+    discipline have one home: :func:`broadcast` takes the snapshot itself (it owns the
+    local apply), while a publisher whose local apply is separate and
+    compensation-rolled-back upstream — the config-service reload doors and the
+    store-backed preset fan-outs — takes it at its OWN pre-apply point and passes it
+    in. Nothing enforces that from here; a new untargeted publisher that skips it
+    silently reports against its post-apply membership."""
+    try:
+        return await bus.expected_at_start()
+    except Exception:
+        logger.warning(
+            "worker bus: op-start census for %r failed — falling back to the publish-time census "
+            "(a worker whose presence fades during the local apply may go unreported)",
+            op_name,
+            exc_info=True,
+        )
+        return None
+
+
 async def broadcast(
     op: dict[str, Any],
     targets: list[str] | None,
@@ -141,12 +185,17 @@ async def broadcast(
     *,
     publish_on_local_failure: bool = False,
 ) -> dict[str, Any]:
-    """Validate targets, apply locally per the self-targeting rule, then broadcast.
+    """Validate targets, pin the expected membership, apply locally per the
+    self-targeting rule, then broadcast.
 
     ``op`` is the wire op dict (``{"op": <name>, ...}``); ``targets`` is ``None`` for
     the whole fleet or the explicit worker list; ``apply`` runs this worker's own
     apply and returns its result (rides the self entry as the payload). Returns the
     :class:`~tai42_skeleton.app.bus.FleetResult` as a JSON-ready dict.
+
+    Both pre-apply steps exist for the same reason: everything the report is judged
+    against must be read before the local apply can change it. See
+    :func:`snapshot_membership`.
     """
     bus = instance.app.bus
     self_targeted = targets is None or bus.identity.name in targets
@@ -158,6 +207,10 @@ async def broadcast(
             await bus.validate_targets(targets)
         except UnknownFleetTargetsError as exc:
             raise BadRequestError(str(exc)) from exc
+
+    # Read the membership the report will be judged against BEFORE the local apply below
+    # can age it out.
+    expected_at_start = await snapshot_membership(bus, str(op.get("op"))) if targets is None else None
 
     local: LocalApplyResult | None = None
     local_failure: Exception | None = None
@@ -173,7 +226,7 @@ async def broadcast(
         else:
             local = LocalApplyResult(outcome=OpOutcome.applied, payload=result)
 
-    report = await bus.publish(op, targets, local)
+    report = await bus.publish(op, targets, local, expected_at_start=expected_at_start)
     # The report is embedded in the response, but an unconfirmed worker is also a
     # loud, visible failure — never a silently stale sibling.
     log_non_convergence(report)
