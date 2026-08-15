@@ -21,7 +21,14 @@ class TurnSettings(TaiBaseSettings):
     # runs unbounded regardless. Expiry answers the caller loudly; an offloaded synchronous
     # tool body may still finish in the background — see the turn-budget primitive. Must be
     # positive when set.
-    timeout_seconds: float | None = Field(default=None, gt=0)
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Wall-clock budget in seconds for one synchronous turn; unset = unbounded. "
+            "On expiry the turn is cancelled with a typed turn-exceeded error."
+        ),
+    )
 
 
 @settings_cache
