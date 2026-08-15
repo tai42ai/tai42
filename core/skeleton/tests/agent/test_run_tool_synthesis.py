@@ -430,14 +430,14 @@ def set_turn_timeout(monkeypatch: pytest.MonkeyPatch):
     reset_all_settings()
 
 
-def _fixture_flag(module: str, name: str) -> object:
+def _fixture_flag(module: str, name: str) -> Any:
     # A fixtures module is popped from sys.modules and re-imported on each app_context
     # enter, so a tool/agent that ran mutates the LIVE module object; read the flag off
     # that one, not a stale import binding.
     return getattr(sys.modules[module], name)
 
 
-def _budget_flag(name: str) -> object:
+def _budget_flag(name: str) -> Any:
     return _fixture_flag("tests.agent._turn_budget_fixtures", name)
 
 
