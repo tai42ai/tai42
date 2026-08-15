@@ -5009,7 +5009,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "0.8.0"
+version = "0.8.1"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5062,7 +5062,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5119,7 +5119,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5773,7 +5773,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "1.9.0"
+version = "1.9.1"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6002,7 +6002,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.12.0"
+version = "1.13.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
