@@ -6002,7 +6002,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "1.13.0"
+version = "2.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
