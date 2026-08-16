@@ -23,9 +23,11 @@ breaking change through a mislabelled minor.
 Breaking changes are ``griffe``'s own classification (public objects removed,
 required parameters added, parameter kinds/types narrowed, and so on) plus the
 removal of a whole shipped top-level module. A module that is new at the tag is
-additive and skipped. Any tooling failure — an unreadable config, a mode the
-config does not name, a module that cannot be loaded — raises loudly; the gate
-never passes a release on a classification it could not compute.
+additive and skipped. A doc-only change to a pydantic ``Field(...)`` — editing
+only ``description``/``title``/``examples`` — is documentation metadata, not API
+surface, so it is not a breaking change. Any tooling failure — an unreadable
+config, a mode the config does not name, a module that cannot be loaded — raises
+loudly; the gate never passes a release on a classification it could not compute.
 
 CLI::
 
@@ -35,6 +37,7 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import subprocess
 import sys
@@ -46,6 +49,9 @@ import yaml
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _MODES = ("label-honesty", "strict")
 _SKIP_DIRS = {"__pycache__"}
+# pydantic ``Field(...)`` keywords that carry documentation only; a change to any
+# of these is metadata, not API surface.
+_FIELD_DOC_KEYWORDS = frozenset({"description", "title", "examples"})
 
 
 def _fail(message: str) -> NoReturn:
@@ -178,6 +184,42 @@ def _top_modules_ref(ref: str, src_rel: str, repo_root: Path) -> set[str]:
     return modules
 
 
+def _field_call_name(func: ast.expr) -> str | None:
+    """Callee name of a call node when it is a bare ``Field`` name or a dotted
+    attribute ending in ``.Field`` (``pydantic.Field``), else ``None``."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _is_doc_only_field_change(old_expr: str, new_expr: str) -> bool:
+    """True only when both value expressions parse as ``Field(...)`` calls that
+    are structurally equal after dropping the documentation-only keywords
+    (``description``/``title``/``examples``). A parse failure or a non-``Field``
+    expression returns ``False`` — the classification stays breaking — and any
+    other surprise propagates to the caller as a loud crash."""
+    try:
+        old_node = ast.parse(old_expr, mode="eval").body
+        new_node = ast.parse(new_expr, mode="eval").body
+    except (SyntaxError, ValueError):
+        return False
+    if not (isinstance(old_node, ast.Call) and isinstance(new_node, ast.Call)):
+        return False
+    if _field_call_name(old_node.func) != "Field":
+        return False
+    if _field_call_name(new_node.func) != "Field":
+        return False
+    old_node.keywords = [
+        kw for kw in old_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS
+    ]
+    new_node.keywords = [
+        kw for kw in new_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS
+    ]
+    return ast.dump(old_node) == ast.dump(new_node)
+
+
 def _breakages(module: str, ref: str, search: str) -> list[str]:
     # griffe is the heavy release-only dependency (api-gate group); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
@@ -186,10 +228,16 @@ def _breakages(module: str, ref: str, search: str) -> list[str]:
 
     old = griffe.load_git(module, ref=ref, search_paths=[search])
     new = griffe.load(module, search_paths=[search])
-    return [
-        _ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE))
-        for b in griffe.find_breaking_changes(old, new)
-    ]
+    explained: list[str] = []
+    for b in griffe.find_breaking_changes(old, new):
+        if b.kind is griffe.BreakageKind.ATTRIBUTE_CHANGED_VALUE and (
+            _is_doc_only_field_change(str(b.old_value), str(b.new_value))
+        ):
+            continue
+        explained.append(
+            _ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE))
+        )
+    return explained
 
 
 def _gate_passes(
