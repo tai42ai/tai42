@@ -77,7 +77,7 @@ uvicorn = ["uvicorn>=0.43"]
 
 # LLM provider backends — imported lazily by llm/models.py and llm/embedding.py
 # inside the per-provider match branches. Each pulls the llm base stack.
-anthropic = ["tai42-kit[llm]", "langchain-anthropic>=1.4"]
+anthropic = ["tai42-kit[llm]", "langchain-anthropic>=1.5.4"]
 mistral = ["tai42-kit[llm]", "langchain-mistralai>=1.1"]
 google = ["tai42-kit[llm]", "langchain-google-genai>=4.2"]
 xai = ["tai42-kit[llm]", "langchain-xai>=1.2"]
