@@ -21,18 +21,10 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { MP_WEB_URL } from './helpers';
 
-// Publish-circular: the marketplace-web frontend renders against the published
-// marketplace backend's browse contract (kind facet / nullable updated_at /
-// premium / docs_url), but the e2e installs the backend at the older
-// `_MARKETPLACE_PIN`. Un-skipped once the pin is bumped to that published backend.
-// Every surface in this file is a marketplace web page, so this gates the whole file.
-test.skip(
-  true,
-  'Publish-circular: the marketplace-web frontend renders against the published ' +
-    'marketplace backend browse contract (kind facet / nullable updated_at / premium / ' +
-    'docs_url), but the e2e installs the backend at the older `_MARKETPLACE_PIN`. ' +
-    'Un-skipped once the pin is bumped to that published backend.',
-);
+// The suites run against the pinned marketplace revision (`_MARKETPLACE_PIN`).
+// That pin and the marketplace-web frontend are the same revision, so the browse
+// contract these pages render (kind facet / nullable updated_at / premium /
+// docs_url) is exactly what the backend serves.
 
 const ALPHA_REF = 'tai42/e2e-alpha';
 /** Alpha's plugin-detail path (`/$namespace/$name`); `vite preview`'s SPA
