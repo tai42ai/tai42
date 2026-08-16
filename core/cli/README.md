@@ -47,7 +47,9 @@ Point the client at a server and authenticate. The server URL resolves from the
 local default. The API key resolves from `--api-key-stdin`, then `TAI_API_KEY`,
 then the config file, then an interactive prompt (there is deliberately no
 `--api-key VALUE` flag — a value on the command line leaks through `ps` and shell
-history).
+history). The HTTP read window resolves from `--timeout SECONDS`, then
+`TAI_CLI_TIMEOUT_SECONDS`, then a 120s default sized for fleet-broadcast config
+writes; values must be positive and finite.
 
 ```bash
 export TAI_SERVER_URL=https://your-server.example
