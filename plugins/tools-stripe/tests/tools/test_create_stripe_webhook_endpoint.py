@@ -1,6 +1,7 @@
 """Tests for the ``create_stripe_webhook_endpoint`` tool: the form-encoded create body, the
-returned shape, that the one-time signing secret is returned verbatim from Stripe's response, the
-livemode assert on the created endpoint, argument validation, and the missing/empty secret."""
+returned shape, that the one-time signing secret is returned wrapped in a ``SecretValue`` whose
+``reveal()`` is Stripe's verbatim secret, the livemode assert on the created endpoint, argument
+validation, and the missing/empty secret."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import pytest
+from tai42_contract.secrets import SecretValue
 
 from tai42_tools_stripe._internal.tools.stripe_client import STRIPE_API_VERSION, StripeLivemodeMismatch
 from tai42_tools_stripe.tools.create_stripe_webhook_endpoint import create_stripe_webhook_endpoint
@@ -58,13 +60,18 @@ def test_happy_path_returns_shape_and_secret_verbatim(stripe_env: Callable[..., 
     stub_server.set_responder(_responder(secret="whsec_verbatim_123"))
 
     result = _call()
-    assert result == {
+    assert isinstance(result["secret"], SecretValue)
+    assert result["secret"].reveal() == "whsec_verbatim_123"
+    assert {k: v for k, v in result.items() if k != "secret"} == {
         "endpoint_id": "we_1",
-        "secret": "whsec_verbatim_123",
         "url": _URL,
         "enabled_events": _EVENTS,
         "status": "enabled",
     }
+    # The envelope is the fail-safe: an un-audited path that dumps the whole
+    # result raises loudly instead of leaking the real secret.
+    with pytest.raises(TypeError):
+        json.dumps(result)
 
     request = stub_server.requests[0]
     assert request["method"] == "POST"

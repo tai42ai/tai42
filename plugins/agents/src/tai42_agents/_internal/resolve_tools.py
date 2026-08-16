@@ -17,6 +17,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 from tai42_contract.agent.base import PresetSpec
+from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools
 
 
@@ -46,7 +47,13 @@ async def _as_structured_tool(
         # A plain-dict args_schema does not strip out-of-schema keys, so drop the
         # fixed keys here to keep the bound values immutable on the merge below.
         runtime = {key: value for key, value in runtime.items() if key not in preset.fixed_kwargs}
-        return await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        result = await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        # This coroutine is the tool adapter this plugin registers with langchain:
+        # langchain turns whatever it returns into the model-visible ToolMessage
+        # (checkpoint and callback trace included). Mask here so the model never
+        # sees a SecretValue -- code that needs the real secret calls the tool
+        # outside an agent turn.
+        return mask_secrets(result)
 
     base_tool = (await app_tools.get_client_tools([preset.base_tool]))[0]
     # ``args_schema`` is a JSON-schema dict, a pydantic model class, or None. Read its

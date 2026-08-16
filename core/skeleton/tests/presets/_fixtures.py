@@ -12,12 +12,19 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import SecretValue
 
 
 @tai42_app.tools.tool
 def weather(city: str, units: str = "metric") -> dict:
     """Report the weather for a city."""
     return {"city": city, "units": units}
+
+
+@tai42_app.tools.tool
+def vault(account: str) -> dict:
+    """Return an account's stored token wrapped as a secret."""
+    return {"account": account, "token": SecretValue(f"tok-{account}")}
 
 
 @tai42_app.tools.tool

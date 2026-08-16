@@ -33,7 +33,13 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward
-from tai42_kit.utils.data.json_schema_util import validate_against_json_schema
+from tai42_contract.secrets import SECRET_PLACEHOLDER, unwrap_secrets
+from tai42_kit.utils.data.json_schema_util import (
+    JsonSchemaValidationError,
+    validate_against_json_schema,
+)
+
+from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_reveal_payload
 
 if TYPE_CHECKING:
     from tai42_contract.app import TaiApp
@@ -87,9 +93,51 @@ async def preset_bind(
     # Plain tool — DECLARE + VALIDATE: advertise the authored schema and validate
     # every result against it, raising loudly on any mismatch (a non-LLM tool
     # cannot be forced).
+    def _raise_redacted(caught: JsonSchemaValidationError) -> None:
+        # The placeholder-only failure: json_path kept, instance text replaced by the
+        # placeholder. MUST be invoked OUTSIDE the ``except`` and raise ``from None`` so
+        # neither ``__cause__`` nor ``__context__`` retains the caught error, whose
+        # message and ``offending_value`` embed the revealed secret verbatim and would
+        # otherwise ride a logged traceback.
+        raise JsonSchemaValidationError(
+            f"value does not match schema at {caught.json_path}: a secret-bearing "
+            f"result violates the schema ({SECRET_PLACEHOLDER} redacts the instance text)",
+            json_path=caught.json_path,
+            offending_value=SECRET_PLACEHOLDER,
+        ) from None
+
     async def _enforce_output_schema(**kwargs: Any) -> Any:
         result = await forward(**kwargs)
-        validate_against_json_schema(result.structured_content, output_schema)
+        # Under the armed in-process reveal gate a secret-bearing return is stowed
+        # RAW while ``result.structured_content`` carries only the masked projection;
+        # validate the REVEALED value (an in-memory reveal for validation only —
+        # nothing recorded, nothing returned from here) so the guard checks the real
+        # result, not the placeholder. With no stowed payload the structured content
+        # is already the real value.
+        has_payload, payload = stowed_reveal_payload()
+        if has_payload:
+            revealed = unwrap_secrets(payload)
+            caught: JsonSchemaValidationError | None = None
+            try:
+                validate_against_json_schema(revealed, output_schema)
+            except JsonSchemaValidationError as exc:
+                caught = exc
+            if caught is not None:
+                _raise_redacted(caught)
+        else:
+            # Unarmed MCP edge: ``structured_content`` already carries the REVEALED
+            # value. A validation failure whose secret was revealed on this door
+            # (:func:`secret_was_revealed`) is redacted the same both-links-severed
+            # way; a non-secret preset re-raises untouched, keeping its instance-quoting.
+            caught = None
+            try:
+                validate_against_json_schema(result.structured_content, output_schema)
+            except JsonSchemaValidationError as exc:
+                if not secret_was_revealed():
+                    raise
+                caught = exc
+            if caught is not None:
+                _raise_redacted(caught)
         return result
 
     return Tool.from_tool(

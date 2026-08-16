@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import unwrap_secrets
 
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -163,7 +164,11 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
         # A lookup raises for exactly the name it was asked, so no name check is needed.
         raise NotFoundError(f"unknown tool: {tool_name}") from exc
     try:
-        return await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
+        # This envelope serves ONLY the live synchronous caller (a background submit
+        # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
+        # secret in the result is revealed here for the one door that hands the caller
+        # the real value; every recorder masks its own copy instead.
+        return unwrap_secrets(await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True))
     except UnknownToolError as exc:
         # Discriminate by NAME: the requested tool vanishing between lookup and dispatch
         # (a concurrent reload) is still a 404, warned because the caller sees only a

@@ -16,6 +16,7 @@ from tai42_contract.interactions import (
     MediaItem,
     MediaKind,
 )
+from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
@@ -153,6 +154,36 @@ async def test_ask_user_blocks_until_answer(monkeypatch, fake_redis, fake_client
     await answerer
 
     assert result == "hello human"
+
+
+async def test_ask_user_sensitive_returns_secret_value(monkeypatch, fake_redis, fake_client_ctx):
+    # A sensitive ask hands the caller the answer WRAPPED: the real value is reached
+    # only through ``reveal()``, and repr/str never expose it.
+    monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
+    store = InteractionStore(helper_module.interactions_settings().key_prefix)
+
+    async def answer_when_asked() -> None:
+        interaction_id, group_id = await await_add_event(fake_redis, store)
+        await store.record_answer(
+            fake_redis,
+            InteractionResponse(
+                interaction_id=interaction_id,
+                answer="hunter2",
+                answered_by="tester",
+                answered_at=datetime.now(UTC),
+            ),
+            group_id,
+            reply_ttl=60,
+        )
+
+    answerer = asyncio.create_task(answer_when_asked())
+    result = await ask_user("your password?", timeout=5, sensitive=True)
+    await answerer
+
+    assert isinstance(result, SecretValue)
+    assert result.reveal() == "hunter2"
+    # The real answer never leaks through the wrapper's repr.
+    assert "hunter2" not in repr(result)
 
 
 async def _answer_and_report_origin(fake_redis, store) -> str | None:

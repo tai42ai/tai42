@@ -50,6 +50,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import mask_secrets
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
@@ -382,8 +383,10 @@ async def _supervise(
             try:
                 result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
                 # ``run_tool`` already json-normalizes the body; a residual dumps
-                # failure surfaces as a ``failed`` record rather than a lost run.
-                result_json = json.dumps(result)
+                # failure surfaces as a ``failed`` record rather than a lost run. A
+                # background run has no live-caller door, so any wrapped secret is
+                # masked to the placeholder before it lands in the durable record.
+                result_json = json.dumps(mask_secrets(result))
             except asyncio.CancelledError as cancel:
                 # A drain (process shutdown OR an epoch retire) cancelled this run
                 # mid-flight. Record it as ``failed`` through the same one-way CAS the

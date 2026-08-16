@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
@@ -127,6 +128,37 @@ async def test_run_tool_delegates_and_returns(monkeypatch: pytest.MonkeyPatch) -
     assert result == {"answer": 42}
     # The sync door offloads a sync tool body onto a worker thread.
     assert tools.run_calls == [("calc", {"a": 1}, True)]
+
+
+async def test_run_tool_reveals_wrapped_secrets_for_the_live_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The sync run-tool door is the ONE live-caller handoff: a wrapped secret in the
+    # tool's result is revealed here so the caller receives the real value.
+    tools = _Tools({"vault"}, run_result={"token": SecretValue("tok-4242-xyzzy")})
+    _install(monkeypatch, tools=tools)
+
+    result = await tools_ops.run_tool("vault", {})
+
+    assert result == {"token": "tok-4242-xyzzy"}
+
+
+async def test_run_tool_of_a_secret_preset_reveals_to_the_live_caller() -> None:
+    # A real PRESET run by name through the sync door: the in-process dispatch carries
+    # the wrapper out intact, and the door reveals it — the live caller gets the real
+    # value. Exercised against the real preset dispatch seam (not the fake tools facet).
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["vault"]}]}
+    )
+    async with app.app_context(manifest):
+        await app.preset_manager.register("acme_vault", "vault", {"account": "acme"}, [], "Acme vault")
+        try:
+            result = await tools_ops.run_tool("acme_vault", {})
+        finally:
+            await app.preset_manager.remove("acme_vault")
+
+    assert result == {"account": "acme", "token": "tok-acme"}
 
 
 async def test_run_tool_unknown_is_404(monkeypatch: pytest.MonkeyPatch, caplog) -> None:

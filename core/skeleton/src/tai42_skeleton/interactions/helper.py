@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
 from tai42_contract.interactions import AnswerFormat, InteractionRequest, MediaItem
+from tai42_contract.secrets import SecretValue
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
@@ -200,9 +201,11 @@ async def ask_user(
     verifier is meaningless without the external callback route). It is stashed
     server-side in the ``format_payload`` and stripped from the client frame.
 
-    ``sensitive`` marks the answer body as not-to-be-persisted: the caller still
-    receives the full answer, but the durable answered record keeps only the
-    status (no response body). Use it for credentials or personal data.
+    ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
+    returned answer in a ``SecretValue``: the caller reaches the real answer only
+    through ``reveal()`` (its repr and JSON dump refuse to expose it), while the
+    durable answered record keeps only the status (no response body). Use it for
+    credentials or personal data.
 
     ``channel`` names a registered channel that delivers the question to a human
     on an external medium; ``None`` keeps the default Studio-inbox-only surface.
@@ -515,7 +518,7 @@ async def ask_user(
                     # never retried and never swallowed, even when an answer was
                     # recorded.
                     if isinstance(exc, asyncio.CancelledError):
-                        mark_parked_question(exc, interaction_id, question)
+                        mark_parked_question(exc, interaction_id, question, sensitive)
                     raise
                 if result == "answered":
                     logger.warning(
@@ -563,7 +566,7 @@ async def ask_user(
             # count / open index. The status gate makes the cancelled-after-answer
             # race a no-op. A cleanup failure propagates (chained on the
             # CancelledError context), never swallowed.
-            mark_parked_question(exc, interaction_id, question)
+            mark_parked_question(exc, interaction_id, question, sensitive)
             await _prune(settings, store, interaction_id, group)
             raise
     if response is None:
@@ -589,4 +592,8 @@ async def ask_user(
             f"ask_user timed out after {budget}s; the question record was already gone "
             f"(expired or pruned elsewhere) and no answer was returned (interaction {interaction_id})"
         )
+    # A sensitive answer is handed back wrapped so it cannot leak through a repr,
+    # a log line, or a JSON dump — the caller reveals it deliberately.
+    if sensitive:
+        return SecretValue(response.answer)
     return response.answer

@@ -13,6 +13,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 from pydantic.v1 import BaseModel as V1BaseModel
 from tai42_contract.agent.base import PresetSpec
+from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_contract.tools import AppTools
 
 from tai42_agents._internal.resolve_tools import resolve_tools
@@ -90,6 +91,29 @@ def test_preset_hides_fixed_keys_and_binds():
     key, arguments = app.run_tool_calls[-1]
     assert key == "flow"
     assert arguments == {"flow_graph": {"nodes": []}, "flow_graph_kwargs": {"x": 1}}
+
+
+class _SecretReturningTools:
+    """A ``tools`` facet whose base tool returns a ``SecretValue``-bearing dict,
+    so the preset adapter's masking of the model-visible result can be exercised."""
+
+    async def get_client_tools(self, names=None):
+        return [make_tool(n) for n in (names or [])]
+
+    async def run_tool(self, key, arguments):
+        return {"endpoint_id": "we_1", "secret": SecretValue("whsec_REAL")}
+
+
+def test_preset_result_masks_secrets_before_the_model():
+    """The preset tool adapter this plugin registers hands langchain a masked
+    result: a ``SecretValue`` in a tool return becomes the placeholder, so the
+    model, checkpoint, and callback trace never see the real secret."""
+    app = cast(AppTools, _SecretReturningTools())
+    preset = PresetSpec(name="p", description="d", base_tool="flow", fixed_kwargs={})
+    (tool,) = asyncio.run(resolve_tools(app, [], [], [preset]))
+    result = asyncio.run(tool.arun({}))
+    assert result == {"endpoint_id": "we_1", "secret": SECRET_PLACEHOLDER}
+    assert "whsec_REAL" not in repr(result)
 
 
 def test_preset_cannot_override_a_fixed_key():

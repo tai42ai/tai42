@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import SecretValue
 
 from tai42_tools_stripe._internal.tools.stripe_client import (
     _assert_livemode,
@@ -24,9 +25,11 @@ async def create_stripe_webhook_endpoint(url: str, enabled_events: list[str]) ->
 
     Security:
         The signing ``secret`` is revealed by Stripe ONLY on this create call and never again. This
-        tool RETURNS it to the caller and writes it nowhere -- no config, no env, no file. Persisting
-        it (through the platform's config API) is the caller's job; a lost secret cannot be
-        re-fetched and forces a create-new / delete-old rotation.
+        tool RETURNS it wrapped in a :class:`SecretValue` envelope -- repr-safe and not
+        JSON-serializable, so it cannot leak through a log line, a recorder, or an LLM turn -- and
+        writes it nowhere (no config, no env, no file). Reveal it with ``.reveal()`` to persist it
+        through the platform's config API; a lost secret cannot be re-fetched and forces a
+        create-new / delete-old rotation.
 
     Stripe has no rotate-secret endpoint: rotation is create a new endpoint, swap the stored secret
     to the new one, then delete the old endpoint -- the three webhook tools together enable it.
@@ -43,7 +46,7 @@ async def create_stripe_webhook_endpoint(url: str, enabled_events: list[str]) ->
 
     Returns:
         ``{"endpoint_id", "secret", "url", "enabled_events", "status"}`` where ``secret`` is the
-        one-time signing secret.
+        one-time signing secret wrapped in a :class:`SecretValue`.
     """
     if not url:
         raise ValueError("url is required and must be non-empty")
@@ -57,7 +60,7 @@ async def create_stripe_webhook_endpoint(url: str, enabled_events: list[str]) ->
     _assert_livemode(endpoint)
     return {
         "endpoint_id": endpoint["id"],
-        "secret": endpoint["secret"],
+        "secret": SecretValue(endpoint["secret"]),
         "url": endpoint["url"],
         "enabled_events": endpoint["enabled_events"],
         "status": endpoint["status"],
