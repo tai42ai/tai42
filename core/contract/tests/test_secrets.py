@@ -8,6 +8,8 @@ mask-loses-the-secret), and ``reveal`` identity.
 from __future__ import annotations
 
 import json
+import pickle
+from typing import Any
 
 import pytest
 
@@ -31,10 +33,27 @@ def test_not_json_serializable():
         json.dumps({"a": SecretValue("tok-4242-xyzzy")})
 
 
+def test_not_pickle_serializable():
+    from tai42_contract.secrets import SecretValue
+
+    with pytest.raises(TypeError):
+        pickle.dumps(SecretValue("tok-4242-xyzzy"))
+    with pytest.raises(TypeError):
+        pickle.dumps({"a": SecretValue("tok-4242-xyzzy")})
+
+
+def test_pickle_refusal_message_carries_no_secret():
+    from tai42_contract.secrets import SecretValue
+
+    with pytest.raises(TypeError) as excinfo:
+        pickle.dumps(SecretValue("tok-4242-xyzzy"))
+    assert "tok-4242-xyzzy" not in str(excinfo.value)
+
+
 def test_mask_secrets_places_placeholder_and_leaves_original_intact():
     from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue, mask_secrets
 
-    original = {
+    original: dict[str, Any] = {
         "token": SecretValue("tok-4242-xyzzy"),
         "name": "alice",
         "nested": [1, SecretValue("pw-9001-plugh"), "keep"],

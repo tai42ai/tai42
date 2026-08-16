@@ -526,9 +526,11 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       - name: Detect marketplace access
-        # The marketplace browser leg clones the PRIVATE tai-marketplace-web, installs
-        # the PRIVATE tai42-marketplace git source, and runs under TAI_E2E_MARKETPLACE=1;
-        # all need the RELEASE_PLEASE_TOKEN secret, absent on fork PRs. Skip loudly then.
+        # The marketplace browser leg clones the PRIVATE tai-marketplace monorepo
+        # (its web/ workspace is the browse site), installs the PRIVATE
+        # tai42-marketplace registry git source, and runs under
+        # TAI_E2E_MARKETPLACE=1; all need the RELEASE_PLEASE_TOKEN secret, absent on
+        # fork PRs. Skip loudly then.
         id: mp
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -568,11 +570,11 @@ jobs:
             echo ""
             echo "Browser suite ran against tai-studio \`main\` @ \`$studio_sha\` (unpinned)."
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Clone tai-marketplace-web (private, marketplace browser leg)
+      - name: Clone tai-marketplace (private, marketplace browser leg)
         if: steps.mp.outputs.enabled == 'true'
         env:
           MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: git clone --depth 1 https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace-web
+        run: git clone --depth 1 https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace
       - name: Build the Studio SPA
         uses: ./.github/actions/studio-spa
       - name: Install the ui/ workspace

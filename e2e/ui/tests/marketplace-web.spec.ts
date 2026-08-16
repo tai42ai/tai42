@@ -1,5 +1,5 @@
 /**
- * The public tai-marketplace-web site (opt-in: `TAI_E2E_MARKETPLACE=1`), built
+ * The public marketplace web site (opt-in: `TAI_E2E_MARKETPLACE=1`), built
  * and served by the studio runner with its `/api` proxy pointed at the same
  * harness-run registry the Studio talks to. Read-only browse surfaces only — the
  * site has no login and no install: browse, facet filtering, a detail page with

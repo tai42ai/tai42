@@ -232,6 +232,42 @@ def test_unserializable_success_result_stays_tagged_description() -> None:
     assert info.result["traceback"] is None
 
 
+def _result_payload(result: Any) -> dict[str, Any]:
+    """A full result-store payload (the key set that routes to the tagging path)
+    carrying ``result`` in the ``r`` slot."""
+    return {
+        "t": 1,
+        "f": "tool_execution",
+        "a": (),
+        "k": {},
+        "et": 1,
+        "s": True,
+        "r": result,
+        "st": 2,
+        "ft": 3,
+        "q": "arq:queue",
+        "id": "j1",
+    }
+
+
+def test_result_serializer_raises_on_secret_value_never_tags_it() -> None:
+    """A ``SecretValue`` reaching the result serializer raises loudly instead of
+    serializing to a tagged description that would silently drop the secret; the
+    message carries no secret text."""
+    from tai42_contract.secrets import SecretValue
+
+    with pytest.raises(TypeError) as excinfo:
+        job_serializer(_result_payload(SecretValue("tok-4242-xyzzy")))
+    assert "tok-4242-xyzzy" not in str(excinfo.value)
+
+
+def test_result_serializer_still_tags_other_unserializable_values() -> None:
+    """Every non-secret value JSON cannot encode keeps the tagging fallback."""
+    revived = job_deserializer(job_serializer(_result_payload(object())))
+    assert revived["r"][UNSERIALIZABLE_KEY] is True
+    assert revived["r"]["type"] == "object"
+
+
 def test_job_payload_stays_strict_for_unserializable_argument() -> None:
     """Enqueue-side payloads get no tagging fallback: an unserializable job
     argument still fails the enqueue loudly."""

@@ -159,9 +159,7 @@ async def test_background_run_of_a_secret_preset_schema_failure_redacts_the_reco
         {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["vault"]}]}
     )
     async with app.app_context(manifest):
-        await app.preset_manager.register(
-            "x_vault", "vault", {"account": "x"}, [], "Short vault", output_schema=schema
-        )
+        await app.preset_manager.register("x_vault", "vault", {"account": "x"}, [], "Short vault", output_schema=schema)
         try:
             out = await ops.submit_run("x_vault", {})
             await _drain()

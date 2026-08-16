@@ -35,6 +35,19 @@ async def test_tool_execution_dispatches_and_closes_clients(app, monkeypatch):
     assert closed == [True]
 
 
+def test_enqueue_serializer_refuses_secret_value_payload():
+    """RQ writes a job through its default (pickle) serializer; a ``SecretValue``
+    in the job args must raise loudly there, never pickle the real value into
+    the result/job store. The message carries no secret text."""
+    from rq.serializers import resolve_serializer
+    from tai42_contract.secrets import SecretValue
+
+    serializer = resolve_serializer(None)
+    with pytest.raises(TypeError) as excinfo:
+        serializer.dumps({"args": (SecretValue("tok-4242-xyzzy"),), "kwargs": {}})
+    assert "tok-4242-xyzzy" not in str(excinfo.value)
+
+
 async def test_tool_execution_runs_the_tool_detached(app, monkeypatch):
     # A worker execution has no live caller, so the tool observes the detached
     # flag set; the flag never leaks past the job.
