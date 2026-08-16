@@ -93,6 +93,31 @@ def test_callback_populates_app_context(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert obj.server_url == "http://probe-host"
 
 
+def test_timeout_flag_reaches_read_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # The global ``--timeout`` flag flows through the root callback into the context's
+    # resolved read window.
+    from tai42_cli import context
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+
+    group = _slim(monkeypatch)
+    captured: dict[str, object] = {}
+
+    @click.command("probe")
+    @click.pass_context
+    def probe(ctx: click.Context) -> None:
+        captured["obj"] = ctx.obj
+
+    group.add_command(probe, "probe")
+    result = CliRunner().invoke(group, ["--timeout", "250", "probe"])
+
+    assert result.exit_code == 0, result.output
+    obj = captured["obj"]
+    assert isinstance(obj, AppContext)
+    assert obj.read_timeout == 250.0
+
+
 def test_trailing_json_flag_on_remote_leaf_renders_json(monkeypatch: pytest.MonkeyPatch) -> None:
     # ``tai tools list --json`` (flag AFTER the leaf command) renders JSON just like
     # the flag-first ``tai --json tools list`` form.

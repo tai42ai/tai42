@@ -21,6 +21,15 @@ from typing import Any
 
 import httpx
 
+# The read window must outlast the slowest documented fleet operation the CLI
+# fronts (a config write blocks on the full worker-reload broadcast, whose fanout
+# scales with worker count), so it is generous by default and the one dimension
+# the override lever tunes. Connect stays snappy so a dead server still fails fast.
+CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_READ_TIMEOUT_SECONDS = 120.0
+WRITE_TIMEOUT_SECONDS = 30.0
+POOL_TIMEOUT_SECONDS = 30.0
+
 
 class ApiError(Exception):
     """A non-2xx response from the server API.
@@ -157,12 +166,18 @@ class ApiClient:
         api_key: str | None,
         *,
         transport: httpx.BaseTransport | None = None,
-        timeout: float = 30.0,
+        read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
     ) -> None:
         # No key → no ``x-api-key`` header at all, so a public route is never handed a
         # stale/wrong credential (which its always-public middleware would ignore, but a
         # protected route would 401 on).
         headers = {"x-api-key": api_key} if api_key is not None else {}
+        timeout = httpx.Timeout(
+            connect=CONNECT_TIMEOUT_SECONDS,
+            read=read_timeout,
+            write=WRITE_TIMEOUT_SECONDS,
+            pool=POOL_TIMEOUT_SECONDS,
+        )
         self._client = httpx.Client(
             base_url=base_url,
             timeout=timeout,

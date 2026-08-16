@@ -2,7 +2,8 @@
 
 Server URL: ``--server`` flag -> ``TAI_SERVER_URL`` -> ``config.toml`` ->
 the local default (port from the serve defaults). API key: ``--api-key-stdin``
--> ``TAI_API_KEY`` -> ``config.toml`` -> interactive prompt.
+-> ``TAI_API_KEY`` -> ``config.toml`` -> interactive prompt. Read timeout:
+``--timeout`` flag -> ``TAI_CLI_TIMEOUT_SECONDS`` -> the client's default.
 """
 
 from __future__ import annotations
@@ -121,7 +122,7 @@ def test_app_context_resolves_lazily_and_caches(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setenv(context.SERVER_URL_ENV, "http://from-env")
     monkeypatch.setenv(context.API_KEY_ENV, "env-key")
 
-    ctx = context.AppContext(json_output=True, server_override=None, api_key_stdin=False)
+    ctx = context.AppContext(json_output=True, server_override=None, api_key_stdin=False, timeout_override=None)
     assert ctx.json_output is True
     assert ctx.server_url == "http://from-env"
     assert ctx.api_key == "env-key"
@@ -136,10 +137,89 @@ def test_app_context_client_uses_resolved_values(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv(context.SERVER_URL_ENV, "http://client-host")
     monkeypatch.setenv(context.API_KEY_ENV, "client-key")
 
-    ctx = context.AppContext(json_output=False, server_override="http://override", api_key_stdin=False)
+    ctx = context.AppContext(
+        json_output=False, server_override="http://override", api_key_stdin=False, timeout_override=None
+    )
     client = ctx.client()
     try:
         assert str(client._client.base_url) == "http://override"
         assert client._client.headers["x-api-key"] == "client-key"
+    finally:
+        client.close()
+
+
+# --- read timeout ---------------------------------------------------------
+
+
+def test_timeout_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+    assert context.resolve_timeout(None) == context.DEFAULT_READ_TIMEOUT_SECONDS
+
+
+def test_timeout_env_override_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(context.TIMEOUT_ENV, "45.5")
+    assert context.resolve_timeout(None) == 45.5
+
+
+def test_timeout_flag_wins_over_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(context.TIMEOUT_ENV, "45.5")
+    assert context.resolve_timeout(90.0) == 90.0
+
+
+def test_timeout_non_numeric_env_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(context.TIMEOUT_ENV, "soon")
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(None)
+
+
+def test_timeout_non_positive_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(0.0)
+    monkeypatch.setenv(context.TIMEOUT_ENV, "-1")
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(None)
+
+
+def test_timeout_nan_flag_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(float("nan"))
+
+
+def test_timeout_nan_env_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(context.TIMEOUT_ENV, "nan")
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(None)
+
+
+def test_timeout_inf_flag_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(float("inf"))
+
+
+def test_timeout_inf_env_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(context.TIMEOUT_ENV, "inf")
+    with pytest.raises(context.typer.BadParameter):
+        context.resolve_timeout(None)
+
+
+def test_timeout_large_finite_value_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(context.TIMEOUT_ENV, raising=False)
+    assert context.resolve_timeout(86400.0) == 86400.0
+
+
+def test_app_context_read_timeout_reaches_the_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv(context.API_KEY_ENV, "client-key")
+    monkeypatch.setenv(context.SERVER_URL_ENV, "http://client-host")
+    monkeypatch.setenv(context.TIMEOUT_ENV, "200")
+
+    ctx = context.AppContext(json_output=False, server_override=None, api_key_stdin=False, timeout_override=None)
+    client = ctx.client()
+    try:
+        assert client._client.timeout.read == 200.0
+        assert client._client.timeout.connect == 5.0
     finally:
         client.close()

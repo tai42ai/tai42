@@ -25,6 +25,25 @@ def _client(handler) -> ApiClient:
     return ApiClient("http://tai.test", "secret-key", transport=httpx.MockTransport(handler))
 
 
+def test_default_timeout_is_generous_read_and_snappy_connect() -> None:
+    # A slow-but-succeeding fleet op (a config write blocks on the full worker-reload
+    # broadcast) must not read-timeout, while a dead server still fails fast on connect.
+    with ApiClient("http://tai.test", "secret-key") as client:
+        timeout = client._client.timeout
+    assert timeout.read == 120.0
+    assert timeout.connect == 5.0
+    assert timeout.write == 30.0
+    assert timeout.pool == 30.0
+
+
+def test_read_timeout_override_tunes_only_the_read_window() -> None:
+    with ApiClient("http://tai.test", "secret-key", read_timeout=300.0) as client:
+        timeout = client._client.timeout
+    assert timeout.read == 300.0
+    # Connect stays snappy regardless of the read override.
+    assert timeout.connect == 5.0
+
+
 def test_get_unwraps_data_and_sends_api_key() -> None:
     seen: dict[str, str] = {}
 
