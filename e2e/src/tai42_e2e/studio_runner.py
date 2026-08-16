@@ -270,8 +270,7 @@ class _MarketplaceWebSite:
                 fh.write(f"$ {' '.join(step)}\n{proc.stdout}\n{proc.stderr}\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"marketplace web {' '.join(step)} failed (exit {proc.returncode}):\n"
-                    f"{proc.stdout}\n{proc.stderr}"
+                    f"marketplace web {' '.join(step)} failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
                 )
 
     def start(self) -> None:

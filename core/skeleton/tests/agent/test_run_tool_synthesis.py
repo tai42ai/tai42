@@ -25,6 +25,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
+from mcp.types import TextContent
 from pydantic.json_schema import PydanticJsonSchemaWarning
 from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_kit.settings import reset_all_settings
@@ -719,7 +720,7 @@ def test_mcp_edge_reveals_wrapped_secret_to_the_client():
                 result = await client.call_tool("vault", {})
 
             assert result.structured_content == {"token": "tok-4242-xyzzy"}
-            texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+            texts = [block.text for block in result.content if isinstance(block, TextContent)]
             assert any("tok-4242-xyzzy" in text for text in texts)
 
     asyncio.run(run())
