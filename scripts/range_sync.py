@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,14 +59,13 @@ _REQ_RE = re.compile(
 )
 
 # A ``contract:`` line in a tai-plugin.yml, e.g. ``contract: '>=0.3,<0.4'``.
-_CONTRACT_RE = re.compile(
-    r"^(?P<indent>\s*)contract:\s*(?P<q>['\"])(?P<val>.*?)(?P=q)(?P<trail>\s*)$"
-)
+_CONTRACT_RE = re.compile(r"^(?P<indent>\s*)contract:\s*(?P<q>['\"])(?P<val>.*?)(?P=q)(?P<trail>\s*)$")
 
 
 # --------------------------------------------------------------------------- #
 # Core derivation                                                             #
 # --------------------------------------------------------------------------- #
+
 
 def derive_range(version: str) -> str:
     """Return the derived ``>=floor,<cap`` range for a released *version*.
@@ -131,6 +129,7 @@ def parse_requirement(raw: str) -> ParsedRequirement | None:
 # --------------------------------------------------------------------------- #
 # Discovery                                                                   #
 # --------------------------------------------------------------------------- #
+
 
 def _load_toml(path: Path) -> dict:
     with path.open("rb") as fh:
@@ -200,6 +199,7 @@ def _requirement_strings(pyproject: dict) -> list[str]:
 # pyproject rewriting                                                         #
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(frozen=True)
 class SpecChange:
     """A single first-party specifier rewrite within one file."""
@@ -209,9 +209,7 @@ class SpecChange:
     new_req: str
 
 
-def compute_pyproject_changes(
-    pyproject: dict, first_party: dict[str, str]
-) -> list[SpecChange]:
+def compute_pyproject_changes(pyproject: dict, first_party: dict[str, str]) -> list[SpecChange]:
     """Return the set of first-party specifier rewrites for one parsed
     pyproject. Version-less first-party refs and non-first-party refs are
     skipped. A change is emitted only when old != new."""
@@ -257,9 +255,7 @@ def rewrite_pyproject_text(text: str, changes: list[SpecChange]) -> tuple[str, i
     for change in changes:
         text, count = _replace_quoted(text, change.old_req, change.new_req)
         if count == 0:
-            raise RuntimeError(
-                f"could not locate requirement literal {change.old_req!r} to rewrite"
-            )
+            raise RuntimeError(f"could not locate requirement literal {change.old_req!r} to rewrite")
         total += count
     return text, total
 
@@ -267,6 +263,7 @@ def rewrite_pyproject_text(text: str, changes: list[SpecChange]) -> tuple[str, i
 # --------------------------------------------------------------------------- #
 # tai-plugin.yml rewriting                                                    #
 # --------------------------------------------------------------------------- #
+
 
 def rewrite_contract_yaml(text: str, new_range: str) -> tuple[str, bool]:
     """Rewrite the ``contract:`` line's quoted value to *new_range*, keeping the
@@ -314,6 +311,7 @@ def plugin_descriptor_files(members: list[Path], root: Path) -> list[Path]:
 # Apply / check                                                               #
 # --------------------------------------------------------------------------- #
 
+
 @dataclass
 class SyncReport:
     """What an apply run changed / what a check run found out of sync."""
@@ -358,9 +356,7 @@ def apply(root: Path) -> SyncReport:
         new_text, changed = rewrite_contract_yaml(text, contract_range)
         if changed:
             yml.write_text(new_text)
-            report.contract_changes.append(
-                (yml.relative_to(root).as_posix(), old or "", contract_range)
-            )
+            report.contract_changes.append((yml.relative_to(root).as_posix(), old or "", contract_range))
 
     _self_assert(root)
     return report
@@ -371,9 +367,9 @@ def _self_assert(root: Path) -> None:
     contract pin now equals the formula output. Raises on any mismatch."""
     drift = check(root)
     if drift.dirty:
-        details = "; ".join(
-            f"{m}: {c.old_req} -> {c.new_req}" for m, c in drift.spec_changes
-        ) or "; ".join(f"{p}: {o} -> {n}" for p, o, n in drift.contract_changes)
+        details = "; ".join(f"{m}: {c.old_req} -> {c.new_req}" for m, c in drift.spec_changes) or "; ".join(
+            f"{p}: {o} -> {n}" for p, o, n in drift.contract_changes
+        )
         raise RuntimeError(f"self-assert failed after apply: {details}")
 
 
@@ -395,9 +391,7 @@ def check(root: Path) -> SyncReport:
         text = yml.read_text()
         current = contract_yaml_value(text)
         if current is not None and current != contract_range:
-            report.contract_changes.append(
-                (yml.relative_to(root).as_posix(), current, contract_range)
-            )
+            report.contract_changes.append((yml.relative_to(root).as_posix(), current, contract_range))
 
     return report
 
@@ -405,6 +399,7 @@ def check(root: Path) -> SyncReport:
 # --------------------------------------------------------------------------- #
 # CLI                                                                         #
 # --------------------------------------------------------------------------- #
+
 
 def _repo_root() -> Path:
     """The repo root is the parent of this script's ``scripts/`` directory."""
@@ -414,10 +409,7 @@ def _repo_root() -> Path:
 def _format_drift(report: SyncReport) -> str:
     lines: list[str] = []
     for member_path, change in report.spec_changes:
-        lines.append(
-            f"  {member_path}/pyproject.toml: "
-            f"{change.old_req!r} -> {change.new_req!r}"
-        )
+        lines.append(f"  {member_path}/pyproject.toml: {change.old_req!r} -> {change.new_req!r}")
     for yaml_path, old, new in report.contract_changes:
         lines.append(f"  {yaml_path}: contract {old!r} -> {new!r}")
     return "\n".join(lines)

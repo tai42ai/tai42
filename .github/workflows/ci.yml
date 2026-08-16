@@ -315,6 +315,10 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       - run: uv sync --locked
+      - name: Ruff
+        run: uv run --no-sync ruff check scripts tests
+      - name: Ruff format
+        run: uv run --no-sync ruff format --check scripts tests
       - name: Fleet consistency
         run: uv run pytest tests/
       - name: Plugin docs gate

@@ -10,10 +10,10 @@ from textwrap import dedent
 
 import pytest
 
-import range_sync  # noqa: E402  (path injected by tests/conftest.py)
-
+import range_sync  # importable via the scripts/ path tests/conftest.py injects
 
 # --------------------------------------------------------------------- derive
+
 
 @pytest.mark.parametrize(
     ("version", "expected"),
@@ -35,18 +35,15 @@ def test_derive_range(version: str, expected: str):
 
 # ------------------------------------------------------------- requirement parse
 
+
 def test_parse_requirement_preserves_extras_and_marker():
-    parsed = range_sync.parse_requirement(
-        "tai42-kit[llm,jq,redis]>=0.2,<0.4; python_version >= '3.13'"
-    )
+    parsed = range_sync.parse_requirement("tai42-kit[llm,jq,redis]>=0.2,<0.4; python_version >= '3.13'")
     assert parsed is not None
     assert parsed.name == "tai42-kit"
     assert parsed.extras == "[llm,jq,redis]"
     assert parsed.specifier == ">=0.2,<0.4"
     assert parsed.marker == "; python_version >= '3.13'"
-    assert parsed.with_specifier(">=0.3,<0.4") == (
-        "tai42-kit[llm,jq,redis]>=0.3,<0.4; python_version >= '3.13'"
-    )
+    assert parsed.with_specifier(">=0.3,<0.4") == ("tai42-kit[llm,jq,redis]>=0.3,<0.4; python_version >= '3.13'")
 
 
 def test_parse_requirement_versionless():
@@ -59,6 +56,7 @@ def test_parse_requirement_versionless():
 
 
 # ------------------------------------------------------------------ sample tree
+
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +143,7 @@ def _kit_deps(root: Path) -> list[str]:
 
 # ---------------------------------------------------------------------- apply
 
+
 def test_apply_rewrites_and_preserves(tmp_path: Path):
     _build_tree(tmp_path)
     report = range_sync.apply(tmp_path)
@@ -180,11 +179,7 @@ def test_apply_rewrites_and_preserves(tmp_path: Path):
 def test_apply_is_idempotent(tmp_path: Path):
     _build_tree(tmp_path)
     range_sync.apply(tmp_path)
-    snapshot = {
-        p: p.read_text()
-        for p in tmp_path.rglob("*")
-        if p.is_file()
-    }
+    snapshot = {p: p.read_text() for p in tmp_path.rglob("*") if p.is_file()}
     report2 = range_sync.apply(tmp_path)
     assert not report2.dirty
     after = {p: p.read_text() for p in tmp_path.rglob("*") if p.is_file()}
@@ -201,6 +196,7 @@ def test_comments_and_formatting_preserved(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------- check
+
 
 def test_check_passes_when_synced(tmp_path: Path):
     _build_tree(tmp_path)
@@ -232,6 +228,7 @@ def test_check_cli_exit_codes(tmp_path: Path):
 
 # ------------------------------------------------------------- yaml quote style
 
+
 @pytest.mark.parametrize("quote", ["'", '"'])
 def test_contract_yaml_quote_style_preserved(quote: str):
     text = f"contract: {quote}>=0.2,<0.4{quote}\n"
@@ -248,6 +245,7 @@ def test_contract_yaml_noop_when_already_synced():
 
 
 # ------------------------------------------------------- PEP 503 name matching
+
 
 def test_noncanonical_dep_name_is_matched():
     # A first-party dep spelled non-canonically (underscore / mixed case) must

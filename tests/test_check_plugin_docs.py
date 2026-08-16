@@ -11,7 +11,8 @@ import pytest
 
 _GATE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "check_plugin_docs.py"
 _spec = importlib.util.spec_from_file_location("check_plugin_docs", _GATE_PATH)
-assert _spec is not None and _spec.loader is not None
+assert _spec is not None
+assert _spec.loader is not None
 gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
 
@@ -71,9 +72,7 @@ def test_rejects_missing_index(tmp_path: Path, capsys: pytest.CaptureFixture[str
 
 def test_rejects_bad_front_matter(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     plugin = _make_plugin(tmp_path)
-    (plugin / "src" / "tai42_example" / "docs" / "index.mdx").write_bytes(
-        b"# no front matter\n"
-    )
+    (plugin / "src" / "tai42_example" / "docs" / "index.mdx").write_bytes(b"# no front matter\n")
 
     assert gate.main([str(plugin)]) == 1
     err = capsys.readouterr().err
@@ -84,9 +83,7 @@ def test_rejects_bad_front_matter(tmp_path: Path, capsys: pytest.CaptureFixture[
 def test_rejects_non_raster_image(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     plugin = _make_plugin(tmp_path)
     docs = plugin / "src" / "tai42_example" / "docs"
-    (docs / "index.mdx").write_bytes(
-        _VALID_INDEX.replace(b"[in-set link](other.mdx)", b"text")
-    )
+    (docs / "index.mdx").write_bytes(_VALID_INDEX.replace(b"[in-set link](other.mdx)", b"text"))
     (docs / "images").mkdir()
     (docs / "images" / "diagram.svg").write_bytes(b"<svg></svg>")
 
@@ -99,9 +96,7 @@ def test_rejects_non_raster_image(tmp_path: Path, capsys: pytest.CaptureFixture[
 def test_rejects_disallowed_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     plugin = _make_plugin(tmp_path)
     docs = plugin / "src" / "tai42_example" / "docs"
-    (docs / "index.mdx").write_bytes(
-        _VALID_INDEX.replace(b"[in-set link](other.mdx)", b"text")
-    )
+    (docs / "index.mdx").write_bytes(_VALID_INDEX.replace(b"[in-set link](other.mdx)", b"text"))
     (docs / "notes.txt").write_bytes(b"stray file")
 
     assert gate.main([str(plugin)]) == 1
@@ -110,9 +105,7 @@ def test_rejects_disallowed_file(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "notes.txt" in err
 
 
-def test_names_the_plugin_on_failure(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-):
+def test_names_the_plugin_on_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     plugin = _make_plugin(tmp_path / "channel-example")
     (plugin / "src" / "tai42_example" / "docs" / "guide.mdx").write_bytes(_VALID_INDEX)
 

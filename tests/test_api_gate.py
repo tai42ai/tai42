@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import api_gate  # noqa: E402  (path injected by tests/conftest.py)
-
+import api_gate  # importable via the scripts/ path tests/conftest.py injects
 
 # ----------------------------------------------------------------- version parse
 
@@ -108,9 +107,7 @@ def test_version_class():
         ("strict", "0.1.0", "0.1.1", False, True),
     ],
 )
-def test_gate_decision_matrix(
-    mode: str, old: str, new: str, has_breaking: bool, passes: bool
-):
+def test_gate_decision_matrix(mode: str, old: str, new: str, has_breaking: bool, passes: bool):
     result, reason = api_gate._gate_passes(mode, old, new, has_breaking)
     assert result is passes
     if has_breaking and not passes:
@@ -127,7 +124,8 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
     # the mjs gate), never a bracketed/quoted list.
     _, reason = api_gate._gate_passes("label-honesty", "0.1.0", "0.1.1", True)
     assert "computed allowed bump(s)=major,minor, bump=patch" in reason
-    assert "[" not in reason and "'" not in reason
+    assert "[" not in reason
+    assert "'" not in reason
 
 
 # ------------------------------------------------------ doc-only Field filter
@@ -298,9 +296,7 @@ def _run_main(
     api_gate.main()
 
 
-def _build_release_repo(
-    repo: Path, *, mode: str, old_version: str, old_body: str, new_body: str
-) -> None:
+def _build_release_repo(repo: Path, *, mode: str, old_version: str, old_body: str, new_body: str) -> None:
     (repo / ".github").mkdir(parents=True)
     (repo / ".github" / "api-gate.yml").write_text(f"mode: {mode}\n")
     src = repo / "core" / "widget" / "src" / "widget"
@@ -361,9 +357,7 @@ def test_end_to_end_breaking_removal(
         )
 
 
-def test_end_to_end_additive_change_passes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_end_to_end_additive_change_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     pytest.importorskip("griffe")
     _build_release_repo(
         tmp_path,
@@ -399,9 +393,7 @@ _FIELD_DEFAULT_NEW = (
 )
 
 
-def test_end_to_end_field_description_only_passes_at_patch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_end_to_end_field_description_only_passes_at_patch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # The skeleton-2.1.0 incident end to end: only a Field description changed.
     # griffe flags ATTRIBUTE_CHANGED_VALUE, the filter drops it, so even a patch
     # under strict passes.
@@ -422,9 +414,7 @@ def test_end_to_end_field_description_only_passes_at_patch(
     )
 
 
-def test_end_to_end_field_default_change_stays_breaking_at_patch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_end_to_end_field_default_change_stays_breaking_at_patch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # A real Field default change is surface, so a patch under strict still fails.
     pytest.importorskip("griffe")
     _build_release_repo(
