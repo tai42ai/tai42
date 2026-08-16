@@ -78,12 +78,13 @@ def _iter_tai42_specifiers(pyproject: dict):
 def _plugin_descriptor(plugin_dir: Path) -> tuple[Path, Path]:
     """Return (root_copy, packaged_copy) descriptor paths for a plugin."""
     root_copy = plugin_dir / "tai-plugin.yml"
-    packaged = [p for p in (plugin_dir / "src").rglob("tai-plugin.yml")]
+    packaged = list((plugin_dir / "src").rglob("tai-plugin.yml"))
     assert len(packaged) == 1, f"{plugin_dir}: expected one packaged descriptor, got {packaged}"
     return root_copy, packaged[0]
 
 
 # ---------------------------------------------------------------- 1. membership
+
 
 def test_membership_equality():
     workspace_members = _load_toml(ROOT / "pyproject.toml")["tool"]["uv"]["workspace"]["members"]
@@ -98,8 +99,7 @@ def test_membership_equality():
     dir_paths = set(MEMBER_PATHS)
 
     assert resolved == config_paths == dir_paths, (
-        f"members glob={sorted(resolved)} "
-        f"config={sorted(config_paths)} dirs={sorted(dir_paths)}"
+        f"members glob={sorted(resolved)} config={sorted(config_paths)} dirs={sorted(dir_paths)}"
     )
 
     for plugin_dir in PLUGIN_DIRS:
@@ -116,6 +116,7 @@ def test_connector_namespace_has_no_init():
 
 # --------------------------------------------------------------- 2. cap admission
 
+
 @pytest.mark.parametrize("member_dir", MEMBER_DIRS, ids=MEMBER_PATHS)
 def test_cap_admission(member_dir: Path):
     pyproject = _load_toml(member_dir / "pyproject.toml")
@@ -124,12 +125,12 @@ def test_cap_admission(member_dir: Path):
             continue  # not a workspace sibling
         sibling_version = SIBLING_VERSIONS[dep_name]
         assert SpecifierSet(str(spec)).contains(sibling_version, prereleases=False), (
-            f"{member_dir.name}: {dep_name}{spec} does not admit "
-            f"sibling version {sibling_version}"
+            f"{member_dir.name}: {dep_name}{spec} does not admit sibling version {sibling_version}"
         )
 
 
 # ------------------------------------------------------ 3. descriptor lockstep
+
 
 @pytest.mark.parametrize("plugin_dir", PLUGIN_DIRS, ids=[d.name for d in PLUGIN_DIRS])
 def test_descriptor_lockstep(plugin_dir: Path):
@@ -153,16 +154,13 @@ def test_descriptor_lockstep(plugin_dir: Path):
             break
     assert contract_spec is not None, f"{name}: no tai42-contract dependency"
     assert SpecifierSet(str(descriptor["contract"])) == contract_spec, (
-        f"{name}: descriptor contract {descriptor['contract']!r} != "
-        f"pyproject specifier {str(contract_spec)!r}"
+        f"{name}: descriptor contract {descriptor['contract']!r} != pyproject specifier {str(contract_spec)!r}"
     )
 
     assert descriptor["repository"] == f"{REPO_TREE_URL}/{member_path}"
 
     # packaged copy byte-identical to the root copy
-    assert packaged_copy.read_bytes() == root_copy.read_bytes(), (
-        f"{name}: packaged descriptor differs from root copy"
-    )
+    assert packaged_copy.read_bytes() == root_copy.read_bytes(), f"{name}: packaged descriptor differs from root copy"
 
     # both release-please extra-files paths exist on disk
     config_entry = _root_config()["packages"][member_path]
@@ -174,11 +172,11 @@ def test_descriptor_lockstep(plugin_dir: Path):
 
 # ------------------------------------------------------------- 4. manifest sanity
 
+
 def test_manifest_sanity():
     manifest = _manifest()
     member_versions = {
-        d.relative_to(ROOT).as_posix(): _load_toml(d / "pyproject.toml")["project"]["version"]
-        for d in MEMBER_DIRS
+        d.relative_to(ROOT).as_posix(): _load_toml(d / "pyproject.toml")["project"]["version"] for d in MEMBER_DIRS
     }
     for key, value in manifest.items():
         assert key in member_versions, f"manifest key {key} is not a member path"
@@ -191,23 +189,42 @@ def test_manifest_sanity():
 
 HARNESS_API = {
     "tai42_e2e.stack": [
-        "TaiStack", "Infra", "StackConfig", "StackResources", "Topology",
-        "InfraUnavailable", "tai_bin", "uvicorn_bin", "spawn_expect_refusal",
+        "TaiStack",
+        "Infra",
+        "StackConfig",
+        "StackResources",
+        "Topology",
+        "InfraUnavailable",
+        "tai_bin",
+        "uvicorn_bin",
+        "spawn_expect_refusal",
     ],
     "tai42_e2e.booting": ["allocate_and_build", "boot_stack"],
     "tai42_e2e.manifests": [
-        "build_replicas_stack", "build_accounts_stack", "build_studio_stack",
+        "build_replicas_stack",
+        "build_accounts_stack",
+        "build_studio_stack",
         "PROBE_TOOLS_TITLE",
     ],
     "tai42_e2e.harness": [
-        "connect_infra", "allocate_resources", "release_resources",
-        "seed_bootstrap_key", "seed_route_rows", "seed_studio_auth",
+        "connect_infra",
+        "allocate_resources",
+        "release_resources",
+        "seed_bootstrap_key",
+        "seed_route_rows",
+        "seed_studio_auth",
         "seed_root_identity",
     ],
     "tai42_e2e.settings": ["HarnessSettings"],
     "tai42_e2e.variants": [
-        "Variants", "resolve_variants", "BusWorker", "bus_census", "BACKENDS",
-        "IDENTITIES", "STORAGES", "short_presence_ttl_env",
+        "Variants",
+        "resolve_variants",
+        "BusWorker",
+        "bus_census",
+        "BACKENDS",
+        "IDENTITIES",
+        "STORAGES",
+        "short_presence_ttl_env",
     ],
     "tai42_e2e.waiting": ["wait_for", "wait_for_async", "WaitTimeout", "align_to_window"],
     "tai42_e2e.httpapi": ["ApiClient"],
@@ -216,8 +233,11 @@ HARNESS_API = {
     "tai42_e2e.diagnostics": ["track", "register", "unregister", "report"],
     "tai42_e2e.rabbitx": ["RabbitAdmin"],
     "tai42_e2e.pkgsource": [
-        "BuiltWheel", "BuiltTarball", "FixturePackageIndex",
-        "build_fixture_wheel", "build_fixture_source_tarball",
+        "BuiltWheel",
+        "BuiltTarball",
+        "FixturePackageIndex",
+        "build_fixture_wheel",
+        "build_fixture_source_tarball",
     ],
     "tai42_e2e.pytest_plugin": [],
 }

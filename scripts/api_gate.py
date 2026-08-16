@@ -118,10 +118,7 @@ def _previous_tag(package: str, new_version: str, repo_root: Path) -> str | None
     candidates: list[tuple[tuple[int, int, int], str]] = []
     for tag in out.split():
         version = tag[len(prefix) :]
-        if (
-            re.fullmatch(r"\d+\.\d+\.\d+", version)
-            and _parse_version(version) < new_key
-        ):
+        if re.fullmatch(r"\d+\.\d+\.\d+", version) and _parse_version(version) < new_key:
             candidates.append((_parse_version(version), tag))
     if not candidates:
         return None
@@ -211,12 +208,8 @@ def _is_doc_only_field_change(old_expr: str, new_expr: str) -> bool:
         return False
     if _field_call_name(new_node.func) != "Field":
         return False
-    old_node.keywords = [
-        kw for kw in old_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS
-    ]
-    new_node.keywords = [
-        kw for kw in new_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS
-    ]
+    old_node.keywords = [kw for kw in old_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS]
+    new_node.keywords = [kw for kw in new_node.keywords if kw.arg not in _FIELD_DOC_KEYWORDS]
     return ast.dump(old_node) == ast.dump(new_node)
 
 
@@ -234,15 +227,11 @@ def _breakages(module: str, ref: str, search: str) -> list[str]:
             _is_doc_only_field_change(str(b.old_value), str(b.new_value))
         ):
             continue
-        explained.append(
-            _ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE))
-        )
+        explained.append(_ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE)))
     return explained
 
 
-def _gate_passes(
-    mode: str, old_version: str, new_version: str, has_breaking: bool
-) -> tuple[bool, str]:
+def _gate_passes(mode: str, old_version: str, new_version: str, has_breaking: bool) -> tuple[bool, str]:
     """The gate's pass/fail decision, factored out of the git/griffe I/O so the
     whole mode x version x bump matrix is unit-testable without those deps.
 
@@ -291,9 +280,7 @@ def main() -> None:
     for module in sorted(old_modules & new_modules):
         findings.extend(_breakages(module, previous, src_rel))
 
-    header = (
-        f"{args.package}: {old_version} -> {args.version} ({bump} bump, mode={mode})"
-    )
+    header = f"{args.package}: {old_version} -> {args.version} ({bump} bump, mode={mode})"
     passes, reason = _gate_passes(mode, old_version, args.version, bool(findings))
     if not findings:
         print(f"{header}: {reason} — gate passes.")
@@ -305,10 +292,7 @@ def main() -> None:
     if passes:
         print(f"{header}: {reason} — gate passes.")
         return
-    _fail(
-        f"{args.package} {args.version} {reason}. "
-        f"Offending items: {'; '.join(findings)}"
-    )
+    _fail(f"{args.package} {args.version} {reason}. Offending items: {'; '.join(findings)}")
 
 
 if __name__ == "__main__":

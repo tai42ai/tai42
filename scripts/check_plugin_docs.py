@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tomllib
 from pathlib import Path
 
-import tomllib
 from tai42_kit.plugins import PLUGIN_DOCS_DIRNAME, PluginDocsError, validate_docs
 
 
@@ -71,9 +71,7 @@ def _docs_dirs(plugin_dir: Path) -> list[Path]:
     if not src.is_dir():
         return []
     hits = [d for d in src.rglob(PLUGIN_DOCS_DIRNAME) if d.is_dir()]
-    return sorted(
-        d for d in hits if PLUGIN_DOCS_DIRNAME not in d.relative_to(src).parts[:-1]
-    )
+    return sorted(d for d in hits if PLUGIN_DOCS_DIRNAME not in d.relative_to(src).parts[:-1])
 
 
 def _read_docs(docs_dir: Path) -> dict[str, bytes]:
@@ -116,11 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = _repo_root()
 
-    plugin_dirs = (
-        [d.resolve() for d in args.plugin_dir]
-        if args.plugin_dir
-        else _plugin_dirs(root)
-    )
+    plugin_dirs = [d.resolve() for d in args.plugin_dir] if args.plugin_dir else _plugin_dirs(root)
     errors: list[str] = []
     for plugin_dir in plugin_dirs:
         errors.extend(_check_plugin(plugin_dir, root))
