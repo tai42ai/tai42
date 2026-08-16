@@ -536,6 +536,42 @@ def test_plain_tool_over_budget_raises_turn_timeout_and_cancels(set_turn_timeout
     assert _budget_flag("slow_tool_completed") is False
 
 
+def test_turn_timeout_names_the_parked_question_on_expiry(set_turn_timeout):
+    # A turn killed while parked on an unanswered question names the question (and its
+    # interaction id) in the expiry error rather than the bare generic timeout message:
+    # the answer wait stamps the pending question on the cancellation that unwinds it,
+    # and the wrapper reads it off the cancelled TimeoutError's cause.
+    set_turn_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("parked_question_tool")):
+            with pytest.raises(TurnTimeoutError) as excinfo:
+                await app.tools.run_tool("parked_question_tool", {"seconds": 5})
+            message = str(excinfo.value)
+            assert "turn exceeded the 0.05s turn timeout" in message
+            assert "waiting on an unanswered question" in message
+            assert "iid-1" in message
+            assert "what is the status?" in message
+
+    asyncio.run(run())
+    assert _budget_flag("parked_question_completed") is False
+
+
+def test_turn_timeout_without_a_parked_question_keeps_the_generic_message(set_turn_timeout):
+    # An over-budget turn that parked no question (nothing stamped the cancellation)
+    # keeps the exact generic expiry message — naming the question is purely additive.
+    set_turn_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("slow_tool")):
+            with pytest.raises(TurnTimeoutError) as excinfo:
+                await app.tools.run_tool("slow_tool", {"seconds": 5})
+            assert str(excinfo.value) == "turn exceeded the 0.05s turn timeout"
+
+    asyncio.run(run())
+    assert _budget_flag("slow_tool_completed") is False
+
+
 def test_plain_tool_under_budget_completes(set_turn_timeout):
     set_turn_timeout("5")
 

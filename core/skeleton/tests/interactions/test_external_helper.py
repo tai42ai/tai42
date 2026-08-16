@@ -15,11 +15,14 @@ import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 from tai42_contract.interactions import InteractionResponse
+from tai42_kit.settings import reset_all_settings
 
+from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.helper import InteractionLimitError, InteractionTimeoutError
 from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.tools.turn_budget import _PARKED_QUESTION_ATTR, turn_budget
 from tests._helpers import await_add_event
 
 
@@ -263,10 +266,38 @@ async def test_cancel_prunes_and_reraises(monkeypatch, fake_redis, fake_client_c
     task = asyncio.create_task(ask_user("q", timeout=60))
     iid, _gid = await await_add_event(fake_redis, store)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as excinfo:
         await task
 
+    # The answer-wait cancel stamps the pending question on the propagating
+    # CancelledError so a turn-budget expiry unwinding through here can name it.
+    assert getattr(excinfo.value, _PARKED_QUESTION_ATTR, None) == (iid, "q")
     assert await store.get_state(fake_redis, iid) is None
+    assert await store.count_open(fake_redis) == 0
+
+
+async def test_turn_budget_expiry_names_the_parked_ask_user_question(monkeypatch, fake_redis, fake_client_ctx):
+    # The real seam end to end: a real ``ask_user`` parked on its answer wait, killed by
+    # a real ``turn_budget`` expiry, surfaces the enriched ``TurnTimeoutError`` naming the
+    # question the turn was waiting on. The budget (0.2s) fires before ask_user's own
+    # longer timeout, cancelling the wait; the cancel path stamps the pending question,
+    # and the budget reads it off the cancelled TimeoutError's cause.
+    settings = _wire(monkeypatch, fake_redis, fake_client_ctx)
+    store = InteractionStore(settings.key_prefix)
+    monkeypatch.setenv("TAI_TURN_TIMEOUT_SECONDS", "0.2")
+    reset_all_settings()
+    try:
+        with pytest.raises(TurnTimeoutError) as excinfo:
+            async with turn_budget():
+                await ask_user("what is the status?", timeout=5)
+    finally:
+        reset_all_settings()
+
+    message = str(excinfo.value)
+    assert "turn timeout" in message
+    assert "waiting on an unanswered question (interaction " in message
+    assert "what is the status?" in message
+    # The cancel path pruned the abandoned question, so the open index is empty.
     assert await store.count_open(fake_redis) == 0
 
 

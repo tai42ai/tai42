@@ -26,7 +26,9 @@ class TurnSettings(TaiBaseSettings):
         gt=0,
         description=(
             "Wall-clock budget in seconds for one synchronous turn; unset = unbounded. "
-            "On expiry the turn is cancelled with a typed turn-exceeded error."
+            "On expiry the turn is cancelled with a typed turn-exceeded error; a turn "
+            "killed while parked on an unanswered question names that question "
+            "in the error."
         ),
     )
 
