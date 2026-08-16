@@ -190,6 +190,12 @@ def main(
             "via ps and shell history)."
         ),
     ),
+    timeout: float | None = typer.Option(
+        None,
+        "--timeout",
+        metavar="SECONDS",
+        help="Read-timeout window in seconds. Resolved: this flag -> TAI_CLI_TIMEOUT_SECONDS -> default.",
+    ),
 ) -> None:
     # Bootstrap a local ``.env`` once for the whole CLI so every subcommand — the
     # remote client and any contributed launcher alike — sees it. ``TAI_CONFIG_MODE``
@@ -206,7 +212,12 @@ def main(
         )
     if config_mode != "k8s":
         load_dotenv()
-    ctx.obj = AppContext(json_output=json_output, server_override=server, api_key_stdin=api_key_stdin)
+    ctx.obj = AppContext(
+        json_output=json_output,
+        server_override=server,
+        api_key_stdin=api_key_stdin,
+        timeout_override=timeout,
+    )
 
 
 # Remote command groups — thin clients over the ``/api/*`` routes.

@@ -134,7 +134,7 @@ class TestAreduceContext:
         assert by_id["5"].content == "Y" * 400  # most recent tool result kept
 
     def test_trimming_drops_old_messages(self):
-        mw = TrimmingMiddleware(max_tokens=15)
+        mw = TrimmingMiddleware(max_tokens=80)
         msgs = [
             HumanMessage("aaaa " * 20, id=str(i)) if i % 2 == 0 else AIMessage("bbbb " * 20, id=str(i))
             for i in range(8)
@@ -142,6 +142,8 @@ class TestAreduceContext:
         result = asyncio.run(areduce_context(msgs, middlewares=[mw]))
         assert result is not None
         assert len(result) < len(msgs)
+        # The invariant holds through areduce_context too: the newest human survives.
+        assert "6" in {m.id for m in result}
 
     def test_summarization_replaces_history_with_summary(self):
         mw = SummarizationMiddleware(

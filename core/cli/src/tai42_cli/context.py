@@ -13,8 +13,13 @@ API key resolution order: ``--api-key-stdin`` (read one line from stdin) →
 ``TAI_API_KEY`` env → ``config.toml`` → an interactive prompt as a last resort.
 There is deliberately no ``--api-key VALUE`` flag: a value on the command line
 leaks through ``ps``/``/proc`` and shell history.
+
+Read-timeout resolution order: ``--timeout`` flag → ``TAI_CLI_TIMEOUT_SECONDS``
+env → the client's default. The override tunes only the read window; the connect
+window stays snappy so a dead server still fails fast.
 """
 
+import math
 import os
 import sys
 import tomllib
@@ -23,10 +28,11 @@ from typing import Any
 
 import typer
 
-from tai42_cli.client import ApiClient
+from tai42_cli.client import DEFAULT_READ_TIMEOUT_SECONDS, ApiClient
 
 SERVER_URL_ENV = "TAI_SERVER_URL"
 API_KEY_ENV = "TAI_API_KEY"
+TIMEOUT_ENV = "TAI_CLI_TIMEOUT_SECONDS"
 
 # The port the local server binds by default. The server's serve-args settings
 # default imports this so the CLI's default ``--server`` URL and a default
@@ -89,16 +95,50 @@ def resolve_api_key(*, from_stdin: bool) -> str:
     return typer.prompt("API key", hide_input=True)
 
 
+def _positive_timeout(value: float, *, source: str) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise typer.BadParameter(f"timeout must be a positive finite number of seconds, got {value}", param_hint=source)
+    return value
+
+
+def resolve_timeout(override: float | None) -> float:
+    """The read-timeout window for the HTTP client, in seconds.
+
+    Resolution order: the ``--timeout`` flag → the ``TAI_CLI_TIMEOUT_SECONDS``
+    env var → the client's default. Only the read window is tuned; connect stays
+    snappy. A non-numeric, non-positive, or non-finite value raises loudly.
+    """
+    if override is not None:
+        return _positive_timeout(override, source="--timeout")
+    from_env = os.environ.get(TIMEOUT_ENV)
+    if from_env:
+        try:
+            value = float(from_env)
+        except ValueError as exc:
+            raise typer.BadParameter(f"{from_env!r} is not a number", param_hint=TIMEOUT_ENV) from exc
+        return _positive_timeout(value, source=TIMEOUT_ENV)
+    return DEFAULT_READ_TIMEOUT_SECONDS
+
+
 class AppContext:
     """Per-invocation CLI state: the global flags plus lazy access to the
     resolved server URL, API key, and a configured :class:`ApiClient`."""
 
-    def __init__(self, *, json_output: bool, server_override: str | None, api_key_stdin: bool) -> None:
+    def __init__(
+        self,
+        *,
+        json_output: bool,
+        server_override: str | None,
+        api_key_stdin: bool,
+        timeout_override: float | None,
+    ) -> None:
         self.json_output = json_output
         self._server_override = server_override
         self._api_key_stdin = api_key_stdin
+        self._timeout_override = timeout_override
         self._server_url: str | None = None
         self._api_key: str | None = None
+        self._read_timeout: float | None = None
 
     @property
     def server_url(self) -> str:
@@ -112,10 +152,20 @@ class AppContext:
             self._api_key = resolve_api_key(from_stdin=self._api_key_stdin)
         return self._api_key
 
+    @property
+    def read_timeout(self) -> float:
+        if self._read_timeout is None:
+            self._read_timeout = resolve_timeout(self._timeout_override)
+        return self._read_timeout
+
     def client(self, *, anonymous: bool = False) -> ApiClient:
         """A configured client for the resolved server + API key.
 
         With ``anonymous=True`` the client carries NO credential — the api-key
         resolution (and its interactive prompt) is never triggered — for the single
         public door the CLI calls (``tai auth claim``, which has no key yet)."""
-        return ApiClient(self.server_url, None if anonymous else self.api_key)
+        return ApiClient(
+            self.server_url,
+            None if anonymous else self.api_key,
+            read_timeout=self.read_timeout,
+        )
