@@ -20,6 +20,7 @@ pytestmark = pytest.mark.backendless
 _FIXTURE_TOOLS = frozenset(
     {
         "e2e_echo",
+        "e2e_secret_value",
         "e2e_worker_info",
         "e2e_settings_snapshot",
         "e2e_record",

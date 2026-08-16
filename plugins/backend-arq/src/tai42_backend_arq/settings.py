@@ -27,6 +27,7 @@ from typing import Any, ClassVar
 import orjson
 from pydantic_core import to_jsonable_python
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.secrets import SecretValue
 from tai42_kit.backend import BackendDispatchSettings
 from tai42_kit.settings import DefaultNamespaceMixin, TaiBaseSettings, settings_cache
 
@@ -54,7 +55,12 @@ class TaskFailedError(Exception):
 
 
 def _describe_unserializable(value: Any) -> dict[str, Any]:
-    """The tagged in-place description of a value JSON cannot encode."""
+    """The tagged in-place description of a value JSON cannot encode.
+
+    A ``SecretValue`` refuses every transport by design: tagging it would leak a
+    secret into the result store as a normal-looking value, so it raises instead."""
+    if isinstance(value, SecretValue):
+        raise TypeError("SecretValue refuses serialization transport")
     is_exception = isinstance(value, BaseException)
     return {
         UNSERIALIZABLE_KEY: True,

@@ -25,7 +25,7 @@ When ``TAI_E2E_MARKETPLACE`` is on, the runner additionally forges the fixture
 wheels, boots the tai42-marketplace registry (on the pinned
 ``TAI_E2E_UI_MP_PORT``, admin token ``TAI_E2E_UI_MP_ADMIN_TOKEN``), seeds the
 fixture catalog, wires the studio stack at it, and pnpm-builds + serves the
-public ``../tai-marketplace-web`` site on ``TAI_E2E_UI_MP_WEB_PORT`` with its
+public ``../tai-marketplace/web`` site on ``TAI_E2E_UI_MP_WEB_PORT`` with its
 ``/api`` proxy pointed at the registry. When off, none of that runs and the
 runner is behaviorally identical.
 """
@@ -222,8 +222,9 @@ def _resolve_stack_builder(runner: StudioRunnerSettings) -> Callable[[StackResou
 
 
 class _MarketplaceWebSite:
-    """The public tai-marketplace-web site, pnpm-built from the sibling checkout
-    and served with ``vite preview`` on a pinned port.
+    """The public marketplace web site (the tai-marketplace monorepo's web/
+    workspace), pnpm-built from the sibling checkout and served with ``vite
+    preview`` on a pinned port.
 
     ``VITE_MP_API_BASE_URL`` is left UNSET at build time so the browser client
     fetches the registry SAME-ORIGIN at ``/api``; the preview proxy (which
@@ -269,7 +270,7 @@ class _MarketplaceWebSite:
                 fh.write(f"$ {' '.join(step)}\n{proc.stdout}\n{proc.stderr}\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"tai-marketplace-web {' '.join(step)} failed (exit {proc.returncode}):\n"
+                    f"marketplace web {' '.join(step)} failed (exit {proc.returncode}):\n"
                     f"{proc.stdout}\n{proc.stderr}"
                 )
 
@@ -301,19 +302,19 @@ class _MarketplaceWebSite:
         def probe() -> bool:
             proc = self._proc
             if proc is not None and not proc.is_running():
-                raise RuntimeError(f"tai-marketplace-web preview exited early (code {proc.poll()}):\n{proc.log_tail()}")
+                raise RuntimeError(f"marketplace web preview exited early (code {proc.poll()}):\n{proc.log_tail()}")
             try:
                 return httpx.get(self.base_url, timeout=2.0).status_code == 200
             except httpx.HTTPError:
                 return False
 
-        wait_for(probe, deadline=30.0, message=f"tai-marketplace-web never became ready at {self.base_url}")
+        wait_for(probe, deadline=30.0, message=f"marketplace web never became ready at {self.base_url}")
 
     def teardown(self) -> None:
         if self._proc is not None:
             self._proc.terminate()
             if self._proc.is_running():
-                raise RuntimeError("tai-marketplace-web preview still running after SIGKILL (leak)")
+                raise RuntimeError("marketplace web preview still running after SIGKILL (leak)")
             self._proc = None
         wait_for(lambda: ports.is_free(self.port), deadline=5.0, message=f"web port {self.port} never freed")
 
@@ -349,11 +350,11 @@ def _resolve_web_repo() -> Path:
     """The public site's sibling checkout. Fails loudly with the clone hint when
     it is missing."""
     repo_root = Path(__file__).resolve().parents[2]
-    web = repo_root.parent / "tai-marketplace-web"
+    web = repo_root.parent / "tai-marketplace" / "web"
     if not (web / "package.json").is_file():
         raise RuntimeError(
-            f"tai-marketplace-web checkout not found at {web} (no package.json); "
-            "clone the sibling next to tai-e2e for the marketplace browser leg."
+            f"marketplace web workspace not found at {web} (no package.json); "
+            "clone tai-marketplace as a sibling of tai-e2e for the marketplace browser leg."
         )
     return web
 

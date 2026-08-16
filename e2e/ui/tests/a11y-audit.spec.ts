@@ -1,5 +1,5 @@
 /**
- * The accessibility audit's AUTOMATED pass over the public tai-marketplace-web
+ * The accessibility audit's AUTOMATED pass over the public marketplace web
  * site (opt-in: `TAI_E2E_MARKETPLACE=1`), built and served by the studio runner.
  * `viewport-sweep.spec.ts` proves browse alone carries no critical/serious axe
  * violation; this walks each of the site's surfaces — browse, a plugin detail
@@ -30,7 +30,7 @@ import { MP_WEB_URL } from './helpers';
 // marketplace backend's browse contract (kind facet / nullable updated_at /
 // premium / docs_url), but the e2e installs the backend at the older
 // `_MARKETPLACE_PIN`. Un-skipped once the pin is bumped to that published backend.
-// Every surface in this file is a tai-marketplace-web page, so this gates the whole file.
+// Every surface in this file is a marketplace web page, so this gates the whole file.
 test.skip(
   true,
   'Publish-circular: the marketplace-web frontend renders against the published ' +
@@ -93,7 +93,7 @@ interface SurfaceReport {
 
 for (const scheme of ['light', 'dark'] as const) {
   test.describe(`marketplace axe A+AA sweep (${scheme})`, () => {
-    // The surfaces are all tai-marketplace-web pages, served only under the opt-in gate.
+    // The surfaces are all marketplace web pages, served only under the opt-in gate.
     test.skip(process.env.TAI_E2E_MARKETPLACE !== '1', 'marketplace-web is opt-in (TAI_E2E_MARKETPLACE=1)');
     test.use({ viewport: { width: 1280, height: 900 }, colorScheme: scheme });
 

@@ -13,6 +13,7 @@ import socket
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import SecretValue
 from tai42_kit.clients import RedisConnectionSettings, current_client_epoch
 from tai42_kit.settings import KeyMaterial, TaiBaseSettings
 
@@ -42,6 +43,14 @@ def e2e_echo(payload: str) -> str:
     """Return ``payload`` unchanged — the default subject for extension
     attachment (prometheus / batch / proxy branches)."""
     return payload
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+def e2e_secret_value(credential: str) -> dict:
+    """Return ``credential`` wrapped in a ``SecretValue`` envelope — the probe for
+    the secret-value doors. The live sync run-tool door and a genuine MCP call
+    reveal the real value; a background tool-run records the masked placeholder."""
+    return {"credential": SecretValue(credential)}
 
 
 @tai42_app.tools.tool(tags={"e2e"})

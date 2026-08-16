@@ -140,12 +140,12 @@ a change to a shared root, sets `run_e2e`):
   Studio SPA, and runs the Playwright chromium suite in `ui/`. When the `run_browsers`
   gate is on (a change under `e2e/ui`, or a manual `workflow_dispatch`) it also
   widens the matrix onto firefox + webkit. With the token it also clones the private
-  `tai-marketplace-web` and runs the marketplace browser specs under
-  `TAI_E2E_MARKETPLACE=1`.
+  `tai-marketplace` monorepo (its `web/` workspace is the browse site) and runs the
+  marketplace browser specs under `TAI_E2E_MARKETPLACE=1`.
 
-The marketplace legs need the private `tai42ai/tai-marketplace` and
-`tai42ai/tai-marketplace-web` repos, so they run only when the `RELEASE_PLEASE_TOKEN`
-secret is available — a fork PR has no secrets, so those steps skip with a visible
+The marketplace legs need the private `tai42ai/tai-marketplace` repo, so they run
+only when the `RELEASE_PLEASE_TOKEN` secret is available — a fork PR has no
+secrets, so those steps skip with a visible
 `::warning::` rather than failing. Other external consumers install this harness as
 the published `tai42-e2e` package and run their own suites against it. Any consumer
 booting the studio stack must also install the Studio reference plugin from the
@@ -166,12 +166,12 @@ seeds them through the registry's real ingest pipeline, which publishes each ver
 synchronously, and the skeleton REALLY pip-installs them into the one shared venv —
 so every lifecycle spec ends with its own uninstall and a session guard raises loudly
 on any leftover distribution (never auto-cleaning). The ui leg additionally
-pnpm-builds and serves the public `tai-marketplace-web` checkout and drives the Studio
+pnpm-builds and serves the public `tai-marketplace/web` checkout and drives the Studio
 marketplace page and the public site over a browser.
 
 ```bash
 docker compose up -d
 TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
-# the browser legs (built Studio dist + the tai-marketplace-web checkout):
+# the browser legs (built Studio dist + the tai-marketplace/web checkout):
 cd ui && TAI_E2E_MARKETPLACE=1 pnpm exec playwright test tests/marketplace.spec.ts tests/marketplace-web.spec.ts
 ```

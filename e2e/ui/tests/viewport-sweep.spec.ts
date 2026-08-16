@@ -1,5 +1,5 @@
 /**
- * The cross-viewport sweep of the public tai-marketplace-web site (opt-in:
+ * The cross-viewport sweep of the public marketplace web site (opt-in:
  * `TAI_E2E_MARKETPLACE=1`), built and served by the studio runner. The
  * marketplace-web.spec drives the browse arc; this walks each of the site's
  * surfaces — browse, a plugin detail, the categories index, the not-found page,
@@ -25,7 +25,7 @@ import { MP_WEB_URL } from './helpers';
 // marketplace backend's browse contract (kind facet / nullable updated_at /
 // premium / docs_url), but the e2e installs the backend at the older
 // `_MARKETPLACE_PIN`. Un-skipped once the pin is bumped to that published backend.
-// Every surface in this file is a tai-marketplace-web page, so this gates the whole file.
+// Every surface in this file is a marketplace web page, so this gates the whole file.
 test.skip(
   true,
   'Publish-circular: the marketplace-web frontend renders against the published ' +
@@ -52,7 +52,7 @@ const LADDER = [320, 390, 640, 768, 1024, 1920] as const;
 
 for (const width of LADDER) {
   test.describe(`the marketplace ladder at ${String(width)} px`, () => {
-    // Every surface is a tai-marketplace-web page, served only under the opt-in gate.
+    // Every surface is a marketplace web page, served only under the opt-in gate.
     test.skip(process.env.TAI_E2E_MARKETPLACE !== '1', 'marketplace-web is opt-in (TAI_E2E_MARKETPLACE=1)');
     test.use({ viewport: { width, height: 900 } });
 
@@ -115,7 +115,7 @@ for (const width of LADDER) {
 }
 
 test.describe('marketplace accessibility smoke at 1280', () => {
-  // browse is a tai-marketplace-web page, served only under the opt-in gate.
+  // browse is a marketplace web page, served only under the opt-in gate.
   test.skip(process.env.TAI_E2E_MARKETPLACE !== '1', 'marketplace-web is opt-in (TAI_E2E_MARKETPLACE=1)');
   test.use({ viewport: { width: 1280, height: 900 } });
 

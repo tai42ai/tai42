@@ -35,7 +35,7 @@ export const MP_ADMIN_TOKEN =
 /** The pinned registry origin (admin advisory calls address it directly). */
 export const MP_URL = `http://127.0.0.1:${String(MP_PORT)}`;
 
-/** The pinned public tai-marketplace-web origin (the read-only browse site). */
+/** The pinned public marketplace web origin (the read-only browse site). */
 export const MP_WEB_URL = `http://127.0.0.1:${String(MP_WEB_PORT)}`;
 
 /** The registry admin bearer header for advisory create/withdraw calls. */
