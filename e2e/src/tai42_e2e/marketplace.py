@@ -47,15 +47,17 @@ if TYPE_CHECKING:
     from tai42_e2e.settings import HarnessSettings
     from tai42_e2e.stack import Infra
 
-# The registry lives in its own private repo, kept out of the monorepo lock. The
-# opt-in marketplace suite installs it out-of-band at boot from this pinned ref
-# (the git insteadOf token config rewrites the URL — no token handling here).
+# The registry lives in its own private repo, kept out of the monorepo lock;
+# the ``tai42-marketplace`` package sits in that repo's ``api/`` subdirectory, so
+# the install spec targets it with ``#subdirectory=api``. The opt-in marketplace
+# suite installs it out-of-band at boot from this pinned ref (the git insteadOf
+# token config rewrites the URL — no token handling here).
 _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # The pinned registry commit MUST carry the framework migration runner
 # (``db migrate``/``db status``) — :meth:`MarketplaceService._apply_ddl` drives
 # that CLI path and nothing older. An unresolvable pin fails the out-of-band
 # install loudly rather than silently resolving an older ``db init``-only ref.
-_MARKETPLACE_PIN = "1ed22b88474094606445f07a0bb9238044d9a5bc"
+_MARKETPLACE_PIN = "7bc9b7c7b67a2fca91f7d9842a874bf600e75c60"
 
 
 def _registry_venv_dir() -> Path:
@@ -424,7 +426,7 @@ class MarketplaceService:
             raise RuntimeError(
                 f"creating the registry venv at {venv} failed (exit {mk.returncode}):\n{mk.stdout}\n{mk.stderr}"
             )
-        spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_MARKETPLACE_PIN}"
+        spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_MARKETPLACE_PIN}#subdirectory=api"
         proc = subprocess.run(
             ["uv", "pip", "install", "--python", str(_registry_python()), spec],
             capture_output=True,
