@@ -130,6 +130,58 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
     assert "[" not in reason and "'" not in reason
 
 
+# ------------------------------------------------------ doc-only Field filter
+# A doc-only pydantic ``Field(...)`` change (description/title/examples) is
+# metadata, not API surface — griffe flags it ATTRIBUTE_CHANGED_VALUE, the filter
+# drops it. Every non-doc change stays breaking, and any non-Field or unparseable
+# expression keeps griffe's classification (breaking-by-default).
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # The real skeleton-2.1.0 incident: only the Field description changed.
+        (
+            "Field(default=None, gt=0, description='...old...')",
+            "Field(default=None, gt=0, description='...new...')",
+        ),
+        # Title-only and examples-only edits are equally documentation.
+        ("Field(default=1, title='A')", "Field(default=1, title='B')"),
+        ("Field(default=1, examples=[1])", "Field(default=1, examples=[2])"),
+        # A dotted ``pydantic.Field`` callee is recognised too.
+        (
+            "pydantic.Field(default=1, description='a')",
+            "pydantic.Field(default=1, description='b')",
+        ),
+    ],
+)
+def test_doc_only_field_change_is_not_breaking(old: str, new: str):
+    assert api_gate._is_doc_only_field_change(old, new) is True
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # A default value change is real surface, never forgiven.
+        ("Field(default=None, gt=0)", "Field(default=5, gt=0)"),
+        # A constraint (gt) change is real surface.
+        ("Field(default=None, gt=0)", "Field(default=None, gt=1)"),
+        # Non-Field attribute value changes keep griffe's classification.
+        ("some_call(a=1)", "some_call(a=2)"),
+        ("42", "43"),
+        # A description edit paired with a real default change is still breaking.
+        (
+            "Field(default=None, description='a')",
+            "Field(default=5, description='b')",
+        ),
+        # An unparseable expression is a parse failure -> still breaking, no crash.
+        ("Field(", "Field("),
+    ],
+)
+def test_non_doc_field_change_stays_breaking(old: str, new: str):
+    assert api_gate._is_doc_only_field_change(old, new) is False
+
+
 # ------------------------------------------------------------------- config read
 
 
@@ -328,3 +380,65 @@ def test_end_to_end_additive_change_passes(
         member_dir="core/widget",
         version="1.0.1",
     )
+
+
+_FIELD_DESC_OLD = (
+    "from pydantic import Field\n"
+    "class TurnSettings:\n"
+    "    timeout_seconds = Field(default=None, gt=0, description='...old...')\n"
+)
+_FIELD_DESC_NEW = (
+    "from pydantic import Field\n"
+    "class TurnSettings:\n"
+    "    timeout_seconds = Field(default=None, gt=0, description='...new...')\n"
+)
+_FIELD_DEFAULT_NEW = (
+    "from pydantic import Field\n"
+    "class TurnSettings:\n"
+    "    timeout_seconds = Field(default=5, gt=0, description='...old...')\n"
+)
+
+
+def test_end_to_end_field_description_only_passes_at_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # The skeleton-2.1.0 incident end to end: only a Field description changed.
+    # griffe flags ATTRIBUTE_CHANGED_VALUE, the filter drops it, so even a patch
+    # under strict passes.
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path,
+        mode="strict",
+        old_version="1.0.0",
+        old_body=_FIELD_DESC_OLD,
+        new_body=_FIELD_DESC_NEW,
+    )
+    _run_main(
+        monkeypatch,
+        tmp_path,
+        package="widget",
+        member_dir="core/widget",
+        version="1.0.1",
+    )
+
+
+def test_end_to_end_field_default_change_stays_breaking_at_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # A real Field default change is surface, so a patch under strict still fails.
+    pytest.importorskip("griffe")
+    _build_release_repo(
+        tmp_path,
+        mode="strict",
+        old_version="1.0.0",
+        old_body=_FIELD_DESC_OLD,
+        new_body=_FIELD_DEFAULT_NEW,
+    )
+    with pytest.raises(SystemExit):
+        _run_main(
+            monkeypatch,
+            tmp_path,
+            package="widget",
+            member_dir="core/widget",
+            version="1.0.1",
+        )
