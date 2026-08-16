@@ -46,7 +46,7 @@ dependencies = [
     "makefun~=1.16.0",
     # Imported directly by core/signatures.py (FastMCP Context detection when
     # composing dispatch-branch signatures; fastmcp is the platform's tool substrate).
-    "fastmcp>=3.2",
+    "fastmcp>=3.4.7",
     # Settings/config model machinery.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
