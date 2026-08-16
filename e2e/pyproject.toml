@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "1.7.0"
+version = "1.7.1"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,14 +27,14 @@ dependencies = [
     # its tai42-contract cap to admit 0.3 — a lower floor lets a pre-0.3 wheel back
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=1.10,<2",
+    "tai42-contract>=1.11,<2",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=1.9,<2",
-    "tai42-skeleton[toolbox,files]>=2.0,<3",
+    "tai42-skeleton[toolbox,files]>=2.1,<3",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.5,<0.6",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
-    "tai42-tools-stripe>=0.6,<0.7",
-    "tai42-agents>=0.8,<0.9",
+    "tai42-tools-stripe>=0.7,<0.8",
+    "tai42-agents>=0.9,<0.10",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=0.3,<0.4",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
@@ -63,7 +63,7 @@ dependencies = [
     "tai42-channel-whatsapp>=0.9,<0.10",
     "tai42-channel-web>=0.8,<0.9",
     # Loaded only by the monitoring stack's manifest.
-    "tai42-monitoring-langfuse>=0.3,<0.4",
+    "tai42-monitoring-langfuse>=0.4,<0.5",
     # The shipped OAuth connector plugins the shipped-connectors stack boots.
     "tai42-connector-google>=0.3,<0.4",
     "tai42-connector-atlassian>=0.3,<0.4",
