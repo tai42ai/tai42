@@ -32,7 +32,7 @@ dependencies = [
     # The agent runtime. Agents are this repo's purpose, so the runtime is a
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
-    "deepagents>=0.5.3",
+    "deepagents>=0.7.5",
     "langgraph>=1.1.6",
     "langchain-core>=1.2.25",
     # The prebuilt agent constructor (``langchain.agents.create_agent``) the
