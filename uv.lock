@@ -5389,7 +5389,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "1.3.1"
+version = "2.0.0"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
