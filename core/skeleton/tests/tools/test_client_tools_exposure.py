@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from fastmcp.server.context import Context
 from langchain_core.tools import ToolException
+from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.app.instance import app
@@ -84,6 +85,28 @@ def test_client_tool_strips_injected_ctx_and_runs_via_bridge(monkeypatch, caplog
                 out = await client_tool.ainvoke({"q": "How many apples?"})
             assert out == "How many apples?:42 apples"
             assert any("falling back to the platform LLM" in r.message for r in caplog.records)
+
+    asyncio.run(run())
+
+
+def test_client_tool_masks_wrapped_secrets_in_the_result():
+    # The agent-facing client-tools adapter feeds the langchain layer (the model, the
+    # checkpoint, the callback trace), so a wrapped secret in the result is masked to the
+    # placeholder — the model never sees the real value. This is distinct from the sync
+    # run-tool and MCP doors, which REVEAL to the live caller.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def vault() -> dict:
+                """Return a dict carrying a wrapped secret."""
+                return {"token": SecretValue("tok-4242-xyzzy")}
+
+            [client_tool] = await app.tools.get_client_tools(["vault"])
+            out = await client_tool.ainvoke({})
+
+            assert out == {"token": "[secret]"}
+            assert "tok-4242-xyzzy" not in repr(out)
 
     asyncio.run(run())
 

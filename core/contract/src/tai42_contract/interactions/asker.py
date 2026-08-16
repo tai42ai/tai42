@@ -71,9 +71,11 @@ class AskUser(Protocol):
         when ``channel`` is ``None`` (an address is meaningless without a
         channel to send on).
 
-        ``sensitive`` marks the answer body as not-to-be-persisted: the caller
-        still receives the full answer, but the durable answered record keeps only
-        the status. Use it for credentials or personal data.
+        ``sensitive`` marks the answer body as not-to-be-persisted AND wraps the
+        returned answer in a ``SecretValue``: the caller reaches the real answer
+        only through ``reveal()`` (its repr and JSON dump refuse to expose it),
+        while the durable answered record keeps only the status. Use it for
+        credentials or personal data.
 
         ``audience`` is the identity (a user_id) the question is addressed
         to: a restricted caller sees and answers ONLY questions addressed to its

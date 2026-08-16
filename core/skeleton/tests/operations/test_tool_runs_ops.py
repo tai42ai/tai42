@@ -10,12 +10,14 @@ is the focused in-memory fake wired at the operation module's ``client_ctx`` sea
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -97,6 +99,81 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
     assert tools.calls == [("alpha", {"x": 2}, True)]
     record = await wired.store.get_run(wired.fake, out["run_id"])
     assert record["status"] == "succeeded"
+
+
+async def test_background_run_masks_wrapped_secrets_in_the_stored_record(wired):
+    # A background run has no live-caller door: a wrapped secret in the result is
+    # masked to the placeholder before it lands in the durable record.
+    tools = wired.install()
+    tools.result = {"token": SecretValue("tok-4242-xyzzy")}
+    out = await ops.submit_run("alpha", {})
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "succeeded"
+    assert json.loads(record["result"]) == {"token": "[secret]"}
+    # The real secret never reaches the persisted record JSON.
+    assert "tok-4242-xyzzy" not in record["result"]
+
+
+async def test_background_run_of_a_secret_preset_masks_the_real_secret_in_the_record(wired):
+    # A PRESET run by name through the in-process dispatch. Its forwarding fn
+    # re-enters the parent tool's convert_result in-process,
+    # which must NOT reveal here — the wrapper has to survive to the background recorder
+    # so the durable record carries the placeholder, never the real secret.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["vault"]}]}
+    )
+    async with app.app_context(manifest):
+        await app.preset_manager.register("acme_vault", "vault", {"account": "acme"}, [], "Acme vault")
+        try:
+            out = await ops.submit_run("acme_vault", {})
+            await _drain()
+
+            record = await wired.store.get_run(wired.fake, out["run_id"])
+            assert record["status"] == "succeeded"
+            assert json.loads(record["result"]) == {"account": "acme", "token": "[secret]"}
+            # The real secret never reaches the persisted record JSON.
+            assert "tok-acme" not in record["result"]
+        finally:
+            await app.preset_manager.remove("acme_vault")
+
+
+async def test_background_run_of_a_secret_preset_schema_failure_redacts_the_record_error(wired):
+    # A secret preset whose output_schema the REAL value violates: the guard raises,
+    # the background recorder persists the failure — but the durable ``error`` text must
+    # carry only the redacted judgement (json path), never the real token the schema
+    # judged. A verbatim jsonschema message would leak ``tok-x`` into the record.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    schema = {
+        "type": "object",
+        "properties": {"account": {"type": "string"}, "token": {"type": "string", "minLength": 6}},
+        "required": ["account", "token"],
+    }
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["vault"]}]}
+    )
+    async with app.app_context(manifest):
+        await app.preset_manager.register(
+            "x_vault", "vault", {"account": "x"}, [], "Short vault", output_schema=schema
+        )
+        try:
+            out = await ops.submit_run("x_vault", {})
+            await _drain()
+
+            record = await wired.store.get_run(wired.fake, out["run_id"])
+            assert record["status"] == "failed"
+            # The redacted judgement keeps the json path...
+            assert "$.token" in record["error"]
+            # ...but the real token never reaches the persisted record.
+            assert "tok-x" not in record["error"]
+        finally:
+            await app.preset_manager.remove("x_vault")
 
 
 async def test_run_binds_its_run_id_as_interaction_origin(wired):

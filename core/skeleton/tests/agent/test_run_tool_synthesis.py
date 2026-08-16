@@ -13,16 +13,20 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import sys
 import time
 import warnings
 from typing import Any, cast
 
 import pytest
+from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from pydantic.json_schema import PydanticJsonSchemaWarning
+from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
@@ -557,6 +561,26 @@ def test_turn_timeout_names_the_parked_question_on_expiry(set_turn_timeout):
     assert _budget_flag("parked_question_completed") is False
 
 
+def test_turn_timeout_redacts_a_sensitive_parked_question(set_turn_timeout):
+    # A turn killed while parked on a SENSITIVE question names the interaction id but
+    # NOT the question text — a credential prompt is redacted to ``[sensitive question]``.
+    set_turn_timeout("0.05")
+
+    async def run() -> None:
+        async with app.app_context(_plain_tools_manifest("parked_sensitive_question_tool")):
+            with pytest.raises(TurnTimeoutError) as excinfo:
+                await app.tools.run_tool("parked_sensitive_question_tool", {"seconds": 5})
+            message = str(excinfo.value)
+            assert "turn exceeded the 0.05s turn timeout" in message
+            assert "waiting on an unanswered question" in message
+            assert "iid-9" in message
+            assert "[sensitive question]" in message
+            assert "what is your password?" not in message
+
+    asyncio.run(run())
+    assert _budget_flag("parked_sensitive_completed") is False
+
+
 def test_turn_timeout_without_a_parked_question_keeps_the_generic_message(set_turn_timeout):
     # An over-budget turn that parked no question (nothing stamped the cancellation)
     # keeps the exact generic expiry message — naming the question is purely additive.
@@ -674,6 +698,155 @@ def test_edge_middleware_arms_once_nested_run_tool_sees_armed_no_rearm(set_turn_
     # The seam ran under the guard the edge armed, so it opened no window of its own.
     assert _budget_flag("nested_inner_saw_armed") is True
     assert _budget_flag("nested_inner_completed") is True
+
+
+# -- the MCP tool-call edge secret reveal -------------------------------------
+
+
+def test_mcp_edge_reveals_wrapped_secret_to_the_client():
+    # The MCP ``tools/call`` edge is a live-caller door: a wrapped secret in the tool's
+    # return is revealed before FastMCP serializes the result, so an in-memory MCP client
+    # receives the real value in both structured and text content — never the placeholder.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def vault() -> dict:
+                """Return a dict carrying a wrapped secret."""
+                return {"token": SecretValue("tok-4242-xyzzy")}
+
+            async with Client(app._fast_mcp) as client:
+                result = await client.call_tool("vault", {})
+
+            assert result.structured_content == {"token": "tok-4242-xyzzy"}
+            texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+            assert any("tok-4242-xyzzy" in text for text in texts)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_reveals_wrapped_secret_of_a_preset_to_the_client():
+    # A PRESET reached over the MCP edge goes FastMCP -> TransformedTool.run directly
+    # (the in-process reveal gate is unarmed), so the parent tool's convert_result
+    # reveals: the live MCP caller of a preset receives the real value, exactly as a
+    # direct tool call does.
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def vault(account: str) -> dict:
+                """Return an account's stored token wrapped as a secret."""
+                return {"account": account, "token": SecretValue(f"tok-{account}")}
+
+            await app.preset_manager.register("acme_vault", "vault", {"account": "acme"}, [], "Acme vault")
+            try:
+                async with Client(app._fast_mcp) as client:
+                    result = await client.call_tool("acme_vault", {})
+            finally:
+                await app.preset_manager.remove("acme_vault")
+
+            assert result.structured_content == {"account": "acme", "token": "tok-acme"}
+
+    asyncio.run(run())
+
+
+class _LogCapture(logging.Handler):
+    """Captures each emitted record's FULLY formatted text — message plus the
+    exception traceback ``logger.exception`` attaches — so a leaked secret in either
+    is detectable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.texts.append(self.format(record))
+
+
+def test_mcp_edge_secret_preset_schema_violation_redacts_the_secret_from_logs_and_client():
+    # A PRESET over a secret-returning tool, reached over the live MCP edge with an
+    # output_schema the REAL token VIOLATES (``minLength: 6`` vs the 5-char ``tok-x``,
+    # which the 8-char ``[secret]`` placeholder would falsely satisfy): the reveal gate
+    # is UNARMED, so convert_result reveals the secret into structured_content and the
+    # output-schema guard validates the revealed value. The violation raises loudly, but
+    # the plaintext token must ride NEITHER fastmcp's ``logger.exception`` NOR the error
+    # returned to the client — the redacted failure keeps only the json_path and the
+    # placeholder.
+    schema = {
+        "type": "object",
+        "properties": {"account": {"type": "string"}, "token": {"type": "string", "minLength": 6}},
+        "required": ["account", "token"],
+    }
+    capture = _LogCapture()
+    server_logger = logging.getLogger("fastmcp.server.server")
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def vault(account: str) -> dict:
+                """Return an account's stored token wrapped as a secret."""
+                return {"account": account, "token": SecretValue(f"tok-{account}")}
+
+            await app.preset_manager.register(
+                "x_vault", "vault", {"account": "x"}, [], "Short vault", output_schema=schema
+            )
+            server_logger.addHandler(capture)
+            try:
+                async with Client(app._fast_mcp) as client:
+                    with pytest.raises(ToolError) as caught:
+                        await client.call_tool("x_vault", {})
+            finally:
+                server_logger.removeHandler(capture)
+                await app.preset_manager.remove("x_vault")
+
+            client_error = str(caught.value)
+            # The client-visible error carries the redacted failure, never the real token.
+            assert "tok-x" not in client_error
+            assert "$.token" in client_error
+            assert SECRET_PLACEHOLDER in client_error
+
+            # The failure WAS logged (not swallowed), and the real token appears in NO
+            # log record — neither its message nor the attached traceback.
+            assert capture.texts, "expected fastmcp to log the failed tool call"
+            assert all("tok-x" not in text for text in capture.texts)
+
+    asyncio.run(run())
+
+
+def test_mcp_edge_non_secret_preset_schema_violation_quotes_the_offending_instance():
+    # A NON-secret preset over the same live MCP edge whose plain result violates its
+    # output_schema: no secret was revealed on this door, so the secret redaction does
+    # NOT widen here — the raised error still quotes the offending instance verbatim.
+    schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "units": {"type": "string", "maxLength": 2}},
+        "required": ["city", "units"],
+    }
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def weather(city: str, units: str = "metric") -> dict:
+                """Report the weather for a city."""
+                return {"city": city, "units": units}
+
+            await app.preset_manager.register(
+                "p_bad", "weather", {"units": "imperial"}, [], "bad", output_schema=schema
+            )
+            try:
+                async with Client(app._fast_mcp) as client:
+                    with pytest.raises(ToolError) as caught:
+                        await client.call_tool("p_bad", {"city": "x"})
+            finally:
+                await app.preset_manager.remove("p_bad")
+
+            # The baked ``imperial`` (7 chars) is the offending value; the non-secret
+            # door keeps instance-quoting, so it rides the error unchanged.
+            assert "imperial" in str(caught.value)
+
+    asyncio.run(run())
 
 
 def test_offloaded_sync_tool_outruns_cancellation_and_completes_in_background(set_turn_timeout):

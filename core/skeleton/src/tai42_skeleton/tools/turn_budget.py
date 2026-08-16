@@ -35,14 +35,16 @@ _turn_budget_armed: ContextVar[bool] = ContextVar("tai42_turn_budget_armed", def
 _PARKED_QUESTION_ATTR = "tai42_parked_question"
 
 
-def mark_parked_question(exc: BaseException, interaction_id: str, question: str) -> None:
+def mark_parked_question(exc: BaseException, interaction_id: str, question: str, sensitive: bool) -> None:
     """Stamp the pending question on a cancellation unwinding out of a parked answer wait.
 
     The turn-budget expiry cancels the awaited turn; when that cancellation is
     unwinding out of an ``ask_user`` answer wait it carries the pending question here
-    so the ``TurnTimeoutError`` can name what the turn was killed waiting on.
+    so the ``TurnTimeoutError`` can name what the turn was killed waiting on. A
+    ``sensitive`` question is stamped too, but its text is redacted in the expiry
+    message so a credential prompt never reaches the error string.
     """
-    setattr(exc, _PARKED_QUESTION_ATTR, (interaction_id, question))
+    setattr(exc, _PARKED_QUESTION_ATTR, (interaction_id, question, sensitive))
 
 
 @asynccontextmanager
@@ -72,7 +74,12 @@ async def turn_budget() -> AsyncIterator[None]:
             if cm.expired():
                 parked = getattr(exc.__cause__, _PARKED_QUESTION_ATTR, None)
                 if parked is not None:
-                    interaction_id, question = parked
+                    interaction_id, question, sensitive = parked
+                    if sensitive:
+                        raise TurnTimeoutError(
+                            f"turn exceeded the {timeout:g}s turn timeout while waiting on an "
+                            f"unanswered question (interaction {interaction_id}): [sensitive question]"
+                        ) from None
                     raise TurnTimeoutError(
                         f"turn exceeded the {timeout:g}s turn timeout while waiting on an "
                         f"unanswered question (interaction {interaction_id}): {question}"

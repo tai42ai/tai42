@@ -27,6 +27,7 @@ from tai42_contract.monitoring import (
     SpanKind,
     TraceContext,
 )
+from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -310,6 +311,32 @@ def test_monitor_emits_span_with_name_kind_and_output():
     assert any(u["output"] == "hi" for u in updates)
     # The happy path never escalates the level.
     assert not any(u["level"] is MonitoringLevel.ERROR for u in updates)
+
+
+def test_monitor_masks_wrapped_secrets_in_span_input_and_output():
+    # The span is a recorder, not a live-caller door: a SecretValue in the arguments
+    # or the result is emitted as the placeholder, never the real value.
+    backend = _RecordingMonitoring()
+    init_monitoring(backend)
+
+    async def run() -> Any:
+        manifest = _manifest("secret_roundtrip", "monitor", tool_module="tests.extensions._fixtures.tools_secret")
+        async with app.app_context(manifest):
+            return await app.tools.run_tool("secret_roundtrip_monitor", {"payload": SecretValue("in-secret")})
+
+    asyncio.run(run())
+
+    assert len(backend.writer.spans) == 1
+    span = backend.writer.spans[0]
+    # Input: the secret argument is masked to the placeholder.
+    assert span["input"]["kwargs"] == {"payload": "[secret]"}
+    assert "in-secret" not in repr(span["input"])
+    # Output: both the echoed secret and the fresh one are masked.
+    updates = span["span"].updates
+    outputs = [u["output"] for u in updates if u["output"] is not None]
+    assert outputs == [{"echo": "[secret]", "token": "[secret]"}]
+    assert "in-secret" not in repr(outputs)
+    assert "tok-4242-xyzzy" not in repr(outputs)
 
 
 def test_monitor_suppresses_span_when_a_trace_is_active():

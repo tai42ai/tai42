@@ -72,9 +72,28 @@ async def parked_question_tool(seconds: float = 0.0) -> str:
     try:
         await asyncio.sleep(seconds)
     except asyncio.CancelledError as exc:
-        mark_parked_question(exc, "iid-1", "what is the status?")
+        mark_parked_question(exc, "iid-1", "what is the status?", False)
         raise
     parked_question_completed = True
+    return "parked-done"
+
+
+parked_sensitive_completed = False
+
+
+@tai42_app.tools.tool
+async def parked_sensitive_question_tool(seconds: float = 0.0) -> str:
+    """Block ``seconds`` with a SENSITIVE question parked; on the turn-budget cancellation
+    stamp the pending question with ``sensitive=True`` exactly as the ``ask_user`` answer
+    wait does for a credential prompt, so the expiry error redacts the question text. A run
+    cancelled on expiry leaves the completion flag False."""
+    global parked_sensitive_completed
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError as exc:
+        mark_parked_question(exc, "iid-9", "what is your password?", True)
+        raise
+    parked_sensitive_completed = True
     return "parked-done"
 
 

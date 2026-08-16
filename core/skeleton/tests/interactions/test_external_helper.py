@@ -269,9 +269,9 @@ async def test_cancel_prunes_and_reraises(monkeypatch, fake_redis, fake_client_c
     with pytest.raises(asyncio.CancelledError) as excinfo:
         await task
 
-    # The answer-wait cancel stamps the pending question on the propagating
-    # CancelledError so a turn-budget expiry unwinding through here can name it.
-    assert getattr(excinfo.value, _PARKED_QUESTION_ATTR, None) == (iid, "q")
+    # The answer-wait cancel stamps the pending question (with its sensitivity) on the
+    # propagating CancelledError so a turn-budget expiry unwinding through here can name it.
+    assert getattr(excinfo.value, _PARKED_QUESTION_ATTR, None) == (iid, "q", False)
     assert await store.get_state(fake_redis, iid) is None
     assert await store.count_open(fake_redis) == 0
 

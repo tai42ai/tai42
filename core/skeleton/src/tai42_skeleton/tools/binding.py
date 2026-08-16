@@ -17,16 +17,17 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
 
 from fastmcp.server.dependencies import without_injected_parameters
-from fastmcp.tools.base import Tool
+from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.tools.function_parsing import ParsedFunction
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import Audio, File, Image, get_cached_typeadapter
 from langchain_core.tools import StructuredTool, ToolException, tool
 from makefun import create_function
-from pydantic_core import to_jsonable_python
+from pydantic_core import PydanticSerializationError, to_jsonable_python
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
+from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, unwrap_secrets
 from tai42_contract.tools import ToolRefsExtractor
 from tai42_kit.utils.data import makefun_func_name
 
@@ -35,6 +36,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
 from tai42_skeleton.tools.context_bridge import bridge_context
+from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.turn_budget import turn_budget
 
 if TYPE_CHECKING:
@@ -257,6 +259,22 @@ def _tool_result_value(result: Any) -> Any:
     return non_text[0] if len(non_text) == 1 else non_text
 
 
+def _jsonable_keeping_secrets(value: Any) -> Any:
+    """JSON-normalize ``value`` but keep any ``SecretValue`` wrapped.
+
+    The shared in-process seam keeps the wrapper so each door decides: the sync
+    run-tool door reveals it, the tool-run recorder masks it. Recursion mirrors the
+    ``mask``/``unwrap`` walk (dict/list/tuple); every OTHER non-JSON-native leaf
+    still raises loudly through ``to_jsonable_python``."""
+    if isinstance(value, SecretValue):
+        return value
+    if isinstance(value, dict):
+        return {key: _jsonable_keeping_secrets(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_keeping_secrets(item) for item in value]
+    return to_jsonable_python(value)
+
+
 def _serialize_result(result: Any) -> Any:
     """Reduce a direct tool-run return to a JSON-native value.
 
@@ -268,14 +286,21 @@ def _serialize_result(result: Any) -> Any:
     "mimeType": <mime>}``; a ``File`` becomes an ``EmbeddedResource``
     (``{"type": "resource", ...}``) — JSON-native, but NOT the media wire shape,
     so the direct-run UI renders it as JSON rather than as media. Any other
-    result serializes directly via ``to_jsonable_python``."""
+    result serializes directly via ``to_jsonable_python``.
+
+    A ``SecretValue`` is deliberately not JSON-serializable, so a result carrying
+    one keeps the wrapper through the seam (revealed at the sync door, masked by the
+    recorder); every other unserializable type still raises loudly."""
     if isinstance(result, Image):
         result = result.to_image_content()
     elif isinstance(result, Audio):
         result = result.to_audio_content()
     elif isinstance(result, File):
         result = result.to_resource_content()
-    return to_jsonable_python(result)
+    try:
+        return to_jsonable_python(result)
+    except PydanticSerializationError:
+        return _jsonable_keeping_secrets(result)
 
 
 def _named_call_arguments(
@@ -330,6 +355,45 @@ def _validation_wrapper(resolved_fn: Callable[..., Any], offload: bool) -> Calla
         # default), falling back to the impl's docstring.
         doc=cast(str, resolved_fn.__doc__),
     )
+
+
+class _SecretRevealingTool(FunctionTool):
+    """A FastMCP tool that reveals wrapped secrets in its return before FastMCP
+    serializes the MCP ``tools/call`` result for the live caller.
+
+    ``convert_result`` has three present-tense modes, keyed on the in-process
+    reveal gate:
+
+    * gate unarmed (a genuine MCP ``tools/call`` — main server, sub-MCP, a direct
+      tool OR a preset reached FastMCP→``TransformedTool.run``) — REVEAL: the live
+      caller gets the real value.
+    * gate armed, the return carries a secret (an in-process preset dispatch whose
+      forwarding fn re-entered this parent ``run``) — stow the RAW wrapper-bearing
+      value on the gate and return a ToolResult of only the placeholder, so the
+      dispatch hands its caller the wrapper intact while the ToolResult that flows
+      back through the transform carries no leak and cannot crash on serialize.
+    * gate armed, no secret — pass the value through unchanged, so a non-secret
+      preset keeps the exact ``_tool_result_value`` path with zero drift.
+
+    The reveal must land here, before FastMCP's own serialization (which has no
+    secret-aware step: ``ToolResult`` would drop a ``SecretValue`` — structured
+    serialize raises, the text block masks it), not in a result-transforming
+    middleware that only sees the already-serialized ``ToolResult``."""
+
+    def convert_result(self, raw_value: Any) -> ToolResult:
+        gate = inprocess_reveal_gate.get()
+        if gate is not None:
+            if contains_secrets(raw_value):
+                gate.payload = raw_value
+                gate.has_payload = True
+                return super().convert_result(mask_secrets(raw_value))
+            return super().convert_result(raw_value)
+        if contains_secrets(raw_value):
+            # Unarmed MCP edge: this reveal exposes a secret into ``structured_content``.
+            # Flag it so the preset output-schema guard redacts any validation failure
+            # rather than let the plaintext ride the raised error into fastmcp's logs.
+            note_secret_reveal()
+        return super().convert_result(unwrap_secrets(raw_value))
 
 
 class ToolBinding:
@@ -507,8 +571,22 @@ class ToolBinding:
             # schema-validating ``run``, which applies the baked hidden constants
             # and REJECTS a caller that passes a baked key. Bridge the in-process
             # Context the same way the callable path does.
-            with bridge_context(self._app.fastmcp):
-                result = await mcp_tool.run(arguments)
+            #
+            # The preset's forwarding fn re-enters the parent tool's ``run`` — and
+            # so its secret-revealing ``convert_result`` — in-process. Arm the gate
+            # so that reveal is suppressed and any secret-bearing return is carried
+            # out wrapper-intact (each downstream door then masks or reveals its own
+            # copy), instead of the ``ToolResult`` handing back already-revealed
+            # plaintext a recorder can no longer mask.
+            gate = InprocessRevealGate()
+            token = inprocess_reveal_gate.set(gate)
+            try:
+                with bridge_context(self._app.fastmcp):
+                    result = await mcp_tool.run(arguments)
+            finally:
+                inprocess_reveal_gate.reset(token)
+            if gate.has_payload:
+                return gate.payload
             return _tool_result_value(result)
         if not isinstance(mcp_tool, FunctionTool):
             raise RuntimeError(f"Tool {key!r} has no callable body and cannot be run directly.")
@@ -684,8 +762,11 @@ class ToolBinding:
                 try:
                     result = target(*args, **kwargs)
                     if inspect.isawaitable(result):
-                        return await result
-                    return result
+                        result = await result
+                    # The model never sees a secret value: this adapter feeds the
+                    # langchain layer (the model, the checkpoint, the callback trace),
+                    # so a wrapped secret is masked before it leaves here.
+                    return mask_secrets(result)
                 except Exception as exc:
                     logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
                     raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
@@ -1080,12 +1161,18 @@ class ToolBinding:
                 f"cannot bind {type(func).__name__} as tool {curr_name!r}: expected a callable or a FastMCP Tool object"
             )
 
-        return self._fast_mcp.tool(
-            *args,
+        # Build the tool as the secret-revealing subclass and register it — the
+        # single MCP-facing seam every ``tools/call`` result flows through. FastMCP's
+        # ``.tool()`` is ``from_function`` + ``add_tool``; building the subclass here
+        # reproduces that while making the MCP edge reveal wrapped secrets. ``*args``
+        # carries no positional here (a name is passed by keyword), so it is unused.
+        tool_obj = _SecretRevealingTool.from_function(
+            func,
             name=curr_name,
             description=description if description is not None else inspect.getdoc(func),
             **kwargs,
-        )(func)
+        )
+        return self._fast_mcp.add_tool(tool_obj)
 
     def _branch_base_callable(self, tool_obj: Tool) -> Callable[..., Any]:
         """The callable an extension branch wraps when the bound base is a prebuilt

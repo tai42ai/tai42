@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from tai42_contract.monitoring import MonitoringLevel, SpanKind, TraceContext
+from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 
 from tai42_monitoring_langfuse.sdk_internals import current_scoped_public_key
 from tai42_monitoring_langfuse.writer import LangfuseWriter, _level_str
@@ -211,6 +212,69 @@ def test_update_current_span_no_kwargs_is_noop(manager, mock_client):
 def test_update_current_span_maps_metadata_and_output(manager, mock_client):
     LangfuseWriter(manager).update_current_span(metadata={"m": 1}, output={"o": 2})
     assert mock_client.update_current_span.call_args.kwargs == {"metadata": {"m": 1}, "output": {"o": 2}}
+
+
+def test_start_span_input_masks_secrets(manager, mock_client):
+    _enter_obs(mock_client)
+    writer = LangfuseWriter(manager)
+
+    with writer.start_span(name="x", kind=SpanKind.TOOL, input={"api_key": SecretValue("sk-live-REAL")}):
+        pass
+
+    kwargs = mock_client.start_as_current_observation.call_args.kwargs
+    assert kwargs["input"] == {"api_key": SECRET_PLACEHOLDER}
+    assert "sk-live-REAL" not in repr(kwargs["input"])
+
+
+def test_span_update_output_masks_secrets(manager, mock_client):
+    obs = _enter_obs(mock_client)
+    writer = LangfuseWriter(manager)
+
+    with writer.start_span(name="x", kind=SpanKind.TOOL) as span:
+        span.update(output={"secret": SecretValue("whsec_REAL")})
+
+    assert obs.update.call_args.kwargs["output"] == {"secret": SECRET_PLACEHOLDER}
+    assert "whsec_REAL" not in repr(obs.update.call_args.kwargs["output"])
+
+
+def test_record_span_masks_secret_input_and_output(manager, mock_client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "tai42_monitoring_langfuse.writer.emit_closed_span",
+        lambda client, **kwargs: captured.update(kwargs),
+    )
+    writer = LangfuseWriter(manager)
+
+    writer.record_span(
+        name="tool",
+        kind=SpanKind.TOOL,
+        start=datetime.now(UTC),
+        end=datetime.now(UTC),
+        trace_context=TraceContext(trace_id="t1"),
+        input={"token": SecretValue("tok-REAL")},
+        output=[SecretValue("out-REAL")],
+    )
+
+    assert captured["input"] == {"token": SECRET_PLACEHOLDER}
+    assert captured["output"] == [SECRET_PLACEHOLDER]
+    assert "REAL" not in repr((captured["input"], captured["output"]))
+
+
+def test_create_event_masks_secret_input_and_output(manager, mock_client):
+    writer = LangfuseWriter(manager)
+    writer.create_event(name="evt", input={"secret": SecretValue("s-REAL")}, output={"secret": SecretValue("o-REAL")})
+
+    kwargs = mock_client.create_event.call_args.kwargs
+    assert kwargs["input"] == {"secret": SECRET_PLACEHOLDER}
+    assert kwargs["output"] == {"secret": SECRET_PLACEHOLDER}
+    assert "REAL" not in repr((kwargs["input"], kwargs["output"]))
+
+
+def test_update_current_span_output_masks_secrets(manager, mock_client):
+    LangfuseWriter(manager).update_current_span(output={"secret": SecretValue("u-REAL")})
+    kwargs = mock_client.update_current_span.call_args.kwargs
+    assert kwargs["output"] == {"secret": SECRET_PLACEHOLDER}
+    assert "u-REAL" not in repr(kwargs["output"])
 
 
 def test_trace_attributes_propagates_and_restores(manager, monkeypatch):

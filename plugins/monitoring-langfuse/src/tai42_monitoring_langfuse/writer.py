@@ -23,6 +23,7 @@ from tai42_contract.monitoring import (
     SpanKind,
     TraceContext,
 )
+from tai42_contract.secrets import mask_secrets
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
 from tai42_monitoring_langfuse.sdk_internals import emit_closed_span, set_trace_attributes
@@ -37,6 +38,14 @@ _AS_TYPE: dict[SpanKind, str] = {
     SpanKind.CHAIN: "chain",
     SpanKind.EVENT: "span",
 }
+
+
+def _emit(payload: Any) -> Any:
+    """Normalize a trace payload for the SDK: a ``SecretValue`` anywhere inside
+    becomes the placeholder so a recorder never receives a real secret. No single
+    SDK entry funnels every emit, so this is called at each ``input``/``output``
+    site."""
+    return mask_secrets(payload)
 
 
 def _level_str(level: MonitoringLevel | None) -> str | None:
@@ -111,7 +120,7 @@ class LangfuseSpan:
         try:
             kwargs: dict[str, Any] = {}
             if output is not None:
-                kwargs["output"] = output
+                kwargs["output"] = _emit(output)
             if model is not None:
                 kwargs["model"] = model
             if usage_details is not None:
@@ -172,7 +181,7 @@ class LangfuseWriter:
             if ctx:
                 kwargs["trace_context"] = ctx
             if input is not None:
-                kwargs["input"] = input
+                kwargs["input"] = _emit(input)
             if model is not None:
                 kwargs["model"] = model
             if model_parameters is not None:
@@ -231,8 +240,8 @@ class LangfuseWriter:
                 end=end,
                 trace_id=trace_context.trace_id,
                 parent_span_id=trace_context.parent_span_id,
-                input=input,
-                output=output,
+                input=_emit(input),
+                output=_emit(output),
                 level=_level_str(level),
                 status_message=status_message,
                 model=model,
@@ -261,9 +270,9 @@ class LangfuseWriter:
             if ctx:
                 kwargs["trace_context"] = ctx
             if input is not None:
-                kwargs["input"] = input
+                kwargs["input"] = _emit(input)
             if output is not None:
-                kwargs["output"] = output
+                kwargs["output"] = _emit(output)
             if status_message is not None:
                 kwargs["status_message"] = status_message
             if metadata is not None:
@@ -291,7 +300,7 @@ class LangfuseWriter:
             if metadata is not None:
                 kwargs["metadata"] = metadata
             if output is not None:
-                kwargs["output"] = output
+                kwargs["output"] = _emit(output)
             if kwargs:
                 self._m.active_client().update_current_span(**kwargs)
         except Exception:
