@@ -37,6 +37,7 @@ from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore, PruneResult
+from tai42_skeleton.tools.turn_budget import mark_parked_question
 
 logger = logging.getLogger(__name__)
 
@@ -513,6 +514,8 @@ async def ask_user(
                     # mid-backoff, SystemExit) ALWAYS propagates — cancellation is
                     # never retried and never swallowed, even when an answer was
                     # recorded.
+                    if isinstance(exc, asyncio.CancelledError):
+                        mark_parked_question(exc, interaction_id, question)
                     raise
                 if result == "answered":
                     logger.warning(
@@ -555,11 +558,12 @@ async def ask_user(
             reply_redis = settings.redis.model_copy(update={"socket_timeout": None})
             async with client_ctx(RedisClient, reply_redis, fresh=True) as reply_conn:
                 response = await store.wait_for_reply(reply_conn, reply_to, remaining, settings.blocking_grace_seconds)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             # Prune on cancel so an abandoned question does not inflate the group
             # count / open index. The status gate makes the cancelled-after-answer
             # race a no-op. A cleanup failure propagates (chained on the
             # CancelledError context), never swallowed.
+            mark_parked_question(exc, interaction_id, question)
             await _prune(settings, store, interaction_id, group)
             raise
     if response is None:

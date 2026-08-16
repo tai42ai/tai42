@@ -17,6 +17,8 @@ import time
 
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.tools.turn_budget import mark_parked_question
+
 slow_tool_completed = False
 
 
@@ -55,6 +57,25 @@ async def nested_outer(seconds: float = 0.0) -> str:
     """Call ``nested_inner`` through the shared ``run_tool`` seam mid-turn, so the nested
     dispatch is what the turn budget's re-entrancy guard governs."""
     return await tai42_app.tools.run_tool("nested_inner", {"seconds": seconds})
+
+
+parked_question_completed = False
+
+
+@tai42_app.tools.tool
+async def parked_question_tool(seconds: float = 0.0) -> str:
+    """Block ``seconds`` with a question parked; on the turn-budget cancellation stamp the
+    pending ``(interaction_id, question)`` on the CancelledError exactly as the ``ask_user``
+    answer wait does, so the expiry error names what the turn was killed waiting on. A run
+    cancelled on expiry leaves the completion flag False."""
+    global parked_question_completed
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError as exc:
+        mark_parked_question(exc, "iid-1", "what is the status?")
+        raise
+    parked_question_completed = True
+    return "parked-done"
 
 
 # Records each thread that ran ``blocking_sync_tool`` to its end — a marker the turn
