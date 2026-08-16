@@ -51,7 +51,7 @@ dependencies = [
     "pydantic-settings>=2.11",
     # Imported directly by the signature helpers (Context detection when a
     # tool's kwargs are serialized into a queued job).
-    "fastmcp>=3.2",
+    "fastmcp>=3.4.7",
 ]
 
 [project.urls]
