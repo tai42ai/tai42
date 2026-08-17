@@ -47,9 +47,38 @@ def _write_target() -> dict[str, Callable[..., IdentityProvider]]:
     return _pending if _pending is not None else _REGISTRY
 
 
+def same_factory(existing: object, factory: object) -> bool:
+    """Whether two provider factories denote the SAME provider — the reload-safety
+    predicate for both this registry and the accounts registry.
+
+    True when the factories are the same object, OR when they share ``__module__``
+    and ``__qualname__``: the hot-reload primitive pops a plugin's modules and
+    re-executes their bodies, minting a FRESH class object each pass, so a
+    re-registration after a reload carries a new object that is nonetheless the
+    same declared provider. A genuinely different provider has a different qualified
+    name, so a real name collision still reads as different. Lambdas (qualname
+    ``<lambda>``) never match across distinct objects — a factory with no stable
+    qualified identity is treated as different, never silently coalesced."""
+    if existing is factory:
+        return True
+    existing_qualname = getattr(existing, "__qualname__", None)
+    if existing_qualname is None or "<lambda>" in existing_qualname:
+        return False
+    same_module = getattr(existing, "__module__", None) == getattr(factory, "__module__", None)
+    return same_module and existing_qualname == getattr(factory, "__qualname__", None)
+
+
 def register_identity_provider(name: str, factory: Callable[..., IdentityProvider]) -> None:
+    """Register a named identity-provider factory. RELOAD-SAFE: re-registering the
+    SAME factory (by :func:`same_factory`) under a name it already holds is a quiet
+    no-op, so the hot-reload primitive re-executing a plugin's module body does not
+    raise; a DIFFERENT factory under an already-registered name still raises loudly."""
     target = _write_target()
-    if name in target:
+    existing = target.get(name)
+    if existing is not None:
+        if same_factory(existing, factory):
+            logger.debug("access_control: identity provider %s re-registered (reload no-op)", name)
+            return
         raise ValueError(f"Identity provider {name!r} already registered")
     target[name] = factory
     logger.info("access_control: registered identity provider %s", name)
@@ -113,4 +142,5 @@ __all__ = [
     "get_identity_provider_factory_staged",
     "register_identity_provider",
     "reset_registry",
+    "same_factory",
 ]
