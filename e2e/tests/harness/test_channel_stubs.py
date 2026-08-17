@@ -107,10 +107,10 @@ def test_channel_modules_render_per_profile() -> None:
     # The channel profile carries its four medium plugins.
     channel = build_channel_stack(_sentinel(), variants)
     assert channel.manifest["channel_modules"] == [
-        "tai42_channel_telegram",
-        "tai42_channel_slack",
-        "tai42_channel_twilio",
-        "tai42_channel_web",
+        "tai42_channel_telegram.register",
+        "tai42_channel_slack.register",
+        "tai42_channel_twilio.register",
+        "tai42_channel_web.register",
     ]
     # The auth profile carries the deliver-only stub channel: its channel-delivered
     # ask_user pin needs a registered channel, but no real medium plugin.
