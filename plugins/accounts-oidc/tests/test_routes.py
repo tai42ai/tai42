@@ -101,10 +101,21 @@ async def test_authorize_sets_binding_cookie(make_provider: Any, oidc_server: An
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
-    assert f"Path={routes._FLOW_COOKIE_PATH}" in cookie
+    assert f"Path={routes._flow_cookie_path()}" in cookie
     # The cookie value is the state record's server-side binding.
     _, record = _state_record(fake, _location_query(response)["state"][0])
     assert _flow_cookie(response) == record["binding"]
+
+
+async def test_authorize_follows_remapped_mount_base(make_provider: Any, oidc_server: Any, monkeypatch: Any) -> None:
+    # An operator-remapped login route base moves both the callback redirect_uri and
+    # the flow cookie's scope; both resolve through the router's captured mount.
+    oidc_server.configure_oidc()
+    monkeypatch.setattr(routes, "_MOUNT_BASE", "/api/sign-in")
+    _, _fake = make_provider([_corp(oidc_server)])
+    response = await _authorize("corp")
+    assert _location_query(response)["redirect_uri"] == ["https://studio.example.com/api/sign-in/oidc/corp/callback"]
+    assert "Path=/api/sign-in/oidc" in response.headers["set-cookie"]
 
 
 async def test_authorize_binding_cookie_secure_on_uppercase_https(make_provider: Any, oidc_server: Any) -> None:
@@ -170,7 +181,7 @@ async def test_full_login_flow(make_provider: Any, oidc_server: Any) -> None:
     assert fake.expirations[f"acc:oidc:sso:{sso_code}"] == provider_mod.SSO_TTL_SECONDS
     assert f"{routes._FLOW_COOKIE}=" in callback.headers["set-cookie"]
     assert "Max-Age=0" in callback.headers["set-cookie"]
-    assert f"Path={routes._FLOW_COOKIE_PATH}" in callback.headers["set-cookie"]
+    assert f"Path={routes._flow_cookie_path()}" in callback.headers["set-cookie"]
 
     exchange = await routes.sso_exchange(build_request(body={"code": sso_code}, method="POST"))
     data = response_json(exchange)["data"]
@@ -293,7 +304,7 @@ async def test_callback_wrong_binding_cookie_rejected(make_provider: Any, oidc_s
     assert ("POST", "/token") not in server.requests
     clear = response.headers["set-cookie"]
     assert "Max-Age=0" in clear
-    assert f"Path={routes._FLOW_COOKIE_PATH}" in clear
+    assert f"Path={routes._flow_cookie_path()}" in clear
 
 
 async def test_callback_bad_signature(make_provider: Any, oidc_server: Any, signing_key: RSAKey) -> None:

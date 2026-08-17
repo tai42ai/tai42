@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-telegram
-contract: '>=1.11,<2'
+contract: '>=2,<3'
 categories:
   - channels
 tags:
@@ -29,3 +29,9 @@ provides:
     description: >-
       Deliver ask_user questions to a Telegram chat and bridge the typed reply
       back.
+    routes:
+      base: channels/telegram
+      paths:
+        - path: /inbound
+          methods: [POST]
+          public: true

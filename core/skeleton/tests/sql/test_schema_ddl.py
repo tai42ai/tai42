@@ -95,6 +95,19 @@ def test_marketplace_version_stamps_are_folded_into_create_table() -> None:
     assert "ADD COLUMN" not in ddl, "the baseline must not carry an ALTER ... ADD COLUMN backfill"
 
 
+def test_marketplace_route_mounts_is_folded_into_create_table() -> None:
+    """The per-item mount-base map (``route_mounts``) is a JSONB column folded INTO
+    the ``CREATE TABLE marketplace_installs`` body, NOT NULL with an empty-object
+    default so a row written before an operator remaps reads as "no overrides"."""
+    ddl = _baseline_sql()
+    match = re.search(r"CREATE TABLE IF NOT EXISTS marketplace_installs\s*\((.*?)\n\);", ddl, re.DOTALL)
+    assert match is not None, "marketplace_installs table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"\broute_mounts\s+JSONB\s+NOT NULL\s+DEFAULT\s+'\{\}'::jsonb", block) is not None, (
+        "route_mounts must be a NOT NULL JSONB column defaulting to '{}'::jsonb in the CREATE TABLE body"
+    )
+
+
 def test_tool_meta_overlay_tables_present() -> None:
     """The tool-metadata overlay ships two plain tables: a folder tree and a
     per-tool row. Text-level guards so a dropped/renamed table or a lost

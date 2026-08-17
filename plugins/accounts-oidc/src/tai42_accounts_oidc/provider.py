@@ -241,13 +241,17 @@ class OidcAccountsProvider(AccountsProvider):
         return AuthIdentity(user_id=record["user_id"], claims=record)
 
     def login_methods(self) -> list[LoginMethod]:
-        # Static config-derived metadata: one button per configured provider.
+        # Static config-derived metadata: one button per configured provider. The
+        # authorize href resolves through the login router's mount base (captured at
+        # its import) so an operator remap of the route base moves the button too.
+        from tai42_accounts_oidc.routes import authorize_path
+
         return [
             ButtonMethod(
                 id=runtime.config.name,
                 label=runtime.config.label,
                 icon=runtime.config.icon,
-                href=f"/api/login/oidc/{runtime.config.name}/authorize",
+                href=authorize_path(runtime.config.name),
             )
             for runtime in self._runtimes.values()
         ]

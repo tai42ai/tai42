@@ -48,11 +48,11 @@ def _body(response: Any) -> dict[str, Any]:
 def test_route_metadata(stub_app):
     sys.modules.pop("tai42_channel_telegram.inbound", None)
     importlib.import_module("tai42_channel_telegram.inbound")
-    routes = [r for r in stub_app.http.routes if r.path == "/api/channels/telegram/inbound"]
+    routes = [r for r in stub_app.http.routes if r.path == "/inbound"]
     assert routes
     route = routes[-1]
     assert route.methods == ["POST"]
-    assert route.authed is False
+    assert route.authed is None
     assert route.tags == ["channels"]
     assert route.summary == "Telegram channel inbound webhook"
 

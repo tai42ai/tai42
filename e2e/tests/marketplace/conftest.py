@@ -30,6 +30,7 @@ from _market_support import MarketInstaller
 
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
+    build_marketplace_authz_stack,
     build_marketplace_prefix_stack,
     build_marketplace_stack,
     build_router_merge_stack,
@@ -41,6 +42,7 @@ from tai42_e2e.marketplace import (
     EPSILON_PACKAGE,
     ETA_PACKAGE,
     GAMMA_PACKAGE,
+    THETA_PACKAGE,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
     ZETA_NARROW_CONTRACT_RANGE,
@@ -95,6 +97,7 @@ _FIXTURE_DISTRIBUTIONS = (
     GAMMA_PACKAGE,
     DELTA_PACKAGE,
     EPSILON_PACKAGE,
+    THETA_PACKAGE,
     ZETA_PACKAGE,
     ETA_PACKAGE,
 )
@@ -306,4 +309,29 @@ def router_merge_stack(
         tmp_path_factory.mktemp("router-merge"),
         build_router_merge_stack,
         resource_kwargs=resource_kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def marketplace_authz_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+) -> Iterator[TaiStack]:
+    """The marketplace stack with access control ON and a seeded root key — the home
+    of the declared-public route tier / per-method pin. Wired at the harness-run
+    registry + fixture index exactly like ``marketplace_stack`` so its install door
+    resolves and installs the fixture wheel; ``seed_auth=True`` seeds the root key the
+    fenced install door authenticates with and pins the readiness probes public."""
+    resource_kwargs = {
+        "marketplace_url": marketplace_service.base_url,
+        "package_index_url": package_index.url,
+    }
+    yield from boot_stack(
+        infra,
+        tmp_path_factory.mktemp("marketplace-authz"),
+        build_marketplace_authz_stack,
+        resource_kwargs=resource_kwargs,
+        seed_auth=True,
     )

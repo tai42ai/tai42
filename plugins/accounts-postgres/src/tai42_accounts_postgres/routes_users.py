@@ -117,7 +117,7 @@ def _presented_session_hash(request: Request) -> str | None:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users",
+    "/users",
     methods=["GET"],
     summary="List user accounts",
     tags=["users"],
@@ -131,7 +131,7 @@ async def list_users(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users",
+    "/users",
     methods=["POST"],
     summary="Create a user and mint an invite",
     tags=["users"],
@@ -183,7 +183,7 @@ async def create_user(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users/me/password",
+    "/users/me/password",
     methods=["PUT"],
     summary="Change your own password",
     tags=["users"],
@@ -224,7 +224,7 @@ async def change_own_password(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users/{user_id}",
+    "/users/{user_id}",
     methods=["PUT"],
     summary="Update a user's role or disabled state",
     tags=["users"],
@@ -307,7 +307,7 @@ async def update_user(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users/{user_id}",
+    "/users/{user_id}",
     methods=["DELETE"],
     summary="Delete a user",
     tags=["users"],
@@ -346,7 +346,7 @@ async def delete_user(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/auth/users/{user_id}/invite",
+    "/users/{user_id}/invite",
     methods=["POST"],
     summary="Regenerate a user's invite",
     tags=["users"],

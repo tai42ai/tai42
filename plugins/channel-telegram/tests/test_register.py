@@ -33,7 +33,7 @@ def test_import_registers_channel_route_and_hook(stub_app):
 
     assert list(stub_app.channels.registered) == ["telegram"]
     assert isinstance(stub_app.channels.registered["telegram"], TelegramChannel)
-    inbound_routes = [r for r in stub_app.http.routes if r.path == "/api/channels/telegram/inbound"]
+    inbound_routes = [r for r in stub_app.http.routes if r.path == "/inbound"]
     assert len(inbound_routes) == 1
     assert len(stub_app.lifecycle.startup_hooks) == 1
 
@@ -44,7 +44,7 @@ def test_reimport_fires_registration_again(stub_app):
     _import_register_module(stub_app)
     _import_register_module(stub_app)
     assert list(stub_app.channels.registered) == ["telegram"]
-    assert len([r for r in stub_app.http.routes if r.path == "/api/channels/telegram/inbound"]) == 1
+    assert len([r for r in stub_app.http.routes if r.path == "/inbound"]) == 1
     assert len(stub_app.lifecycle.startup_hooks) == 1
 
 
@@ -87,6 +87,17 @@ async def test_startup_hook_normalizes_trailing_slash(stub_app, http_recorder, m
 
     body = json.loads(http_recorder.requests[0].content)
     assert body["url"] == "https://example.test/api/channels/telegram/inbound"
+
+
+async def test_startup_hook_follows_remapped_mount_base(stub_app, http_recorder, monkeypatch: pytest.MonkeyPatch):
+    # An operator-remapped route base moves the inbound mount; setWebhook must point
+    # at the resolved mount register captured at import, not the default path.
+    monkeypatch.setattr(stub_app.http, "mount_base_value", "/api/channels/tg-remap")
+    _import_register_module(stub_app)
+    await stub_app.lifecycle.startup_hooks[0]()
+
+    body = json.loads(http_recorder.requests[0].content)
+    assert body["url"] == "https://example.test/api/channels/tg-remap/inbound"
 
 
 async def test_startup_hook_raises_on_ok_false(stub_app, http_recorder):

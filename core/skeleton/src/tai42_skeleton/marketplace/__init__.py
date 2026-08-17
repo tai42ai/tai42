@@ -17,6 +17,9 @@ Its pieces:
 - :mod:`.store` — the Postgres attribution store recording each installed plugin.
 - :mod:`.manifest_patch` — the pure patch/unpatch functions that wire a plugin's
   ``provides`` index into the manifest.
+- :mod:`.routes` — the pure functions that resolve a plugin's declared HTTP routes
+  against their mount bases, collision-check them against the live registry, and
+  gate public/reserved-prefix rows for the installer pre-flight and the preview door.
 - :mod:`.pip` — the ``sys.executable -m pip`` subprocess seam: pre-flights, the
   runner, and local pin-argv composition.
 - :mod:`.advisories` — the installed-plugin advisory cache, its on-demand refresh,

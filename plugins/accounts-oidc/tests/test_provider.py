@@ -149,6 +149,16 @@ def test_login_methods_empty_when_no_providers(make_provider: Any) -> None:
     assert instance.login_methods() == []
 
 
+def test_login_methods_href_follows_remapped_mount_base(make_provider: Any, monkeypatch: Any) -> None:
+    # An operator-remapped login route base moves the authorize path; the button
+    # href resolves through the router's captured mount, not a hardcoded default.
+    from tai42_accounts_oidc import routes
+
+    monkeypatch.setattr(routes, "_MOUNT_BASE", "/api/sign-in")
+    instance, _ = make_provider([{"name": "google", "preset": "google", "client_id": "c", "client_secret": "s"}])
+    assert instance.login_methods()[0].href == "/api/sign-in/oidc/google/authorize"
+
+
 # -- healthcheck ----------------------------------------------------------------
 
 

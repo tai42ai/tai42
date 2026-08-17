@@ -58,12 +58,18 @@ from tests.conftest import (
     write_manifest,
 )
 
-_CHAT = "/api/channels/web/chat/{identity}"
-_ASSETS = "/api/channels/web/assets/{file}"
-_MESSAGES = "/api/channels/web/messages"
-_STREAM = "/api/channels/web/stream"
-_ANSWER = "/api/channels/web/questions/{interaction_id}/answer"
-_ROTATE = "/api/channels/web/session/rotate"
+# The RELATIVE registered paths (what the module declares and ``_handler`` looks up).
+_CHAT = "/chat/{identity}"
+_ASSETS = "/assets/{file}"
+_MESSAGES = "/messages"
+_STREAM = "/stream"
+_ANSWER = "/questions/{interaction_id}/answer"
+_ROTATE = "/session/rotate"
+# The ABSOLUTE URLs a caller reaches them on (base resolves here at the default),
+# used as the request scope path where a door reads it (mount-base derivation).
+_CHAT_URL = "/api/channels/web/chat/{identity}"
+_ASSETS_URL = "/api/channels/web/assets/{file}"
+_ROTATE_URL = "/api/channels/web/session/rotate"
 _TRANSCRIPT_KEY = f"channel:web:transcript:{IDENTITY}:{VISITOR_ID}"
 _SESSION_KEY = f"channel:web:session:{SESSION_TOKEN}"
 _FOREIGN_ORIGIN = [(b"origin", b"https://evil.example")]
@@ -75,14 +81,16 @@ _NAVIGATION = [(b"sec-fetch-dest", b"document")]
 def _rotate_request(identity: str = IDENTITY, **kwargs):
     """A rotation POST. The body names the web route the fresh session is minted for
     — a session belongs to one."""
-    return build_request(path=_ROTATE, json_body={"identity": identity}, **kwargs)
+    return build_request(path=_ROTATE_URL, json_body={"identity": identity}, **kwargs)
 
 
 def _handler(stub_app, path: str) -> Callable[..., Awaitable[Response]]:
     routes = [route for route in stub_app.http.routes if route.path == path]
     assert len(routes) == 1
-    # Every door is public: the visitor session cookie is the only credential.
-    assert routes[0].authed is False
+    # Every door here is public: it passes no explicit ``authed`` (resolved from the
+    # declaration) and no action-class — the visitor session cookie is its credential.
+    assert routes[0].authed is None
+    assert routes[0].action is None
     return routes[0].handler
 
 
@@ -146,7 +154,7 @@ def _set_cookie(resp: Response) -> SimpleCookie:
 
 def _chat_request(identity: str = IDENTITY, **kwargs):
     return build_request(
-        method="GET", path=_CHAT.format(identity=identity), path_params={"identity": identity}, **kwargs
+        method="GET", path=_CHAT_URL.format(identity=identity), path_params={"identity": identity}, **kwargs
     )
 
 
@@ -162,6 +170,9 @@ async def test_chat_page_renders_the_built_shell(web_env, stub_app, fake_redis: 
     assert f'src="/api/channels/web/assets/{ENTRY_ASSET}"' in html
     assert f'href="/api/channels/web/assets/{STYLE_ASSET}"' in html
     assert f'data-identity="{IDENTITY}"' in html
+    # The mount the door served under rides #root's data-api-base, so the bundle's
+    # own API calls follow the actual mount rather than a hardcoded default.
+    assert 'data-api-base="/api/channels/web"' in html
     assert "<title>Chat</title>" in html
 
 
@@ -423,7 +434,7 @@ async def test_a_rotation_binds_the_fresh_session_to_the_route_it_names(
 async def test_a_rotation_without_a_usable_route_is_422(web_env, stub_app, registered_session: FakeRedis, body: dict):
     # The fresh session must belong to a route; a rotation that names none would mint
     # a session no door could ever serve.
-    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE, json_body=body, token=SESSION_TOKEN))
+    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE_URL, json_body=body, token=SESSION_TOKEN))
 
     assert resp.status_code == 422
     assert "identity" in _body(resp)["error"]
@@ -455,7 +466,7 @@ async def test_two_routes_in_one_browser_never_share_a_conversation(
 
 
 def _asset_request(name: str):
-    return build_request(method="GET", path=_ASSETS.format(file=name), path_params={"file": name})
+    return build_request(method="GET", path=_ASSETS_URL.format(file=name), path_params={"file": name})
 
 
 async def test_asset_serves_a_listed_file(web_env, stub_app, public_build: Path):
@@ -1482,7 +1493,7 @@ async def test_rotate_cross_origin_is_403(web_env, stub_app, registered_session:
 
 
 async def test_rotate_with_an_unreadable_body_is_400(web_env, stub_app, registered_session: FakeRedis):
-    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE, raw_body=b"{bad", token=SESSION_TOKEN))
+    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE_URL, raw_body=b"{bad", token=SESSION_TOKEN))
 
     assert resp.status_code == 400
     assert _body(resp)["error"] == "invalid JSON body"
@@ -1493,7 +1504,7 @@ async def test_rotate_with_an_unreadable_body_is_400(web_env, stub_app, register
 async def test_rotate_unconfigured_store_is_501(no_web_env, stub_app):
     # The store guard stands ahead of the body: without a registration store there is
     # nothing to mint into, whatever the body says.
-    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE, token=SESSION_TOKEN))
+    resp = await _handler(stub_app, _ROTATE)(build_request(path=_ROTATE_URL, token=SESSION_TOKEN))
     assert resp.status_code == 501
 
 
@@ -1770,7 +1781,7 @@ async def test_rotate_on_a_gated_route_refuses_without_a_live_code(web_env, stub
     await set_gate(IDENTITY, True)
     handler = _handler(stub_app, _ROTATE)
     missing = await handler(_rotate_request())
-    wrong = await handler(build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": "nope"}))
+    wrong = await handler(build_request(path=_ROTATE_URL, json_body={"identity": IDENTITY, "entry_code": "nope"}))
     assert missing.status_code == wrong.status_code == 403
     assert _body(missing)["code"] == _body(wrong)["code"] == "entry_refused"
 
@@ -1779,7 +1790,7 @@ async def test_rotate_on_a_gated_route_admits_a_live_code_and_clears_params(web_
     await set_gate(IDENTITY, True)
     raw_code, _ = await mint_entry_code(IDENTITY, None, None)
     resp = await _handler(stub_app, _ROTATE)(
-        build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": raw_code})
+        build_request(path=_ROTATE_URL, json_body={"identity": IDENTITY, "entry_code": raw_code})
     )
     assert resp.status_code == 200
     registration = await resolve_session(_set_cookie(resp)[SECURE_COOKIE].value)
@@ -1789,16 +1800,18 @@ async def test_rotate_on_a_gated_route_admits_a_live_code_and_clears_params(web_
 
 async def test_rotate_on_an_ungated_route_ignores_the_code_field(web_env, stub_app, fake_redis: FakeRedis):
     resp = await _handler(stub_app, _ROTATE)(
-        build_request(path=_ROTATE, json_body={"identity": IDENTITY, "entry_code": "irrelevant"})
+        build_request(path=_ROTATE_URL, json_body={"identity": IDENTITY, "entry_code": "irrelevant"})
     )
     assert resp.status_code == 200
 
 
 # -- management doors (authed) --------------------------------------------------
 
-_GATES = "/api/channels/web/gates/{identity}"
-_CODES = "/api/channels/web/gates/{identity}/codes"
-_CODE = "/api/channels/web/gates/{identity}/codes/{code_id}"
+# The RELATIVE registered paths; the gate doors read the identity from the path
+# params, not the request URL, so a relative scope path drives them fine.
+_GATES = "/gates/{identity}"
+_CODES = "/gates/{identity}/codes"
+_CODE = "/gates/{identity}/codes/{code_id}"
 
 
 def _managed_route(stub_app, path: str, method: str):
@@ -1812,14 +1825,15 @@ def _gate_request(method: str, path: str, *, json_body=None, path_params: dict[s
 
 
 def test_management_doors_are_authed_with_the_pinned_action_class(stub_app):
-    # An authed route with no action-class refuses to register in the core registry
-    # (fail-closed); the stub records the declared metadata so the pin is asserted here.
+    # The module passes no explicit ``authed`` — the runtime resolves it from the
+    # declaration's ``public: false``. Each door still declares its action-class (an
+    # authed route with none refuses to register); the stub records that pinned class.
     read = _managed_route(stub_app, _GATES, "GET")
-    assert read.authed is True
+    assert read.authed is None
     assert read.action == "read"
     for path, method in [(_GATES, "PUT"), (_CODES, "POST"), (_CODE, "DELETE")]:
         route = _managed_route(stub_app, path, method)
-        assert route.authed is True
+        assert route.authed is None
         assert route.action == "write"
 
 

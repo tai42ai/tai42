@@ -116,10 +116,23 @@ class FakeStore:
         *,
         contract_version,
         skeleton_version,
+        route_mounts=None,
     ) -> None:
         self._events.append("store:record")
         self.record_calls.append(
-            (ref, version, source, repository_url, tag, artifact_ref, sha256, spec, contract_version, skeleton_version)
+            (
+                ref,
+                version,
+                source,
+                repository_url,
+                tag,
+                artifact_ref,
+                sha256,
+                spec,
+                contract_version,
+                skeleton_version,
+                route_mounts or {},
+            )
         )
         if self.record_error is not None:
             raise self.record_error
@@ -134,6 +147,7 @@ class FakeStore:
             spec=spec,
             contract_version=contract_version,
             skeleton_version=skeleton_version,
+            route_mounts=route_mounts or {},
             installed_at=datetime.now(UTC),
         )
 
@@ -295,8 +309,15 @@ class Harness:
         self.cm = FakeCM(self.events, **cm_kwargs)
         self.svc = FakeConfigService(self.events, self.cm)
 
-    def installer(self) -> Installer:
+    def installer(self, *, owned_routes: Any = None, reserved_prefixes: Any = None) -> Installer:
         # The fakes duck-type the real collaborators; cast past the typed params.
+        # ``owned_routes`` / ``reserved_prefixes`` default to the live seams; a route
+        # test injects a deterministic set instead of the process registry/settings.
+        extra: dict[str, Any] = {}
+        if owned_routes is not None:
+            extra["owned_routes"] = owned_routes
+        if reserved_prefixes is not None:
+            extra["reserved_prefixes"] = reserved_prefixes
         return Installer(
             registry=cast(Any, self.registry),
             pip_runner=self.pip,
@@ -304,6 +325,7 @@ class Harness:
             config_service=cast(Any, self.svc),
             fleet_lock=self.fleet,
             config_manager=self.cm,
+            **extra,
         )
 
 
@@ -1592,7 +1614,7 @@ async def test_upgrade_all_reports_every_outcome(monkeypatch: pytest.MonkeyPatch
     assert h.registry.resolve_calls == [("tai42", "up", "1.2.0")]
     # The upgraded ref's attribution row was re-stamped with the running cores.
     assert h.store.record_calls[-1][0] == "tai42/up"
-    assert h.store.record_calls[-1][8:] == ("0.1.0", "0.1.0")
+    assert h.store.record_calls[-1][8:10] == ("0.1.0", "0.1.0")
 
 
 async def test_upgrade_all_holds_one_lock_across_the_batch(monkeypatch: pytest.MonkeyPatch) -> None:

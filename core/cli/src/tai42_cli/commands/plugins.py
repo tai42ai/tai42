@@ -24,7 +24,9 @@ from tai42_cli.commands._common import (
     covers,
     emit_records,
     emit_result,
+    parse_assignment_arg,
 )
+from tai42_cli.render import print_json
 
 app = typer.Typer(
     name="plugins",
@@ -169,21 +171,93 @@ def installed(ctx: typer.Context) -> None:
     )
 
 
+def _mount_overrides(mount: list[str] | None) -> dict[str, str]:
+    """Parse repeated ``--mount item=base`` pairs into a ``{item: base}`` map,
+    rejecting a duplicated item so a base is never silently last-wins."""
+    overrides: dict[str, str] = {}
+    for pair in mount or []:
+        item, base = parse_assignment_arg(pair, param_hint="--mount")
+        if item in overrides:
+            raise typer.BadParameter(f"item {item!r} was given more than once", param_hint="--mount")
+        overrides[item] = base
+    return overrides
+
+
+def _render_preview_table(preview: dict[str, Any]) -> None:
+    """Print the resolved routes, collisions, and public routes of an install
+    preview as human lines (stdout stays data; every route is visible)."""
+    for item in preview.get("items", []):
+        typer.echo(f"item {item.get('item')} (base {item.get('base')}):")
+        for route in item.get("routes", []):
+            flag = "public" if route.get("public") else "authed"
+            methods = ",".join(route.get("methods", []))
+            typer.echo(f"  {methods} {route.get('full_path')} [{flag}]")
+    for collision in preview.get("collisions", []):
+        methods = ",".join(collision.get("methods", []))
+        typer.echo(
+            f"collision: {methods} {collision.get('full_path')} clashes with "
+            f"{collision.get('conflict_owner')} {collision.get('conflict_path')} — remap the item base"
+        )
+    if preview.get("requires_public_acceptance"):
+        typer.echo("public routes answer WITHOUT authentication; pass --accept-public-routes to install:")
+        for row in preview.get("new_public_routes", []):
+            methods = ",".join(row.get("methods", []))
+            typer.echo(f"  {methods} {row.get('full_path')}")
+
+
 @app.command("install")
-@covers(("POST", "/api/marketplace/install"))
+@covers(("POST", "/api/marketplace/install"), ("POST", "/api/marketplace/install/preview"))
 def install(
     ctx: typer.Context,
     ref: Annotated[str, typer.Argument(help="Plugin ref 'namespace/name'.")],
     version: Annotated[str | None, typer.Option("--version", help="Pin a specific version; omit for latest.")] = None,
+    mount: Annotated[
+        list[str] | None,
+        typer.Option("--mount", help="Remap a route-carrying item's mount base as item=base (repeatable)."),
+    ] = None,
+    accept_public_routes: Annotated[
+        bool,
+        typer.Option("--accept-public-routes", help="Acknowledge routes that answer without authentication."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show the resolved routes and collisions without installing."),
+    ] = False,
 ) -> None:
     """Install a marketplace plugin by ref, optionally pinning a version.
+
+    ``--mount`` remaps a route-carrying item's base prefix; ``--dry-run`` previews
+    the resolved routes and collisions (exiting non-zero on any collision) without
+    installing; ``--accept-public-routes`` is required when the plugin declares
+    routes that answer without authentication.
 
     Example: ``tai plugins install tai42/toolbox``
     """
     ctx_obj = app_context(ctx)
+    overrides = _mount_overrides(mount)
+    if dry_run:
+        preview_body: dict[str, Any] = {"ref": ref}
+        if version is not None:
+            preview_body["version"] = version
+        if overrides:
+            preview_body["route_mounts"] = overrides
+        with ctx_obj.client() as client:
+            preview = client.post("/api/marketplace/install/preview", json=preview_body)
+        if ctx_obj.json_output:
+            print_json(preview)
+        else:
+            _render_preview_table(preview)
+        # A collision is a non-zero exit so a scripted dry-run gates on it.
+        if isinstance(preview, dict) and preview.get("collisions"):
+            raise typer.Exit(code=1)
+        return
     body: dict[str, Any] = {"ref": ref}
     if version is not None:
         body["version"] = version
+    if overrides:
+        body["route_mounts"] = overrides
+    if accept_public_routes:
+        body["accept_public_routes"] = True
     with ctx_obj.client() as client:
         data = client.post("/api/marketplace/install", json=body)
     emit_result(ctx_obj, data)

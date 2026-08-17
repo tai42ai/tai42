@@ -46,7 +46,19 @@ class _FakeCursor:
         self._all = []
         self.rowcount = 0
         if norm.startswith("INSERT INTO marketplace_installs"):
-            ref, version, source, repository_url, tag, artifact_ref, sha256, spec, contract_v, skeleton_v = params
+            (
+                ref,
+                version,
+                source,
+                repository_url,
+                tag,
+                artifact_ref,
+                sha256,
+                spec,
+                contract_v,
+                skeleton_v,
+                route_mounts,
+            ) = params
             pg.rows[ref] = {
                 "ref": ref,
                 "version": version,
@@ -58,6 +70,7 @@ class _FakeCursor:
                 "spec": _unwrap(spec),
                 "contract_version": contract_v,
                 "skeleton_version": skeleton_v,
+                "route_mounts": _unwrap(route_mounts),
                 "installed_at": pg.next_time(),
             }
         elif norm.startswith("SELECT"):
@@ -128,6 +141,7 @@ class FakeMarketplacePg:
             row["spec"],
             row["contract_version"],
             row["skeleton_version"],
+            row["route_mounts"],
             row["installed_at"],
         )
 
@@ -178,6 +192,25 @@ async def test_record_and_get_round_trip_pypi(pg, store) -> None:
     # The core-version stamps round-trip — diagnostics columns, written on every record.
     assert rec.contract_version == "0.3.0"
     assert rec.skeleton_version == "0.3.1"
+    # A row written without a mount override reads back the column default: no overrides.
+    assert rec.route_mounts == {}
+
+
+async def test_record_persists_route_mounts(pg, store) -> None:
+    await _record(store, "tai42/relay", "1.0.0", {"v": 1}, route_mounts={"relay": "channels/relay-2"})
+    rec = await store.get("tai42/relay")
+    assert rec is not None
+    # The resolved per-item mount bases round-trip so the boot mount-map reproduces
+    # the operator's remap across restart.
+    assert rec.route_mounts == {"relay": "channels/relay-2"}
+
+
+async def test_record_upsert_replaces_route_mounts(pg, store) -> None:
+    await _record(store, "tai42/relay", "1.0.0", {"v": 1}, route_mounts={"relay": "channels/relay"})
+    await _record(store, "tai42/relay", "2.0.0", {"v": 2}, route_mounts={"relay": "channels/relay-9"})
+    rec = await store.get("tai42/relay")
+    assert rec is not None
+    assert rec.route_mounts == {"relay": "channels/relay-9"}
 
 
 async def test_record_github_round_trips_pin_and_verified_columns(pg, store) -> None:

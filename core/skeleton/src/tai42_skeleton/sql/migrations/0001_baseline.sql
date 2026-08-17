@@ -319,6 +319,11 @@ CREATE TABLE IF NOT EXISTS marketplace_installs (
     -- a core upgrade is expected and is exactly what they exist to show.
     contract_version TEXT,
     skeleton_version TEXT,
+    -- The chosen mount base per route-carrying item ({item_name: base}), resolved
+    -- at install time and read by the boot mount-map to reproduce operator route
+    -- remaps across restart. Folded into the CREATE TABLE (baseline-fold, no ALTER);
+    -- the default empty object means every item mounts at its declared base.
+    route_mounts   JSONB        NOT NULL DEFAULT '{}'::jsonb,
     installed_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (ref)
 );

@@ -36,13 +36,32 @@ from tai42_accounts_oidc.settings import accounts_oidc_settings
 
 logger = logging.getLogger(__name__)
 
-_CALLBACK_PATH_TEMPLATE = "/api/login/oidc/{name}/callback"
+# The router's resolved absolute mount base, captured at import (the mount binding is
+# live only then), so every self-referential path here follows an operator remap of
+# the login route base instead of a hardcoded default.
+_MOUNT_BASE = tai42_app.http.mount_base()
 
 # The flow-binding cookie: an HttpOnly secret set at authorize, required to match
 # the redeemed state's binding at callback. SameSite=Lax reaches the callback (a
 # top-level GET from the issuer); the path scopes it to the login flow.
 _FLOW_COOKIE = "tai42_oidc_flow"
-_FLOW_COOKIE_PATH = "/api/login/oidc"
+
+
+def _flow_cookie_path() -> str:
+    """The path the flow cookie is scoped to — the OIDC login subtree of the mount."""
+    return f"{_MOUNT_BASE}/oidc"
+
+
+def _callback_path(name: str) -> str:
+    """The absolute callback path for provider ``name`` under the resolved mount."""
+    return f"{_MOUNT_BASE}/oidc/{name}/callback"
+
+
+def authorize_path(name: str) -> str:
+    """The absolute authorize path for provider ``name`` under the resolved mount —
+    the login button's ``href``, resolved through the router's mount so a remap
+    moves it too."""
+    return f"{_MOUNT_BASE}/oidc/{name}/authorize"
 
 
 class SessionResponse(BaseModel):
@@ -94,7 +113,7 @@ def _public_base_url() -> str:
 def _redirect_uri(name: str) -> str:
     # From operator config, never the inbound Host/origin, so a Host-header-injecting
     # client cannot steer where the auth code lands.
-    return _public_base_url() + _CALLBACK_PATH_TEMPLATE.format(name=name)
+    return _public_base_url() + _callback_path(name)
 
 
 def _flow_cookie_secure() -> bool:
@@ -104,12 +123,11 @@ def _flow_cookie_secure() -> bool:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/oidc/{provider}/authorize",
+    "/oidc/{provider}/authorize",
     methods=["GET"],
     summary="Begin an OIDC/OAuth2 login",
     tags=["login"],
     response_model=None,
-    authed=False,
 )
 async def oidc_authorize(request: Request) -> Response:
     """Mint state + PKCE + nonce and 302 to the configured provider's issuer.
@@ -171,7 +189,7 @@ async def oidc_authorize(request: Request) -> Response:
         _FLOW_COOKIE,
         binding,
         max_age=provider.STATE_TTL_SECONDS,
-        path=_FLOW_COOKIE_PATH,
+        path=_flow_cookie_path(),
         httponly=True,
         secure=_flow_cookie_secure(),
         samesite="lax",
@@ -180,12 +198,11 @@ async def oidc_authorize(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/oidc/{provider}/callback",
+    "/oidc/{provider}/callback",
     methods=["GET"],
     summary="Complete an OIDC/OAuth2 login",
     tags=["login"],
     response_model=None,
-    authed=False,
 )
 async def oidc_callback(request: Request) -> Response:
     """Verify state, exchange the code, verify the id_token, mint a session, and
@@ -268,7 +285,7 @@ def _binding_matches(request: Request, record: dict) -> bool:
 
 def _clear_flow_cookie(response: Response) -> Response:
     """Expire the single-use flow cookie once its state has been consumed."""
-    response.delete_cookie(_FLOW_COOKIE, path=_FLOW_COOKIE_PATH)
+    response.delete_cookie(_FLOW_COOKIE, path=_flow_cookie_path())
     return response
 
 
@@ -377,13 +394,12 @@ async def _post_token(url: str, data: dict[str, str]) -> dict:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/sso/exchange",
+    "/sso/exchange",
     methods=["POST"],
     summary="Exchange a one-time SSO code for a session",
     tags=["login"],
     request_model=SsoExchangeBody,
     response_model=SessionResponse,
-    authed=False,
 )
 async def sso_exchange(request: Request) -> Response:
     """Trade the one-time SSO hand-back code for the frozen login response.

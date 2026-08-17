@@ -1,11 +1,11 @@
 """Coordinated staged-registration lifecycle for every per-generation global.
 
 An epoch build stages each code-populated global — the connector, identity, accounts,
-and operation registries, plus the plugin-quarantine set, the monitoring backend, and
-the Studio plugin registry — into a fresh generation off to the side, and promotes
-them ALL TOGETHER only if the build succeeds. A failed build drops every staged
-generation untouched, so the live epoch keeps serving against a complete, unmutated
-set of globals.
+and operation registries, plus the plugin-quarantine set, the monitoring backend, the
+Studio plugin registry, and the route registry's ``/api`` shape index — into a fresh
+generation off to the side, and promotes them ALL TOGETHER only if the build succeeds.
+A failed build drops every staged generation untouched, so the live epoch keeps serving
+against a complete, unmutated set of globals.
 
 Three of these live in the contract (identity/accounts) or below the app so they stay
 epoch-free; this skeleton helper is the ONE place their staging is driven in lockstep
@@ -20,6 +20,7 @@ from __future__ import annotations
 from tai42_contract.access_control import registry as identity_registry
 from tai42_contract.accounts import registry as accounts_registry
 
+from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.connectors.providers import registry as connector_registry
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.operations.registry import operation_registry
@@ -37,6 +38,7 @@ def begin_staging_all() -> None:
     quarantine_registry.begin_staging()
     monitoring_registry.begin_staging()
     studio_registry.begin_staging()
+    route_registry.begin_shape_staging()
 
 
 def commit_staging_all() -> None:
@@ -50,6 +52,7 @@ def commit_staging_all() -> None:
     quarantine_registry.commit_staging()
     monitoring_registry.commit_staging()
     studio_registry.commit_staging()
+    route_registry.commit_shape_staging()
 
 
 def abort_staging_all() -> None:
@@ -62,3 +65,4 @@ def abort_staging_all() -> None:
     quarantine_registry.abort_staging()
     monitoring_registry.abort_staging()
     studio_registry.abort_staging()
+    route_registry.abort_shape_staging()

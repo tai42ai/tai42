@@ -31,9 +31,11 @@ from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none, is_ep
 from tai42_skeleton.app.graceful_exit import graceful_exit_for
 from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.kind_status import collect_kind_status, warn_if_noop_monitoring
+from tai42_skeleton.app.mount_map import MountBinding, bind_module, build_mount_map
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel, write_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_defaults import DEFAULT_API_ROUTERS, STUDIO_SPA_ROUTER
+from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.connectors.providers.registry import reset_registry
 from tai42_skeleton.connectors.token_injection import evict_pooled_session
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -144,6 +146,10 @@ class TaiMCPLifecycleMixin(ABC):
         # skeleton) self-heals without a manual reload. Distinct from the
         # worker-bus subscription task above.
         self._reprobe_task: asyncio.Task[None] | None = None
+
+        # The module → mount-binding map for the CURRENT registration pass, rebuilt at
+        # the top of ``_initialize_components`` before any manifest module imports.
+        self._mount_map: dict[str, MountBinding] = {}
 
     # -- per-epoch serving core (forwarding reads) -----------------------------
     # Every collaborator the lifecycle swaps per epoch is read through the live
@@ -845,6 +851,14 @@ class TaiMCPLifecycleMixin(ABC):
         # generation the whole time — no unsettled window on the request path. At
         # boot it clears the committed map.
         operation_registry.clear()
+
+        # Clear the route registry's write-target /api shape generation before the
+        # routers re-attach: an epoch build clears the fresh STAGED generation (the
+        # live match/collision surface stays untouched); at boot the committed one.
+        # The re-import below repopulates it, so an uninstalled/remapped route leaves
+        # the shape index by simply not re-registering.
+        route_registry.reset_shape_index()
+
         self._initialize_registries()
         self._initialize_components()
 
@@ -953,6 +967,35 @@ class TaiMCPLifecycleMixin(ABC):
             return None
         return self._effective_router_modules()
 
+    def _build_mount_map(self) -> dict[str, MountBinding]:
+        """The module → :class:`MountBinding` map for this registration pass, built
+        from the manifest's channel/router modules' packaged ``tai-plugin.yml`` with
+        persisted route-mount overrides applied. The install store is read ONLY when a
+        real plugin route module is present. A resolved public route under a reserved
+        never-public prefix fails the build."""
+        if self._manifest is None:
+            raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
+        from tai42_skeleton.access_control.settings import access_control_settings
+
+        modules = [*(self._manifest.channel_modules or []), *self._effective_router_modules()]
+        reserved = access_control_settings().reserved_public_pin_prefixes
+        return build_mount_map(modules, reserved, self._installed_route_mounts)
+
+    def _installed_route_mounts(self) -> dict[str, dict[str, str]]:
+        """Every marketplace-install row's ``{ref: {item_name: base}}`` route-mount
+        overrides — the persisted operator remaps the boot mount-map reproduces. Empty
+        when the skeleton database is not configured (a file-mode deployment has no
+        rows). Read off-loop so a sync/serving caller both resolve it."""
+        from tai42_kit.db import component_store_configured
+
+        from tai42_skeleton.db import SKELETON_COMPONENT
+        from tai42_skeleton.marketplace.store import MarketplaceInstallStore
+
+        if not component_store_configured(SKELETON_COMPONENT):
+            return {}
+        records = self._run_blocking(lambda: MarketplaceInstallStore().list_installed())
+        return {record.ref: dict(record.route_mounts) for record in records}
+
     def _initialize_components(self):
         if self._manifest is None:
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
@@ -997,6 +1040,12 @@ class TaiMCPLifecycleMixin(ABC):
 
         reregister_operations()
 
+        # Build the module → mount-binding map BEFORE any manifest module imports, so
+        # each declared plugin route resolves its absolute path + public flag from the
+        # declaration while its module imports below (bound through
+        # ``_import_additive_plugin``). Reserved-prefix violations fail the build here.
+        self._mount_map = self._build_mount_map()
+
         for module in self._manifest.lifecycle_modules or []:
             self._import_additive_plugin(module, "lifecycle", dist_map)
 
@@ -1021,10 +1070,9 @@ class TaiMCPLifecycleMixin(ABC):
         # Import the composed effective router set (defaults + extras + a single
         # last catch-all, per default_routers). Each import runs the module's
         # @custom_route decorators, registering routes into the FastMCP route table.
-        # NOTE: that table is snapshotted once when the ASGI app is built, so a
-        # router first imported on a live reload registers into the table but does
-        # not reach the already-built served app until the next process start — a
-        # newly-installed plugin router activates on restart.
+        # The epoch build rebuilds the serving ASGI app from that table and the atomic
+        # swap installs it, so a router first imported on a live reload serves the
+        # instant the swap completes — no restart.
         for module in self._effective_router_modules():
             self._import_additive_plugin(module, "router", dist_map)
 
@@ -1125,9 +1173,24 @@ class TaiMCPLifecycleMixin(ABC):
             return False
         if verdict.status == "unknown":
             logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
+        binding = self._mount_map.get(module)
+        # Savepoint the FastMCP route table before a BOUND module imports, so a failure
+        # can roll back exactly the routes it committed. A bindingless (core/operator)
+        # module records no owner-isolable rows, so it takes no savepoint/rollback.
+        savepoint = self._http_surface.route_table_savepoint() if binding is not None else None
         try:
-            import_or_reload_package(module)
+            # A mount-bound module resolves its declared routes through the binding
+            # carried on the contextvar for the span of its import; the bind also
+            # verifies every declared row registered once the import completes.
+            with bind_module(binding):
+                import_or_reload_package(module)
         except Exception as exc:
+            if binding is not None and savepoint is not None:
+                # Roll back so a quarantined declared-route module serves NOTHING: the
+                # rows it committed before a mid-import custom_route raise, or before a
+                # post-import _verify_all_registered raise, must leave no trace in the
+                # shape index, _routes, or the FastMCP route table.
+                self._http_surface.rollback_module_routes(binding, savepoint)
             logger.exception("%s module %s failed to import; quarantining it", kind, module)
             quarantine_plugin(module, f"{kind} module failed to import: {exc}")
             return False

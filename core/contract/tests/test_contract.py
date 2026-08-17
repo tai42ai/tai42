@@ -19,12 +19,12 @@ from _helpers import protocol_members  # stdlib-only helper, no application pack
 
 import tai42_contract
 
-# The frozen facade surface: the 60 (sub-protocol, member) pairs over 57
-# distinct flat names, grouped into the 19 sub-protocols. This is the
+# The frozen facade surface: the 63 (sub-protocol, member) pairs over 60
+# distinct flat names, grouped into the 20 sub-protocols. This is the
 # contract's own source of truth — no external lookup needed. Three leaf names
 # are shared: ``store`` (versioning + presets) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (57) is three
-# fewer than the pair count (60).
+# (webhook_verifiers + channels), so the distinct-name union (60) is three
+# fewer than the pair count (63).
 EXPECTED_FACADE = {
     # tools (12)
     "tool",
@@ -69,9 +69,10 @@ EXPECTED_FACADE = {
     # extensions (2)
     "extension",
     "available_extensions",
-    # http (2)
+    # http (3)
     "middleware",
     "custom_route",
+    "mount_base",
     # clients (2)
     "client_ctx",
     "shutdown_clients",
@@ -205,11 +206,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 62 (sub-protocol, member) pairs over 59 distinct names — ``store`` is
+    # 63 (sub-protocol, member) pairs over 60 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 59, f"union={len(union)}"
-    assert total == 62 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 60, f"union={len(union)}"
+    assert total == 63 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_namespaces():
@@ -580,7 +581,17 @@ def test_custom_route_carries_self_describing_metadata():
     assert sig.parameters["response_model"].default is empty
     assert sig.parameters["request_model"].default is None
     assert sig.parameters["query_model"].default is None
-    assert sig.parameters["authed"].default is True
+    assert sig.parameters["authed"].default is None
+
+
+def test_mount_base_is_a_zero_arg_str_query():
+    # mount_base takes no arguments beyond self and returns the resolved absolute
+    # mount base a declared plugin route module captures at import.
+    from tai42_contract.app import AppHttp
+
+    sig = inspect.signature(AppHttp.mount_base)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation == "str"
 
 
 def test_extension_registration_carries_requires_body_locality():

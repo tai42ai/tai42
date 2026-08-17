@@ -64,6 +64,12 @@ class _StubChannels:
 class _StubHttp:
     def __init__(self) -> None:
         self.routes: list[SimpleNamespace] = []
+        # The resolved absolute mount base register captures at import; a test
+        # overrides it to prove setWebhook follows a remapped route base.
+        self.mount_base_value = "/api/channels/telegram"
+
+    def mount_base(self) -> str:
+        return self.mount_base_value
 
     def custom_route(
         self,
@@ -77,7 +83,8 @@ class _StubHttp:
         response_model: Any,
         request_model: Any = None,
         query_model: Any = None,
-        authed: bool = True,
+        authed: bool | None = None,
+        action: str | None = None,
     ):
         def decorator(handler):
             self.routes.append(

@@ -83,7 +83,7 @@ def test_load_build_rejects_a_linked_file_absent_from_the_integrity_map(public_b
 
 def test_render_page_links_every_asset_with_its_integrity(public_build: Path):
     build = load_build()
-    html = render_page(IDENTITY, "Chat", build)
+    html = render_page(IDENTITY, "Chat", build, "/api/channels/web")
     assert html.startswith("<!doctype html>")
     assert (
         f'<script type="module" src="/api/channels/web/assets/{ENTRY_ASSET}" integrity="sha384-{ENTRY_ASSET}">'
@@ -91,12 +91,28 @@ def test_render_page_links_every_asset_with_its_integrity(public_build: Path):
     assert (
         f'<link rel="stylesheet" href="/api/channels/web/assets/{STYLE_ASSET}" integrity="sha384-{STYLE_ASSET}">'
     ) in html
-    assert '<div id="root" data-identity="site-alpha"></div>' in html
+    assert '<div id="root" data-identity="site-alpha" data-api-base="/api/channels/web"></div>' in html
     assert 'name="theme-color"' in html
 
 
+def test_render_page_hangs_asset_urls_off_the_given_mount_base(public_build: Path):
+    # A remapped mount base moves the asset URLs with it — the default is never
+    # hardcoded into the served shell.
+    html = render_page(IDENTITY, "Chat", load_build(), "/api/channels/relay")
+    assert f'src="/api/channels/relay/assets/{ENTRY_ASSET}"' in html
+    assert "/api/channels/web/assets/" not in html
+
+
+def test_render_page_carries_the_mount_base_on_root_for_the_bundle(public_build: Path):
+    # The bundle reads its API base off #root's data-api-base; a remapped mount is
+    # carried there too, so the browser's own calls follow it rather than a default.
+    html = render_page(IDENTITY, "Chat", load_build(), "/api/channels/relay")
+    assert f'data-identity="{IDENTITY}" data-api-base="/api/channels/relay"' in html
+    assert 'data-api-base="/api/channels/web"' not in html
+
+
 def test_render_page_escapes_interpolated_values(public_build: Path):
-    html = render_page('x" onload="boom', "</title><script>", load_build())
+    html = render_page('x" onload="boom', "</title><script>", load_build(), "/api/channels/web")
     assert 'onload="boom' not in html
     assert "<script>" not in html.split('<script type="module"')[0]
 

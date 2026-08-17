@@ -23,6 +23,10 @@ from tai42_channel_telegram.settings import telegram_settings
 # mask it in httpx/httpcore log records before the first send (setWebhook) fires.
 install_telegram_log_redaction()
 
+# Captured at import — where the mount binding is live — so setWebhook points at the
+# inbound door's ACTUAL mount, following an operator remap of the route base.
+_INBOUND_MOUNT_BASE = tai42_app.http.mount_base()
+
 tai42_app.channels.register("telegram", TelegramChannel())
 
 
@@ -46,7 +50,7 @@ async def _register_telegram_webhook() -> None:
         )
 
     payload = {
-        "url": f"{base.rstrip('/')}/api/channels/telegram/inbound",
+        "url": f"{base.rstrip('/')}{_INBOUND_MOUNT_BASE}/inbound",
         "secret_token": secret,
         # Only message updates matter (ForceReply answers arrive as messages).
         "allowed_updates": ["message"],

@@ -1,7 +1,8 @@
 """The public inbound door Telegram's webhook POSTs updates to.
 
-``POST /api/channels/telegram/inbound`` (``authed=False``): verify the
-``X-Telegram-Bot-Api-Secret-Token`` header against the configured webhook secret
+``POST /api/channels/telegram/inbound`` (declared ``public: true`` in
+``tai-plugin.yml``): verify the ``X-Telegram-Bot-Api-Secret-Token`` header against
+the configured webhook secret
 (constant-time over sha256 digests; FAIL CLOSED on missing config). A ForceReply
 reply from a configured recipient chat whose question is still pending resolves
 that ask — forwarded to its callback door. Every other user text message, and a
@@ -157,12 +158,11 @@ async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: d
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/telegram/inbound",
+    "/inbound",
     methods=["POST"],
     summary="Telegram channel inbound webhook",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def inbound(request: Request) -> Response:
     """Receive a Telegram webhook update, resolve a pending ask or bridge the message.

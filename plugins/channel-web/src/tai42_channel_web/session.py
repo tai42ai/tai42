@@ -45,10 +45,9 @@ SESSION_COOKIE_BASE = "tai_web_session"
 # or overwrite it. All three conditions travel together, so ONE flag decides the
 # whole naming: a Secure deployment gets the prefixed name at the root path, and a
 # plain-http one (dev / e2e), which can satisfy none of the three, gets the bare
-# name scoped to this plugin's own prefix, where the page, its assets and the chat
-# doors all live.
+# name scoped to this plugin's own mount prefix, where the page, its assets and the
+# chat doors all live.
 _HOST_PREFIX = "__Host-"
-_SCOPED_PATH = "/api/channels/web"
 
 
 def session_cookie_name(secure: bool) -> str:
@@ -58,10 +57,11 @@ def session_cookie_name(secure: bool) -> str:
     return f"{_HOST_PREFIX}{SESSION_COOKIE_BASE}" if secure else SESSION_COOKIE_BASE
 
 
-def session_cookie_path(secure: bool) -> str:
+def session_cookie_path(secure: bool, mount_base: str) -> str:
     """The cookie's ``Path``. ``/`` is what the ``__Host-`` prefix requires; without
-    the prefix the capability is scoped to this plugin's doors."""
-    return "/" if secure else _SCOPED_PATH
+    the prefix the capability is scoped to this deployment's mount prefix, so a
+    remapped base is followed rather than the default hardcoded."""
+    return "/" if secure else mount_base
 
 
 # 32 bytes -> a 43-character urlsafe token. The accepted range starts at 22
@@ -98,18 +98,19 @@ def session_token(request: Request, settings: WebSettings) -> str | None:
     return value
 
 
-def set_session_cookie(response: Response, token: str, settings: WebSettings) -> None:
+def set_session_cookie(response: Response, token: str, settings: WebSettings, mount_base: str) -> None:
     """Set (or refresh the ``Max-Age`` of) the visitor's session cookie.
 
-    ``httponly`` keeps the capability out of page script entirely; ``samesite=lax``
-    withholds it from cross-site POSTs while still arriving on a link-followed page
-    load."""
+    ``mount_base`` is this deployment's absolute mount prefix for the web channel; a
+    plain-http deployment scopes the cookie ``Path`` to it. ``httponly`` keeps the
+    capability out of page script entirely; ``samesite=lax`` withholds it from
+    cross-site POSTs while still arriving on a link-followed page load."""
     secure = settings.session_cookie_secure
     response.set_cookie(
         session_cookie_name(secure),
         token,
         max_age=settings.session_ttl_seconds,
-        path=session_cookie_path(secure),
+        path=session_cookie_path(secure, mount_base),
         httponly=True,
         secure=secure,
         samesite="lax",

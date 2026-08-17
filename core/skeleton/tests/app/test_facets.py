@@ -313,7 +313,7 @@ def test_http_facet_forwarding():
         response_model=None,
         request_model=None,
         query_model=None,
-        authed=True,
+        authed=None,
         destructive=False,
         action=None,
         declared=None,

@@ -227,12 +227,11 @@ def _as_list(value: Any) -> list[Any]:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/whatsapp/inbound",
+    "/inbound",
     methods=["GET", "POST"],
     summary="WhatsApp webhook (verification + messages + delivery statuses)",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def whatsapp_inbound(request: Request) -> Response:
     """Meta's single webhook endpoint: GET verification, POST message/status events.

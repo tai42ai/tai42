@@ -43,7 +43,12 @@ pytestmark = pytest.mark.backendless
 _ROUTER_MODULE = "tai_e2e_market_epsilon.router"
 _MIDDLEWARE_MODULE = "tai_e2e_market_epsilon.mw"
 _SPA_CATCH_ALL = "tai42_skeleton.routers.plugins"
+# The router item declares three routes in tai-plugin.yml relative to its ``e2e-epsilon``
+# base — an authed ``/ping``, a public ``/open``, and an authed ``POST /open`` — resolving
+# under the default base to these absolute paths (default bases reproduce the pre-declaration
+# paths).
 _PING = "/api/e2e-epsilon/ping"
+_OPEN = "/api/e2e-epsilon/open"
 
 
 def _persisted_manifest(stack: TaiStack) -> dict:
@@ -54,20 +59,20 @@ def _persisted_manifest(stack: TaiStack) -> dict:
     return yaml.safe_load(text)
 
 
-async def _ping_status(stack: TaiStack) -> int:
-    resp = await stack.api().request_raw("GET", _PING)
+async def _route_status(stack: TaiStack, path: str) -> int:
+    resp = await stack.api().request_raw("GET", path)
     return resp.status_code
 
 
-async def _wait_ping(stack: TaiStack, expected: int) -> None:
-    """Poll ``GET /api/e2e-epsilon/ping`` until it reaches ``expected`` — the hot
-    load/unload lands the instant the swap completes, but a bounded wait absorbs any
-    reload-tail scheduling; a genuine miss still fails at the deadline."""
+async def _wait_route(stack: TaiStack, path: str, expected: int) -> None:
+    """Poll ``GET path`` until it reaches ``expected`` — the hot load/unload lands the
+    instant the swap completes, but a bounded wait absorbs any reload-tail scheduling;
+    a genuine miss still fails at the deadline."""
 
     async def reached() -> bool:
-        return await _ping_status(stack) == expected
+        return await _route_status(stack, path) == expected
 
-    await wait_for_async(reached, deadline=15.0, message=f"{_PING} never reached status {expected}")
+    await wait_for_async(reached, deadline=15.0, message=f"{path} never reached status {expected}")
 
 
 async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
@@ -83,8 +88,10 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     # browse catalog, so the router-merge spec seeds the fixture it installs itself.
     await seed_epsilon_listing(marketplace_service, package_index, fixture_artifacts)
 
-    # Precondition (negative first): the route is dark and the distribution is absent.
-    assert await _ping_status(stack) == 404
+    # Precondition (negative first): both declared routes are dark and the
+    # distribution is absent.
+    assert await _route_status(stack, _PING) == 404
+    assert await _route_status(stack, _OPEN) == 404
     assert distribution_absent(EPSILON_PACKAGE)
 
     # Install through the abort-safe ledger so a mid-body failure still uninstalls.
@@ -104,12 +111,18 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     # (b) HOT-LOADED (no restart): the install reload built a fresh serving surface, so the
     # merged router serves 200 immediately — ahead of the catch-all — and the merged
     # middleware's header is present.
-    await _wait_ping(stack, 200)
+    await _wait_route(stack, _PING, 200)
     resp = await stack.api().request_raw("GET", _PING)
     assert resp.status_code == 200, f"router did not hot-load after install: {resp.status_code}; body {resp.text}"
     body = resp.json()
     assert body["data"]["epsilon"] == "pong", f"epsilon handler did not answer (catch-all shadowed it?): {body}"
     assert resp.headers.get("x-e2e-epsilon") == "1", "the merged middleware's response header is absent after install"
+
+    # The declared PUBLIC sibling route mounts alongside it (both declared rows land).
+    await _wait_route(stack, _OPEN, 200)
+    open_resp = await stack.api().request_raw("GET", _OPEN)
+    assert open_resp.status_code == 200, f"declared public sibling did not hot-load: {open_resp.status_code}"
+    assert open_resp.json()["data"]["epsilon"] == "open", "the declared public sibling handler did not answer"
 
     # (c) A RESTART re-boots on the persisted manifest and STILL serves the route + header.
     stack.restart("serve")
@@ -124,7 +137,8 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     # route 404s again with no restart, the module leaves the manifest (catch-all still
     # last), and the distribution is gone from the venv.
     await stack.api().post("/api/marketplace/uninstall", json={"ref": EPSILON_REF})
-    await _wait_ping(stack, 404)
+    await _wait_route(stack, _PING, 404)
+    await _wait_route(stack, _OPEN, 404)
     after = _persisted_manifest(stack)
     routers_after = after.get("routers_modules") or []
     assert _ROUTER_MODULE not in routers_after, f"router module lingered after uninstall: {routers_after}"

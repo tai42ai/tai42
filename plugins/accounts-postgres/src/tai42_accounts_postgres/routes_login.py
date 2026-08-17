@@ -31,6 +31,16 @@ from tai42_accounts_postgres.settings import accounts_settings
 
 logger = logging.getLogger(__name__)
 
+# The router's resolved absolute mount base, captured at import (the mount binding is
+# live only then), so a login form's self-referential submit path follows an operator
+# remap of the login route base instead of a hardcoded default.
+_MOUNT_BASE = tai42_app.http.mount_base()
+
+
+def submit_path(relative: str) -> str:
+    """The absolute submit path for a login form under the resolved login mount."""
+    return f"{_MOUNT_BASE}{relative}"
+
 
 class SessionResponse(BaseModel):
     """The one-time login result: a raw session token and the user's id."""
@@ -120,13 +130,12 @@ def _password_too_short(password: str) -> str | None:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/password",
+    "/password",
     methods=["POST"],
     summary="Log in with email and password",
     tags=["login"],
     request_model=PasswordLoginBody,
     response_model=SessionResponse,
-    authed=False,
 )
 async def login_password(request: Request) -> Response:
     """Verify email + password and mint a session.
@@ -169,13 +178,12 @@ async def login_password(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/bootstrap",
+    "/bootstrap",
     methods=["POST"],
     summary="Create the first owner account",
     tags=["login"],
     request_model=BootstrapBody,
     response_model=SessionResponse,
-    authed=False,
 )
 async def login_bootstrap(request: Request) -> Response:
     """Create the first owner under the secure-by-default gate.
@@ -226,13 +234,12 @@ async def login_bootstrap(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/login/invite/accept",
+    "/invite/accept",
     methods=["POST"],
     summary="Accept an invite and set a password",
     tags=["login"],
     request_model=InviteAcceptBody,
     response_model=SessionResponse,
-    authed=False,
 )
 async def login_invite_accept(request: Request) -> Response:
     """Consume an invite, set the user's first password, and mint a session.

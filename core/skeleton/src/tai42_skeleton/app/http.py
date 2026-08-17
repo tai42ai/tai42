@@ -14,11 +14,22 @@ from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from tai42_skeleton.app.route_registry import MOUNT_METHODS, route_registry
+from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, current_mount_binding, note_registered
+from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
 
 if TYPE_CHECKING:
-    from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
+    from tai42_contract.app import DeclaredRouteMetadata
+
+    from tai42_skeleton.app.route_registry import RouteAction
     from tai42_skeleton.app.server import TaiMCP
+
+
+def _plugin_owner(binding: MountBinding) -> RouteOwner:
+    """The route owner identity a declared plugin route records under — one per bound
+    module. The SINGLE source of that identity, shared by ``custom_route`` (which
+    stamps it on each recorded row) and the rollback (which deregisters by it), so the
+    two never drift."""
+    return RouteOwner(kind="plugin", owner_ref=binding.owner_ref, item_name=binding.item_name)
 
 
 def record_sub_mcp_mount(prefix: str) -> None:
@@ -76,7 +87,7 @@ class HttpSurface:
         response_model: type[BaseModel] | None,
         request_model: type[BaseModel] | None = None,
         query_model: type[BaseModel] | None = None,
-        authed: bool = True,
+        authed: bool | None = None,
         destructive: bool = False,
         action: "RouteAction | None" = None,
         declared: "DeclaredRouteMetadata | None" = None,
@@ -91,28 +102,116 @@ class HttpSurface:
         (emitted as ``x-destructive``) and ``declared`` (its behavioral
         properties, taken from the operation's metadata rather than divined from
         the adapter closure's source).
+
+        When the importing module carries a mount binding (a declared plugin
+        route), ``path`` is RELATIVE and the route resolves from the declaration:
+        the served path is ``/api/`` + the mount base + ``path``, ``authed`` is the
+        negation of the declared ``public`` flag, and the owner is the plugin. A
+        row not declared in the plugin's ``tai-plugin.yml`` — or an explicit
+        ``authed`` argument on a declared route, or any route from a route-less
+        item's module — is a registration error. Off a binding (a core/operator
+        route) ``path`` is absolute and ``authed`` defaults to ``True``.
         """
-        fastmcp_route = self._app._fast_mcp.custom_route(path, methods, name, include_in_schema)
+        binding = current_mount_binding()
+        if binding is not None:
+            if binding.forbidden:
+                raise MountRegistrationError(
+                    f"item {binding.item_name!r} of plugin {binding.owner_ref!r} declares no routes in "
+                    f"tai-plugin.yml but registers {'/'.join(methods)} {path}"
+                )
+            if authed is not None:
+                raise MountRegistrationError(
+                    f"declared plugin route {'/'.join(methods)} {path} (item {binding.item_name!r}) passed an "
+                    "explicit authed= — the tai-plugin.yml public flag is the single source of that decision"
+                )
+            method_set = frozenset(m.upper() for m in methods)
+            decl = binding.find_route(path, method_set)
+            if decl is None:
+                raise MountRegistrationError(
+                    f"plugin {binding.owner_ref!r} item {binding.item_name!r} registers route "
+                    f"{'/'.join(methods)} {path} not declared in its tai-plugin.yml routes"
+                )
+            note_registered(path, method_set)
+            resolved_path = binding.resolved_path(path)
+            resolved_authed = not decl.public
+            resolved_public = decl.public
+            owner = _plugin_owner(binding)
+        else:
+            resolved_path = path
+            resolved_authed = True if authed is None else authed
+            resolved_public = not resolved_authed
+            owner = CORE_OWNER
+
+        fastmcp_route = self._app._fast_mcp.custom_route(resolved_path, methods, name, include_in_schema)
 
         def decorator(fn: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
             route_registry.record(
-                path=path,
+                path=resolved_path,
                 methods=methods,
                 name=name,
                 handler=fn,
                 summary=summary,
                 tags=tags,
-                authed=authed,
+                authed=resolved_authed,
                 request_model=request_model,
                 response_model=response_model,
                 query_model=query_model,
                 destructive=destructive,
                 action=action,
                 declared=declared,
+                owner=owner,
+                public=resolved_public,
             )
             return fastmcp_route(fn)
 
         return decorator
+
+    def mount_base(self) -> str:
+        """The resolved absolute mount base of the module importing now — ``/api/``
+        plus the mount binding's base, no trailing slash. Raises off a binding (a
+        core or operator-authored module) or from a route-less item's module —
+        neither owns a declared mount. See :class:`tai42_contract.app.facets.AppHttp`.
+        """
+        binding = current_mount_binding()
+        if binding is None:
+            raise MountRegistrationError(
+                "mount_base() called with no mount binding present — a core or operator-authored module "
+                "owns no declared mount base"
+            )
+        if binding.forbidden:
+            raise MountRegistrationError(
+                f"item {binding.item_name!r} of plugin {binding.owner_ref!r} declares no routes in "
+                "tai-plugin.yml, so it has no mount base"
+            )
+        return binding.resolved_path("")
+
+    def route_table_savepoint(self) -> int:
+        """The current length of the FastMCP additional-route table — a savepoint the
+        additive-plugin import captures BEFORE a bound module imports. A module import
+        only ever APPENDS routes (one per ``custom_route``), so truncating back to this
+        length drops exactly the routes that module registered and nothing earlier.
+
+        Reaches the FastMCP-private route list because FastMCP affords no route-removal
+        API; this surface already owns every write into that list, so it owns the
+        savepoint too."""
+        return len(self._app._fast_mcp._additional_http_routes)
+
+    def rollback_module_routes(self, binding: MountBinding, savepoint: int) -> None:
+        """Undo every route a failed/quarantined bound module registered, across all
+        three surfaces, so ``RouteRegistry.match()``, the cross-owner collision math,
+        and the OpenAPI enumeration all see nothing from it: truncate the FastMCP
+        route table back to ``savepoint`` and deregister every ``route_registry`` row
+        owned by the module.
+
+        Fires for BOTH failure shapes — a ``custom_route`` that raised mid-import
+        (undeclared row / explicit ``authed=`` / route-less item) and a post-import
+        ``_verify_all_registered`` raise — since both leave the rows committed before
+        the fault standing. A misused savepoint (outside the current table) raises."""
+        routes = self._app._fast_mcp._additional_http_routes
+        if not 0 <= savepoint <= len(routes):
+            raise ValueError(f"route-table savepoint {savepoint} is outside the current table of {len(routes)} routes")
+        del routes[savepoint:]
+        route_registry.rollback_owner(_plugin_owner(binding))
 
     def finalize(self, app):
         """Mount the sub-MCP router and wrap the registered middleware stack.

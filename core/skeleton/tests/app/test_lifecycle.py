@@ -1273,7 +1273,7 @@ def test_no_providers_configured_boots_with_a_quarantined_provider():
         mp.setattr(
             ac_settings,
             "access_control_settings",
-            lambda: SimpleNamespace(enable=False, auth_providers=[]),
+            lambda: SimpleNamespace(enable=False, auth_providers=[], reserved_public_pin_prefixes=("/api/auth",)),
         )
         asyncio.run(run())
 

@@ -11,7 +11,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/accounts-oidc
-contract: '>=1.11,<2'
+contract: '>=2,<3'
 categories:
   - identity
   - security
@@ -38,3 +38,15 @@ provides:
     name: login
     module: tai42_accounts_oidc.routes
     description: The public /api/login/* login-flow routes.
+    routes:
+      base: login
+      paths:
+        - path: /oidc/{provider}/authorize
+          methods: [GET]
+          public: true
+        - path: /oidc/{provider}/callback
+          methods: [GET]
+          public: true
+        - path: /sso/exchange
+          methods: [POST]
+          public: true
