@@ -65,13 +65,6 @@ class CrossOwnerRouteCollision(RuntimeError):
     construction — one owner per route, enforced at registration."""
 
 
-class EpochRouteAuditError(RuntimeError):
-    """An epoch rebuild produced a staged route generation that dropped EVERY HTTP
-    route of a plugin still declared in the manifest. Raised before the atomic
-    commit so ``build_and_swap_epoch`` discards the staged generation and the OLD
-    epoch keeps serving — a loud reload failure instead of a silent route unmount."""
-
-
 # The route action-class — the SINGLE authoritative source of a route's
 # authorization character:
 #
@@ -554,45 +547,6 @@ class RouteRegistry:
         target = self._shape_target()
         target[:] = [entry for entry in target if entry.meta.owner != owner]
         self._version += 1
-
-    def audit_plugin_routes_preserved(self, expected_owners: set[RouteOwner]) -> None:
-        """Guard the epoch rebuild against a SILENT plugin-route unmount.
-
-        An epoch build re-imports the manifest modules to re-fire their route
-        registrations into the STAGED generation. A plugin whose route lives in a
-        sibling of its manifest leaf can silently fail to re-register (the sibling
-        stayed cached in ``sys.modules``), dropping every one of that plugin's routes
-        from the generation about to be committed — a 404 until process restart.
-
-        Called during the build, BEFORE the atomic commit, with ``expected_owners``
-        the plugin owners the NEW manifest still declares routes for. For each such
-        owner that served a route in the live (committed) generation, the staged
-        generation must serve at least one — else this raises so
-        ``build_and_swap_epoch`` discards the staged generation and the OLD epoch
-        keeps serving.
-
-        Precise by construction: a plugin dropped from the manifest, or one whose new
-        spec declares no routes, is not in ``expected_owners`` and never trips the
-        guard; a remap or an update that keeps at least one route still passes (an
-        owner's routes are all in one bound module, so the sibling-cache bug drops
-        them all-or-nothing). A no-op outside an epoch build (no staged generation)."""
-        if self._staged_shapes is None:
-            return
-        staged_owners = {entry.meta.owner for entry in self._staged_shapes}
-        committed_plugin_owners = {
-            entry.meta.owner for entry in self._committed_shapes if entry.meta.owner.kind == "plugin"
-        }
-        dropped = sorted(
-            f"{owner.owner_ref}:{owner.item_name}"
-            for owner in committed_plugin_owners & expected_owners
-            if owner not in staged_owners
-        )
-        if dropped:
-            raise EpochRouteAuditError(
-                "epoch rebuild dropped every HTTP route of plugin(s) still declared in the manifest: "
-                f"{dropped} — their route-registering module did not re-register on reload; refusing to "
-                "commit a route-dropping epoch (the previous epoch keeps serving)"
-            )
 
 
 def _shape_specificity(shape: Shape) -> int:

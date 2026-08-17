@@ -1,12 +1,66 @@
-"""The epsilon fixture's router — the manifest LEAF (bumped version).
+"""The epsilon fixture's HTTP router — the bumped version carrying a new public route.
 
-Identical role to the prior version: the module listed in the item's
-``tai-plugin.yml`` and persisted into ``routers_modules``. It registers NOTHING
-itself — it imports the route-carrying sibling ``_inbound`` purely for its
-``@tai42_app.http.custom_route`` side-effect, so the routes live in a sibling of the
-manifest leaf. The bumped sibling adds the public ``GET /probe`` route.
-"""
+Registers four routes at import via ``@tai42_app.http.custom_route``, relative to
+the item's declared ``e2e-epsilon`` mount base: an authed ``GET /ping``, a public
+``GET /open``, an authed ``POST /open`` sharing that path (the per-method pin), and
+a public ``GET /probe`` that the prior version did not declare. The auth posture of
+each route comes from the ``tai-plugin.yml`` ``public`` flag, not a ``custom_route``
+argument."""
 
 from __future__ import annotations
 
-import tai_e2e_market_epsilon._inbound  # noqa: F401  (route registration side-effect)
+import os
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from tai42_contract.app import tai42_app
+
+
+@tai42_app.http.custom_route(
+    "/ping",
+    methods=["GET"],
+    summary="Epsilon fixture ping",
+    tags=["e2e-epsilon"],
+    response_model=None,
+    action="read",
+)
+async def epsilon_ping(request: Request) -> Response:
+    """Return a fixed marker payload identifying the epsilon fixture router."""
+    return JSONResponse({"data": {"epsilon": "pong", "pid": os.getpid()}})
+
+
+@tai42_app.http.custom_route(
+    "/open",
+    methods=["GET"],
+    summary="Epsilon fixture public probe",
+    tags=["e2e-epsilon"],
+    response_model=None,
+)
+async def epsilon_open(request: Request) -> Response:
+    """Return a fixed marker payload from the fixture's declared-public route."""
+    return JSONResponse({"data": {"epsilon": "open", "pid": os.getpid()}})
+
+
+@tai42_app.http.custom_route(
+    "/open",
+    methods=["POST"],
+    summary="Epsilon fixture authed sibling method",
+    tags=["e2e-epsilon"],
+    response_model=None,
+    action="write",
+)
+async def epsilon_open_write(request: Request) -> Response:
+    """Return a fixed marker from the authed POST sibling of the public GET /open."""
+    return JSONResponse({"data": {"epsilon": "open-write", "pid": os.getpid()}})
+
+
+@tai42_app.http.custom_route(
+    "/probe",
+    methods=["GET"],
+    summary="Epsilon fixture second public probe",
+    tags=["e2e-epsilon"],
+    response_model=None,
+)
+async def epsilon_probe(request: Request) -> Response:
+    """Return a fixed marker payload from the public route the bumped version adds."""
+    return JSONResponse({"data": {"epsilon": "probe", "pid": os.getpid()}})

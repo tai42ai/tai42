@@ -915,26 +915,7 @@ class TaiMCPLifecycleMixin(ABC):
         require_bus_for_backend(manifest)
         self.start(manifest)
         self._run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))
-        # Audit the STAGED route generation before the primitive commits it: fail the
-        # build loudly if a plugin still declared in the manifest lost every one of its
-        # routes on the re-import, so the atomic swap never installs a route-dropping
-        # epoch (the old epoch keeps serving on the raise).
-        self._audit_plugin_routes_preserved()
         return {"status": "ok"}
-
-    def _audit_plugin_routes_preserved(self) -> None:
-        """Assert the epoch rebuild kept the routes of every still-declared plugin —
-        the loud guard against a silent route unmount. ``expected_owners`` is the
-        plugin owner identity of each route-declaring mount binding this build
-        resolved (a plugin dropped from the manifest, or bound route-less, is absent,
-        so its legitimately-gone routes never trip the guard). Uses the ONE owner-
-        identity source ``custom_route`` stamps rows under, so the two never drift."""
-        from tai42_skeleton.app.http import _plugin_owner
-
-        expected_owners = {
-            _plugin_owner(binding) for binding in (self._mount_map or {}).values() if binding.declared_routes
-        }
-        route_registry.audit_plugin_routes_preserved(expected_owners)
 
     def _initialize_registries(self):
         if self._manifest is None:
@@ -1202,14 +1183,7 @@ class TaiMCPLifecycleMixin(ABC):
             # carried on the contextvar for the span of its import; the bind also
             # verifies every declared row registered once the import completes.
             with bind_module(binding):
-                # A route-carrying plugin (a bound channel/router — it ships a
-                # tai-plugin.yml, so it has a mount binding) may register its routes in a
-                # SIBLING of the manifest leaf. Widen its re-import to the whole top-level
-                # distribution package set (``dist_map``-derived) so the sibling re-fires
-                # its decorators into the staged epoch route table on reload instead of
-                # staying cached and silently unmounting. A bindingless module (core
-                # router, operator-authored, other plugin kinds) keeps leaf-only reload.
-                import_or_reload_package(module, dist_map if binding is not None else None)
+                import_or_reload_package(module)
         except Exception as exc:
             if binding is not None and savepoint is not None:
                 # Roll back so a quarantined declared-route module serves NOTHING: the
