@@ -736,10 +736,10 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
     manifest = {
         "default_routers": "none",
         "channel_modules": [
-            "tai42_channel_telegram",
-            "tai42_channel_slack",
-            "tai42_channel_twilio",
-            "tai42_channel_web",
+            "tai42_channel_telegram.register",
+            "tai42_channel_slack.register",
+            "tai42_channel_twilio.register",
+            "tai42_channel_web.register",
         ],
         "routers_modules": [
             "tai42_skeleton.routers.health",
@@ -889,7 +889,11 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     manifest = {
         "default_routers": "none",
         "lifecycle_modules": [variants.identity.lifecycle_module],
-        "channel_modules": ["tai42_channel_twilio", "tai42_channel_whatsapp", "tai42_channel_web"],
+        "channel_modules": [
+            "tai42_channel_twilio.register",
+            "tai42_channel_whatsapp.register",
+            "tai42_channel_web.register",
+        ],
         "routers_modules": [
             *_CORE_ROUTERS,
             "tai42_skeleton.routers.conversations",
@@ -2167,7 +2171,7 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
         # to the mounted HTTP routers the doctrine is pinned against.
         "tools": [_toolbox_tools_entry()],
         "api_tools": {"enabled": False},
-        "channel_modules": ["tai42_channel_web"],
+        "channel_modules": ["tai42_channel_web.register"],
     }
     env = _base_env(res, variants)
     # Subtract the two anchors that would resolve a feature store, leaving every
