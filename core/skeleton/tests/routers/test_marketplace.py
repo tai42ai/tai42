@@ -39,7 +39,11 @@ from tai42_skeleton.marketplace.errors import (
     OperationInProgressError,
     PipFailedError,
     PipUnavailableError,
+    PublicRoutesNotAcceptedError,
     RegistryUnreachableError,
+    ReservedRoutePrefixError,
+    RouteCollisionError,
+    RouteMountError,
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.store import InstallRecord
@@ -131,13 +135,20 @@ def _use_store(monkeypatch: pytest.MonkeyPatch, rows: list[InstallRecord]) -> No
 
 def _use_installer(monkeypatch: pytest.MonkeyPatch, *, install: Callable[[str, str | None], Awaitable[Any]]) -> None:
     class _Installer:
-        async def install(self, ref, version=None, *, env=None, secret_keys=None):
+        async def install(
+            self, ref, version=None, *, env=None, secret_keys=None, route_mounts=None, accept_public_routes=False
+        ):
             return await install(ref, version)
 
         async def uninstall(self, ref):
             return await install(ref, None)
 
-        async def update(self, ref, version=None, *, env=None, secret_keys=None):
+        async def update(
+            self, ref, version=None, *, env=None, secret_keys=None, route_mounts=None, accept_public_routes=False
+        ):
+            return await install(ref, version)
+
+        async def preview(self, ref, version=None, *, route_mounts=None):
             return await install(ref, version)
 
         async def upgrade_all(self):
@@ -264,6 +275,27 @@ async def test_installed_exposes_provided_item_names(monkeypatch: pytest.MonkeyP
     rows = {r["ref"]: r for r in _data(resp)["data"]["installed"]}
     assert rows["tai42/postgres-mcp"]["items"] == [{"kind": "mcp-server", "name": "postgres"}]
     assert rows["tai42/toolbox"]["items"] == []
+
+
+async def test_installed_exposes_stored_route_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Studio seeds its update flow and renders routes at the ACTUAL mounted base
+    # from this per-row {item_name: base}; a row with no remap answers {}.
+    remapped = InstallRecord(
+        ref="tai42/gateway",
+        version="1.0.0",
+        source="pypi",
+        repository_url=None,
+        tag=None,
+        spec={},
+        route_mounts={"gateway": "custom/base"},
+        installed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    _use_store(monkeypatch, [remapped, _record("tai42/toolbox", "1.0.0")])
+    _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
+    resp = await router.marketplace_installed(_get())
+    rows = {r["ref"]: r for r in _data(resp)["data"]["installed"]}
+    assert rows["tai42/gateway"]["route_mounts"] == {"gateway": "custom/base"}
+    assert rows["tai42/toolbox"]["route_mounts"] == {}
 
 
 async def test_installed_incompatible_newer_never_advertises_as_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -465,6 +497,10 @@ async def test_install_operation_in_progress_is_retriable_503(monkeypatch: pytes
         (ManifestCollisionError("collides"), 409),
         (ContractIncompatibleError("range"), 409),
         (EnvironmentShadowError("env 1.0 shadows prefix 2.0"), 409),
+        (RouteCollisionError([{"item": "relay", "full_path": "/api/x", "methods": ["GET"]}]), 409),
+        (ReservedRoutePrefixError(["/api/auth/x"], ["/api/auth"]), 409),
+        (RouteMountError("unknown item"), 400),
+        (PublicRoutesNotAcceptedError([{"item": "relay", "full_path": "/api/x", "methods": ["GET"]}]), 400),
         (InstallStateError("already installed"), 409),
         (InstallStateError("not installed", not_installed=True), 404),
         (ListingNotFoundError("not found"), 404),
@@ -511,6 +547,38 @@ async def test_install_artifact_integrity_carries_digests_in_envelope(monkeypatc
     assert body["artifact_ref"] == "https://codeload/x.tgz"
 
 
+async def test_install_route_collision_carries_code_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A route collision is a 409 whose envelope carries the stable code + the list so
+    # the UI keys a remap flow on it.
+    collisions = [{"item": "relay", "full_path": "/api/relay/status", "methods": ["GET"], "conflict_owner": "core"}]
+
+    async def _raise(ref, version):
+        raise RouteCollisionError(collisions)
+
+    _use_installer(monkeypatch, install=_raise)
+    resp = await router.marketplace_install(_post({"ref": "acme/relay"}))
+    assert resp.status_code == 409
+    body = _data(resp)
+    assert body["code"] == "ROUTE_COLLISION"
+    assert body["collisions"] == collisions
+
+
+async def test_install_public_not_accepted_carries_code_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An unaccepted public route is a 400 whose envelope carries the stable code + the
+    # rows so the UI renders the acceptance gate.
+    rows = [{"item": "relay", "full_path": "/api/relay/status", "methods": ["GET"]}]
+
+    async def _raise(ref, version):
+        raise PublicRoutesNotAcceptedError(rows)
+
+    _use_installer(monkeypatch, install=_raise)
+    resp = await router.marketplace_install(_post({"ref": "acme/relay"}))
+    assert resp.status_code == 400
+    body = _data(resp)
+    assert body["code"] == "PUBLIC_ROUTES_NOT_ACCEPTED"
+    assert body["public_routes"] == rows
+
+
 async def test_uninstall_and_update_wrap_data(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(ref, version):
         return {"ref": ref, "ok": True}
@@ -520,6 +588,16 @@ async def test_uninstall_and_update_wrap_data(monkeypatch: pytest.MonkeyPatch) -
     r2 = await router.marketplace_update(_post({"ref": "tai42/toolbox", "version": "2.0.0"}))
     assert _data(r1)["data"]["ok"] is True
     assert _data(r2)["data"]["ok"] is True
+
+
+async def test_install_preview_wraps_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _preview(ref, version):
+        return {"ref": ref, "items": [], "collisions": [], "requires_public_acceptance": False}
+
+    _use_installer(monkeypatch, install=_preview)
+    resp = await router.marketplace_install_preview(_post({"ref": "acme/relay"}))
+    assert resp.status_code == 200
+    assert _data(resp)["data"]["ref"] == "acme/relay"
 
 
 # -- upgrade-all --------------------------------------------------------------

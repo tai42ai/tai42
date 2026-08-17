@@ -311,7 +311,7 @@ class AppHttp(Protocol):
         response_model: type[BaseModel] | None,
         request_model: type[BaseModel] | None = None,
         query_model: type[BaseModel] | None = None,
-        authed: bool = True,
+        authed: bool | None = None,
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,
@@ -334,8 +334,12 @@ class AppHttp(Protocol):
           door's ``request_model`` already emits as query, so this is the only way a
           WRITE-method door documents the query it reads at the edge; ``None`` (the
           default) publishes no query model.
-        * ``authed`` — whether the route requires the api key (default ``True``);
-          emitted as the ``security`` requirement.
+        * ``authed`` — whether the route requires the api key; emitted as the
+          ``security`` requirement. ``None`` (the default) defers to the runtime:
+          a core route resolves to ``True``, a declared plugin route to the
+          negation of its ``tai-plugin.yml`` ``public`` flag. Passing an explicit
+          bool from a declared plugin route module is a registration error — the
+          declaration is the single source of that decision.
         * ``destructive`` — whether the route mutates in a way flagged as
           destructive (default ``False``); emitted as ``x-destructive``.
         * ``action`` — the route's authorization character (a :data:`RouteAction`);
@@ -351,6 +355,19 @@ class AppHttp(Protocol):
 
         The handler's narrative docstring becomes the operation description, and
         the reload-gate ``503`` response is derived from the handler body."""
+        ...
+
+    def mount_base(self) -> str:
+        """The resolved absolute mount base of the declared plugin route module
+        importing now — ``/api/`` + the item's mount base, no trailing slash
+        (e.g. ``/api/channels/telegram``).
+
+        Callable ONLY while a declared plugin route module imports — the mount
+        binding is present then. A module captures this value at import for later
+        use (a startup hook building an external webhook URL, a login descriptor's
+        self-referential path) so a remapped base is followed instead of a
+        hardcoded default. Called with no binding present — a core or
+        operator-authored module — it raises: those modules own no declared mount."""
         ...
 
 

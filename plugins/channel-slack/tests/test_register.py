@@ -27,9 +27,9 @@ def test_import_registers_channel_and_inbound_route(stub_app):
     _import_register_module(stub_app)
 
     assert isinstance(stub_app.channels.registered["slack"], SlackChannel)
-    route = stub_app.http.routes["/api/channels/slack/inbound"]
+    route = stub_app.http.routes["/inbound"]
     assert route.methods == ["POST"]
-    assert route.authed is False
+    assert route.authed is None
     assert route.summary
     assert route.tags == ["channels"]
 
@@ -37,9 +37,9 @@ def test_import_registers_channel_and_inbound_route(stub_app):
 def test_import_registers_the_interactivity_route(stub_app):
     _import_register_module(stub_app)
 
-    route = stub_app.http.routes["/api/channels/slack/interactive"]
+    route = stub_app.http.routes["/interactive"]
     assert route.methods == ["POST"]
-    assert route.authed is False
+    assert route.authed is None
     assert route.summary
     assert route.tags == ["channels"]
 

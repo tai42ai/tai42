@@ -1,6 +1,6 @@
 """The marketplace HTTP surface — ``/api/marketplace/*`` (all AUTHED).
 
-Ten thin adapters over the operations in
+Eleven thin adapters over the operations in
 ``tai42_skeleton.operations.marketplace``:
 
 * ``GET  /api/marketplace/search``                 — proxy the registry search (multi-value ``tags``).
@@ -9,6 +9,7 @@ Ten thin adapters over the operations in
 * ``GET  /api/marketplace/kinds``                  — the controlled item-kind vocabulary.
 * ``GET  /api/marketplace/installed``              — the installed inventory (per-row compat + update
   availability) and the boot's plugin-quarantine entries.
+* ``POST /api/marketplace/install/preview``        — resolve a candidate install/update's routes, no side effects.
 * ``POST /api/marketplace/install``                — install a plugin by ref.
 * ``POST /api/marketplace/uninstall``              — uninstall a plugin by ref.
 * ``POST /api/marketplace/update``                 — update a plugin to a newer/named version.
@@ -56,6 +57,7 @@ from tai42_skeleton.operations import operation_metadata_of, register_operation_
 from tai42_skeleton.operations.marketplace import marketplace_advisories as _marketplace_advisories_op
 from tai42_skeleton.operations.marketplace import marketplace_categories as _marketplace_categories_op
 from tai42_skeleton.operations.marketplace import marketplace_install as _marketplace_install_op
+from tai42_skeleton.operations.marketplace import marketplace_install_preview as _marketplace_install_preview_op
 from tai42_skeleton.operations.marketplace import marketplace_installed as _marketplace_installed_op
 from tai42_skeleton.operations.marketplace import marketplace_kinds as _marketplace_kinds_op
 from tai42_skeleton.operations.marketplace import marketplace_plugin_detail as _marketplace_plugin_detail_op
@@ -138,6 +140,17 @@ marketplace_install = register_operation_route(
     operation_metadata_of(_marketplace_install_op),
     path="/api/marketplace/install",
     method="POST",
+    action="fenced",
+)
+
+marketplace_install_preview = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_marketplace_install_preview_op),
+    path="/api/marketplace/install/preview",
+    method="POST",
+    # A POST that mutates nothing, but part of the privileged install flow and it
+    # surfaces other installed plugins' route ownership — fenced like the install it
+    # previews (a POST route cannot be the grantable read class regardless).
     action="fenced",
 )
 

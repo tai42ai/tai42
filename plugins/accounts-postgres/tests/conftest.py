@@ -32,6 +32,11 @@ class _FakeHttp:
 
         return _decorator
 
+    def mount_base(self) -> str:
+        # The resolved absolute mount base routes_login.py captures at import — the
+        # default login mount; a remap test monkeypatches ``routes_login._MOUNT_BASE``.
+        return "/api/login"
+
 
 class _FakeLifecycle:
     def __init__(self) -> None:

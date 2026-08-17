@@ -14,7 +14,7 @@ from tai42_kit.settings import register_settings_reset
 from tai42_skeleton.access_control.path_canon import MalformedPathError, canonicalize_path, under_prefix
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.store import access_control_store
-from tai42_skeleton.app.route_registry import load_all_routes
+from tai42_skeleton.app.route_registry import load_all_routes, route_registry
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +213,20 @@ class AccessControlVerifier(TokenVerifier):
         # the control plane is never public.
         if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
             return [self.settings.public_resource_id]
+
+        # Declared-public plugin-route tier (per-method, deny-safe): a request that
+        # resolves to a PLUGIN route whose tai-plugin.yml declared it public answers
+        # UNAUTHENTICATED. Per-method by construction — a sibling method not declared
+        # public produces no match and falls through to the normal gate below. Sits
+        # below the always-public prefix/pattern tiers and ABOVE the route-table store
+        # lookup: unique ownership + declaration IS the source of truth, so no row is
+        # ever written to ``access_control_routes`` for a declared-public route. The
+        # control plane can never enter it: the mount-map build refuses a public route
+        # under any reserved prefix, and ``_is_reserved_prefix`` drops it here too.
+        if method is not None and not self._is_reserved_prefix(path):
+            matched = route_registry.match(path, method)
+            if matched is not None and matched.owner.kind == "plugin" and matched.public:
+                return [self.settings.public_resource_id]
 
         # Read the current policy version once (a single cheap GET) and thread it
         # through every cached route/pattern read below, so a management route

@@ -155,6 +155,79 @@ def test_install_posts_ref_and_version(monkeypatch) -> None:
     assert captured["body"] == {"ref": "tai42/toolbox", "version": "1.2.3"}
 
 
+def test_install_mount_and_accept_public_routes_in_body(monkeypatch) -> None:
+    handler, captured = _capture()
+    captured["_payload"] = {"ref": "acme/relay"}
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["plugins", "install", "acme/relay", "--mount", "relay=channels/relay-2", "--accept-public-routes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/marketplace/install"
+    assert captured["body"] == {
+        "ref": "acme/relay",
+        "route_mounts": {"relay": "channels/relay-2"},
+        "accept_public_routes": True,
+    }
+
+
+def test_install_duplicate_mount_item_is_a_usage_error(monkeypatch) -> None:
+    handler, _ = _capture()
+    result = run_cli(
+        monkeypatch, handler, ["plugins", "install", "acme/relay", "--mount", "relay=a", "--mount", "relay=b"]
+    )
+    assert result.exit_code != 0
+    assert "more than once" in result.output
+
+
+def test_install_dry_run_previews_and_does_not_install(monkeypatch) -> None:
+    handler, captured = _capture()
+    captured["_payload"] = {
+        "ref": "acme/relay",
+        "version": "1.0.0",
+        "items": [
+            {
+                "item": "relay",
+                "base": "relay",
+                "routes": [{"path": "/status", "full_path": "/api/relay/status", "methods": ["GET"], "public": True}],
+            }
+        ],
+        "collisions": [],
+        "new_public_routes": [{"item": "relay", "full_path": "/api/relay/status", "methods": ["GET"]}],
+        "requires_public_acceptance": True,
+    }
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/relay", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    # A dry-run hits ONLY the preview door, never the install door.
+    assert captured["path"] == "/api/marketplace/install/preview"
+    assert captured["body"] == {"ref": "acme/relay"}
+    assert "/api/relay/status" in result.output
+
+
+def test_install_dry_run_exits_nonzero_on_collision(monkeypatch) -> None:
+    handler, captured = _capture()
+    captured["_payload"] = {
+        "ref": "acme/relay",
+        "version": "1.0.0",
+        "items": [],
+        "collisions": [
+            {
+                "item": "relay",
+                "full_path": "/api/relay/status",
+                "methods": ["GET"],
+                "conflict_owner": "core",
+                "conflict_path": "/api/relay/status",
+            }
+        ],
+        "new_public_routes": [],
+        "requires_public_acceptance": False,
+    }
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/relay", "--dry-run"])
+    assert result.exit_code == 1
+    assert "collision" in result.output
+
+
 def test_uninstall_posts_ref(monkeypatch) -> None:
     handler, captured = _capture()
     captured["_payload"] = {"ref": "tai42/toolbox", "uninstalled": True}

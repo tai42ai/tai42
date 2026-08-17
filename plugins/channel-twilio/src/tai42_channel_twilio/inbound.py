@@ -165,12 +165,11 @@ async def _forward_answer(callback_url: str, answer: str) -> httpx.Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/twilio/inbound",
+    "/inbound",
     methods=["POST"],
     summary="Twilio inbound message webhook",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def twilio_inbound(request: Request) -> Response:
     """Receive a Twilio inbound message and resolve the pair's pending question,
@@ -272,12 +271,11 @@ async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/twilio/status",
+    "/status",
     methods=["POST"],
     summary="Twilio delivery status webhook",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def twilio_status(request: Request) -> Response:
     """Ingest a Twilio-signed delivery-status callback for a bridge outbound message.

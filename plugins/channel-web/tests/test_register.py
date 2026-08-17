@@ -31,36 +31,45 @@ def test_importing_register_registers_channel_and_routes(stub_app):
 
         assert list(stub_app.channels.registered) == ["web"]
         assert isinstance(stub_app.channels.registered["web"], WebChannel)
+        # Routes are declared RELATIVE to the item's mount base; the runtime resolves
+        # them to absolute paths and the public flag from ``tai-plugin.yml``, so the
+        # module passes no explicit ``authed``.
         paths = {route.path for route in stub_app.http.routes}
         assert paths == {
-            "/api/channels/web/chat/{identity}",
-            "/api/channels/web/assets/{file}",
-            "/api/channels/web/messages",
-            "/api/channels/web/stream",
-            "/api/channels/web/questions/{interaction_id}/answer",
-            "/api/channels/web/session/rotate",
-            "/api/channels/web/gates/{identity}",
-            "/api/channels/web/gates/{identity}/codes",
-            "/api/channels/web/gates/{identity}/codes/{code_id}",
+            "/chat/{identity}",
+            "/assets/{file}",
+            "/messages",
+            "/stream",
+            "/questions/{interaction_id}/answer",
+            "/session/rotate",
+            "/gates/{identity}",
+            "/gates/{identity}/codes",
+            "/gates/{identity}/codes/{code_id}",
         }
-        # The chat doors are public — the visitor session cookie is their only
-        # credential. The entry-gate management doors are AUTHED and each declares an
-        # explicit action-class (an authed door with none refuses to register).
-        public = {route.path for route in stub_app.http.routes if route.authed is False}
-        authed = {(route.path, tuple(route.methods), route.action) for route in stub_app.http.routes if route.authed}
+        # The module defers auth to the declaration for every door (no explicit
+        # ``authed``). The chat doors pass no action; the entry-gate management doors
+        # each declare an explicit action-class (an authed door with none refuses to
+        # register).
+        assert all(route.authed is None for route in stub_app.http.routes)
+        public = {route.path for route in stub_app.http.routes if route.action is None}
+        managed = {
+            (route.path, tuple(route.methods), route.action)
+            for route in stub_app.http.routes
+            if route.action is not None
+        }
         assert public == {
-            "/api/channels/web/chat/{identity}",
-            "/api/channels/web/assets/{file}",
-            "/api/channels/web/messages",
-            "/api/channels/web/stream",
-            "/api/channels/web/questions/{interaction_id}/answer",
-            "/api/channels/web/session/rotate",
+            "/chat/{identity}",
+            "/assets/{file}",
+            "/messages",
+            "/stream",
+            "/questions/{interaction_id}/answer",
+            "/session/rotate",
         }
-        assert authed == {
-            ("/api/channels/web/gates/{identity}", ("GET",), "read"),
-            ("/api/channels/web/gates/{identity}", ("PUT",), "write"),
-            ("/api/channels/web/gates/{identity}/codes", ("POST",), "write"),
-            ("/api/channels/web/gates/{identity}/codes/{code_id}", ("DELETE",), "write"),
+        assert managed == {
+            ("/gates/{identity}", ("GET",), "read"),
+            ("/gates/{identity}", ("PUT",), "write"),
+            ("/gates/{identity}/codes", ("POST",), "write"),
+            ("/gates/{identity}/codes/{code_id}", ("DELETE",), "write"),
         }
     finally:
         for name, module in saved_modules.items():

@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 from tai42_kit.db import component_store_settings
@@ -60,6 +60,11 @@ class InstallRecord(BaseModel):
     spec: dict[str, Any]
     contract_version: str | None = None
     skeleton_version: str | None = None
+    # ``{item_name: mount base}`` for every route-carrying item, resolved at install
+    # time — the persisted mount the boot mount-map reads to reproduce operator
+    # remaps across restart. Empty (the column default) means every item mounts at
+    # its declared base.
+    route_mounts: dict[str, str] = Field(default_factory=dict)
     installed_at: datetime
 
 
@@ -79,6 +84,7 @@ class MarketplaceInstallStore:
         *,
         contract_version: str,
         skeleton_version: str,
+        route_mounts: dict[str, str] | None = None,
     ) -> None:
         """Insert the install row, or replace it when one already exists.
 
@@ -87,7 +93,9 @@ class MarketplaceInstallStore:
         ``artifact_ref`` + ``sha256`` are persisted so update-unwind can reinstall
         the old pin through the same verified fetch; both are ``None`` for pypi.
         ``contract_version`` + ``skeleton_version`` stamp the core that performed
-        the write — diagnostics only.
+        the write — diagnostics only. ``route_mounts`` is the ``{item_name: base}``
+        the installer resolved for every route-carrying item (``None`` writes the
+        empty map — the boot mount-map then reproduces each item's declared base).
         """
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -97,14 +105,15 @@ class MarketplaceInstallStore:
             await cur.execute(
                 "INSERT INTO marketplace_installs "
                 "(ref, version, source, repository_url, tag, artifact_ref, sha256, spec, "
-                "contract_version, skeleton_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "contract_version, skeleton_version, route_mounts) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (ref) DO UPDATE SET "
                 "version = EXCLUDED.version, source = EXCLUDED.source, "
                 "repository_url = EXCLUDED.repository_url, tag = EXCLUDED.tag, "
                 "artifact_ref = EXCLUDED.artifact_ref, sha256 = EXCLUDED.sha256, "
                 "spec = EXCLUDED.spec, contract_version = EXCLUDED.contract_version, "
-                "skeleton_version = EXCLUDED.skeleton_version, installed_at = now()",
+                "skeleton_version = EXCLUDED.skeleton_version, route_mounts = EXCLUDED.route_mounts, "
+                "installed_at = now()",
                 (
                     ref,
                     version,
@@ -116,6 +125,7 @@ class MarketplaceInstallStore:
                     Json(spec),
                     contract_version,
                     skeleton_version,
+                    Json(route_mounts or {}),
                 ),
             )
 
@@ -128,7 +138,7 @@ class MarketplaceInstallStore:
         ):
             await cur.execute(
                 "SELECT ref, version, source, repository_url, tag, artifact_ref, sha256, spec, "
-                "contract_version, skeleton_version, installed_at "
+                "contract_version, skeleton_version, route_mounts, installed_at "
                 "FROM marketplace_installs WHERE ref = %s",
                 (ref,),
             )
@@ -156,7 +166,7 @@ class MarketplaceInstallStore:
         ):
             await cur.execute(
                 "SELECT ref, version, source, repository_url, tag, artifact_ref, sha256, spec, "
-                "contract_version, skeleton_version, installed_at "
+                "contract_version, skeleton_version, route_mounts, installed_at "
                 "FROM marketplace_installs ORDER BY ref"
             )
             rows = await cur.fetchall()
@@ -175,6 +185,7 @@ def _row_to_record(row: tuple[Any, ...]) -> InstallRecord:
         spec,
         contract_version,
         skeleton_version,
+        route_mounts,
         installed_at,
     ) = row
     return InstallRecord(
@@ -188,5 +199,6 @@ def _row_to_record(row: tuple[Any, ...]) -> InstallRecord:
         spec=spec,
         contract_version=contract_version,
         skeleton_version=skeleton_version,
+        route_mounts=route_mounts,
         installed_at=installed_at,
     )

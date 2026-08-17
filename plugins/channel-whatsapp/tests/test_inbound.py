@@ -41,7 +41,7 @@ from tests.conftest import (
 
 pytestmark = pytest.mark.usefixtures("whatsapp_env")
 
-_PATH = "/api/channels/whatsapp/inbound"
+_PATH = "/inbound"
 _WAMID = "wamid.TESTID"
 _CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
 _SEEN_KEY = f"channel:whatsapp:seen:{_WAMID}"
@@ -54,7 +54,7 @@ def handler(stub_app) -> Callable[..., Awaitable[Response]]:
     assert len(routes) == 1
     route = routes[0]
     assert route.methods == ["GET", "POST"]
-    assert route.authed is False
+    assert route.authed is None
     return route.handler
 
 

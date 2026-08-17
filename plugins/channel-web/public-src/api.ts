@@ -1,5 +1,6 @@
 /**
- * The chat page's HTTP seam onto its own public doors under `/api/channels/web`.
+ * The chat page's HTTP seam onto its own public doors under this deployment's
+ * web-channel mount.
  *
  * There is NO credential to attach: the visitor's `tai_web_session` cookie is
  * `HttpOnly` and rides every same-origin request on its own, so these calls send
@@ -16,7 +17,21 @@
  */
 import { sseOpenToken } from '@/sse';
 
-const BASE = '/api/channels/web';
+/**
+ * This deployment's absolute mount prefix for the web channel, read at runtime from
+ * the shell the page door served: it writes the actual mount onto `#root`'s
+ * `data-api-base`, so a remapped mount is followed rather than the default assumed.
+ * A missing base is a loud throw — never a silent fall back to a default prefix.
+ */
+function apiBase(): string {
+  const base = document.getElementById('root')?.dataset.apiBase;
+  if (base === undefined || base.trim() === '') {
+    throw new Error(
+      'the chat page shell carries no data-api-base — the API base cannot be derived',
+    );
+  }
+  return base;
+}
 
 /** The door signals "your cookie resolves to no session on this web route" with
  * this code; the page answers by asking the visitor to reload (the chat URL mints
@@ -175,7 +190,7 @@ export async function sendMessage(
   text: string,
   clientMessageId: string,
 ): Promise<string> {
-  const response = await fetch(`${BASE}/messages`, {
+  const response = await fetch(`${apiBase()}/messages`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
     body: JSON.stringify({ identity, text, client_message_id: clientMessageId }),
@@ -190,11 +205,14 @@ export async function sendMessage(
 /** Answer one pending question. The door verifies the record belongs to this
  * visitor's own conversation before forwarding. */
 export async function answerQuestion(interactionId: string, answer: unknown): Promise<void> {
-  const response = await fetch(`${BASE}/questions/${encodeURIComponent(interactionId)}/answer`, {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({ answer }),
-  });
+  const response = await fetch(
+    `${apiBase()}/questions/${encodeURIComponent(interactionId)}/answer`,
+    {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ answer }),
+    },
+  );
   if (!response.ok) throw await failure(response, QUESTION_DOOR);
 }
 
@@ -212,7 +230,7 @@ export async function rotateSession(
 ): Promise<void> {
   const body: { identity: string; entry_code?: string } =
     entryCode === null ? { identity } : { identity, entry_code: entryCode };
-  const response = await fetch(`${BASE}/session/rotate`, {
+  const response = await fetch(`${apiBase()}/session/rotate`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -227,7 +245,7 @@ export async function rotateSession(
  * caller can tell a terminal refusal from a dropped connection.
  */
 export async function openChatStream(identity: string, signal: AbortSignal): Promise<Response> {
-  const url = `${BASE}/stream?identity=${encodeURIComponent(identity)}&_=${sseOpenToken()}`;
+  const url = `${apiBase()}/stream?identity=${encodeURIComponent(identity)}&_=${sseOpenToken()}`;
   const response = await fetch(url, { headers: { accept: 'text/event-stream' }, signal });
   if (!response.ok) throw await failure(response, STREAM_DOOR);
   return response;

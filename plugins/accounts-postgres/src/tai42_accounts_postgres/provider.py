@@ -35,10 +35,16 @@ logger = logging.getLogger(__name__)
 # per request on a busy session.
 _TOUCH_THROTTLE_SECONDS = 60
 
-_OPEN_WINDOW_WARNING = (
-    "first-owner bootstrap is OPEN — anyone who can reach /api/login/bootstrap can seize the admin "
-    "owner; unset TAI_ACCOUNTS_BOOTSTRAP_OPEN to gate it"
-)
+
+def _open_window_warning() -> str:
+    # The bootstrap door's path resolves through the login router's mount base (captured
+    # at its import), so the warning names the real door even under an operator remap.
+    from tai42_accounts_postgres.routes_login import submit_path
+
+    return (
+        f"first-owner bootstrap is OPEN — anyone who can reach {submit_path('/bootstrap')} can seize the admin "
+        "owner; unset TAI_ACCOUNTS_BOOTSTRAP_OPEN to gate it"
+    )
 
 
 class PostgresAccountsProvider(AccountsProvider):
@@ -95,7 +101,11 @@ class PostgresAccountsProvider(AccountsProvider):
 
     def login_methods(self) -> list[LoginMethod]:
         # Static config-derived metadata. The bootstrap form declares a
-        # bootstrap_token field unless the gate is explicitly opened.
+        # bootstrap_token field unless the gate is explicitly opened. Submit paths
+        # resolve through the login router's mount base (captured at its import) so an
+        # operator remap of the route base moves them too.
+        from tai42_accounts_postgres.routes_login import submit_path
+
         settings = accounts_settings()
 
         bootstrap_fields = [
@@ -114,14 +124,14 @@ class PostgresAccountsProvider(AccountsProvider):
                     FormField(name="email", label="Email", autocomplete="email"),
                     FormField(name="password", label="Password", secret=True, autocomplete="current-password"),
                 ],
-                submit_path="/api/login/password",
+                submit_path=submit_path("/password"),
             ),
             FormMethod(
                 id="bootstrap",
                 title="Create the first owner",
                 purpose="bootstrap",
                 fields=bootstrap_fields,
-                submit_path="/api/login/bootstrap",
+                submit_path=submit_path("/bootstrap"),
             ),
             FormMethod(
                 id="invite",
@@ -136,7 +146,7 @@ class PostgresAccountsProvider(AccountsProvider):
                         autocomplete="new-password",
                     ),
                 ],
-                submit_path="/api/login/invite/accept",
+                submit_path=submit_path("/invite/accept"),
             ),
         ]
 
@@ -159,7 +169,7 @@ class PostgresAccountsProvider(AccountsProvider):
         if settings.bootstrap_open:
             # The only ungated config: warn loudly every boot while no owner exists.
             if await self.needs_bootstrap():
-                logger.warning(_OPEN_WINDOW_WARNING)
+                logger.warning(_open_window_warning())
         else:
             await service.ensure_bootstrap_token(self.settings.redis)
 

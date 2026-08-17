@@ -25,9 +25,9 @@ def test_importing_register_registers_channel_and_route(stub_app):
     assert list(stub_app.channels.registered) == ["twilio"]
     assert isinstance(stub_app.channels.registered["twilio"], TwilioChannel)
     paths = {route.path for route in stub_app.http.routes}
-    assert paths == {"/api/channels/twilio/inbound", "/api/channels/twilio/status"}
+    assert paths == {"/inbound", "/status"}
     assert len(stub_app.http.routes) == 2
-    assert all(route.methods == ["POST"] and route.authed is False for route in stub_app.http.routes)
+    assert all(route.methods == ["POST"] and route.authed is None for route in stub_app.http.routes)
 
 
 def test_bare_package_import_does_not_register():

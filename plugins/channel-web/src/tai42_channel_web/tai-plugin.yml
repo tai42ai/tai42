@@ -9,7 +9,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/channel-web
-contract: '>=1.11,<2'
+contract: '>=2,<3'
 categories:
   - channels
 tags:
@@ -31,3 +31,36 @@ provides:
     description: >-
       Deliver ask_user questions to a visitor in the public chat page and bridge
       the reply back.
+    routes:
+      base: channels/web
+      paths:
+        - path: /chat/{identity}
+          methods: [GET]
+          public: true
+        - path: /assets/{file}
+          methods: [GET]
+          public: true
+        - path: /messages
+          methods: [POST]
+          public: true
+        - path: /stream
+          methods: [GET]
+          public: true
+        - path: /questions/{interaction_id}/answer
+          methods: [POST]
+          public: true
+        - path: /session/rotate
+          methods: [POST]
+          public: true
+        - path: /gates/{identity}
+          methods: [GET]
+          public: false
+        - path: /gates/{identity}
+          methods: [PUT]
+          public: false
+        - path: /gates/{identity}/codes
+          methods: [POST]
+          public: false
+        - path: /gates/{identity}/codes/{code_id}
+          methods: [DELETE]
+          public: false

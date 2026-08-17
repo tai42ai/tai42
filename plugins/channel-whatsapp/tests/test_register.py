@@ -25,11 +25,13 @@ def test_importing_register_registers_channel_and_route(stub_app):
     assert list(stub_app.channels.registered) == ["whatsapp"]
     assert isinstance(stub_app.channels.registered["whatsapp"], WhatsAppChannel)
     paths = {route.path for route in stub_app.http.routes}
-    assert paths == {"/api/channels/whatsapp/inbound"}
+    assert paths == {"/inbound"}
     assert len(stub_app.http.routes) == 1
     route = stub_app.http.routes[0]
     assert route.methods == ["GET", "POST"]
-    assert route.authed is False
+    # The route is declared relative and passes no explicit ``authed``: the mount
+    # base and the public flag come from ``tai-plugin.yml``, resolved by the runtime.
+    assert route.authed is None
 
 
 def test_bare_package_import_does_not_register():

@@ -103,7 +103,8 @@ class _StubHttp:
         response_model: Any,
         request_model: Any = None,
         query_model: Any = None,
-        authed: bool = True,
+        authed: bool | None = None,
+        action: str | None = None,
     ) -> Any:
         def decorator(handler: Any) -> Any:
             self.routes[path] = SimpleNamespace(

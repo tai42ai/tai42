@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/accounts-postgres
-contract: '>=1.11,<2'
+contract: '>=2,<3'
 categories:
   - identity
   - security
@@ -36,7 +36,40 @@ provides:
     name: login
     module: tai42_accounts_postgres.routes_login
     description: The public /api/login/* routes.
+    routes:
+      base: login
+      paths:
+        - path: /password
+          methods: [POST]
+          public: true
+        - path: /bootstrap
+          methods: [POST]
+          public: true
+        - path: /invite/accept
+          methods: [POST]
+          public: true
   - kind: router
     name: users
     module: tai42_accounts_postgres.routes_users
     description: The authed /api/auth/users* user-administration routes.
+    routes:
+      base: auth
+      paths:
+        - path: /users
+          methods: [GET]
+          public: false
+        - path: /users
+          methods: [POST]
+          public: false
+        - path: /users/me/password
+          methods: [PUT]
+          public: false
+        - path: /users/{user_id}
+          methods: [PUT]
+          public: false
+        - path: /users/{user_id}
+          methods: [DELETE]
+          public: false
+        - path: /users/{user_id}/invite
+          methods: [POST]
+          public: false

@@ -22,6 +22,35 @@ def tool_item(module: str = "tai42_toolbox.tools.gen_uuid", name: str = "gen-uui
     return {"kind": "tool", "name": name, "module": module, "description": "Generate a UUID"}
 
 
+def router_item(
+    *,
+    name: str = "relay",
+    module: str = "tai42_relay.routes",
+    base: str = "relay",
+    paths: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A ``router``-kind provides item with a declared routes block.
+
+    ``paths`` defaults to one public GET and one authed POST so a fixture carries
+    both a public and an authed row; a caller states only the rows it cares about.
+    """
+    return {
+        "kind": "router",
+        "name": name,
+        "module": module,
+        "description": "A relay router",
+        "routes": {
+            "base": base,
+            "paths": paths
+            if paths is not None
+            else [
+                {"path": "/status", "methods": ["GET"], "public": True},
+                {"path": "/events", "methods": ["POST"], "public": False},
+            ],
+        },
+    }
+
+
 def make_spec(
     *,
     namespace: str = "tai42",

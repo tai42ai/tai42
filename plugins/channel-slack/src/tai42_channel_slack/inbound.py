@@ -1,17 +1,17 @@
 """The Slack inbound doors: the Events API door and the interactivity door.
 
-Both are ``authed=False`` (Slack cannot present the deployment api key) and both
+Both declare ``public: true`` (Slack cannot present the deployment api key) and both
 authenticate by the ``X-Slack-Signature`` v0 HMAC over the exact raw body, reading
-a bounded body first.
+a bounded body first. Each mounts under the item's resolved route base.
 
-``POST /api/channels/slack/interactive`` handles Block Kit interactivity for
-``form`` questions: a ``block_actions`` ``tai42_form_open`` click opens the modal
+The ``POST /interactive`` door handles Block Kit interactivity for ``form``
+questions: a ``block_actions`` ``tai42_form_open`` click opens the modal
 (``views.open`` with the payload's ``trigger_id``), and a ``view_submission`` for
 ``tai42_form_submit`` coerces the state per the stored schema and forwards
 ``{"answer": <dict>}`` to the callback door. Its body is form-encoded with the
 JSON in the ``payload`` field, and the signature covers that raw form body.
 
-``POST /api/channels/slack/inbound`` is the Events API door. Flow:
+The ``POST /inbound`` door is the Events API door. Flow:
 
 1. Read a BOUNDED body (actual bytes, never a client ``Content-Length``) before
    any HMAC work; past the cap a loud 413, never a truncation.
@@ -146,12 +146,11 @@ def _verify_signature(raw: bytes, headers: Mapping[str, str], secret: str) -> No
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/slack/inbound",
+    "/inbound",
     methods=["POST"],
     summary="Slack Events API inbound door (signature-authenticated)",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def slack_inbound(request: Request) -> Response:
     """Receive a Slack Events API delivery, verify it, and route it: a correlated
@@ -394,12 +393,11 @@ def _door_error_block(response: Any, schema: dict[str, Any], fallback: str) -> s
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/slack/interactive",
+    "/interactive",
     methods=["POST"],
     summary="Slack interactivity door (Block Kit form modals, signature-authenticated)",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def slack_interactive(request: Request) -> Response:
     """Receive a Slack interactivity POST, verify it, and act on it.

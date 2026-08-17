@@ -10,6 +10,8 @@ vocabulary; nothing here leaks a raw third-party exception.
 
 from __future__ import annotations
 
+from typing import Any
+
 from tai42_skeleton.exceptions.exceptions import TaiMCPServerError
 
 
@@ -168,6 +170,59 @@ class EnvironmentShadowError(MarketplaceError):
     message names both versions. A deployment/state conflict the operator resolves
     (re-pin to the environment version or rebuild the image), never the caller's
     request."""
+
+
+class RouteMountError(MarketplaceError):
+    """A ``route_mounts`` override names an item that is not route-carrying in the
+    resolved spec, or a base that is not the relative mount charset — the caller's
+    own input error, mapped at the boundary to a 400. Names the offending item or
+    base, never guesses."""
+
+
+class RouteCollisionError(MarketplaceError):
+    """One or more declared routes collide (path SHAPE + method) with a route the
+    live registry already owns — core or another installed plugin. Carries the
+    collision rows so the operator sees each clash and its owner; the remedy, stated
+    in the message, is to remap the item's mount base. Mapped at the boundary to a
+    409 with a machine-readable ``ROUTE_COLLISION`` code."""
+
+    def __init__(self, collisions: list[dict[str, Any]]) -> None:
+        super().__init__(
+            "declared route(s) collide with a route the server already owns; remap the "
+            f"item's mount base to resolve: {collisions}"
+        )
+        self.collisions = collisions
+
+
+class PublicRoutesNotAcceptedError(MarketplaceError):
+    """Declared PUBLIC route(s) require the operator's explicit acceptance — they
+    answer UNAUTHENTICATED once installed — and the accept flag was not set. Carries
+    the rows requiring acceptance (an install lists every public row; an update lists
+    only rows not already approved in the installed version). Mapped at the boundary
+    to a 400 with a machine-readable ``PUBLIC_ROUTES_NOT_ACCEPTED`` code."""
+
+    def __init__(self, public_routes: list[dict[str, Any]]) -> None:
+        super().__init__(
+            "installing would open route(s) that answer WITHOUT authentication; pass "
+            f"accept_public_routes to proceed: {public_routes}"
+        )
+        self.public_routes = public_routes
+
+
+class ReservedRoutePrefixError(MarketplaceError):
+    """A declared PUBLIC route resolves under a reserved never-public prefix (the
+    operator remapped a base into it, or the declaration does) — refused before any
+    state change. Carries the offending resolved paths and the reserved prefixes.
+    Mapped at the boundary to a 409 with a machine-readable ``ROUTE_RESERVED_PREFIX``
+    code."""
+
+    def __init__(self, offenders: list[str], reserved_prefixes: list[str]) -> None:
+        super().__init__(
+            f"declared public route(s) {offenders} resolve under a reserved never-public "
+            f"prefix {reserved_prefixes}; a public route may not mount there — remap the base"
+        )
+        self.offenders = offenders
+        self.reserved_prefixes = reserved_prefixes
 
 
 class ArtifactIntegrityError(MarketplaceError):

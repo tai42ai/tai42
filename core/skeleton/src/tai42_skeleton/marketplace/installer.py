@@ -82,7 +82,7 @@ import importlib.metadata
 import logging
 import os
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -99,6 +99,7 @@ from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
 from tai42_skeleton.config.service import ApplyResult, ConfigService
 from tai42_skeleton.db import SKELETON_COMPONENT, plugin_migration_entry
+from tai42_skeleton.marketplace import routes as routes_mod
 from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.compat import running_contract_version, update_targets
 from tai42_skeleton.marketplace.errors import (
@@ -113,7 +114,10 @@ from tai42_skeleton.marketplace.errors import (
     ManifestComposeError,
     OperationInProgressError,
     PluginPrefixError,
+    PublicRoutesNotAcceptedError,
     RegistryResponseError,
+    ReservedRoutePrefixError,
+    RouteCollisionError,
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
@@ -227,6 +231,22 @@ async def _fleet_lock() -> AsyncIterator[None]:
                 )
 
 
+def _live_owned_routes() -> list[routes_mod.OwnedRoute]:
+    """The live route registry's committed ``/api`` ownership generation — the
+    routes a candidate install/update is collision-checked against."""
+    from tai42_skeleton.app.route_registry import route_registry
+
+    return routes_mod.owned_routes_from_registry(route_registry)
+
+
+def _live_reserved_prefixes() -> Sequence[str]:
+    """The deployment's reserved never-public route prefixes — a resolved public
+    route may not mount under any of them."""
+    from tai42_skeleton.access_control.settings import access_control_settings
+
+    return access_control_settings().reserved_public_pin_prefixes
+
+
 class Installer:
     """Install, uninstall, and update marketplace plugins with abort-and-unwind.
 
@@ -250,6 +270,8 @@ class Installer:
         prefix_ensure_writable: Callable[[str], None] = ensure_prefix_writable,
         prefix_has_dist: Callable[[str, str], bool] = prefix_has_distribution,
         env_dist_version: Callable[[str, str], str | None] = environment_distribution_version,
+        owned_routes: Callable[[], list[routes_mod.OwnedRoute]] = _live_owned_routes,
+        reserved_prefixes: Callable[[], Sequence[str]] = _live_reserved_prefixes,
     ) -> None:
         self._registry = registry or RegistryClient()
         self._pip_runner = pip_runner
@@ -264,6 +286,8 @@ class Installer:
         self._prefix_ensure_writable = prefix_ensure_writable
         self._prefix_has_dist = prefix_has_dist
         self._env_dist_version = env_dist_version
+        self._owned_routes = owned_routes
+        self._reserved_prefixes = reserved_prefixes
 
     # -- infrastructure -----------------------------------------------------
 
@@ -416,6 +440,117 @@ class Installer:
                 f"the environment will hide (re-pin to {env_version} or rebuild the image)"
             )
 
+    # -- declared route pre-flight ------------------------------------------
+
+    def _route_preflight(
+        self,
+        spec: PluginSpec,
+        route_mounts: Mapping[str, str] | None,
+        accept_public_routes: bool,
+        *,
+        prior: Mapping[str, str] | None,
+        exclude_ref: str | None,
+        approved_public: set[tuple[str, tuple[str, ...]]] | None,
+    ) -> tuple[dict[str, str], list[routes_mod.ResolvedRoute]]:
+        """Resolve the spec's declared route mounts and refuse before any state change.
+
+        Applies ``route_mounts`` overrides over ``prior`` stored bases and the
+        declared defaults (:func:`~tai42_skeleton.marketplace.routes.resolve_mounts`,
+        an unknown-item / bad-base override → 400), rejects a resolved PUBLIC route
+        under a reserved prefix, collision-checks every resolved route against the live
+        registry EXCLUDING ``exclude_ref``'s own routes (a clash → 409 ``ROUTE_COLLISION``
+        naming the remap remedy), and refuses unaccepted public routes: an install
+        (``approved_public`` is ``None``) requires acceptance of EVERY public row, an
+        update only of rows not already approved. Returns the resolved
+        ``{item_name: base}`` and the resolved routes for the receipt.
+        """
+        mounts = routes_mod.resolve_mounts(spec, route_mounts, prior=prior)
+        resolved = routes_mod.resolved_routes(spec, mounts)
+        reserved = list(self._reserved_prefixes())
+        offenders = routes_mod.reserved_public_offenders(resolved, reserved)
+        if offenders:
+            raise ReservedRoutePrefixError([route.full_path for route in offenders], reserved)
+        found = routes_mod.find_collisions(resolved, self._owned_routes(), exclude_ref=exclude_ref)
+        if found:
+            raise RouteCollisionError(found)
+        public = routes_mod.public_rows(resolved)
+        if approved_public is None:
+            need_acceptance = public
+        else:
+            need_acceptance = [row for row in public if routes_mod.row_key(row) not in approved_public]
+        if need_acceptance and not accept_public_routes:
+            raise PublicRoutesNotAcceptedError(need_acceptance)
+        return mounts, resolved
+
+    def _approved_public_of(self, row: InstallRecord) -> set[tuple[str, tuple[str, ...]]]:
+        """The public route rows the installed version already approved — its stored
+        spec resolved at its stored mount bases. An update asks acceptance only for
+        public rows not in this set."""
+        old_spec = _spec_from_row(row)
+        old_mounts = routes_mod.resolve_mounts(old_spec, {}, prior=row.route_mounts)
+        old_resolved = routes_mod.resolved_routes(old_spec, old_mounts)
+        return {routes_mod.row_key(r) for r in routes_mod.public_rows(old_resolved)}
+
+    # -- preview ------------------------------------------------------------
+
+    async def preview(
+        self,
+        ref: str,
+        version: str | None = None,
+        *,
+        route_mounts: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a candidate install/update and report its routes WITHOUT changing
+        any state.
+
+        Resolves the target spec from the registry (no pip, no manifest, no store
+        write), applies any ``route_mounts`` overrides, and reports the resolved
+        routes per item, the collisions against the live registry (excluding the
+        plugin's OWN routes when it is already installed — an update preview), the
+        public routes requiring acceptance, and — for an update — the ``new`` public
+        rows not already approved. A resolved public route under a reserved prefix,
+        an unknown-item override, or a registry/contract fault raises loudly, exactly
+        as the install would.
+        """
+        ns, name = _parse_ref(ref)
+        existing = await self._store.get(ref)
+        resolved = await self._registry.resolve(ns, name, version)
+        spec, _source = self._prepare_resolved(resolved)
+        pinned_version = _require(resolved, "version")
+        return self._route_preview(spec, pinned_version, route_mounts, existing)
+
+    def _route_preview(
+        self,
+        spec: PluginSpec,
+        pinned_version: str,
+        route_mounts: dict[str, str] | None,
+        existing: InstallRecord | None,
+    ) -> dict[str, Any]:
+        prior = existing.route_mounts if existing is not None else None
+        mounts = routes_mod.resolve_mounts(spec, route_mounts, prior=prior)
+        resolved = routes_mod.resolved_routes(spec, mounts)
+        reserved = list(self._reserved_prefixes())
+        offenders = routes_mod.reserved_public_offenders(resolved, reserved)
+        if offenders:
+            raise ReservedRoutePrefixError([route.full_path for route in offenders], reserved)
+        exclude_ref = spec.ref if existing is not None else None
+        found = routes_mod.find_collisions(resolved, self._owned_routes(), exclude_ref=exclude_ref)
+        public = routes_mod.public_rows(resolved)
+        if existing is not None:
+            approved = self._approved_public_of(existing)
+            new_public = [row for row in public if routes_mod.row_key(row) not in approved]
+        else:
+            new_public = public
+        return {
+            "ref": spec.ref,
+            "version": pinned_version,
+            "items": routes_mod.preview_items(resolved),
+            "collisions": found,
+            "public_routes": public,
+            "new_public_routes": new_public,
+            "requires_public_acceptance": bool(new_public),
+        }
+
     # -- install ------------------------------------------------------------
 
     async def install(
@@ -425,6 +560,8 @@ class Installer:
         *,
         env: dict[str, str] | None = None,
         secret_keys: list[str] | None = None,
+        route_mounts: dict[str, str] | None = None,
+        accept_public_routes: bool = False,
     ) -> dict[str, Any]:
         """Install a marketplace plugin, aborting and unwinding on any failure.
 
@@ -440,6 +577,11 @@ class Installer:
         store in the SAME combined transaction that writes the entry (never deferred).
         ``secret_keys`` marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``).
 
+        ``route_mounts`` remaps a route-carrying item's declared base; every declared
+        route is collision-checked against the live registry and any public route
+        requires ``accept_public_routes`` — both BEFORE pip, so a clash or an
+        unaccepted public route changes nothing (see :meth:`_route_preflight`).
+
         Each step past the pip install unwinds the applied steps in reverse on
         failure (env keys THIS install wrote deleted, manifest restored, live app
         converged back, pip uninstall) and re-raises; a failed unwind escalates to
@@ -447,10 +589,16 @@ class Installer:
         pip-transaction caveat.
         """
         async with self._guard():
-            return await self._install_locked(ref, version, env, secret_keys)
+            return await self._install_locked(ref, version, env, secret_keys, route_mounts, accept_public_routes)
 
     async def _install_locked(
-        self, ref: str, version: str | None, env: dict[str, str] | None, secret_keys: list[str] | None
+        self,
+        ref: str,
+        version: str | None,
+        env: dict[str, str] | None,
+        secret_keys: list[str] | None,
+        route_mounts: dict[str, str] | None,
+        accept_public_routes: bool,
     ) -> dict[str, Any]:
         ns, name = _parse_ref(ref)
         existing = await self._store.get(ref)
@@ -470,6 +618,18 @@ class Installer:
         found = collisions(dict(cm.read_manifest_preserved()), spec)
         if found:
             raise ManifestCollisionError("; ".join(found))
+
+        # Declared-route pre-flight BEFORE pip: an install requires acceptance of
+        # every public row (no prior approval), and no route may clash with an
+        # already-owned one. Persisted route_mounts cover every route-carrying item.
+        resolved_mounts, resolved_route_list = self._route_preflight(
+            spec,
+            route_mounts,
+            accept_public_routes,
+            prior=None,
+            exclude_ref=None,
+            approved_public=None,
+        )
 
         if self._prefix is not None:
             # A prefix install of a version the environment already shadows at a
@@ -534,6 +694,7 @@ class Installer:
                 spec.model_dump(mode="json"),
                 contract_version=contract_version,
                 skeleton_version=skeleton_version,
+                route_mounts=resolved_mounts,
             )
         except Exception as step_error:
             # The pipeline aborts a failed mutation with nothing persisted, so the
@@ -557,6 +718,7 @@ class Installer:
             "notes": _install_notes(spec),
             "reload": _reload_report(apply_result),
             "pip_output": pip_output,
+            "routes": routes_mod.mounted_rows(resolved_route_list),
         }
 
     async def _unwind_install(
@@ -767,10 +929,18 @@ class Installer:
         *,
         env: dict[str, str] | None = None,
         secret_keys: list[str] | None = None,
+        route_mounts: dict[str, str] | None = None,
+        accept_public_routes: bool = False,
     ) -> dict[str, Any]:
         """Update an installed plugin to a newer (or named) version — an install
         of the new version with the same pre-flights, in one manifest
         read-modify-write.
+
+        ``route_mounts`` remaps a route-carrying item's base; a surviving item with
+        no override keeps its stored base, a new item takes the override-or-default.
+        Every declared route is collision-checked against the live registry
+        (excluding the plugin's OWN routes) and only public rows NOT already approved
+        in the installed version require ``accept_public_routes`` — both BEFORE pip.
 
         Order: parse the ref (a malformed ref is the caller's 400, checked before
         the store read so an unparseable ref is never a phantom 404); pip
@@ -792,10 +962,16 @@ class Installer:
         pip-transaction caveat.
         """
         async with self._guard():
-            return await self._update_locked(ref, version, env, secret_keys)
+            return await self._update_locked(ref, version, env, secret_keys, route_mounts, accept_public_routes)
 
     async def _update_locked(
-        self, ref: str, version: str | None, env: dict[str, str] | None, secret_keys: list[str] | None
+        self,
+        ref: str,
+        version: str | None,
+        env: dict[str, str] | None,
+        secret_keys: list[str] | None,
+        route_mounts: dict[str, str] | None,
+        accept_public_routes: bool,
     ) -> dict[str, Any]:
         ns, name = _parse_ref(ref)
         ensure_pip_available()
@@ -818,6 +994,19 @@ class Installer:
         found = collisions(preview, new_spec)
         if found:
             raise ManifestCollisionError("; ".join(found))
+
+        # Declared-route pre-flight BEFORE pip: keep surviving items' stored bases,
+        # collision-check the new routes against the live registry excluding the
+        # plugin's OWN routes, and require acceptance only for public rows NOT already
+        # approved in the installed version.
+        resolved_mounts, resolved_route_list = self._route_preflight(
+            new_spec,
+            route_mounts,
+            accept_public_routes,
+            prior=row.route_mounts,
+            exclude_ref=ref,
+            approved_public=self._approved_public_of(row),
+        )
 
         if self._prefix is not None:
             # The environment shadows the prefix, so it cannot hold a version the
@@ -907,6 +1096,7 @@ class Installer:
                 new_spec.model_dump(mode="json"),
                 contract_version=contract_version,
                 skeleton_version=skeleton_version,
+                route_mounts=resolved_mounts,
             )
         except Exception as step_error:
             persisted = manifest_persisted or isinstance(step_error, FleetBroadcastError)
@@ -928,6 +1118,7 @@ class Installer:
             "notes": _install_notes(new_spec),
             "reload": _reload_report(apply_result),
             "pip_output": pip_output,
+            "routes": routes_mod.mounted_rows(resolved_route_list),
         }
 
     async def _unwind_update(
@@ -1024,7 +1215,7 @@ class Installer:
                     "outcome": "up-to-date",
                     "detail": f"{row.version} is the latest compatible version{blocked}",
                 }
-            result = await self._update_locked(row.ref, targets.latest_compatible, None, None)
+            result = await self._update_locked(row.ref, targets.latest_compatible, None, None, None, False)
             return {"ref": row.ref, "outcome": "upgraded", "detail": f"{row.version} -> {result['version']}"}
         except Exception as exc:
             # The explicit per-ref recovery path: logged with the traceback and

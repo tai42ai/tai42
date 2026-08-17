@@ -178,6 +178,19 @@ def test_login_methods_declares_three_with_bootstrap_token_field():
     assert "bootstrap_token" in field_names
 
 
+def test_login_methods_submit_path_follows_remapped_mount_base(monkeypatch):
+    # An operator-remapped login route base moves the submit paths; each resolves
+    # through the router's captured mount, not a hardcoded default.
+    from tai42_accounts_postgres import routes_login
+
+    monkeypatch.setattr(routes_login, "_MOUNT_BASE", "/api/sign-in")
+    methods = [m for m in _provider().login_methods() if isinstance(m, FormMethod)]
+    by_purpose = {m.purpose: m for m in methods}
+    assert by_purpose["login"].submit_path == "/api/sign-in/password"
+    assert by_purpose["bootstrap"].submit_path == "/api/sign-in/bootstrap"
+    assert by_purpose["invite"].submit_path == "/api/sign-in/invite/accept"
+
+
 def test_login_methods_omits_token_field_when_open(monkeypatch):
     monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
     accounts_settings.cache_clear()
@@ -228,6 +241,21 @@ async def test_healthcheck_open_window_warns(monkeypatch, users_store, caplog):
     with caplog.at_level("WARNING"):
         await _provider().healthcheck()
     assert "first-owner bootstrap is OPEN" in caplog.text
+    # The warning names the real bootstrap door, resolved through the login mount.
+    assert "/api/login/bootstrap" in caplog.text
+
+
+async def test_healthcheck_open_window_warning_follows_remapped_mount_base(monkeypatch, users_store, caplog):
+    from tai42_accounts_postgres import routes_login
+
+    monkeypatch.setenv("TAI_ACCOUNTS_BOOTSTRAP_OPEN", "true")
+    accounts_settings.cache_clear()
+    monkeypatch.setattr(routes_login, "_MOUNT_BASE", "/api/sign-in")
+    monkeypatch.setattr(provider_module, "assert_accounts_schema_applied", _gate_ok)
+    monkeypatch.setattr(service, "users_store", lambda: users_store)  # empty -> needs bootstrap
+    with caplog.at_level("WARNING"):
+        await _provider().healthcheck()
+    assert "/api/sign-in/bootstrap" in caplog.text
 
 
 def test_readiness_targets_names_both_stores():

@@ -6,7 +6,7 @@ version: 0.0.0
 description: "Installable marketplace fixture plugin: an HTTP router and a response-header middleware."
 license: Apache-2.0
 repository: https://github.com/tai42ai/tai-e2e
-contract: ">=0.3,<0.4"
+contract: ">=0.4,<0.5"
 categories: [utilities]
 tags: [router, middleware, epsilon]
 permissions:
@@ -17,8 +17,20 @@ provides:
   - kind: router
     name: e2e_epsilon_router
     module: tai_e2e_market_epsilon.router
-    description: "Register an authed GET /api/e2e-epsilon/ping route."
+    description: "Register an authed GET /ping, a public GET /open, and an authed POST /open route under /api/e2e-epsilon."
     tags: [epsilon]
+    routes:
+      base: e2e-epsilon
+      paths:
+        - path: /ping
+          methods: [GET]
+          public: false
+        - path: /open
+          methods: [GET]
+          public: true
+        - path: /open
+          methods: [POST]
+          public: false
   - kind: middleware
     name: e2e_epsilon_middleware
     module: tai_e2e_market_epsilon.mw

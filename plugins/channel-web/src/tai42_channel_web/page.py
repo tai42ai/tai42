@@ -27,7 +27,6 @@ from html import escape
 from pathlib import Path
 
 PUBLIC_MANIFEST_FILENAME = "public-manifest.json"
-ASSET_URL_PREFIX = "/api/channels/web/assets/"
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 
 # Named in every build error so an operator is told the one command that fixes it.
@@ -182,16 +181,23 @@ def asset_content_type(filename: str) -> str:
     return _OCTET_STREAM
 
 
-def _asset_url(name: str) -> str:
-    return f"{ASSET_URL_PREFIX}{name}"
+def _asset_url(mount_base: str, name: str) -> str:
+    return f"{mount_base}/assets/{name}"
 
 
-def render_page(identity: str, title: str, build: PublicBuild) -> str:
+def render_page(identity: str, title: str, build: PublicBuild, mount_base: str) -> str:
     """The chat page shell around the built bundle.
 
-    The bundle reads the route it talks to from ``#root``'s ``data-identity``. Every
-    interpolated value is HTML-escaped — the identity is a URL segment and the title
-    is operator config, neither of which may break out of its attribute or element.
+    ``mount_base`` is this deployment's absolute mount prefix for the web channel,
+    read from the serving request; asset URLs hang off ``{mount_base}/assets/`` so a
+    remapped base is followed rather than the default hardcoded.
+
+    The bundle reads the route it talks to from ``#root``'s ``data-identity`` and the
+    mount its own API doors sit under from ``#root``'s ``data-api-base`` (this same
+    ``mount_base``), so a remapped mount is followed there too rather than a default
+    assumed. Every interpolated value is HTML-escaped — the identity is a URL segment
+    and the title is operator config, neither of which may break out of its attribute
+    or element.
     """
     head = [
         '<meta charset="utf-8">',
@@ -202,12 +208,13 @@ def render_page(identity: str, title: str, build: PublicBuild) -> str:
         f"<title>{escape(title)}</title>",
     ]
     head += [
-        f'<link rel="stylesheet" href="{escape(_asset_url(name))}" integrity="{escape(build.integrity[name])}">'
+        f'<link rel="stylesheet" href="{escape(_asset_url(mount_base, name))}" '
+        f'integrity="{escape(build.integrity[name])}">'
         for name in build.styles
     ]
     body = [
-        f'<div id="root" data-identity="{escape(identity)}"></div>',
-        f'<script type="module" src="{escape(_asset_url(build.entry))}" '
+        f'<div id="root" data-identity="{escape(identity)}" data-api-base="{escape(mount_base)}"></div>',
+        f'<script type="module" src="{escape(_asset_url(mount_base, build.entry))}" '
         f'integrity="{escape(build.integrity[build.entry])}"></script>',
     ]
     lines = ["<!doctype html>", '<html lang="en">', "<head>", *head, "</head>", "<body>", *body, "</body>", "</html>"]

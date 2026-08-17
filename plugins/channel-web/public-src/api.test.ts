@@ -20,13 +20,21 @@ function reply(status: number, body: unknown): Response {
   return new Response(body === undefined ? '' : JSON.stringify(body), { status });
 }
 
+/** The shell the page door serves: `#root` carries the deployment's web-channel
+ * mount on `data-api-base`, which every call reads to build its URL. */
+function mountShell(apiBase: string): void {
+  document.body.innerHTML = `<div id="root" data-api-base="${apiBase}"></div>`;
+}
+
 beforeEach(() => {
+  mountShell('/api/channels/web');
   vi.stubGlobal('fetch', fetchMock);
   // The door's own wording is logged, never rendered — keep it out of the report.
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 afterEach(() => {
+  document.body.innerHTML = '';
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -246,5 +254,42 @@ describe('openChatStream', () => {
 
     expect((error as ChatApiError).message).toMatch(/something went wrong/i);
     expect((error as ChatApiError).code).toBeNull();
+  });
+});
+
+describe('API base derivation', () => {
+  it('addresses the doors under the mount the shell was served at, not the default', async () => {
+    // A deployment that remapped the web channel serves a shell whose
+    // data-api-base is the actual mount; every call must follow it.
+    mountShell('/api/channels/relay');
+    fetchMock.mockResolvedValue(reply(200, { data: { message_id: 'msg-1' } }));
+
+    await sendMessage('site-alpha', 'hello', KEY);
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/channels/relay/messages');
+  });
+
+  it('carries the remapped mount into every door, not just the message door', async () => {
+    mountShell('/api/channels/relay');
+    fetchMock.mockResolvedValue(new Response('', { status: 200 }));
+
+    await rotateSession('site-alpha');
+    await openChatStream('site-alpha', new AbortController().signal);
+    await answerQuestion('int-1', true);
+
+    const urls = fetchMock.mock.calls.map((call) => call[0] as string);
+    expect(urls[0]).toBe('/api/channels/relay/session/rotate');
+    expect(urls[1]).toContain('/api/channels/relay/stream?identity=site-alpha&_=');
+    expect(urls[2]).toBe('/api/channels/relay/questions/int-1/answer');
+  });
+
+  it('throws loudly rather than calling a default base when the shell carries none', async () => {
+    // No silent fall back to the default mount: a shell with no data-api-base is a
+    // build/serve fault the page must surface, not paper over.
+    document.body.innerHTML = '<div id="root"></div>';
+
+    await expect(sendMessage('site-alpha', 'hi', KEY)).rejects.toThrow(/no data-api-base/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

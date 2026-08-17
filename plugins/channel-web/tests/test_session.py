@@ -81,9 +81,12 @@ def test_the_cookie_name_and_path_follow_the_secure_flag():
     # root path, and then no sibling host of this origin can plant one. All three go
     # together or none does.
     assert session_cookie_name(True) == "__Host-tai_web_session"
-    assert session_cookie_path(True) == "/"
+    assert session_cookie_path(True, "/api/channels/web") == "/"
     assert session_cookie_name(False) == "tai_web_session"
-    assert session_cookie_path(False) == "/api/channels/web"
+    # A plain-http deployment scopes the cookie to the mount base it is served on, so
+    # a remapped base moves the scope with it.
+    assert session_cookie_path(False, "/api/channels/web") == "/api/channels/web"
+    assert session_cookie_path(False, "/api/channels/relay") == "/api/channels/relay"
 
 
 def test_a_secure_deployment_reads_only_the_host_prefixed_cookie(no_web_env):
@@ -104,7 +107,7 @@ def test_a_plain_http_deployment_reads_only_the_unprefixed_cookie(no_web_env, mo
 
 def test_set_session_cookie_carries_the_full_attribute_set(no_web_env):
     response = JSONResponse({})
-    set_session_cookie(response, SESSION_TOKEN, WebSettings())
+    set_session_cookie(response, SESSION_TOKEN, WebSettings(), "/api/channels/web")
     header = response.headers["set-cookie"]
     # The three attributes a browser demands before it accepts the ``__Host-`` prefix:
     # Secure, Path=/, and no Domain.
@@ -123,7 +126,7 @@ def test_set_session_cookie_drops_secure_and_the_prefix_for_a_plain_http_deploym
     # A ``__Host-`` cookie is REFUSED by the browser without Secure, so a plain-http
     # stack would hand every visitor a session it can never store.
     response = JSONResponse({})
-    set_session_cookie(response, SESSION_TOKEN, _plain(monkeypatch))
+    set_session_cookie(response, SESSION_TOKEN, _plain(monkeypatch), "/api/channels/web")
     header = response.headers["set-cookie"]
     assert header.startswith(f"{PLAIN_COOKIE}={SESSION_TOKEN}")
     assert "Secure" not in header

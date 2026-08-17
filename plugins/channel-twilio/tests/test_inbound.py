@@ -25,7 +25,10 @@ from tests.conftest import (
 
 pytestmark = pytest.mark.usefixtures("twilio_env")
 
+# The absolute URL Twilio delivers to and signs over (the mount base resolves to
+# this at the default). The registered route is the relative ``/inbound`` beneath it.
 _PATH = "/api/channels/twilio/inbound"
+_ROUTE = "/inbound"
 _TWILIO = "+15550000001"
 _HUMAN = "+15550000002"
 _CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
@@ -40,11 +43,11 @@ def _pairs(**overrides: str) -> list[tuple[str, str]]:
 
 @pytest.fixture
 def handler(stub_app) -> Callable[..., Awaitable[Response]]:
-    routes = [route for route in stub_app.http.routes if route.path == _PATH]
+    routes = [route for route in stub_app.http.routes if route.path == _ROUTE]
     assert len(routes) == 1
     route = routes[0]
     assert route.methods == ["POST"]
-    assert route.authed is False
+    assert route.authed is None
     return route.handler
 
 
@@ -446,15 +449,16 @@ async def test_forward_transport_failure_restores_and_propagates(handler, fake_r
 # --- Signed delivery-status route ---------------------------------------------
 
 _STATUS_PATH = "/api/channels/twilio/status"
+_STATUS_ROUTE = "/status"
 
 
 @pytest.fixture
 def status_handler(stub_app) -> Callable[..., Awaitable[Response]]:
-    routes = [route for route in stub_app.http.routes if route.path == _STATUS_PATH]
+    routes = [route for route in stub_app.http.routes if route.path == _STATUS_ROUTE]
     assert len(routes) == 1
     route = routes[0]
     assert route.methods == ["POST"]
-    assert route.authed is False
+    assert route.authed is None
     return route.handler
 
 

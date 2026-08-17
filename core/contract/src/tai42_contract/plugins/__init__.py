@@ -81,6 +81,20 @@ ICON_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 # is also hydrated from stored DB rows and can touch no filesystem.
 MIGRATIONS_DIR_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
+# One literal segment of a declared route path: filename-safe characters, no
+# slash. A template segment (``{name}``) is matched separately.
+ROUTE_LITERAL_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+# One template segment of a declared route path: ``{name}`` where ``name`` is a
+# python identifier. A Starlette converter suffix (``{x:path}``) is INVALID —
+# plugin declarations never carry converters.
+ROUTE_PARAM_SEGMENT_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+# One segment of a route mount base: lowercase alphanumerics and interior
+# hyphens, no leading/trailing hyphen. Segments join with ``/``; the base itself
+# is relative (no leading/trailing slash) and carries no templates.
+ROUTE_BASE_SEGMENT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
 # Longest single-line UI title accepted for ``display_name`` — a listing card's
 # title stays bounded.
 DISPLAY_NAME_MAX_LEN = 80
@@ -334,6 +348,116 @@ class PluginPermissions(BaseModel):
     filesystem: bool = False
 
 
+RouteMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+
+class RouteDecl(BaseModel):
+    """One HTTP route a plugin item declares, relative to its mount base.
+
+    ``path`` is ``/``-prefixed with at least one segment; each segment is a
+    literal (:data:`ROUTE_LITERAL_SEGMENT_RE`) or a ``{name}`` template
+    (:data:`ROUTE_PARAM_SEGMENT_RE`, a python identifier with no converter
+    suffix). ``methods`` is a non-empty set of uppercase HTTP methods, unique
+    within the row. ``public`` states — with no default, so the declaration is
+    never silent — whether the resolved route answers unauthenticated.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    methods: list[RouteMethod]
+    public: bool
+
+    @field_validator("path")
+    @classmethod
+    def _check_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError(f"route path {value!r} must be '/'-prefixed")
+        segments = value.split("/")[1:]
+        if not segments or "" in segments:
+            raise ValueError(f"route path {value!r} must have >=1 non-empty segment and no trailing slash")
+        for segment in segments:
+            if segment in (".", ".."):
+                raise ValueError(
+                    f"route path segment {segment!r} is a path-traversal token, never a valid route segment"
+                )
+            if "{" in segment or "}" in segment:
+                if not ROUTE_PARAM_SEGMENT_RE.fullmatch(segment):
+                    raise ValueError(
+                        f"route path segment {segment!r} must be a '{{name}}' template with a "
+                        "python-identifier name and no converter suffix"
+                    )
+            elif not ROUTE_LITERAL_SEGMENT_RE.fullmatch(segment):
+                raise ValueError(
+                    f"route path segment {segment!r} must be a literal ([a-zA-Z0-9._-]+) or a '{{name}}' template"
+                )
+        return value
+
+    @field_validator("methods")
+    @classmethod
+    def _check_methods(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("methods must name at least one HTTP method")
+        if len(set(value)) != len(value):
+            raise ValueError("methods must be unique")
+        return value
+
+
+class RoutesDecl(BaseModel):
+    """The route block one item declares: a default mount ``base`` and its rows.
+
+    ``base`` is RELATIVE — one or more :data:`ROUTE_BASE_SEGMENT_RE` segments
+    joined by ``/``, no leading/trailing slash, no templates. The resolved
+    absolute path of each row is ``/api/`` + ``base`` + the row's ``path``; the
+    ``/api/`` root is fixed platform-wide and only ``base`` is remappable.
+    ``paths`` is non-empty.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base: str
+    paths: list[RouteDecl]
+
+    @field_validator("base")
+    @classmethod
+    def _check_base(cls, value: str) -> str:
+        if value.startswith("/") or value.endswith("/"):
+            raise ValueError(f"route base {value!r} must be relative (no leading or trailing '/')")
+        segments = value.split("/")
+        for segment in segments:
+            if not ROUTE_BASE_SEGMENT_RE.fullmatch(segment):
+                raise ValueError(
+                    f"route base segment {segment!r} must match {ROUTE_BASE_SEGMENT_RE.pattern} (no templates)"
+                )
+        return value
+
+    @field_validator("paths")
+    @classmethod
+    def _check_paths(cls, value: list[RouteDecl]) -> list[RouteDecl]:
+        if not value:
+            raise ValueError("routes must declare at least one path")
+        return value
+
+
+def _route_shape(base: str, path: str) -> tuple[str | None, ...]:
+    """Resolved segment shape of one declared route for overlap comparison: the
+    ``base`` segments followed by the ``path`` segments, each a literal text or
+    ``None`` for a ``{name}`` template position. The fixed ``/api/`` root is a
+    constant prefix on every route and omitted."""
+    segments: list[str | None] = list(base.split("/"))
+    segments.extend(None if seg.startswith("{") else seg for seg in path.split("/")[1:])
+    return tuple(segments)
+
+
+def _shapes_overlap(a: tuple[str | None, ...], b: tuple[str | None, ...]) -> bool:
+    """True when two resolved shapes can match one concrete request path: equal
+    segment count and, at every position, either side is a template or the two
+    literals are equal (a concrete path instantiating a template IS an overlap)."""
+    if len(a) != len(b):
+        return False
+    return all(sa is None or sb is None or sa == sb for sa, sb in zip(a, b, strict=True))
+
+
 class PluginItem(BaseModel):
     """One installable item in a plugin's ``provides`` index.
 
@@ -344,6 +468,10 @@ class PluginItem(BaseModel):
     The item shape is kind-conditional (a model validator enforces it, loud
     both ways): an ``mcp-server`` item carries ``mcp`` transport config and no
     ``module``; every other kind carries ``module`` and no ``mcp``.
+
+    ``routes`` declares the item's HTTP mount: REQUIRED for ``kind: router``,
+    OPTIONAL for ``kind: channel``, and FORBIDDEN (must be absent) for every
+    other kind.
 
     ``group`` is an OPTIONAL logical family label the author may put on any item
     of any kind: items sharing a value belong to one family, and a consumer may
@@ -362,6 +490,7 @@ class PluginItem(BaseModel):
     description: str
     tags: list[str] = Field(default_factory=list)
     group: str | None = None
+    routes: RoutesDecl | None = None
 
     @field_validator("name")
     @classmethod
@@ -420,6 +549,11 @@ class PluginItem(BaseModel):
                 raise ValueError(f"kind {self.kind.value!r} requires 'module'")
             if self.mcp is not None:
                 raise ValueError(f"kind {self.kind.value!r} must not set 'mcp'")
+        if self.kind is PluginItemKind.ROUTER:
+            if self.routes is None:
+                raise ValueError(f"kind {self.kind.value!r} requires 'routes'")
+        elif self.kind is not PluginItemKind.CHANNEL and self.routes is not None:
+            raise ValueError(f"kind {self.kind.value!r} must not set 'routes'")
         return self
 
 
@@ -621,6 +755,30 @@ class PluginSpec(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _no_route_collisions(self) -> PluginSpec:
+        # One-owner-per-route within the spec: two declared rows collide when
+        # their resolved shapes overlap AND their method sets intersect. Same
+        # shape with disjoint methods is legal. Plugin declarations never carry
+        # converters, so a literal/template overlap is the whole rule here.
+        declared: list[tuple[str, str, tuple[str | None, ...], frozenset[str]]] = []
+        for item in self.provides:
+            if item.routes is None:
+                continue
+            base = item.routes.base
+            for route in item.routes.paths:
+                shape = _route_shape(base, route.path)
+                methods = frozenset(route.methods)
+                for other_name, other_path, other_shape, other_methods in declared:
+                    shared = methods & other_methods
+                    if shared and _shapes_overlap(shape, other_shape):
+                        raise ValueError(
+                            f"route collision: item {item.name!r} path {route.path!r} overlaps "
+                            f"item {other_name!r} path {other_path!r} on methods {sorted(shared)}"
+                        )
+                declared.append((item.name, route.path, shape, methods))
+        return self
+
 
 __all__ = [
     "KIND_MANIFEST_BINDINGS",
@@ -629,4 +787,7 @@ __all__ = [
     "PluginItemKind",
     "PluginPermissions",
     "PluginSpec",
+    "RouteDecl",
+    "RouteMethod",
+    "RoutesDecl",
 ]

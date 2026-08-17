@@ -53,7 +53,17 @@ from starlette.requests import Request
 from starlette.responses import Response
 from tai42_contract.app import DeclaredRouteMetadata
 
+from tai42_skeleton.app.route_shapes import Literal as ShapeLiteral
+from tai42_skeleton.app.route_shapes import Shape, collision, overlap, parse_concrete, parse_shape
+
 Handler = Callable[[Request], Awaitable[Response]]
+
+
+class CrossOwnerRouteCollision(RuntimeError):
+    """A route registration whose shape+methods collide with a DIFFERENT owner's
+    already-registered route. Raised to kill silent registry shadowing by
+    construction — one owner per route, enforced at registration."""
+
 
 # The route action-class — the SINGLE authoritative source of a route's
 # authorization character:
@@ -137,6 +147,21 @@ _METHOD_GUARD = re.compile(r"""request\.method\s*==\s*['"]([A-Za-z]+)['"]""")
 
 
 @dataclass(frozen=True)
+class RouteOwner:
+    """Who registered a route: ``core`` for a native/operator route, ``plugin``
+    for a declared plugin route (then ``owner_ref`` is the ``namespace/name``
+    listing and ``item_name`` the provided item). The identity the cross-owner
+    collision check compares — one owner per route shape."""
+
+    kind: Literal["core", "plugin"] = "core"
+    owner_ref: str | None = None
+    item_name: str | None = None
+
+
+CORE_OWNER = RouteOwner(kind="core")
+
+
+@dataclass(frozen=True)
 class RouteMetadata:
     """One self-describing route: its wire shape plus the OpenAPI metadata the
     emitter and the coverage/parity gates consume."""
@@ -169,6 +194,14 @@ class RouteMetadata:
     # HANDLER surface skips it and only the ones asking "is this path served, and is it
     # credential-gated?" (the rate limiter) read it.
     mounted: bool = False
+    # Who registered the route (:class:`RouteOwner`): ``core`` for a native/operator
+    # route, ``plugin`` for a declared plugin route. The cross-owner collision check
+    # keys on it, and the verifier's declared-public tier grants only a ``plugin``
+    # owner's public route.
+    owner: RouteOwner = CORE_OWNER
+    # Whether the route answers UNAUTHENTICATED — the negation of ``authed``, kept as
+    # the explicit declared flag the verifier's declared-public tier reads.
+    public: bool = False
 
 
 def _handler_source(func: Callable[..., object]) -> str:
@@ -253,17 +286,39 @@ def _resolve_route_action(action: RouteAction | None, methods: tuple[str, ...], 
     return action
 
 
+@dataclass(frozen=True)
+class _ShapeEntry:
+    """One owned ``/api`` route in the shape index: its parsed shape, the methods
+    it is SERVED on (``GET`` implies ``HEAD``), and its metadata (owner + public)."""
+
+    shape: Shape
+    methods: frozenset[str]
+    meta: RouteMetadata
+
+
 class RouteRegistry:
     """In-memory map of every registered route, keyed by ``(path, methods)``.
 
     Populated as a side effect of importing the router modules. Recording the
     same ``(path, methods)`` twice replaces the entry (a module re-import is
     idempotent), never accumulates duplicates.
+
+    Alongside the append-only ``(path, methods)`` map the registry keeps a
+    generation-scoped SHAPE INDEX of every ``/api`` route by parsed shape + served
+    methods + owner. The index answers the cross-owner collision check at
+    registration and the concrete-path ownership :meth:`match` the verifier's
+    declared-public tier reads. Unlike ``_routes`` (a process-spine dedup map that
+    is never rolled back), the shape index is STAGED per epoch build and committed
+    atomically, so an uninstalled/remapped route leaves it the instant its module
+    stops re-registering — the match and collision answers reflect exactly the
+    generation the build assembled.
     """
 
     def __init__(self) -> None:
         self._routes: dict[tuple[str, tuple[str, ...]], RouteMetadata] = {}
         self._version = 0
+        self._committed_shapes: list[_ShapeEntry] = []
+        self._staged_shapes: list[_ShapeEntry] | None = None
 
     @property
     def version(self) -> int:
@@ -289,6 +344,8 @@ class RouteRegistry:
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,
+        owner: RouteOwner = CORE_OWNER,
+        public: bool = False,
     ) -> None:
         """Record one route's metadata.
 
@@ -319,7 +376,7 @@ class RouteRegistry:
             error_statuses = declared.error_statuses
             success_status = declared.success_status
             additional_success_statuses = declared.additional_success_statuses
-        self._routes[path, method_key] = RouteMetadata(
+        meta = RouteMetadata(
             path=path,
             methods=method_key,
             name=name or handler.__name__,
@@ -338,7 +395,11 @@ class RouteRegistry:
             success_media_types=_success_media_types(source, method_key),
             action=resolved_action,
             destructive=destructive,
+            owner=owner,
+            public=public,
         )
+        self._record_shape(meta, method_key)
+        self._routes[path, method_key] = meta
         self._version += 1
 
     def record_mounted(self, *, path: str, methods: list[str], name: str, summary: str) -> None:
@@ -390,6 +451,109 @@ class RouteRegistry:
     def routes(self) -> list[RouteMetadata]:
         """Every recorded route, ordered by path then methods for a stable spec."""
         return [self._routes[key] for key in sorted(self._routes)]
+
+    # -- shape index (cross-owner collision + concrete-path ownership) ----------
+
+    @staticmethod
+    def _served_methods(method_key: tuple[str, ...]) -> frozenset[str]:
+        """The methods a route is served on — ``GET`` implies ``HEAD`` (Starlette
+        adds it), so a public GET route answers HEAD probes on the same tier."""
+        declared = frozenset(method_key)
+        return declared | {"HEAD"} if "GET" in declared else declared
+
+    def _shape_target(self) -> list[_ShapeEntry]:
+        """The write-target shape list: the staged generation during an epoch build,
+        else the committed live one (cold boot writes committed directly)."""
+        return self._staged_shapes if self._staged_shapes is not None else self._committed_shapes
+
+    def _record_shape(self, meta: RouteMetadata, method_key: tuple[str, ...]) -> None:
+        """Index one ``/api`` handler route by shape, raising on a cross-owner
+        collision. Mounted surfaces (their own credential gate) and non-``/api``
+        routes (governed by the SPA-shell tier) are outside the ownership space."""
+        if meta.mounted or not meta.path.startswith("/api/"):
+            return
+        shape = parse_shape(meta.path)
+        served = self._served_methods(method_key)
+        target = self._shape_target()
+        for entry in target:
+            if entry.meta.owner != meta.owner and collision(shape, served, entry.shape, entry.methods):
+                raise CrossOwnerRouteCollision(
+                    f"route {'/'.join(method_key)} {meta.path} (owner {meta.owner}) collides with "
+                    f"{'/'.join(sorted(entry.methods))} {entry.meta.path} (owner {entry.meta.owner}) — "
+                    "one owner per route shape; remap the mount base to resolve"
+                )
+        target[:] = [e for e in target if not (e.meta.path == meta.path and e.methods == served)]
+        target.append(_ShapeEntry(shape=shape, methods=served, meta=meta))
+
+    def api_shape_index(self) -> list[_ShapeEntry]:
+        """The committed ``/api`` shape generation — each entry's parsed shape,
+        served methods, and owning metadata. The marketplace install pre-flight and
+        preview door read it to collision-check a candidate route against exactly
+        the ownership the live epoch serves (unlike :meth:`routes`, whose dedup map
+        keeps an uninstalled plugin's stale entry)."""
+        return list(self._committed_shapes)
+
+    def match(self, path: str, method: str) -> RouteMetadata | None:
+        """The registered ``/api`` route that OWNS the concrete request ``(path,
+        method)``, or ``None``. Deterministic: cross-owner shapes never overlap, so
+        at most one owner matches; among a single owner's overlapping shapes the
+        most specific (most literal segments) wins."""
+        concrete = parse_concrete(path)
+        best: _ShapeEntry | None = None
+        for entry in self._committed_shapes:
+            if method not in entry.methods or not overlap(concrete, entry.shape):
+                continue
+            if best is None or _shape_specificity(entry.shape) > _shape_specificity(best.shape):
+                best = entry
+        return best.meta if best is not None else None
+
+    def begin_shape_staging(self) -> None:
+        """Open a fresh staged shape generation for an epoch build; the committed
+        live one keeps answering match/collision until the atomic commit."""
+        self._staged_shapes = []
+
+    def commit_shape_staging(self) -> None:
+        """Promote the staged shape generation to committed — one reference flip in
+        the build's no-await swap stretch."""
+        if self._staged_shapes is not None:
+            self._committed_shapes = self._staged_shapes
+            self._staged_shapes = None
+
+    def abort_shape_staging(self) -> None:
+        """Drop the staged shape generation on a failed build; the committed live
+        one is untouched."""
+        self._staged_shapes = None
+
+    def reset_shape_index(self) -> None:
+        """Clear the write-target shape generation before a registration pass
+        re-records it — the staged one during a build, the committed one at boot."""
+        self._shape_target().clear()
+
+    def rollback_owner(self, owner: RouteOwner) -> None:
+        """Deregister EVERY route this owner recorded — from both the process-spine
+        dedup map (``_routes``) and the write-target shape generation — so a module
+        whose import/bind/verify failed leaves no trace the match/collision surface or
+        the OpenAPI enumeration can see. Paired by the caller with the FastMCP
+        route-table rollback so all three surfaces drop the module together.
+
+        Keyed on the plugin owner identity, which is one-to-one with a bound module,
+        so it removes exactly that module's rows (including any stale prior-epoch
+        ``_routes`` entry the failed pass did not re-record). Refuses the core owner:
+        core routes share one owner and are not owner-isolable, so a core rollback
+        would nuke the whole native surface — a misuse."""
+        if owner.kind != "plugin":
+            raise ValueError(f"rollback_owner refuses the {owner.kind} owner — only a plugin owner is rollable")
+        self._routes = {key: meta for key, meta in self._routes.items() if meta.owner != owner}
+        target = self._shape_target()
+        target[:] = [entry for entry in target if entry.meta.owner != owner]
+        self._version += 1
+
+
+def _shape_specificity(shape: Shape) -> int:
+    """A shape's specificity for match tie-breaking: its count of LITERAL segments
+    (a fixed segment out-ranks any template), so ``/api/x/y`` beats ``/api/x/{z}``
+    when both match a concrete path."""
+    return sum(1 for segment in shape if isinstance(segment, ShapeLiteral))
 
 
 # The one process-wide registry. ``HttpSurface.custom_route`` records into it;

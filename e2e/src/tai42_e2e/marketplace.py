@@ -118,6 +118,7 @@ BETA_PACKAGE = "tai-e2e-market-beta"
 GAMMA_PACKAGE = "tai-e2e-market-gamma"
 DELTA_PACKAGE = "tai-e2e-market-delta"
 EPSILON_PACKAGE = "tai-e2e-market-epsilon"
+THETA_PACKAGE = "tai-e2e-market-theta"
 ZETA_PACKAGE = "tai-e2e-market-zeta"
 ETA_PACKAGE = "tai-e2e-market-eta"
 ALPHA_REF = "tai42/e2e-alpha"
@@ -125,8 +126,17 @@ BETA_REF = "tai42/e2e-beta"
 GAMMA_REF = "tai42/e2e-gamma"
 DELTA_REF = "tai42/e2e-delta"
 EPSILON_REF = "tai42/e2e-epsilon"
+THETA_REF = "tai42/e2e-theta"
 ZETA_REF = "tai42/e2e-zeta"
 ETA_REF = "tai42/e2e-eta"
+
+# Epsilon's second published version: a router item bumped to carry an additional
+# declared PUBLIC route the 0.1.0 spec does not. Forged from its own source tree
+# (``epsilon_v2``) rather than a version stamp of ``epsilon``, since a bump that
+# ADDS a route must ship different module + spec bytes, not just a new version
+# number. Same distribution (``tai-e2e-market-epsilon``) and ref (``EPSILON_REF``)
+# as 0.1.0 — the update flow moves the one installed plugin onto it.
+EPSILON_V2_VERSION = "0.2.0"
 
 # Eta is the mcp-server fixture: its one provided item is kind ``mcp-server`` whose
 # ``mcp.command`` launches the fixture's own one-tool stdio server. An mcp-server
@@ -159,15 +169,20 @@ DELTA_REPOSITORY_URL = "https://github.com/tai42ai/tai-e2e-market-delta"
 @dataclass(frozen=True)
 class FixtureArtifacts:
     """The forged fixture artifacts a marketplace-area run needs: the pypi-sourced
-    wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0, eta 0.1.0) and
-    the github-sourced delta source tarballs (0.1.0/0.2.0). Immutable and shareable
-    across modules — forging is pure and the built files never change."""
+    wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0/0.2.0,
+    theta 0.1.0, eta 0.1.0) and the github-sourced delta source tarballs (0.1.0/0.2.0).
+    Immutable and shareable across modules — forging is pure and the built files never
+    change. ``epsilon_v2`` is the same distribution as ``epsilon_v1`` at a bumped
+    version whose spec declares an extra public route (see ``EPSILON_V2_VERSION``);
+    ``theta_v1`` is a router whose declared route shape-collides with epsilon's."""
 
     alpha_v1: BuiltWheel
     alpha_v2: BuiltWheel
     beta_v1: BuiltWheel
     gamma_v1: BuiltWheel
     epsilon_v1: BuiltWheel
+    epsilon_v2: BuiltWheel
+    theta_v1: BuiltWheel
     eta_v1: BuiltWheel
     delta_v1: BuiltTarball
     delta_v2: BuiltTarball
@@ -241,7 +256,7 @@ def contract_facet_probe_versions() -> tuple[str, str]:
 
 
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
-    """Forge every fixture artifact into ``out_dir``: the six wheels and the two
+    """Forge every fixture artifact into ``out_dir``: the eight wheels and the two
     delta source tarballs (delta is the github-sourced listing and gets no
     wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
     ``TAI_E2E_MARKETPLACE_FIXTURES``); each build stamps its version into a copy of
@@ -262,6 +277,8 @@ def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> 
         beta_v1=build_fixture_wheel(src / "beta", "0.1.0", out_dir, contract_range=contract_range),
         gamma_v1=build_fixture_wheel(src / "gamma", "0.1.0", out_dir, contract_range=contract_range),
         epsilon_v1=build_fixture_wheel(src / "epsilon", "0.1.0", out_dir, contract_range=contract_range),
+        epsilon_v2=build_fixture_wheel(src / "epsilon_v2", EPSILON_V2_VERSION, out_dir, contract_range=contract_range),
+        theta_v1=build_fixture_wheel(src / "theta", "0.1.0", out_dir, contract_range=contract_range),
         eta_v1=build_fixture_wheel(src / "eta", "0.1.0", out_dir),
         delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
         delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),
@@ -717,6 +734,37 @@ async def seed_epsilon_listing(mp: MarketplaceService, index: FixturePackageInde
     index.register(artifacts.epsilon_v1)
     await _admin_seed(mp, ((EPSILON_PACKAGE, artifacts.epsilon_v1.plugin_yml),))
     await _wait_published(mp, EPSILON_REF, "0.1.0")
+
+
+async def seed_epsilon_v2_listing(
+    mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts
+) -> None:
+    """Stage epsilon's bumped ``0.2.0`` wheel and publish it through the real
+    admin-seed + ingest pipeline, so the same listing carries two versions.
+
+    Publishes ON TOP of :func:`seed_epsilon_listing`'s ``0.1.0`` (the synchronous
+    seed publishes each version in its own request, no background poller), so the
+    route-mounting update spec can install ``0.1.0`` and then move onto the ``0.2.0``
+    whose spec declares a route the older version did not."""
+    index.register(artifacts.epsilon_v2)
+    await _admin_seed(mp, ((EPSILON_PACKAGE, artifacts.epsilon_v2.plugin_yml),))
+    await _wait_published(mp, EPSILON_REF, EPSILON_V2_VERSION)
+
+
+async def seed_theta_listing(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:
+    """Stage theta's ``0.1.0`` wheel and drive the real admin-seed + ingest pipeline
+    until it publishes.
+
+    Theta is the route-collision fixture the route-mounting spec installs after
+    epsilon: its declared ``GET /{slug}`` template overlaps epsilon's concrete
+    ``/ping`` / ``/open`` GET routes at the shared default base, so the second install
+    is a collision until the operator remaps theta's base. Kept OUT of
+    :func:`seed_fixture_catalog` so it never pollutes the shared browse catalog —
+    only the route-mounting spec's own registry carries it, exactly as
+    delta/epsilon/eta are seeded by their own specs rather than the shared seed."""
+    index.register(artifacts.theta_v1)
+    await _admin_seed(mp, ((THETA_PACKAGE, artifacts.theta_v1.plugin_yml),))
+    await _wait_published(mp, THETA_REF, "0.1.0")
 
 
 async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:

@@ -76,7 +76,7 @@ class _StubHttp:
         response_model: Any,
         request_model: Any = None,
         query_model: Any = None,
-        authed: bool = True,
+        authed: bool | None = None,
         action: str | None = None,
     ) -> Callable[[Any], Any]:
         # ``action`` is recorded as metadata only — the stub enforces nothing (the

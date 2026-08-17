@@ -1985,6 +1985,24 @@ def build_router_merge_stack(res: StackResources, variants: Variants) -> StackCo
     return replace(base, name="router-merge", manifest=manifest)
 
 
+def build_marketplace_authz_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The marketplace stack with access control ON — the home of the declared-public
+    route tier / per-method pin.
+
+    Same marketplace wiring as ``build_marketplace_stack`` (registry client, package
+    index, install door) with the identity provider + Postgres policy store wired ON,
+    so an installed plugin's declared-PUBLIC route answers unauthenticated while its
+    sibling AUTHED route/method still rejects an anonymous caller. Booted with
+    ``seed_auth=True`` (the fixture passes it to ``boot_stack``) so the install door is
+    reachable with the seeded root key and the readiness probes stay public."""
+    from dataclasses import replace
+
+    base = build_marketplace_stack(res, variants)
+    manifest = {**base.manifest, "lifecycle_modules": [variants.identity.lifecycle_module]}
+    env = {**base.env, "ACCESS_CONTROL_ENABLE": "true", **variants.identity.auth_provider_env()}
+    return replace(base, name="marketplace-authz", manifest=manifest, env=env, auth=True)
+
+
 def build_default_router_stack(res: StackResources, variants: Variants) -> StackConfig:
     """MULTIWORKER(1), no backend — boots on the DEFAULT router set
     (``default_routers="all"`` with no ``routers_modules``) so the route-coverage

@@ -19,7 +19,12 @@ from tests.marketplace._specs import make_spec
 
 
 def _item(kind: str, name: str, module: str) -> dict:
-    return {"kind": kind, "name": name, "module": module, "description": "d"}
+    item: dict = {"kind": kind, "name": name, "module": module, "description": "d"}
+    if kind == "router":
+        # A router item now REQUIRES a routes block; manifest patching is orthogonal
+        # to route content, so a minimal generic declaration keeps these tests focused.
+        item["routes"] = {"base": name, "paths": [{"path": "/ping", "methods": ["GET"], "public": False}]}
+    return item
 
 
 # -- apply per kind ----------------------------------------------------------

@@ -27,8 +27,9 @@ are AUTHED — they carry the platform api key and declare an explicit action-cl
   session for that web route (the visitor's "new conversation"); the next message
   opens a conversation on the new address.
 
-The chat doors are PUBLIC (``authed=False``): the transport credential is the
-visitor's session cookie, and no chat door reads the platform api key or a Studio
+The chat doors are PUBLIC (declared ``public: true`` in ``tai-plugin.yml``): the
+transport credential is the visitor's session cookie, and no chat door reads the
+platform api key or a Studio
 session. A session is a capability on ONE web route: it is minted against the route
 it was minted on, and a door presented with it on any other route refuses exactly as
 it refuses an unknown token — the two are indistinguishable to a caller, so no session
@@ -48,11 +49,12 @@ bundle 500 has no code: it is a server fault with no API counterpart, and nothin
 page could do differently for. Every page-door HTML response carries
 ``Referrer-Policy: no-referrer`` — a capability URL must never leak via referrer.
 
-The entry-gate management doors are AUTHED (``authed=True``): they mint, list, revoke
-codes and toggle the gate for a web route, keyed by the platform api key, and each
-declares an explicit ``read``/``write`` action-class (an authed route with none
-fails to register). Entry codes are hashed at rest, multi-use, optionally expiring;
-the raw code is returned once at mint and never read back. A gate refuses uniformly.
+The entry-gate management doors are AUTHED (declared ``public: false``): they mint,
+list, revoke codes and toggle the gate for a web route, keyed by the platform api
+key, and each declares an explicit ``read``/``write`` action-class (an authed route
+with none fails to register). Entry codes are hashed at rest, multi-use, optionally
+expiring; the raw code is returned once at mint and never read back. A gate refuses
+uniformly.
 
 Flood control on these doors is NOT this plugin's: the platform's public-door limiter
 bounds requests per caller ahead of them, and the operator's ingress bounds what
@@ -444,13 +446,24 @@ def _serves(registration: SessionRegistration | None, identity: str) -> bool:
     return registration is not None and registration.identity == identity
 
 
-async def _mint_session(response: Response, identity: str, settings: WebSettings, params: dict[str, str]) -> None:
+def _mount_base(request: Request, route_path: str) -> str:
+    """This deployment's absolute mount prefix for the web channel, read from the
+    request path by dropping this route's own relative tail. A remapped base is
+    followed rather than the default assumed — the served page's asset URLs and the
+    session cookie's ``Path`` both derive from it."""
+    depth = len(route_path.strip("/").split("/"))
+    return "/".join(request.url.path.split("/")[:-depth])
+
+
+async def _mint_session(
+    response: Response, identity: str, settings: WebSettings, params: dict[str, str], mount_base: str
+) -> None:
     """Register a fresh token/visitor-id pair for one web route, with the entry's link
     params, and set the cookie. The registration lands first: a cookie whose token
     resolves to nothing is not a session."""
     token = mint_session_token()
     await register_session(token, mint_visitor_id(), identity, params)
-    set_session_cookie(response, token, settings)
+    set_session_cookie(response, token, settings, mount_base)
 
 
 def _client_bucket(request: Request) -> str:
@@ -606,12 +619,11 @@ async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/chat/{identity}",
+    "/chat/{identity}",
     methods=["GET"],
     summary="Serve the public chat page for a web route",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_chat_page(request: Request) -> Response:
     """Serve the visitor-facing chat page and (re)establish the session.
@@ -676,8 +688,9 @@ async def web_chat_page(request: Request) -> Response:
     except PublicBuildError as exc:
         logger.error("web chat page cannot be served: %s", exc)
         return _refusal_page(_PAGE_UNAVAILABLE_PAGE, 500)
+    mount_base = _mount_base(request, "/chat/{identity}")
     response = Response(
-        render_page(raw_identity, settings.page_title, build),
+        render_page(raw_identity, settings.page_title, build, mount_base),
         media_type=HTML_CONTENT_TYPE,
         headers={"content-security-policy": PAGE_CSP, **_NOSNIFF, "cache-control": _NO_STORE, **_REFERRER_POLICY},
     )
@@ -688,19 +701,18 @@ async def web_chat_page(request: Request) -> Response:
         if params and navigation:
             assert registration is not None  # _serves guarantees it when existing is set
             await update_session_params(existing, registration, params)
-        set_session_cookie(response, existing, settings)
+        set_session_cookie(response, existing, settings, mount_base)
     else:
-        await _mint_session(response, identity, settings, params)
+        await _mint_session(response, identity, settings, params, mount_base)
     return response
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/assets/{file}",
+    "/assets/{file}",
     methods=["GET"],
     summary="Serve a built chat page asset",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_asset(request: Request) -> Response:
     """Serve one file of the built chat bundle.
@@ -744,12 +756,11 @@ async def web_asset(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/messages",
+    "/messages",
     methods=["POST"],
     summary="Send a web chat message into the visitor's conversation",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_messages(request: Request) -> Response:
     """Bridge one visitor message into their own web conversation.
@@ -832,12 +843,11 @@ async def web_messages(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/stream",
+    "/stream",
     methods=["GET"],
     summary="Stream the visitor's web conversation (backlog then live)",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_stream(request: Request) -> Response:
     """Open the SSE feed of the session's own conversation.
@@ -886,12 +896,11 @@ async def web_stream(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/questions/{interaction_id}/answer",
+    "/questions/{interaction_id}/answer",
     methods=["POST"],
     summary="Answer a pending web chat question",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_answer(request: Request) -> Response:
     """Forward an answer to a pending web question's interactions callback.
@@ -981,12 +990,11 @@ async def web_answer(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/session/rotate",
+    "/session/rotate",
     methods=["POST"],
     summary="Start a fresh web chat visitor session",
     tags=["channels"],
     response_model=None,
-    authed=False,
 )
 async def web_session_rotate(request: Request) -> Response:
     """Mint a fresh session for one web route and set it as the visitor's cookie.
@@ -1030,16 +1038,16 @@ async def web_session_rotate(request: Request) -> Response:
         await drop_session(token)
     response = _ok({"status": "rotated"})
     # A rotation mints a CLEAN registration: it carries no link params (README pin).
-    await _mint_session(response, body.identity, settings, {})
+    await _mint_session(response, body.identity, settings, {}, _mount_base(request, "/session/rotate"))
     return response
 
 
-# -- management doors (authed=True, platform api key) ---------------------------
+# -- management doors (authed, platform api key) --------------------------------
 #
 # The entry gate's operator plane. Unlike the public chat doors these require the
-# platform api key (``authed=True``) and declare an explicit action-class — an authed
-# route with none REFUSES TO REGISTER (fail-closed fence). They refuse with the
-# standard JSON envelope; they are not navigations and get no refusal pages.
+# platform api key (declared ``public: false``) and declare an explicit action-class
+# — an authed route with none REFUSES TO REGISTER (fail-closed fence). They refuse
+# with the standard JSON envelope; they are not navigations and get no refusal pages.
 
 
 def _managed_identity(request: Request) -> str | None:
@@ -1058,12 +1066,11 @@ def _code_view(code: EntryCode) -> dict[str, Any]:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/gates/{identity}",
+    "/gates/{identity}",
     methods=["GET"],
     summary="Read a web route's entry-gate state and its codes",
     tags=["channels"],
     response_model=None,
-    authed=True,
     action="read",
 )
 async def web_gate_read(request: Request) -> Response:
@@ -1081,13 +1088,12 @@ async def web_gate_read(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/gates/{identity}",
+    "/gates/{identity}",
     methods=["PUT"],
     summary="Turn a web route's entry gate on or off",
     tags=["channels"],
     response_model=None,
     request_model=GateToggleBody,
-    authed=True,
     action="write",
 )
 async def web_gate_toggle(request: Request) -> Response:
@@ -1112,13 +1118,12 @@ async def web_gate_toggle(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/gates/{identity}/codes",
+    "/gates/{identity}/codes",
     methods=["POST"],
     summary="Mint an entry code for a web route",
     tags=["channels"],
     response_model=None,
     request_model=MintCodeBody,
-    authed=True,
     action="write",
 )
 async def web_gate_mint_code(request: Request) -> Response:
@@ -1144,12 +1149,11 @@ async def web_gate_mint_code(request: Request) -> Response:
 
 
 @tai42_app.http.custom_route(
-    "/api/channels/web/gates/{identity}/codes/{code_id}",
+    "/gates/{identity}/codes/{code_id}",
     methods=["DELETE"],
     summary="Revoke a web route's entry code",
     tags=["channels"],
     response_model=None,
-    authed=True,
     action="write",
 )
 async def web_gate_revoke_code(request: Request) -> Response:

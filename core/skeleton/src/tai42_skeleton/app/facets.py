@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.agent import Agent
+    from tai42_contract.app import DeclaredRouteMetadata
     from tai42_contract.backend import Backend
     from tai42_contract.config import ConfigManager
     from tai42_contract.monitoring import Monitoring
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     from tai42_contract.versioning import VersionedStore
     from tai42_contract.webhooks import WebhookVerifier
 
-    from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
+    from tai42_skeleton.app.route_registry import RouteAction
     from tai42_skeleton.app.server import TaiMCP
     from tai42_skeleton.manifest import Manifest as ManifestImpl
     from tai42_skeleton.template import ResourceManager
@@ -268,6 +269,9 @@ class HttpFacet(_Facet):
     def middleware(self, cls: type | None = None, **options: Any) -> Callable[..., Any]:
         return self._app._http_surface.middleware(cls, **options)
 
+    def mount_base(self) -> str:
+        return self._app._http_surface.mount_base()
+
     def custom_route(
         self,
         path: str,
@@ -280,7 +284,7 @@ class HttpFacet(_Facet):
         response_model: type[BaseModel] | None,
         request_model: type[BaseModel] | None = None,
         query_model: type[BaseModel] | None = None,
-        authed: bool = True,
+        authed: bool | None = None,
         destructive: bool = False,
         action: RouteAction | None = None,
         declared: DeclaredRouteMetadata | None = None,

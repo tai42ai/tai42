@@ -75,7 +75,8 @@ class _StubHttp:
         response_model: Any,
         request_model: Any = None,
         query_model: Any = None,
-        authed: bool = True,
+        authed: bool | None = None,
+        action: str | None = None,
     ) -> Callable[[Any], Any]:
         def decorator(fn: Any) -> Any:
             self.routes.append(
