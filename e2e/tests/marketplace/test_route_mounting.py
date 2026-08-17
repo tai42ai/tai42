@@ -185,6 +185,42 @@ async def test_remap_serves_at_new_base_and_survives_restart(
         await _uninstall_clean(stack, EPSILON_REF, EPSILON_PACKAGE)
 
 
+# ---- 1b. plugin routes survive an in-process config reload --------------
+
+
+async def test_plugin_routes_survive_in_process_config_reload(
+    route_fixtures_seeded: None,
+    router_merge_stack: TaiStack,
+) -> None:
+    # A route-carrying plugin, hot-loaded, must KEEP serving its routes across a plain
+    # in-process ``POST /api/config/reload`` (a soft-restart that rebuilds the serving
+    # epoch WITHOUT a process restart). The regression this guards: the epoch rebuild
+    # re-imported only the manifest leaf, so a plugin whose routes register in a sibling
+    # module dropped every route from the new epoch and 404ed until a full restart.
+    stack = router_merge_stack
+    assert distribution_absent(EPSILON_PACKAGE)
+
+    await _install(stack, EPSILON_REF, version="0.1.0", accept=True)
+    try:
+        # Hot-loaded: the routes serve before the reload.
+        await _wait_status(stack.api(), _DEFAULT_PING, 200)
+        await _wait_status(stack.api(), _DEFAULT_OPEN, 200)
+
+        # Drive the in-process reload (fenced admin door; the seeded root token opens it).
+        await stack.api().post("/api/config/reload", json={}, timeout=240.0, retry_on_reloading=True)
+
+        # The plugin routes still serve after the reload — the rebuilt epoch re-mounted
+        # them instead of silently dropping them.
+        await _wait_status(stack.api(), _DEFAULT_PING, 200)
+        ping = await stack.api().request_raw("GET", _DEFAULT_PING)
+        assert ping.status_code == 200, f"plugin route unmounted on reload: {ping.status_code} {ping.text}"
+        assert ping.json()["data"]["epsilon"] == "pong", ping.text
+        open_resp = await stack.api().request_raw("GET", _DEFAULT_OPEN)
+        assert open_resp.status_code == 200, f"public plugin route unmounted on reload: {open_resp.text}"
+    finally:
+        await _uninstall_clean(stack, EPSILON_REF, EPSILON_PACKAGE)
+
+
 # ---- 2. collision, then remap remedy ------------------------------------
 
 

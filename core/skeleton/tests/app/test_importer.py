@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,15 @@ from tai42_skeleton.app.importer import (
     _stable_cycle_fallback,
     import_or_reload_package,
 )
+
+# A standalone top-level fixture distribution whose manifest leaf
+# (``route_sibling_plugin.register``) registers its HTTP route via an ``import
+# route_sibling_plugin.inbound`` side-effect — the sibling-route shape the reload bug
+# hit. Its parent dir is put on ``sys.path`` so the whole-distribution widen can reach
+# it, and a synthetic ``dist_map`` maps its top-level package to a distribution.
+_PLUGIN_DIST_ROOT = Path(__file__).parent / "_fixtures" / "_plugin_dist"
+_SIBLING_MANIFEST_LEAF = "route_sibling_plugin.register"
+_SIBLING_DIST_MAP = {"route_sibling_plugin": ["route-sibling-plugin"]}
 
 
 def test_empty_name_returns_empty():
@@ -104,3 +114,53 @@ def test_reloading_a_provider_registering_module_is_reload_safe():
 def test_stable_cycle_fallback_orders_by_depth_then_name():
     nodes = {"a.b.c", "a", "a.b", "z"}
     assert _stable_cycle_fallback(nodes) == ["a", "z", "a.b", "a.b.c"]
+
+
+@pytest.fixture
+def sibling_route_plugin(monkeypatch: pytest.MonkeyPatch):
+    """Make the sibling-route fixture distribution importable and route its route
+    registrations into a FRESH registry, cleaning both up after the test."""
+    from tai42_skeleton.app.route_registry import RouteRegistry
+
+    registry = RouteRegistry()
+    # The fixture's ``inbound`` reads the registry indirectly off the module, so this
+    # swap redirects its registration into the fresh instance.
+    monkeypatch.setattr("tai42_skeleton.app.route_registry.route_registry", registry)
+    monkeypatch.syspath_prepend(str(_PLUGIN_DIST_ROOT))
+    for name in [n for n in sys.modules if n == "route_sibling_plugin" or n.startswith("route_sibling_plugin.")]:
+        del sys.modules[name]
+    try:
+        yield registry
+    finally:
+        for name in [n for n in sys.modules if n == "route_sibling_plugin" or n.startswith("route_sibling_plugin.")]:
+            del sys.modules[name]
+
+
+def test_reload_refires_a_route_registering_sibling_of_the_manifest_leaf(sibling_route_plugin):
+    # A plugin whose route lives in a SIBLING of its manifest leaf (the twilio/whatsapp/
+    # web/slack/telegram channel shape). Boot imports the leaf, which imports the sibling
+    # fresh, so the route registers. On a reload the epoch rebuild clears the staged route
+    # table and re-imports the manifest leaf — and the route must come back.
+    registry = sibling_route_plugin
+    path, method = "/api/channels/fixture/inbound", "POST"
+
+    # Boot: fresh import records the sibling's route.
+    import_or_reload_package(_SIBLING_MANIFEST_LEAF, _SIBLING_DIST_MAP)
+    assert registry.match(path, method) is not None
+
+    # The epoch rebuild clears the route table before the re-import re-populates it.
+    registry.reset_shape_index()
+    assert registry.match(path, method) is None
+
+    # OLD leaf-only behavior (no dist_map): re-importing ONLY the leaf leaves the sibling
+    # cached in sys.modules, so its registration never re-fires — the route stays dropped
+    # (the silent-unmount bug). This assertion is RED against the pre-fix reload path.
+    import_or_reload_package(_SIBLING_MANIFEST_LEAF)
+    assert registry.match(path, method) is None
+
+    # THE FIX: widening the reload to the plugin's whole distribution (dist_map-derived)
+    # pops+reimports the sibling too, so its route registration re-fires and the route is
+    # back in the table the rebuilt epoch will serve.
+    registry.reset_shape_index()
+    import_or_reload_package(_SIBLING_MANIFEST_LEAF, _SIBLING_DIST_MAP)
+    assert registry.match(path, method) is not None
