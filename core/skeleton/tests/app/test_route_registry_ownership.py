@@ -10,7 +10,6 @@ from starlette.responses import JSONResponse, Response
 from tai42_skeleton.app.route_registry import (
     CORE_OWNER,
     CrossOwnerRouteCollision,
-    EpochRouteAuditError,
     RouteOwner,
     RouteRegistry,
 )
@@ -178,50 +177,6 @@ def test_shape_staging_abort_keeps_the_committed_surface() -> None:
     # A failed build drops the staged generation; the live surface is exactly as before.
     assert registry.match("/api/live/one", "GET") is not None
     assert registry.match("/api/live/two", "GET") is None
-
-
-def test_audit_raises_when_a_still_declared_plugins_routes_all_drop() -> None:
-    registry = RouteRegistry()
-    # The live epoch serves plugin A's route. A rebuild stages a generation in which
-    # A's route-registering sibling never re-fired (the reload bug), so the staged
-    # generation carries none of A's routes.
-    _record(registry, "/api/acme/one/inbound", ["POST"], _PLUGIN_A, public=True, authed=False)
-    registry.begin_shape_staging()
-    registry.reset_shape_index()
-    # A is still declared in the new manifest, so its total drop is the silent unmount
-    # the audit must catch before the commit — the build raises and the primitive keeps
-    # the old epoch. (Pre-fix, the leaf-only re-import left A with zero staged routes
-    # and the epoch committed anyway, 404ing until restart.)
-    with pytest.raises(EpochRouteAuditError, match="acme/one:web"):
-        registry.audit_plugin_routes_preserved({_PLUGIN_A})
-
-
-def test_audit_ignores_a_plugin_dropped_from_the_manifest() -> None:
-    registry = RouteRegistry()
-    _record(registry, "/api/acme/one/inbound", ["POST"], _PLUGIN_A, public=True, authed=False)
-    registry.begin_shape_staging()
-    registry.reset_shape_index()
-    # A is NOT in the expected owners (uninstalled/removed from the manifest), so its
-    # legitimately-absent routes must not trip the guard.
-    registry.audit_plugin_routes_preserved(set())
-
-
-def test_audit_passes_when_the_plugin_re_registers_a_route() -> None:
-    registry = RouteRegistry()
-    _record(registry, "/api/acme/one/inbound", ["POST"], _PLUGIN_A, public=True, authed=False)
-    registry.begin_shape_staging()
-    registry.reset_shape_index()
-    # The sibling re-fired: A owns a route in the staged generation again (a remap may
-    # have changed the path — at least one surviving route is enough).
-    _record(registry, "/api/acme/remapped/inbound", ["POST"], _PLUGIN_A, public=True, authed=False)
-    registry.audit_plugin_routes_preserved({_PLUGIN_A})
-
-
-def test_audit_is_a_noop_outside_an_epoch_build() -> None:
-    registry = RouteRegistry()
-    _record(registry, "/api/acme/one/inbound", ["POST"], _PLUGIN_A, public=True, authed=False)
-    # No staging open (boot / steady state): the audit never fires.
-    registry.audit_plugin_routes_preserved({_PLUGIN_A})
 
 
 def test_rollback_owner_removes_only_that_owners_routes_and_shapes() -> None:

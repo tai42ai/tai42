@@ -37,13 +37,6 @@ import importlib.util
 import os
 import pkgutil
 import sys
-from collections.abc import Mapping
-
-# The core distribution's top-level import package. Its modules are NEVER widened to
-# a whole-package reload: a core router declares its routes in the manifest leaf
-# itself (so a leaf-only re-import re-fires them), and widening would pop+reimport the
-# entire skeleton.
-_CORE_TOP_LEVEL = "tai42_skeleton"
 
 
 def _discover_all_modules(root_pkg_name: str) -> set[str]:
@@ -77,61 +70,16 @@ def _stable_cycle_fallback(nodes: set[str]) -> list[str]:
     return sorted(nodes, key=lambda n: (n.count("."), n))
 
 
-def _reload_roots(module: str, dist_map: Mapping[str, list[str]] | None) -> set[str]:
-    """The package name(s) to pop+reimport for a manifest ``module``.
-
-    A plugin's manifest leaf may register its HTTP routes in a SIBLING module via an
-    import side-effect (``tai42_channel_twilio.register`` does ``import
-    tai42_channel_twilio.inbound``, whose ``@custom_route`` decorators live in the
-    sibling). Popping+reimporting only the leaf leaves the sibling cached in
-    ``sys.modules`` on a reload, so its decorators never re-fire and every one of the
-    plugin's routes drops from the rebuilt epoch. Widening the reload to every
-    top-level package the leaf's DISTRIBUTION provides re-fires all its siblings.
-
-    Widening is derived from ``dist_map`` (top-level package -> owning distribution(s),
-    a ``packages_distributions`` snapshot). It is DELIBERATELY narrow:
-
-    * a ``tai42_skeleton`` (core) module is never widened — its routes live in the
-      manifest leaf itself and widening would reload the whole skeleton;
-    * an operator-authored module that maps to no installed distribution (no
-      ``dist_map`` entry) is never widened — leaf-only preserves its reload semantics;
-    * with no ``dist_map`` at all (a non-plugin caller) the leaf alone is reloaded.
-
-    Both fall-back paths return just the leaf, so existing behavior is unchanged
-    except for a real installed plugin distribution.
-    """
-    if dist_map is None:
-        return {module}
-    top_level = module.partition(".")[0]
-    if top_level == _CORE_TOP_LEVEL:
-        return {module}
-    owning = dist_map.get(top_level)
-    if not owning:
-        return {module}
-    owners = set(owning)
-    # Reload every top-level package the owning distribution(s) provide (a dist may
-    # ship more than one), so a sibling in ANY of them re-fires — minus core, which is
-    # never widened even when a plugin dist also contributes to its namespace.
-    packages = {pkg for pkg, dists in dist_map.items() if pkg != _CORE_TOP_LEVEL and not owners.isdisjoint(dists)}
-    packages.add(top_level)
-    return packages
-
-
-def import_or_reload_package(root_pkg_name: str | None, dist_map: Mapping[str, list[str]] | None = None) -> list[str]:
+def import_or_reload_package(root_pkg_name: str | None) -> list[str]:
     if not root_pkg_name:
         return []
 
     importlib.invalidate_caches()
 
-    # Resolve the reload scope: a plain leaf (core / operator / no dist_map) reloads
-    # only itself; a real plugin distribution's leaf widens to its whole top-level
-    # package set so its route-registering siblings re-fire (see ``_reload_roots``).
-    # A manifest-named package that cannot be found is corrupt configuration: the
-    # discovery failure propagates and aborts startup loudly rather than booting a
-    # server silently missing its modules.
-    managed: set[str] = set()
-    for root in _reload_roots(root_pkg_name, dist_map):
-        managed |= _discover_all_modules(root)
+    # A manifest-named package that cannot be found is corrupt configuration:
+    # the discovery failure propagates and aborts startup loudly rather than
+    # booting a server silently missing its modules.
+    managed = _discover_all_modules(root_pkg_name)
 
     # Remove all managed modules from sys.modules
     for name in managed:
