@@ -118,14 +118,22 @@ class _FakeInnerApp:
 
 class _FakeLifecycle:
     """Records reload-handler registrations by their ``module.qualname`` key, so a
-    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``."""
+    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``,
+    and stands in for the cold-boot manifest read the door delegates here — mirroring
+    the real seam, it reads through the config manager so a failing read still
+    propagates."""
 
-    def __init__(self) -> None:
+    def __init__(self, config_manager: _FakeConfigManager) -> None:
         self.reload_handlers: dict[str, object] = {}
+        self._config_manager = config_manager
 
     def on_reload(self, func):
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
+
+    def read_boot_manifest(self):
+        self._config_manager.read_manifest()
+        return SimpleNamespace()
 
 
 class _FakeApp:
@@ -135,7 +143,7 @@ class _FakeApp:
         self.config = SimpleNamespace(config_manager=_FakeConfigManager(raise_on_read=raise_on_read))
         # The CLI seams register the root-logger reload handler through the app's
         # lifecycle; the recorder captures it without a real lifecycle.
-        self.lifecycle = _FakeLifecycle()
+        self.lifecycle = _FakeLifecycle(self.config.config_manager)
         self.http_called = False
         self.http_stateless: bool | None = None
         self.sse_called = False
@@ -168,12 +176,12 @@ class _FakeApp:
 
 @pytest.fixture
 def patch_app_seam(monkeypatch: pytest.MonkeyPatch):
-    """Install a fake ``app`` + bypass real ``Manifest`` validation."""
+    """Install a fake ``app``; its ``lifecycle.read_boot_manifest`` stands in for the
+    cold-boot manifest read the door delegates there."""
 
     def _install(app: _FakeApp) -> _FakeApp:
         # The launcher obtains the app via the deferred factory ``instance.build_app``.
         monkeypatch.setattr(mcp_app.instance, "build_app", lambda: app)
-        monkeypatch.setattr(mcp_app.Manifest, "model_validate", staticmethod(lambda data: SimpleNamespace()))
         return app
 
     return _install

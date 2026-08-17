@@ -5,10 +5,10 @@ including a stamp failure rolling the one-app claim back), transport selection,
 the one-app-per-process guard, host mounting with a composed lifespan, and that a
 factory boot leaves the host's root logger untouched.
 
-The ``app`` and ``Manifest`` seams are replaced with fakes: the unit under test is
-the factory wiring, not the real MCP app or manifest validation. The factory's
-``build_app`` / ``Manifest`` are the same module objects the CLI wrapper shares, so
-patching ``asgi.instance.build_app`` / ``asgi.Manifest.model_validate`` reaches both.
+The ``app`` seam is replaced with a fake: the unit under test is the factory wiring,
+not the real MCP app or manifest validation. The cold-boot manifest read is delegated
+to ``app.lifecycle.read_boot_manifest``, which the fake lifecycle stands in for, so
+patching ``asgi.instance.build_app`` reaches the whole factory path.
 """
 
 from __future__ import annotations
@@ -67,7 +67,8 @@ class _FakeInnerApp:
 
 
 class _FakeLifecycle:
-    """Records reload-handler registrations by their ``module.qualname`` key."""
+    """Records reload-handler registrations by their ``module.qualname`` key, and
+    stands in for the cold-boot manifest read the door delegates here."""
 
     def __init__(self) -> None:
         self.reload_handlers: dict[str, object] = {}
@@ -75,6 +76,9 @@ class _FakeLifecycle:
     def on_reload(self, func):
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
+
+    def read_boot_manifest(self):
+        return SimpleNamespace()
 
 
 class _FakeApp:
@@ -118,11 +122,11 @@ class _FakeApp:
 
 @pytest.fixture
 def patch_factory_seam(monkeypatch: pytest.MonkeyPatch):
-    """Install a fake ``app`` + bypass real ``Manifest`` validation for the factory."""
+    """Install a fake ``app`` for the factory; its ``lifecycle.read_boot_manifest``
+    stands in for the real cold-boot manifest read the door delegates there."""
 
     def _install(app: _FakeApp) -> _FakeApp:
         monkeypatch.setattr(asgi.instance, "build_app", lambda: app)
-        monkeypatch.setattr(asgi.Manifest, "model_validate", staticmethod(lambda data: SimpleNamespace()))
         return app
 
     return _install

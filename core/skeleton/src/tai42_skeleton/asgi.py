@@ -47,7 +47,6 @@ from tai42_skeleton.app import epoch, instance
 from tai42_skeleton.app.epoch import EpochAdmissionApp
 from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 from tai42_skeleton.config.config_mode import config_mode
-from tai42_skeleton.manifest import Manifest
 
 __all__ = ["Transport", "create_app", "lifespan"]
 
@@ -143,7 +142,10 @@ def create_app(
         try:
             app = instance.build_app()
             logger.info("Configuration mode: %s", config_mode())
-            manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
+            # Bridge the persisted env store into ``os.environ`` and resolve the
+            # manifest under it in one seam, so a store-only ``!ENV ${VAR}`` marker
+            # resolves to its real value before ``start()`` probes any mount.
+            manifest = app.lifecycle.read_boot_manifest()
 
             # Initialize the core app context
             async with app.app_context(manifest):
