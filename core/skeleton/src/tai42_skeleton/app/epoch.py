@@ -310,9 +310,12 @@ def install_boot_core(core: ServingCore) -> Epoch:
     slot + serving app are attached later by the worker lifespan
     (:func:`attach_boot_serving_app`); an embedded / pure-``app_context`` caller needs
     no serving app. The boot epoch's number is the current client epoch."""
-    global _current, _loaded_env_keys
+    # ``_loaded_env_keys`` is owned by the cold-boot env bridge, which ran BEFORE this
+    # and populated it with the stored-env keys it applied; a later reload's removed-key
+    # reconciliation depends on those keys, so this must NOT reset it. Between contexts
+    # in one process ``clear_epoch`` clears it at teardown.
+    global _current
     _current = Epoch(number=current_client_epoch(), core=core)
-    _loaded_env_keys = set()
     return _current
 
 
@@ -361,6 +364,17 @@ def _apply_env(proposed: Mapping[str, str]) -> None:
         os.environ.pop(key, None)
     os.environ.update(proposed)
     _loaded_env_keys = set(proposed)
+
+
+def apply_env_and_reset_settings(proposed: Mapping[str, str]) -> None:
+    """Apply ``proposed`` to ``os.environ`` (removed-key reconciled) and clear the
+    settings accessor caches, so the next settings read resolves under it. The
+    apply-then-reset pair the epoch build and the cold-boot env bridge both cross —
+    one authority, so boot and reload resolve settings under the stored env
+    identically (stored env OVERRIDES container env on both, via ``_apply_env``'s
+    ``os.environ.update``)."""
+    _apply_env(proposed)
+    reset_all_settings()
 
 
 def _restore_env(snapshot: Mapping[str, str], loaded: set[str]) -> None:
@@ -610,8 +624,7 @@ async def build_and_swap_epoch(
 
     snapshot = dict(os.environ)
     loaded_before = set(_loaded_env_keys)
-    _apply_env(proposed_env)
-    reset_all_settings()
+    apply_env_and_reset_settings(proposed_env)
     # Open a staged generation for every per-generation global, so ``start()`` and the
     # epoch handlers populate the generation being built and the live epoch's globals
     # stay untouched until the atomic commit below.

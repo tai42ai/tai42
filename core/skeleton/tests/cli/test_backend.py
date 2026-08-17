@@ -63,7 +63,8 @@ class _FakeManifest:
 
 class _FakeLifecycle:
     """Records reload-handler registrations by their ``module.qualname`` key, so a
-    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``."""
+    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``,
+    and stands in for the cold-boot manifest read the launcher delegates here."""
 
     def __init__(self) -> None:
         self.reload_handlers: dict[str, object] = {}
@@ -71,6 +72,9 @@ class _FakeLifecycle:
     def on_reload(self, func):
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
+
+    def read_boot_manifest(self) -> _FakeManifest:
+        return _FakeManifest()
 
 
 class _FakeApp:
@@ -118,7 +122,6 @@ def fake_app(monkeypatch: pytest.MonkeyPatch) -> _FakeApp:
     app = _FakeApp()
     # The launcher obtains the app via the deferred factory ``instance.build_app``.
     monkeypatch.setattr(backend.instance, "build_app", lambda: app)
-    monkeypatch.setattr(backend.Manifest, "model_validate", staticmethod(lambda data: _FakeManifest()))
     return app
 
 
@@ -395,7 +398,6 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
 
     app = _SigApp()
     monkeypatch.setattr(backend.instance, "build_app", lambda: app)
-    monkeypatch.setattr(backend.Manifest, "model_validate", staticmethod(lambda data: _FakeManifest()))
 
     task = asyncio.create_task(backend.run_backend(["worker"]))
     await entered.wait()
@@ -509,7 +511,6 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
 
     app = _DrainApp()
     monkeypatch.setattr(backend.instance, "build_app", lambda: app)
-    monkeypatch.setattr(backend.Manifest, "model_validate", staticmethod(lambda data: _FakeManifest()))
 
     with tai42_app.bound(app):
         task = asyncio.create_task(backend.run_backend(["worker"]))

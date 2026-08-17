@@ -15,7 +15,6 @@ from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
-from tai42_skeleton.manifest import Manifest
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,10 @@ async def run_backend(extra_args):
     # (truthfully) as a leak. Retain the plain string instead.
     manifest_key = base_backend_settings().manifest_key
     logger.info("Configuration mode: %s", config_mode())
-    manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
+    # Bridge the persisted env store into ``os.environ`` and resolve the manifest
+    # under it in one seam, so a store-only ``!ENV ${VAR}`` marker resolves to its
+    # real value — including in the resolved manifest dumped below for fork children.
+    manifest = app.lifecycle.read_boot_manifest()
 
     # A dedicated backend runtime always registers a task backend, so it requires the
     # worker bus (the backend-runtime and server processes must converge on config

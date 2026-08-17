@@ -19,7 +19,6 @@ from tai42_skeleton.app.boot_rules import require_bus_for_k8s, require_bus_for_w
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.connectors.meta_log_redactor import install_meta_log_redactor
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
-from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.cache import app_args_settings
 from tai42_skeleton.settings.cache import manifest_path as default_manifest_path
 
@@ -99,7 +98,10 @@ async def run_stdio():
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
     install_meta_log_redactor(scope="process")
-    manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
+    # Bridge the persisted env store into ``os.environ`` and resolve the manifest
+    # under it in one seam, so a store-only ``!ENV ${VAR}`` marker resolves to its
+    # real value before ``start()`` probes any mount.
+    manifest = app.lifecycle.read_boot_manifest()
     async with app.app_context(manifest):
         await app.run_async(transport="stdio")
     return 0

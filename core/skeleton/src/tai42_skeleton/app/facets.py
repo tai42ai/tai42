@@ -332,6 +332,12 @@ class LifecycleFacet(_Facet):
     async def wait_until_ready(self) -> None:
         await self._app._wait_until_ready()
 
+    def read_boot_manifest(self) -> ManifestImpl:
+        """Bridge the persisted env store into ``os.environ``, read + validate the boot
+        manifest under it, and name any still-dangling ``!ENV`` marker — the one
+        cold-boot manifest read every serving/backend entrypoint crosses."""
+        return self._app._read_boot_manifest()
+
 
 class AdminFacet(_Facet):
     """``app.admin`` — runtime management surface (``AppAdmin``)."""
