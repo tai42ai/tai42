@@ -97,6 +97,9 @@ def test_k8s_secret_env_is_bridged_at_boot(monkeypatch):
     """The k8s-mode config manager path: a var stored in the K8s Secret is decoded,
     bridged into ``os.environ``, and its manifest marker resolves — the boot bridge is
     polymorphic over the active config manager."""
+    # The k8s client is the plugin's optional ``k8s`` extra, absent from the
+    # skeleton dev closure; skip rather than error when it is not installed.
+    pytest.importorskip("kubernetes")
     from pathlib import Path
 
     from kubernetes import client
