@@ -76,6 +76,31 @@ def test_side_effecting_init_runs_exactly_once():
     assert "tests.app._fixtures.side_effect_pkg.child" in reloaded
 
 
+def test_reloading_a_provider_registering_module_is_reload_safe():
+    # A plugin whose module body calls register_accounts_provider is reloaded by
+    # import_or_reload_package (pop + re-execute), exactly as boot/reload does.
+    # Before the reload-safe registry fix the SECOND reload re-ran the module-level
+    # registration and raised ValueError("... already registered"), crashing boot;
+    # now the re-registration of the same declared provider is a no-op.
+    from tai42_contract.access_control.registry import get_identity_provider_factory
+    from tai42_contract.access_control.registry import reset_registry as reset_identity
+    from tai42_contract.accounts.registry import get_accounts_provider_factory
+    from tai42_contract.accounts.registry import reset_registry as reset_accounts
+
+    reset_accounts()
+    reset_identity()
+    try:
+        import_or_reload_package("tests.app._fixtures.accounts_reg")  # first import: registers
+        import_or_reload_package("tests.app._fixtures.accounts_reg")  # reload: was the crash
+        # Registered in BOTH registries and still resolvable after the reload.
+        assert get_accounts_provider_factory("fixture-accounts") is not None
+        assert get_identity_provider_factory("fixture-accounts") is not None
+    finally:
+        reset_accounts()
+        reset_identity()
+        sys.modules.pop("tests.app._fixtures.accounts_reg", None)
+
+
 def test_stable_cycle_fallback_orders_by_depth_then_name():
     nodes = {"a.b.c", "a", "a.b", "z"}
     assert _stable_cycle_fallback(nodes) == ["a", "z", "a.b", "a.b.c"]

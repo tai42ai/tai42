@@ -57,10 +57,44 @@ def test_register_then_lookup_returns_the_factory():
     assert isinstance(get_identity_provider_factory("fake")(), _FakeProvider)
 
 
-def test_duplicate_name_raises_valueerror():
+class _OtherProvider(IdentityProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+
+def _other_factory(*_args: Any, **_kwargs: Any) -> IdentityProvider:
+    return _OtherProvider()
+
+
+def test_reregistering_the_same_factory_is_a_reload_safe_no_op():
+    # Reload-safety: the hot-reload primitive pops a plugin's modules and re-executes
+    # their bodies, re-running the module-level registration. Before the fix a second
+    # register_identity_provider under the same name raised "already registered" and
+    # crashed boot; now it is a quiet no-op.
+    register_identity_provider("fake", _fake_factory)
+    register_identity_provider("fake", _fake_factory)  # no raise
+    assert get_identity_provider_factory("fake") is _fake_factory
+
+
+def test_reregistering_a_reloaded_factory_object_is_a_no_op():
+    # The reload primitive mints a FRESH class object each pass, so a reloaded
+    # factory is a different object with the same __module__/__qualname__. That still
+    # counts as the same provider and must not raise.
+    register_identity_provider("dup", _OtherProvider)
+    clone = type("_OtherProvider", (IdentityProvider,), dict(_OtherProvider.__dict__))
+    clone.__module__ = _OtherProvider.__module__
+    clone.__qualname__ = _OtherProvider.__qualname__
+    assert clone is not _OtherProvider
+    register_identity_provider("dup", clone)  # no raise: same qualified identity
+    assert get_identity_provider_factory("dup") is _OtherProvider
+
+
+def test_different_factory_under_existing_name_still_raises():
+    # The real-conflict guard is preserved: a genuinely different provider claiming a
+    # taken name is a loud error, not a silent overwrite.
     register_identity_provider("fake", _fake_factory)
     with pytest.raises(ValueError, match="already registered"):
-        register_identity_provider("fake", _fake_factory)
+        register_identity_provider("fake", _other_factory)
 
 
 def test_unknown_name_raises():

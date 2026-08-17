@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from tai42_contract.access_control.registry import register_identity_provider
+from tai42_contract.access_control.registry import register_identity_provider, same_factory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -49,12 +49,23 @@ def register_accounts_provider(name: str, factory: Callable[..., AccountsProvide
 
     Registers ``factory`` here and — because an accounts provider is the
     identity answerer for its own session tokens — into the identity
-    registry under the same name. A duplicate in either registry raises.
-    Both registries stage together, so a staged accounts registration lands
-    beside its staged identity twin.
+    registry under the same name. Both registries stage together, so a staged
+    accounts registration lands beside its staged identity twin.
+
+    RELOAD-SAFE: re-registering the SAME factory (by
+    :func:`~tai42_contract.access_control.registry.same_factory`) under a name it
+    already holds is a quiet no-op in BOTH registries, so the hot-reload primitive
+    re-executing this plugin's module body does not raise. A DIFFERENT factory under
+    an already-registered name still raises loudly, in either registry. The accounts
+    no-op returns before touching the identity registry, and the identity registry
+    is only written when this name is new here, so the two registries never drift.
     """
     target = _write_target()
-    if name in target:
+    existing = target.get(name)
+    if existing is not None:
+        if same_factory(existing, factory):
+            logger.debug("accounts: accounts provider %s re-registered (reload no-op)", name)
+            return
         raise ValueError(f"Accounts provider {name!r} already registered")
     register_identity_provider(name, factory)
     target[name] = factory

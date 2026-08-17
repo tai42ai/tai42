@@ -72,6 +72,14 @@ def _fake_factory(*_args: object, **_kwargs: object) -> AccountsProvider:
     return _FakeAccounts()
 
 
+class _OtherAccounts(_FakeAccounts):
+    """A distinct provider class — a real conflict when it claims a taken name."""
+
+
+def _other_factory(*_args: object, **_kwargs: object) -> AccountsProvider:
+    return _OtherAccounts()
+
+
 # -- Registry ------------------------------------------------------------------
 
 
@@ -89,12 +97,13 @@ def test_registration_dual_registers_into_identity_registry():
 
 
 def test_identity_collision_raises_and_leaves_accounts_map_untouched():
-    # A name already taken in the identity registry must make the accounts
-    # registration raise (identity write is ordered first) without registering
-    # anything in the accounts map.
+    # A name already taken in the identity registry by a DIFFERENT provider must make
+    # the accounts registration raise (identity write is ordered first) without
+    # registering anything in the accounts map. A different factory is a real conflict;
+    # the identical factory is reload-safe and covered separately below.
     register_identity_provider("taken", _fake_factory)
     with pytest.raises(ValueError, match="already registered"):
-        register_accounts_provider("taken", _fake_factory)
+        register_accounts_provider("taken", _other_factory)
     with pytest.raises(KeyError, match="Unknown accounts provider"):
         get_accounts_provider_factory("taken")
 
@@ -109,10 +118,36 @@ def test_iter_is_name_sorted_and_a_fresh_list():
     assert [name for name, _ in iter_accounts_provider_factories()] == ["alpha", "bravo"]
 
 
-def test_duplicate_name_raises_valueerror():
+def test_reregistering_the_same_factory_is_a_reload_safe_no_op():
+    # Reload-safety: the hot-reload primitive pops the plugin's modules and
+    # re-executes their bodies, re-running the module-level register_accounts_provider.
+    # Before the fix the second call raised "already registered" and crashed boot;
+    # now it is a quiet no-op in BOTH registries, which stay consistent.
+    register_accounts_provider("fake", _fake_factory)
+    register_accounts_provider("fake", _fake_factory)  # no raise
+    assert get_accounts_provider_factory("fake") is _fake_factory
+    assert get_identity_provider_factory("fake") is _fake_factory
+
+
+def test_reregistering_a_reloaded_factory_object_is_a_no_op():
+    # The reload primitive mints a FRESH class object each pass, so a reloaded factory
+    # is a different object sharing __module__/__qualname__ — still the same provider.
+    register_accounts_provider("dup", _FakeAccounts)
+    clone = type("_FakeAccounts", (AccountsProvider,), dict(_FakeAccounts.__dict__))
+    clone.__module__ = _FakeAccounts.__module__
+    clone.__qualname__ = _FakeAccounts.__qualname__
+    assert clone is not _FakeAccounts
+    register_accounts_provider("dup", clone)  # no raise: same qualified identity
+    assert get_accounts_provider_factory("dup") is _FakeAccounts
+    assert get_identity_provider_factory("dup") is _FakeAccounts
+
+
+def test_different_factory_under_existing_name_still_raises():
+    # The real-conflict guard is preserved in BOTH registries: a genuinely different
+    # provider claiming a taken name is a loud error, not a silent overwrite.
     register_accounts_provider("fake", _fake_factory)
     with pytest.raises(ValueError, match="'fake' already registered"):
-        register_accounts_provider("fake", _fake_factory)
+        register_accounts_provider("fake", _other_factory)
 
 
 def test_unknown_name_raises_keyerror():
