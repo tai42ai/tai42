@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-skeleton"
-version = "4.1.2"
+version = "4.2.0"
 description = "Open-source implementation of tai42-contract: the extended MCP server hosting tools, agents, extensions, connectors, hooks, and storage for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     # The pure interface contract this package implements.
-    "tai42-contract>=2.1,<3",
+    "tai42-contract>=2.2,<3",
     # Generic leaf helpers + pooled-client framework. Extras: the LLM stack
     # (agent facets, checkpoint/store registries), jq (hooks + policy
     # conditions), uvicorn (CLI arg parsing), redis/postgres drivers. The floor
@@ -32,10 +32,10 @@ dependencies = [
     # holds around every reload body, and `tai42_kit.signals` + `tai42_kit.backend`
     # (signal_chain, BackendDispatchSettings), which the backend CLI and the
     # dispatch settings use.
-    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=3.0,<4",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=3.1,<4",
     # The `tai` command client. The server owns no console script; it contributes
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
-    "tai42-cli>=3.0,<4",
+    "tai42-cli>=3.1,<4",
     # Direct third-party deps imported by the orchestrator + copied-in impl.
     "click>=8.3",
     # The local commands the skeleton contributes are Typer apps. Typer builds on
