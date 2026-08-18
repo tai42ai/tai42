@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-stripe"
-version = "1.0.1"
+version = "1.0.2"
 description = "Stripe payment tools for the TAI ecosystem: manifest-loaded tools for the external-ask checkout link, the webhook-bridge confirm, the reconciliation recovery layer, a flexible-amount non-blocking payment link, an early expire of an issued checkout session, and webhook-endpoint provisioning (create, list, delete)."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=2.1,<3",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Stripe REST module wires to.
-    "tai42-kit[curl]>=2.0,<4",
+    "tai42-kit[curl]>=3.0,<4",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",

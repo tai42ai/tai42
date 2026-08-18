@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-whatsapp"
-version = "1.0.1"
+version = "1.0.2"
 description = "WhatsApp provisioning tools for the TAI ecosystem: manifest-loaded Meta Graph tools that register a WhatsApp message template, list the account's message templates, delete a message template by name, and subscribe the app to a WhatsApp Business Account's webhooks."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=2.1,<3",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Graph REST module wires to.
-    "tai42-kit[curl]>=2.0,<4",
+    "tai42-kit[curl]>=3.0,<4",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-rq"
-version = "1.0.1"
+version = "1.0.2"
 description = "RQ execution backend for the TAI ecosystem — background tool runs and schedules over Redis."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -32,7 +32,7 @@ dependencies = [
     # `tai42_kit.fork_gate`, the barrier this worker holds around each fork instant
     # (prefork) or in-process job (solo/gevent), and `tai42_kit.backend`
     # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
-    "tai42-kit[jq]>=2.0,<4",
+    "tai42-kit[jq]>=3.0,<4",
     # The broker stack: RQ workers/queues, the recurring-job scheduler (beat),
     # and the web dashboard.
     "rq~=2.7.0",

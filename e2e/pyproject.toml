@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "2.0.2"
+version = "2.0.3"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -29,7 +29,7 @@ dependencies = [
     # harness unresolvable.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=2.1,<3",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=2.0,<4",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.0,<4",
     "tai42-skeleton[toolbox,files]>=4.1,<5",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing

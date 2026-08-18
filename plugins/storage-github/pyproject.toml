@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-storage-github"
-version = "1.0.1"
+version = "1.0.2"
 description = "GitHub-backed Storage provider (text + binary/media) for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,7 +27,7 @@ dependencies = [
     # ObjectStat, assert_not_root, and the tai42_app handle.
     "tai42-contract>=2.1,<3",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=2.0,<4",
+    "tai42-kit>=3.0,<4",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
