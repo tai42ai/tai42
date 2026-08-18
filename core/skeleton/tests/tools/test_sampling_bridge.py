@@ -41,6 +41,45 @@ def _patch_model(monkeypatch, reply: str) -> _FakeModel:
     return model
 
 
+def test_platform_llm_omits_unset_temperature_from_get_llm(monkeypatch):
+    # platform_llm() builds via
+    # get_llm(provider, **llm_settings().model_dump(exclude_none=True)). An unset
+    # temperature is None, so exclude_none DROPS it — the provider is never sent
+    # one it was not configured with.
+    from unittest.mock import MagicMock
+
+    from tai42_kit.llm import models, settings
+
+    get_llm = MagicMock()
+    monkeypatch.setattr(models, "get_llm", get_llm)
+    monkeypatch.setattr(settings, "llm_settings", lambda: settings.LLMSettings())
+    monkeypatch.setattr(settings, "llm_provider_settings", lambda: settings.LLMProviderSettings(llm="openai"))
+
+    sampling_bridge.platform_llm()
+
+    get_llm.assert_called_once()
+    assert get_llm.call_args.args == ("openai",)
+    assert "temperature" not in get_llm.call_args.kwargs
+    assert get_llm.call_args.kwargs.get("model") == "gpt-4o"
+
+
+def test_platform_llm_passes_configured_temperature_to_get_llm(monkeypatch):
+    # A configured temperature survives model_dump(exclude_none=True) and reaches
+    # get_llm unchanged.
+    from unittest.mock import MagicMock
+
+    from tai42_kit.llm import models, settings
+
+    get_llm = MagicMock()
+    monkeypatch.setattr(models, "get_llm", get_llm)
+    monkeypatch.setattr(settings, "llm_settings", lambda: settings.LLMSettings(temperature=0.2))
+    monkeypatch.setattr(settings, "llm_provider_settings", lambda: settings.LLMProviderSettings(llm="openai"))
+
+    sampling_bridge.platform_llm()
+
+    assert get_llm.call_args.kwargs.get("temperature") == 0.2
+
+
 def test_platform_sample_returns_text_and_logs_fallback(monkeypatch, caplog):
     _patch_model(monkeypatch, "the answer")
 
