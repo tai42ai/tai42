@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: tools-github
 package: tai42-tools-github
-version: 1.0.0
+version: 1.0.1
 description: >-
   GitHub provisioning tools for the TAI ecosystem: manifest-loaded
   repository-webhook setup tools that create a repository webhook, list a

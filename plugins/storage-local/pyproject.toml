@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-storage-local"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local-filesystem storage backend for the TAI ecosystem: a manifest-loaded Storage plugin serving text and binary content from a directory tree."
 readme = "README.md"
 requires-python = ">=3.13"
