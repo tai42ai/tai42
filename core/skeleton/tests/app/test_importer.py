@@ -128,6 +128,42 @@ def test_stale_extra_module_is_dropped_not_raised(caplog):
     )
 
 
+def test_extra_whose_backing_file_was_deleted_is_dropped_not_raised(tmp_path, monkeypatch, caplog):
+    # A plugin UPDATE can delete a route-sibling whose module is STILL cached in
+    # ``sys.modules`` (imported under the old epoch). ``find_spec`` short-circuits to the
+    # cached module's stale ``__spec__``, so the staleness check would keep the vanished
+    # module, pop it, and fail to reimport it — a ModuleNotFoundError that quarantines the
+    # plugin. The extra must instead be dropped: popped first, so ``find_spec`` resolves
+    # against the filesystem, sees the deleted file, and drops it with the log.
+    pkg = tmp_path / "deleted_sibling_pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "leaf.py").write_text("MARKER = 'leaf'\n")
+    (pkg / "sibling.py").write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    leaf = "deleted_sibling_pkg.leaf"
+    sibling = "deleted_sibling_pkg.sibling"
+    try:
+        import_or_reload_package(leaf)  # boot the leaf
+        importlib.import_module(sibling)  # cache the sibling under the old epoch
+        assert sibling in sys.modules
+        # The update removes the sibling's backing file while its module stays cached.
+        (pkg / "sibling.py").unlink()
+
+        with caplog.at_level(logging.INFO, logger="tai42_skeleton.app.importer"):
+            reloaded = import_or_reload_package(leaf, [sibling])
+
+        # No raise: the vanished sibling is dropped, and the leaf reimport proceeds.
+        assert reloaded == [leaf]
+        assert sibling not in sys.modules
+        assert any(f"dropping stale route-sibling extra {sibling}" in record.message for record in caplog.records)
+    finally:
+        sys.modules.pop(leaf, None)
+        sys.modules.pop(sibling, None)
+        sys.modules.pop("deleted_sibling_pkg", None)
+
+
 def test_stable_cycle_fallback_orders_by_depth_then_name():
     nodes = {"a.b.c", "a", "a.b", "z"}
     assert _stable_cycle_fallback(nodes) == ["a", "z", "a.b", "a.b.c"]

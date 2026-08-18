@@ -174,6 +174,106 @@ def test_multi_router_distribution_reloads_each_module_under_its_own_binding(plu
     assert _regprobe.exec_count[_USERS_LEAF] == 1
 
 
+_EPS_OWNER = RouteOwner(kind="plugin", owner_ref="fixture/eps", item_name="eps")
+_EPS_BINDING = MountBinding(
+    owner_ref="fixture/eps",
+    item_name="eps",
+    base="eps",
+    declared_routes=(RouteDecl(path="/inbound", methods=["POST"], public=True),),
+)
+_EPS_PATH = "/api/eps/inbound"
+
+_EPS_INBOUND_SRC = """\
+from _regprobe import register_route
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from tai42_skeleton.app.route_registry import RouteOwner
+
+OWNER = RouteOwner(kind="plugin", owner_ref="fixture/eps", item_name="eps")
+
+
+async def inbound(request: Request) -> Response:
+    return JSONResponse({"data": {}})
+
+
+register_route("/inbound", "POST", OWNER, inbound)
+"""
+
+# v2 leaf: the sibling is gone, so the leaf registers the route ITSELF.
+_EPS_V2_LEAF_SRC = """\
+from _regprobe import register_route
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from tai42_skeleton.app.route_registry import RouteOwner
+
+OWNER = RouteOwner(kind="plugin", owner_ref="fixture/eps", item_name="eps")
+
+
+async def inbound(request: Request) -> Response:
+    return JSONResponse({"data": {}})
+
+
+register_route("/inbound", "POST", OWNER, inbound)
+"""
+
+
+def test_update_that_deletes_the_sibling_reloads_cleanly(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # The epsilon-shaped plugin UPDATE: v1's manifest leaf registers by importing a
+    # route-carrying SIBLING; v2's leaf self-registers and the update REMOVES the sibling
+    # file. The reload's extra set — the owner's route modules recorded on the OLD epoch —
+    # still names the vanished sibling, whose module is still cached in ``sys.modules``.
+    # The reload must drop that extra against the filesystem (not its stale cached spec),
+    # so the leaf reimport re-fires v2's own registration: the route stays live, the
+    # plugin is not quarantined by a ModuleNotFoundError, and the audit sees no drop.
+    registry = RouteRegistry()
+    monkeypatch.setattr("tai42_skeleton.app.route_registry.route_registry", registry)
+    monkeypatch.syspath_prepend(str(_PLUGIN_DIST_ROOT))  # for ``_regprobe``
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    pkg = tmp_path / "epsilon_plugin"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "register.py").write_text("import epsilon_plugin.inbound  # noqa: F401\n")
+    (pkg / "inbound.py").write_text(_EPS_INBOUND_SRC)
+
+    leaf = "epsilon_plugin.register"
+    sibling = "epsilon_plugin.inbound"
+    _forget(("epsilon_plugin",))
+    try:
+        # Boot v1: the leaf imports the sibling, which registers the route; the owner's
+        # recorded route module is the SIBLING.
+        with bind_module(_EPS_BINDING):
+            import_or_reload_package(leaf)
+        assert registry.match(_EPS_PATH, "POST") is not None
+        assert registry.owner_route_modules(_EPS_OWNER) == frozenset({sibling})
+
+        # The reload extra is computed from the OLD epoch — the vanished sibling.
+        extra = _reload_extra(registry, _EPS_OWNER, leaf)
+        assert extra == frozenset({sibling})
+
+        # The update lands: the leaf self-registers and the sibling file is DELETED, while
+        # its module stays cached in ``sys.modules`` from the boot import.
+        (pkg / "register.py").write_text(_EPS_V2_LEAF_SRC)
+        (pkg / "inbound.py").unlink()
+        assert sibling in sys.modules
+
+        # Reload under the binding with the stale extra: the sibling is dropped (its file is
+        # gone), the leaf re-fires v2's own registration, and the route is back — no
+        # ModuleNotFoundError, no ``MountRegistrationError`` quarantine.
+        registry.reset_shape_index()
+        with bind_module(_EPS_BINDING):
+            reloaded = import_or_reload_package(leaf, extra)
+        assert reloaded == [leaf]
+        assert sibling not in sys.modules
+        assert registry.match(_EPS_PATH, "POST") is not None
+        # The self-registering leaf now carries the route.
+        assert leaf in registry.owner_route_modules(_EPS_OWNER)
+    finally:
+        _forget(("epsilon_plugin",))
+
+
 def test_dual_route_leaf_and_sibling_both_survive_a_rebuild(plugin_dist: RouteRegistry) -> None:
     import _regprobe  # pyright: ignore[reportMissingImports]  (on sys.path via the plugin_dist fixture)
 

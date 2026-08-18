@@ -96,6 +96,13 @@ def import_or_reload_package(root_pkg_name: str | None, extra_modules: Iterable[
     for name in extra_modules:
         if name in managed:
             continue
+        # ``find_spec`` short-circuits to ``sys.modules[name].__spec__`` when the module
+        # is still cached, so a sibling whose file the update removed resolves against its
+        # stale in-memory spec and dodges the staleness check. Drop the module from the
+        # cache first — the ``invalidate_caches`` above has already refreshed the finders —
+        # so resolution runs against the filesystem. Popping a dead module is correct
+        # hygiene, and a resolving extra is popped again below as a managed member.
+        sys.modules.pop(name, None)
         if importlib.util.find_spec(name) is None:
             # A stale route-sibling of ``root_pkg_name``: notable but expected across a
             # plugin update, so log the drop rather than pass it silently.
