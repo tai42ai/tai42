@@ -27,49 +27,49 @@ dependencies = [
     # its tai42-contract cap to admit 0.3 — a lower floor lets a pre-0.3 wheel back
     # in and makes the published harness unresolvable against tai42-contract 0.3.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=1.11,<2",
+    "tai42-contract>=2.0,<3",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=1.9,<2",
-    "tai42-skeleton[toolbox,files]>=3.0,<4",
-    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=0.5,<0.6",
+    "tai42-skeleton[toolbox,files]>=4.0,<5",
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
-    "tai42-tools-stripe>=0.7,<0.8",
-    "tai42-agents>=0.9,<0.10",
+    "tai42-tools-stripe>=1.0,<2",
+    "tai42-agents>=1.0,<2",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
-    "tai42-identity-redis>=0.3,<0.4",
+    "tai42-identity-redis>=1.0,<2",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
     # Postgres-backed accounts provider (password login, sessions, invites), the
     # OIDC/OAuth2 login accounts provider, and the validate-only OIDC identity
     # provider (issuer-minted machine JWTs).
-    "tai42-accounts-postgres>=1.1,<2",
-    "tai42-accounts-oidc>=0.4,<0.5",
-    "tai42-identity-oidc>=0.3,<0.4",
+    "tai42-accounts-postgres>=2.0,<3",
+    "tai42-accounts-oidc>=1.0,<2",
+    "tai42-identity-oidc>=1.0,<2",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
-    "tai42-backend-arq>=0.8,<0.9",
-    "tai42-backend-celery>=0.7,<0.8",
-    "tai42-backend-rq>=0.7,<0.8",
+    "tai42-backend-arq>=1.0,<2",
+    "tai42-backend-celery>=1.0,<2",
+    "tai42-backend-rq>=1.0,<2",
     # The real Storage plugins: the local filesystem backing plus the S3 and
     # GitHub object stores the storage-axis variant sweep boots.
-    "tai42-storage-local>=0.3,<0.4",
-    "tai42-storage-s3>=0.3,<0.4",
-    "tai42-storage-github>=0.4,<0.5",
+    "tai42-storage-local>=1.0,<2",
+    "tai42-storage-s3>=1.0,<2",
+    "tai42-storage-github>=1.0,<2",
     # The real webhook verifiers.
-    "tai42-webhook-verifier-github>=0.3,<0.4",
-    "tai42-webhook-verifier-stripe>=0.3,<0.4",
+    "tai42-webhook-verifier-github>=1.0,<2",
+    "tai42-webhook-verifier-stripe>=1.0,<2",
     # The channel plugins that deliver ask_user questions over a chat transport.
-    "tai42-channel-telegram>=0.10,<0.11",
-    "tai42-channel-slack>=0.10,<0.11",
-    "tai42-channel-twilio>=0.8,<0.9",
-    "tai42-channel-whatsapp>=0.9,<0.10",
-    "tai42-channel-web>=0.8,<0.9",
+    "tai42-channel-telegram>=1.0,<2",
+    "tai42-channel-slack>=1.0,<2",
+    "tai42-channel-twilio>=1.0,<2",
+    "tai42-channel-whatsapp>=1.0,<2",
+    "tai42-channel-web>=1.0,<2",
     # Loaded only by the monitoring stack's manifest.
-    "tai42-monitoring-langfuse>=0.4,<0.5",
+    "tai42-monitoring-langfuse>=1.0,<2",
     # The shipped OAuth connector plugins the shipped-connectors stack boots.
-    "tai42-connector-google>=0.3,<0.4",
-    "tai42-connector-atlassian>=0.3,<0.4",
+    "tai42-connector-google>=1.0,<2",
+    "tai42-connector-atlassian>=1.0,<2",
     # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
     # client the K8sConfigManager imports where the provider runs.
-    "tai42-config-k8s[k8s]>=0.4,<0.5",
+    "tai42-config-k8s[k8s]>=1.0,<2",
 
     # Harness runtime.
     "pytest>=8",
