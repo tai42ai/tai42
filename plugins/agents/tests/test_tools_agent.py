@@ -674,6 +674,16 @@ def test_face_rejects_response_format_without_title(monkeypatch: pytest.MonkeyPa
         _capture_config(monkeypatch, face, user_message="hi", response_format={"type": "object"})
 
 
+@pytest.mark.parametrize("face", ["run", "astream"])
+def test_face_rejects_oneof_response_format_with_untitled_variant(monkeypatch: pytest.MonkeyPatch, face: str) -> None:
+    """A ``oneOf`` ``response_format`` binds one structured-output name per variant, so
+    an untitled variant (which would take a random name) is rejected on both faces —
+    even though the container carries a top-level title."""
+    schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
+    with pytest.raises(ValueError, match="oneOf variants must each"):
+        _capture_config(monkeypatch, face, user_message="hi", response_format=schema)
+
+
 # --------------------------------------------------------------------------
 # astream: full contract event taxonomy from a scripted stream
 # --------------------------------------------------------------------------

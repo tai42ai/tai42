@@ -413,7 +413,7 @@ class TestRefineAgentRecovery:
         )
         monkeypatch.setattr(fagent, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(fagent, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(fagent, "context_overflow_middlewares", list)
+        monkeypatch.setattr(fagent, "context_overflow_middlewares", lambda system_prompt=None: [])
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return models[provider]

@@ -11,7 +11,7 @@ structured-output name on a JSON-Schema ``response_format``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 
@@ -73,16 +73,47 @@ def reject_blank_memory_keys(
             raise ValueError(f"{qualified_face}: {name} must be a non-empty string; got {value!r}")
 
 
+def _oneof_leaf_variants(schema: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """Yield the leaf schemas a JSON-Schema ``oneOf`` fans out into.
+
+    Mirrors the tool-calling strategy's variant walk: a ``oneOf`` binds one
+    structured-output name per leaf, and a nested ``oneOf`` is recursed the same
+    way. Only ``oneOf`` fans out for a dict schema; a non-dict or non-list value
+    is not a container and yields nothing.
+    """
+    variants = schema.get("oneOf")
+    if not isinstance(variants, list):
+        return
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        if isinstance(variant.get("oneOf"), list):
+            yield from _oneof_leaf_variants(variant)
+        else:
+            yield variant
+
+
 def reject_untitled_response_format(agent_name: str, response_format: Any) -> None:
     """Raise ``ValueError`` when a JSON-Schema ``response_format`` carries no ``"title"``.
 
     The top-level ``"title"`` is the structured-output name the run forces, so a
     dict schema without one is malformed and is named (``agent_name`` opening the
-    message). ``None`` and a pydantic class (which carries its own name) pass
-    untouched.
+    message). Each ``oneOf`` variant binds its own structured-output name too, so a
+    variant lacking a non-empty ``"title"`` is named the same way — otherwise the
+    tool-calling strategy mints a random ``response_format_<hex>`` name for it.
+    ``None`` and a pydantic class (which carries its own name) pass untouched.
     """
-    if isinstance(response_format, dict) and "title" not in response_format:
+    if not isinstance(response_format, dict):
+        return
+    if "title" not in response_format:
         raise ValueError(
             f"{agent_name} response_format must be a JSON Schema with a top-level 'title' "
             "(used as the structured-output name)."
         )
+    for variant in _oneof_leaf_variants(response_format):
+        title = variant.get("title")
+        if not (isinstance(title, str) and title.strip()):
+            raise ValueError(
+                f"{agent_name} response_format oneOf variants must each be a JSON Schema with a "
+                "non-empty 'title' (used as the structured-output name)."
+            )

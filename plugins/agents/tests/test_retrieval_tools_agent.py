@@ -23,10 +23,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool, ToolException
-from langgraph.constants import END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.constants import END, START
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr, ValidationError
@@ -113,11 +114,13 @@ class RecordingStore(InMemoryStore):
 
 
 class ScriptedChatModel(BaseChatModel):
-    """Returns a fixed list of messages in order; ``bind_tools`` is a no-op so
-    the agent node can bind the retrieve/selected tools and still be scripted."""
+    """Returns a fixed list of messages in order and records the exact message
+    list each model call received; ``bind_tools`` is a no-op so the agent node
+    can bind the retrieve/selected tools and still be scripted."""
 
     _responses: list[BaseMessage] = PrivateAttr(default_factory=list)
     _index: int = PrivateAttr(default=0)
+    _seen: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
 
     def __init__(self, responses: Sequence[BaseMessage], **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -130,6 +133,7 @@ class ScriptedChatModel(BaseChatModel):
     def _generate(
         self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
     ) -> ChatResult:
+        self._seen.append(list(messages))
         message = self._responses[self._index]
         self._index += 1
         return ChatResult(generations=[ChatGeneration(message=message)])
@@ -547,6 +551,79 @@ class TestTerminalResultHelper:
 
 
 # --------------------------------------------------------------------------
+# The system prompt is per-run model configuration, never checkpointed state
+# --------------------------------------------------------------------------
+
+
+class TestSystemPromptPerRun:
+    def _compiled(self, llm: ScriptedChatModel, checkpoint: InMemorySaver) -> Any:
+        alpha = _tool("alpha", "the alpha tool")
+        alpha_id = text_to_md5("alpha")
+        return asyncio.run(
+            RetrievalToolsGraph(
+                tools=[alpha],
+                llm=llm,
+                store=StubStore([alpha_id]),
+                checkpoint=checkpoint,
+                system_prompt="be brief",
+            ).abuild()
+        )
+
+    def _terminal_llm(self) -> ScriptedChatModel:
+        return ScriptedChatModel(
+            [AIMessage(content=json.dumps({"status": "success", "message": "done", "result": "ok"}))]
+        )
+
+    def test_system_prompt_is_prepended_at_the_model_call_but_never_stored(self) -> None:
+        llm = self._terminal_llm()
+        graph = self._compiled(llm, InMemorySaver())
+        config = {"configurable": {"thread_id": "sys-t1"}}
+
+        state = asyncio.run(graph.ainvoke({"messages": [{"role": "user", "content": "hi"}]}, config))
+
+        # The model call led with exactly one system message — the per-run prompt.
+        seen = llm._seen[0]
+        assert isinstance(seen[0], SystemMessage)
+        assert seen[0].content == "be brief"
+        assert sum(isinstance(m, SystemMessage) for m in seen) == 1
+        # The checkpointed thread stays system-free: conversation only.
+        assert not any(isinstance(m, SystemMessage) for m in state["messages"])
+
+    def test_stored_system_message_is_purged_before_the_model_call(self) -> None:
+        llm = self._terminal_llm()
+        graph = self._compiled(llm, InMemorySaver())
+        config = {"configurable": {"thread_id": "sys-t2"}}
+
+        # Seed a thread whose stored history carries a system message ahead of
+        # the conversation, written straight into the checkpoint.
+        asyncio.run(
+            graph.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        SystemMessage(content="stored rules", id="stale-system"),
+                        HumanMessage(content="earlier turn", id="h1"),
+                    ]
+                },
+                as_node=START,
+            )
+        )
+        state = asyncio.run(graph.ainvoke({"messages": [{"role": "user", "content": "hi"}]}, config))
+
+        # The context node purged the stored system message, so the model saw
+        # exactly one — the per-run prompt, first — never the stored one.
+        seen = llm._seen[0]
+        systems = [m for m in seen if isinstance(m, SystemMessage)]
+        assert len(systems) == 1
+        assert seen[0] is systems[0]
+        assert systems[0].content == "be brief"
+        # The purge is persistent: the stored system message is gone from state
+        # while the conversation survives.
+        assert not any(isinstance(m, SystemMessage) for m in state["messages"])
+        assert [m.content for m in state["messages"][:2]] == ["earlier turn", "hi"]
+
+
+# --------------------------------------------------------------------------
 # StreamEvent projection over a real compiled graph
 # --------------------------------------------------------------------------
 
@@ -877,10 +954,11 @@ class TestBuild:
         assert config == {"configurable": {"thread_id": "t"}}
         # ``_build`` hands back the resolved llm for the structured finalization pass.
         assert llm == "llm-obj"
-        # Rendered user message + system prompt thread into the built agent input.
-        roles = {message["role"]: message["content"] for message in messages["messages"]}
-        assert roles["user"] == "do it"
-        assert "be brief" in roles["system"]
+        # The rendered user message is the whole agent input; the system prompt is
+        # per-run graph configuration (prepended at each model call, never
+        # checkpointed state) and reaches the graph constructor instead.
+        assert messages == {"messages": [{"role": "user", "content": "do it"}]}
+        assert "be brief" in captured["graph_kwargs"]["system_prompt"]
 
         # Providers fell back to the settings defaults and were threaded through.
         assert captured["llm_provider"] == "def_llm"

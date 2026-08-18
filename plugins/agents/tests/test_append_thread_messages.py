@@ -165,7 +165,7 @@ class TestToolsAgentAppend:
         )
         monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(bta, "context_overflow_middlewares", list)
+        monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
         monkeypatch.setattr(bta, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
@@ -501,7 +501,7 @@ class TestMcpToolsAgentAppend:
         )
         monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
         monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(bta, "context_overflow_middlewares", list)
+        monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
         monkeypatch.setattr(bta, "init_langgraph_config", _strip_callbacks)
 
         async def get_llm(*, provider: str, **k: Any) -> Any:

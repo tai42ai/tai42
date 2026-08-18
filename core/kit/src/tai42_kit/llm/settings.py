@@ -23,6 +23,15 @@ ContextOverflowMethod = Literal["trimming", "summarization", "context_editing"]
 
 
 class TrimmingMiddlewareSettings(TaiBaseSettings):
+    """Behavior of the trimming context-overflow strategy.
+
+    ``max_tokens`` bounds the outgoing request. The per-run system prompt is
+    graph configuration (never message state): with ``include_system=True`` its
+    tokens count against ``max_tokens`` — the history is trimmed to the budget
+    minus the prompt — while ``include_system=False`` scopes the budget to the
+    history alone.
+    """
+
     model_config = SettingsConfigDict(env_prefix="TRIMMING_MIDDLEWARE_")
 
     strategy: Literal["first", "last"] = "last"

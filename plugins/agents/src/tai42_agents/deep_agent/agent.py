@@ -46,6 +46,7 @@ from tai42_agents._internal.reject import (
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import aproject_agent_events
+from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.deep_agent.factory import build_deep_agent
 from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 from tai42_agents.deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
@@ -232,13 +233,16 @@ class DeepAgent(Agent):
         internal_subagents = await resolve_subagent_specs(subagents)
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
 
+        # Wrap the schema ONCE and bind that same strategy into both the graph and the
+        # projection, so the synthetic tool names match by identity.
+        strategy = as_tool_strategy(response_format)
         agent = await self._resolve_and_build(
             tools=resolved_tools,
             subagents=internal_subagents,
             skills=skills,
             inline_skills=coerced_inline_skills or None,
             system_message=rendered_system,
-            response_format=response_format,
+            response_format=strategy,
             interrupt_on=interrupt_on,
             llm_provider=llm_provider,
             checkpoint_provider=checkpoint_provider,
@@ -254,7 +258,9 @@ class DeepAgent(Agent):
             agent_input = build_agent_input(rendered_user)
 
         return await self._drain(
-            self._astream_built(agent, agent_input, config, interrupt_on, response_format=response_format),
+            self._astream_built(
+                agent, agent_input, config, interrupt_on, response_format=response_format, structured_strategy=strategy
+            ),
             response_format=response_format,
         )
 
@@ -379,13 +385,16 @@ class DeepAgent(Agent):
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
         internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
+        # Wrap the schema ONCE and bind that same strategy into both the graph and the
+        # projection, so the synthetic tool names match by identity.
+        strategy = as_tool_strategy(response_format)
         agent, config = await self._build_agent(
             tools=[*tools, *client_tools],
             subagents=internal_subagents,
             skills=skills,
             inline_skills=coerced_inline_skills or None,
             system_message=system_message,
-            response_format=response_format,
+            response_format=strategy,
             interrupt_on=interrupt_on,
             thread_id=thread_id,
             resume_checkpoint_id=resume_checkpoint_id,
@@ -406,7 +415,7 @@ class DeepAgent(Agent):
         saw_structured = False
         saw_interrupt = False
         async for event in self._astream_built(
-            agent, agent_input, config, interrupt_on, response_format=response_format
+            agent, agent_input, config, interrupt_on, response_format=response_format, structured_strategy=strategy
         ):
             if isinstance(event, StructuredFinal):
                 saw_structured = True
@@ -426,6 +435,7 @@ class DeepAgent(Agent):
         config: dict[str, Any],
         interrupt_on: dict[str, Any] | None,
         response_format: Any = None,
+        structured_strategy: Any = None,
     ) -> AsyncIterator[StreamEvent]:
         """Project a built agent's run into contract events, then one
         :class:`InterruptFinal` per pending interrupt.
@@ -433,10 +443,15 @@ class DeepAgent(Agent):
         The shared streaming core behind both faces, so a thread poisoned by an
         aborted turn is repaired here before the run. A graph can only pause when
         ``interrupt_on`` is configured, so the paused-state read is skipped
-        otherwise. ``response_format`` is handed to the projection for validation.
+        otherwise. The raw ``response_format`` is handed to the projection for
+        validation; ``structured_strategy`` is the exact ``ToolStrategy`` the graph
+        was compiled with, so the synthetic tool names it suppresses match by
+        identity.
         """
         await _repair_dangling_tool_calls(agent, config)
-        async for event in aproject_agent_events(agent, agent_input, config, response_format=response_format):
+        async for event in aproject_agent_events(
+            agent, agent_input, config, response_format=response_format, structured_strategy=structured_strategy
+        ):
             yield event
         if interrupt_on:
             for interrupt in await self._pending_interrupts(agent, config):

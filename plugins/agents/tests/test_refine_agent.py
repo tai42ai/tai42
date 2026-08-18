@@ -17,7 +17,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import ValidationError
 from tai42_contract.agent import (
@@ -32,12 +33,17 @@ from tai42_contract.agent import (
     ToolResultStep,
 )
 from tai42_contract.app import tai42_app
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 import tai42_agents.refine_agent.agent as agent_mod
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.refine_agent.agent import RefineAgent, RefineAgentInput
-from tai42_agents.refine_agent.prompt import CRITIC_APPROVAL_MESSAGE
+from tai42_agents.refine_agent.prompt import (
+    CRITIC_APPROVAL_MESSAGE,
+    CRITIC_SYSTEM_MESSAGE,
+    EVALUATOR_SYSTEM_MESSAGE,
+)
 
 AGENT_NAME = "refine_agent"
 
@@ -78,13 +84,16 @@ class FakeAgent:
 
 
 class CreateAgentRecorder:
-    """A ``create_agent`` replacement: hands out queued fakes and records the tools
-    and ``response_format`` each was compiled with (the latter is ``None`` on the
-    text-loop evaluator/critic and the schema only on the structured final pass)."""
+    """A ``create_agent`` replacement: hands out queued fakes and records the
+    tools, per-run ``system_prompt``, and ``response_format`` each was compiled
+    with (the latter is ``None`` on the text-loop evaluator/critic and the
+    schema strategy only on the structured final pass)."""
 
     def __init__(self, agents: list[FakeAgent]) -> None:
         self._queue = list(agents)
         self.tools_per_call: list[list[Any]] = []
+        self.system_prompts: list[Any] = []
+        self.middlewares_per_call: list[list[Any]] = []
         self.response_formats: list[Any] = []
 
     def __call__(
@@ -96,8 +105,11 @@ class CreateAgentRecorder:
         middleware: Any,
         debug: Any,
         response_format: Any = None,
+        system_prompt: Any = None,
     ) -> FakeAgent:
         self.tools_per_call.append(list(tools))
+        self.system_prompts.append(system_prompt)
+        self.middlewares_per_call.append(list(middleware))
         self.response_formats.append(response_format)
         return self._queue.pop(0)
 
@@ -135,7 +147,7 @@ def _patch_loop(monkeypatch: pytest.MonkeyPatch, agents: list[FakeAgent]) -> Cre
 
     monkeypatch.setattr(agent_mod, "get_llm_async", _get_llm_async)
     monkeypatch.setattr(agent_mod, "checkpoint_registry", lambda: _CheckpointRegistry())
-    monkeypatch.setattr(agent_mod, "context_overflow_middlewares", list)
+    monkeypatch.setattr(agent_mod, "context_overflow_middlewares", lambda system_prompt=None: [])
     monkeypatch.setattr(agent_mod, "logging_settings", lambda: _LoggingSettings())
     monkeypatch.setattr(agent_mod, "llm_provider_settings", lambda: _ProviderSettings())
     monkeypatch.setattr(agent_mod, "llm_settings", lambda: _LlmSettings())
@@ -417,9 +429,13 @@ def test_run_with_response_format_forces_final_answer_on_a_fresh_thread(
     )
 
     assert result == {"answer": "final"}
-    # Only the THIRD create_agent call (the structured final pass) carried the schema;
-    # the text-loop evaluator and critic were built without one.
-    assert recorder.response_formats == [None, None, _REFINE_SCHEMA]
+    # Only the THIRD create_agent call (the structured final pass) carried the
+    # schema — pinned to the tool-calling strategy, never provider-dependent
+    # auto-routing; the text-loop evaluator and critic were built without one.
+    assert recorder.response_formats[:2] == [None, None]
+    structured_format = recorder.response_formats[2]
+    assert isinstance(structured_format, ToolStrategy)
+    assert structured_format.schema == _REFINE_SCHEMA
     # The loop's evaluator (not the structured graph) is read via aget_state twice —
     # once by the turn-start repair before the loop, once to read history for the
     # structured pass — and the structured pass is a DISTINCT graph (no cross-topology
@@ -431,6 +447,42 @@ def test_run_with_response_format_forces_final_answer_on_a_fresh_thread(
     fed = structured.astream_inputs[0]["messages"]
     assert fed[0] is history[0]
     assert fed[-1] == {"role": "user", "content": "Critic Approved."}
+
+
+def test_role_prompts_are_per_run_config_with_purge_middleware_and_system_free_inputs(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """Every ``create_agent`` call carries its role's system message as the graph's
+    per-run ``system_prompt`` — never as an input message — plus a leading
+    ``SystemPurgeMiddleware``, and the loop's agent inputs are system-free, so no
+    system message ever enters checkpointed thread state."""
+    history = [AIMessage(content="draft under negotiation")]
+    evaluator = FakeAgent(invoke_contents=["draft"], history=history)
+    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    structured = FakeAgent(invoke_contents=[], stream_items=_structured_stream_items({"answer": "final"}))
+    recorder = _patch_loop(monkeypatch, [evaluator, critic, structured])
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    asyncio.run(agent.run(evaluator_message="write it", critic_message="review it", response_format=_REFINE_SCHEMA))
+
+    # The evaluator, critic, and structured final pass each compiled with their
+    # role's per-run system prompt.
+    assert recorder.system_prompts == [EVALUATOR_SYSTEM_MESSAGE, CRITIC_SYSTEM_MESSAGE, EVALUATOR_SYSTEM_MESSAGE]
+    # Each graph's middleware stack leads with the system purge, so a stored
+    # system message never reaches the model alongside the per-run prompt.
+    assert len(recorder.middlewares_per_call) == 3
+    for middleware in recorder.middlewares_per_call:
+        assert isinstance(middleware[0], SystemPurgeMiddleware)
+    # The loop feeds its agents only user turns and prior conversation history —
+    # never a system message that would become checkpointed state.
+    loop_inputs = [*evaluator.ainvoke_inputs, *critic.ainvoke_inputs, *structured.astream_inputs]
+    assert loop_inputs
+    for agent_input in loop_inputs:
+        for message in agent_input["messages"]:
+            if isinstance(message, dict):
+                assert message["role"] != "system"
+            else:
+                assert not isinstance(message, SystemMessage)
 
 
 def test_run_with_response_format_but_no_structured_raises_loudly(
@@ -525,6 +577,18 @@ def test_astream_response_format_without_title_raises_loudly(
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     with pytest.raises(ValueError, match="top-level 'title'"):
         _collect(agent, evaluator_message="write it", critic_message="review it", response_format={"type": "object"})
+
+
+def test_astream_rejects_oneof_response_format_with_untitled_variant(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """A ``oneOf`` ``response_format`` whose variants lack titles (each binds its own
+    structured-output name) is rejected up front, even though the container is
+    titled."""
+    schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    with pytest.raises(ValueError, match="oneOf variants must each"):
+        _collect(agent, evaluator_message="write it", critic_message="review it", response_format=schema)
 
 
 # ---------------------------------------------------------------------------

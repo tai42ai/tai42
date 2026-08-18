@@ -104,7 +104,7 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemor
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
     # No context-overflow strategies in the test: keep the middleware list to the
     # tool-error middleware the factory appends.
-    monkeypatch.setattr(bta, "context_overflow_middlewares", list)
+    monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
     # The real config init wires the recording monitoring stub's non-callable
     # callback sentinels, which the live graph would try to invoke; keep the
     # caller's thread_id and nothing else.
