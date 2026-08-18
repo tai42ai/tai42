@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: toolbox
 package: tai42-toolbox
-version: 0.5.1
+version: 1.0.0
 description: >-
   Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded
   generic tools and tool extensions (a tool extension extends a single tool).

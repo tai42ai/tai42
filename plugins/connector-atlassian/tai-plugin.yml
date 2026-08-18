@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: connector-atlassian
 package: tai42-connector-atlassian
-version: 0.3.0
+version: 1.0.0
 description: >-
   Atlassian (Jira, Confluence, Compass) OAuth connector provider for the TAI
   ecosystem. Pure descriptor data; depends only on tai42-contract.

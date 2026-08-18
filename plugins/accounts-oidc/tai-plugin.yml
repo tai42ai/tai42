@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: accounts-oidc
 package: tai42-accounts-oidc
-version: 0.4.0
+version: 1.0.0
 description: >-
   OIDC/OAuth2 login accounts provider for the TAI ecosystem: an installable
   plugin that registers itself as the "accounts-oidc" accounts provider
@@ -42,11 +42,14 @@ provides:
       base: login
       paths:
         - path: /oidc/{provider}/authorize
-          methods: [GET]
+          methods:
+            - GET
           public: true
         - path: /oidc/{provider}/callback
-          methods: [GET]
+          methods:
+            - GET
           public: true
         - path: /sso/exchange
-          methods: [POST]
+          methods:
+            - POST
           public: true

@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: identity-redis
 package: tai42-identity-redis
-version: 0.3.0
+version: 1.0.0
 description: >-
   Redis-backed api-key identity provider for the TAI ecosystem: an installable
   plugin that registers itself as the "redis" identity provider (token

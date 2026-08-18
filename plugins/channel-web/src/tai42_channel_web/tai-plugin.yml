@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: channel-web
 package: tai42-channel-web
-version: 0.8.0
+version: 1.0.0
 description: >-
   Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat
   page, delivers ask_user questions into it, and bridges the reply back.
@@ -35,32 +35,42 @@ provides:
       base: channels/web
       paths:
         - path: /chat/{identity}
-          methods: [GET]
+          methods:
+            - GET
           public: true
         - path: /assets/{file}
-          methods: [GET]
+          methods:
+            - GET
           public: true
         - path: /messages
-          methods: [POST]
+          methods:
+            - POST
           public: true
         - path: /stream
-          methods: [GET]
+          methods:
+            - GET
           public: true
         - path: /questions/{interaction_id}/answer
-          methods: [POST]
+          methods:
+            - POST
           public: true
         - path: /session/rotate
-          methods: [POST]
+          methods:
+            - POST
           public: true
         - path: /gates/{identity}
-          methods: [GET]
+          methods:
+            - GET
           public: false
         - path: /gates/{identity}
-          methods: [PUT]
+          methods:
+            - PUT
           public: false
         - path: /gates/{identity}/codes
-          methods: [POST]
+          methods:
+            - POST
           public: false
         - path: /gates/{identity}/codes/{code_id}
-          methods: [DELETE]
+          methods:
+            - DELETE
           public: false
