@@ -121,11 +121,24 @@ class MarketInstaller:
         self._installed: list[tuple[TaiStack, str, str]] = []
 
     async def install(
-        self, stack: TaiStack, ref: str, package: str, *, version: str | None = None, timeout: float | None = None
+        self,
+        stack: TaiStack,
+        ref: str,
+        package: str,
+        *,
+        version: str | None = None,
+        accept_public_routes: bool = False,
+        timeout: float | None = None,
     ) -> None:
-        body: dict[str, str] = {"ref": ref}
+        body: dict[str, Any] = {"ref": ref}
         if version is not None:
             body["version"] = version
+        if accept_public_routes:
+            # A fixture that declares a PUBLIC route (epsilon's GET /api/e2e-epsilon/open)
+            # requires explicit acceptance, mirroring the field the server + the route
+            # spec's own install helper use, or the routes-capable registry returns 400
+            # PUBLIC_ROUTES_NOT_ACCEPTED.
+            body["accept_public_routes"] = True
         await stack.api().post("/api/marketplace/install", json=body, timeout=timeout)
         self._installed.append((stack, ref, package))
 

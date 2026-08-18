@@ -348,6 +348,37 @@ class Installer:
         except (ValidationError, BackendNeedsBusError) as exc:
             raise ManifestComposeError(f"the composed manifest is invalid: {exc}") from exc
 
+    async def _remount_reload(self, prior: ApplyResult) -> ApplyResult:
+        """Re-reload AFTER the attribution row is persisted so the mount map re-reads the
+        store and (re)mounts route-carrying items at their PERSISTED base — the remap — in
+        THIS process, with no reboot.
+
+        The forward provides reload runs BEFORE the attribution row exists (the record is
+        the last committing step, so the unwind can restore the manifest when a record
+        fails), so the mount map (:meth:`AppLifecycle._installed_route_mounts`, which reads
+        ``MarketplaceInstallStore.list_installed()``) sees no persisted ``route_mounts`` and
+        mounts every route at its DECLARED base. This second reload — issued once the row is
+        in place — rebuilds the serving surface with the persisted mounts live, so an
+        operator remap serves immediately instead of only after the next reboot. It
+        re-applies the ALREADY-persisted manifest (an identity replace) purely to drive the
+        reload; no manifest content changes.
+
+        Best-effort by design: the install/update is already committed and internally
+        consistent (package + manifest + row all agree), so a failed remount degrades to
+        the pre-fix behavior — the routes serve at their declared base until the next reboot
+        re-reads the store — and MUST NOT unwind a good install. The failure is logged; the
+        forward reload's result stands in for the receipt. Returns the remount's result on
+        success, else ``prior``."""
+        try:
+            return await self._svc().apply_replace(self._cm().read_manifest_preserved())
+        except Exception:
+            logger.warning(
+                "marketplace: post-record remount reload failed; persisted route mounts will take effect "
+                "on the next reboot",
+                exc_info=True,
+            )
+            return prior
+
     async def _pip_install(
         self, package: str, version: str, source: str, artifact_ref: str | None, sha256: str | None
     ) -> str:
@@ -696,6 +727,13 @@ class Installer:
                 skeleton_version=skeleton_version,
                 route_mounts=resolved_mounts,
             )
+            # Step 5.5 — with the row now persisted, re-reload so the mount map re-reads
+            # the store and mounts each route-carrying item at its remapped base in THIS
+            # process (the forward reload above ran before the row existed and mounted at
+            # the declared base). Only for a route-declaring spec; best-effort, so it never
+            # unwinds the already-committed install (see :meth:`_remount_reload`).
+            if resolved_route_list:
+                apply_result = await self._remount_reload(apply_result)
         except Exception as step_error:
             # The pipeline aborts a failed mutation with nothing persisted, so the
             # manifest needs restoring only when the change actually landed — the
@@ -1098,6 +1136,13 @@ class Installer:
                 skeleton_version=skeleton_version,
                 route_mounts=resolved_mounts,
             )
+            # Step 6.5 — with the upserted row now persisted, re-reload so the mount map
+            # re-reads the store and mounts each route-carrying item at its (possibly
+            # remapped, possibly surviving-stored) base in THIS process; the forward reload
+            # above ran before the row was updated. Only for a route-declaring spec;
+            # best-effort, so it never unwinds the already-committed update.
+            if resolved_route_list:
+                apply_result = await self._remount_reload(apply_result)
         except Exception as step_error:
             persisted = manifest_persisted or isinstance(step_error, FleetBroadcastError)
             await self._unwind_update(

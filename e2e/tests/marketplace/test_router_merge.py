@@ -102,7 +102,9 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     assert distribution_absent(EPSILON_PACKAGE)
 
     # Install through the abort-safe ledger so a mid-body failure still uninstalls.
-    await market_installer.install(stack, EPSILON_REF, EPSILON_PACKAGE, version="0.1.0")
+    # Epsilon declares a PUBLIC route (GET /api/e2e-epsilon/open), so acceptance is
+    # required or the routes-capable registry returns 400 PUBLIC_ROUTES_NOT_ACCEPTED.
+    await market_installer.install(stack, EPSILON_REF, EPSILON_PACKAGE, version="0.1.0", accept_public_routes=True)
 
     # (a) PERSISTED before the SPA catch-all.
     manifest = _persisted_manifest(stack)
