@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-identity-oidc"
-version = "1.0.1"
+version = "1.0.2"
 description = "Validate-only OIDC identity provider for the TAI ecosystem: an installable plugin that registers itself as the \"identity-oidc\" identity provider and resolves an issuer-minted JWT to an authenticated identity (no key minting, no stored state)."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -30,7 +30,7 @@ dependencies = [
     # extra is REQUIRED, not optional: that module imports joserfc at module top,
     # so tai42-kit[jwt] must resolve for this plugin to import. NO redis extra —
     # this provider validates only and holds no state.
-    "tai42-kit[jwt]>=2.0,<4",
+    "tai42-kit[jwt]>=3.0,<4",
 ]
 
 [project.urls]
