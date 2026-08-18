@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: accounts-postgres
 package: tai42-accounts-postgres
-version: 2.0.0
+version: 2.0.1
 description: >-
   Postgres-backed accounts provider for the TAI ecosystem: an installable plugin
   that owns user accounts, password login, sessions, and invites, registers
@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/accounts-postgres
-contract: '>=2.0,<3'
+contract: '>=2.1,<3'
 categories:
   - identity
   - security

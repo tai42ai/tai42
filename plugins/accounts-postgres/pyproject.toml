@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-accounts-postgres"
-version = "2.0.0"
+version = "2.0.1"
 description = "Postgres-backed accounts provider for the TAI ecosystem: an installable plugin that owns user accounts, password login, sessions, and invites, registers itself as the \"accounts-postgres\" provider, and ships a Studio users-admin UI."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,13 +25,13 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the accounts
     # ABCs, the login-method metadata models, and the module-level accounts registry.
-    "tai42-contract>=2.0,<3",
+    "tai42-contract>=2.1,<3",
     # The Postgres and Redis clients plus the session/invite token hash. The
     # `postgres` extra (psycopg[binary,pool]) backs the user/session/invite store;
     # the `redis` extra backs the login rate limiter and the shared bootstrap
     # token. Both are REQUIRED, not optional: the plugin's storage IS Postgres and
     # its throttle IS Redis, so both client modules must resolve for it to import.
-    "tai42-kit[postgres,redis]>=1.9,<3",
+    "tai42-kit[postgres,redis]>=2.0,<3",
     # argon2id password hashing (RFC 9106 defaults).
     "argon2-cffi>=23",
 ]
