@@ -2,7 +2,7 @@
   "core/contract": "2.1.0",
   "core/kit": "2.0.0",
   "core/cli": "3.0.0",
-  "core/skeleton": "4.1.0",
+  "core/skeleton": "4.1.1",
   "plugins/accounts-oidc": "1.0.1",
   "plugins/accounts-postgres": "2.0.1",
   "plugins/agents": "2.0.0",
@@ -30,5 +30,5 @@
   "plugins/tools-whatsapp": "1.0.1",
   "plugins/webhook-verifier-github": "1.0.0",
   "plugins/webhook-verifier-stripe": "1.0.0",
-  "e2e": "2.0.1"
+  "e2e": "2.0.2"
 }

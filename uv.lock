@@ -5586,7 +5586,7 @@ wheels = [
 
 [[package]]
 name = "tai42-e2e"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6002,7 +6002,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "4.1.0"
+version = "4.1.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
