@@ -72,9 +72,10 @@ def route_fixtures_seeded(
     registry through the real admin-seed + ingest pipeline. Kept out of the shared
     browse catalog, so this spec seeds exactly the listings it installs.
 
-    Skips this module's legs when the pinned registry cannot accept declared routes
-    (the fixtures declare ``routes``); ``marketplace_service`` has already built the
-    registry venv the gate reads."""
+    This is the ONE route-seeding gate for the whole spec: every leg's route-carrying
+    listing is published here, and the gate skips this module's legs when the pinned
+    registry cannot accept declared routes (the fixtures declare ``routes``);
+    ``marketplace_service`` has already built the registry venv the gate reads."""
     import asyncio
 
     skip_unless_registry_supports_declared_routes()
@@ -192,6 +193,43 @@ async def test_remap_serves_at_new_base_and_survives_restart(
         assert row["route_mounts"] == {_EPSILON_ITEM: remapped_base}, (
             f"route_mounts did not survive the restart: {row.get('route_mounts')}"
         )
+    finally:
+        await _uninstall_clean(stack, EPSILON_REF, EPSILON_PACKAGE)
+
+
+# ---- 1b. plugin routes survive an in-process config reload --------------
+
+
+async def test_plugin_routes_survive_in_process_config_reload(
+    route_fixtures_seeded: None,
+    router_merge_stack: TaiStack,
+) -> None:
+    # A route-carrying plugin, hot-loaded, must KEEP serving its routes across a plain
+    # in-process ``POST /api/config/reload`` (a soft-restart that rebuilds the serving
+    # epoch WITHOUT a process restart). The regression this guards: the epoch rebuild
+    # re-imported only the manifest leaf, so a plugin whose routes register in a sibling
+    # module dropped every route from the new epoch and 404ed until a full restart.
+    stack = router_merge_stack
+    assert distribution_absent(EPSILON_PACKAGE)
+
+    await _install(stack, EPSILON_REF, version="0.1.0", accept=True)
+    try:
+        # Hot-loaded: the routes serve before the reload.
+        await _wait_status(stack.api(), _DEFAULT_PING, 200)
+        await _wait_status(stack.api(), _DEFAULT_OPEN, 200)
+
+        # Drive the in-process reload (fenced admin door; the seeded root token opens it).
+        await stack.api().post("/api/config/reload", json={}, timeout=240.0, retry_on_reloading=True)
+
+        # The plugin routes still serve after the reload — the rebuilt epoch re-fired the
+        # sibling's registrations instead of silently dropping them.
+        await _wait_status(stack.api(), _DEFAULT_PING, 200)
+        ping = await stack.api().request_raw("GET", _DEFAULT_PING)
+        assert ping.status_code == 200, ping.text
+        assert ping.json()["data"]["epsilon"] == "pong", ping.text
+        open_resp = await _settled(stack.api(), "GET", _DEFAULT_OPEN)
+        assert open_resp.status_code == 200, open_resp.text
+        assert open_resp.json()["data"]["epsilon"] == "open", open_resp.text
     finally:
         await _uninstall_clean(stack, EPSILON_REF, EPSILON_PACKAGE)
 

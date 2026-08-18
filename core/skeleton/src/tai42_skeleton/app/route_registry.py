@@ -65,6 +65,13 @@ class CrossOwnerRouteCollision(RuntimeError):
     construction — one owner per route, enforced at registration."""
 
 
+class EpochRouteAuditError(RuntimeError):
+    """An epoch rebuild produced a staged route generation that dropped EVERY HTTP
+    route of a plugin still declared in the manifest. Raised before the atomic
+    commit so the build discards the staged generation and the OLD epoch keeps
+    serving — a loud reload failure instead of a silent route unmount."""
+
+
 # The route action-class — the SINGLE authoritative source of a route's
 # authorization character:
 #
@@ -319,6 +326,15 @@ class RouteRegistry:
         self._version = 0
         self._committed_shapes: list[_ShapeEntry] = []
         self._staged_shapes: list[_ShapeEntry] | None = None
+        # Per plugin owner, the import module(s) whose ``@custom_route`` registered its
+        # routes — the module the handler is DEFINED in, which is the module whose
+        # import fires the decorator. A plugin whose routes register in a SIBLING of its
+        # manifest leaf (the leaf imports the sibling for the side-effect) records the
+        # sibling here, so a reload can pop+reimport exactly that sibling under the
+        # owner's binding and re-fire its decorators instead of leaving it cached.
+        # Process-spine like ``_routes`` (never epoch-staged), so a reload reads the
+        # association the live epoch registered.
+        self._owner_route_modules: dict[RouteOwner, set[str]] = {}
 
     @property
     def version(self) -> int:
@@ -400,6 +416,14 @@ class RouteRegistry:
         )
         self._record_shape(meta, method_key)
         self._routes[path, method_key] = meta
+        if owner.kind == "plugin":
+            # Remember which import module registered this plugin route, keyed on the
+            # owner a reload resolves from its mount binding, so the reload re-fires the
+            # right module even when it is a sibling of the manifest leaf. Attribution
+            # assumes the handler is DEFINED in the module whose import registers it: a
+            # route registered from a module that does not define its handler is not
+            # re-fired on reload and the epoch-build audit fails the reload loudly.
+            self._owner_route_modules.setdefault(owner, set()).add(handler.__module__)
         self._version += 1
 
     def record_mounted(self, *, path: str, methods: list[str], name: str, summary: str) -> None:
@@ -546,7 +570,57 @@ class RouteRegistry:
         self._routes = {key: meta for key, meta in self._routes.items() if meta.owner != owner}
         target = self._shape_target()
         target[:] = [entry for entry in target if entry.meta.owner != owner]
+        # Drop the owner's recorded route module(s) too: a rolled-back owner registers
+        # nothing, so a later reload must not pop+reimport a module attributed to a run
+        # that left no route standing.
+        self._owner_route_modules.pop(owner, None)
         self._version += 1
+
+    def owner_route_modules(self, owner: RouteOwner) -> frozenset[str]:
+        """The import module(s) that registered ``owner``'s routes on the live epoch —
+        the modules a reload must pop+reimport under the owner's binding so their
+        ``@custom_route`` decorators re-fire. Empty for an owner that registered no
+        route yet (a first boot, or a never-loaded plugin). The reload uses this to
+        re-fire ONLY the owner's own route-registering module(s), never a wider set."""
+        return frozenset(self._owner_route_modules.get(owner, frozenset()))
+
+    def audit_plugin_routes_preserved(self, expected_owners: set[RouteOwner]) -> None:
+        """Guard the epoch rebuild against a SILENT plugin-route unmount.
+
+        An epoch build re-imports the manifest modules to re-fire their route
+        registrations into the STAGED generation. A plugin whose route lives in a
+        sibling of its manifest leaf can silently fail to re-register (the sibling
+        stayed cached in ``sys.modules``), dropping every one of that plugin's routes
+        from the generation about to be committed — a 404 until process restart.
+
+        Called during the build, BEFORE the atomic commit, with ``expected_owners``
+        the plugin owners the NEW manifest still declares routes for. For each such
+        owner that served a route in the live (committed) generation, the staged
+        generation must serve at least one — else this raises so the build discards
+        the staged generation and the OLD epoch keeps serving.
+
+        Precise by construction: a plugin dropped from the manifest, or one whose new
+        spec declares no routes, is not in ``expected_owners`` and never trips the
+        guard; a remap or an update that keeps at least one route still passes (an
+        owner's routes are all in one binding, so the sibling-cache bug drops them
+        all-or-nothing). A no-op outside an epoch build (no staged generation)."""
+        if self._staged_shapes is None:
+            return
+        staged_owners = {entry.meta.owner for entry in self._staged_shapes}
+        committed_plugin_owners = {
+            entry.meta.owner for entry in self._committed_shapes if entry.meta.owner.kind == "plugin"
+        }
+        dropped = sorted(
+            f"{owner.owner_ref}:{owner.item_name}"
+            for owner in committed_plugin_owners & expected_owners
+            if owner not in staged_owners
+        )
+        if dropped:
+            raise EpochRouteAuditError(
+                "epoch rebuild dropped every HTTP route of plugin(s) still declared in the manifest: "
+                f"{dropped} — their route-registering module did not re-register on reload; refusing to "
+                "commit a route-dropping epoch (the previous epoch keeps serving)"
+            )
 
 
 def _shape_specificity(shape: Shape) -> int:

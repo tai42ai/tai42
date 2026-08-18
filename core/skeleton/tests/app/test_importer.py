@@ -6,6 +6,7 @@ raise-on-missing-package and raise-on-broken-submodule paths) and the
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
 
 import pytest
@@ -99,6 +100,32 @@ def test_reloading_a_provider_registering_module_is_reload_safe():
         reset_accounts()
         reset_identity()
         sys.modules.pop("tests.app._fixtures.accounts_reg", None)
+
+
+def test_extra_modules_are_popped_and_reimported_with_the_leaf():
+    # A bound plugin's route-registering SIBLING is passed as an extra so it re-fires
+    # on reload: it is popped+reimported alongside the leaf, not left cached.
+    leaf = "tests.app._fixtures.neutral.leaf"
+    sibling = "tests.app._fixtures.neutral.leaf2"
+    import_or_reload_package(leaf)  # boot both into the cache
+    importlib.import_module(sibling)
+    reloaded = import_or_reload_package(leaf, [sibling])
+    assert sibling in reloaded
+    assert sys.modules[sibling].VALUE == 2
+
+
+def test_stale_extra_module_is_dropped_not_raised(caplog):
+    # A plugin update that renamed its route module leaves a STALE extra that no longer
+    # resolves — it is dropped (the leaf's own import pulls the current module), never
+    # raised, and the drop is logged rather than passed silently.
+    leaf = "tests.app._fixtures.neutral.leaf"
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.app.importer"):
+        reloaded = import_or_reload_package(leaf, ["tests.app._fixtures.neutral.gone_module"])
+    assert reloaded == [leaf]
+    assert any(
+        "dropping stale route-sibling extra tests.app._fixtures.neutral.gone_module" in record.message
+        for record in caplog.records
+    )
 
 
 def test_stable_cycle_fallback_orders_by_depth_then_name():
