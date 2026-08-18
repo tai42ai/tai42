@@ -19,6 +19,7 @@ from _market_support import (
     installed_refs,
     ok_json,
     run_cli,
+    skip_unless_registry_supports_declared_routes,
     tai_bin,
     wait_tool_absent,
     wait_tool_live,
@@ -163,6 +164,9 @@ async def test_cli_plugins_route_mounting(
     resolved-route table (with ``--mount`` remapping the base), the install refuses a
     declared public route without ``--accept-public-routes``, and accepts it with the
     flag — ending clean."""
+    # Epsilon declares routes; skip when the pinned registry can't accept them (the
+    # marketplace_service fixture has already built the registry venv the gate reads).
+    skip_unless_registry_supports_declared_routes()
     stack = marketplace_stack
     env = cli_env(stack, tmp_path)
 
@@ -235,6 +239,9 @@ async def test_cli_plugins_dry_run_collision(
     """``tai plugins install --dry-run`` at a base that collides with an already
     installed plugin renders the collision row in the table AND exits NON-ZERO (so a
     scripted dry-run gates on it), without installing anything."""
+    # Epsilon and theta declare routes; skip when the pinned registry can't accept them
+    # (the marketplace_service fixture has already built the registry venv the gate reads).
+    skip_unless_registry_supports_declared_routes()
     stack = marketplace_stack
     env = cli_env(stack, tmp_path)
 

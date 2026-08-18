@@ -57,7 +57,17 @@ _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # (``db migrate``/``db status``) — :meth:`MarketplaceService._apply_ddl` drives
 # that CLI path and nothing older. An unresolvable pin fails the out-of-band
 # install loudly rather than silently resolving an older ``db init``-only ref.
+#
+# This pin runs tai42-contract <2, whose PluginSpec has NO ``routes`` field, so
+# the registry rejects a route-carrying fixture spec at seed time. The
+# route-marketplace legs gate on :func:`registry_supports_declared_routes`. Bump
+# this pin to a routes-capable tai-marketplace commit (tai42-contract >=2) once
+# contract 2.0 publishes to re-enable those legs.
 _MARKETPLACE_PIN = "7bc9b7c7b67a2fca91f7d9842a874bf600e75c60"
+
+# The first tai42-contract major whose PluginSpec accepts a declared ``routes``
+# field (contract 2.0). A registry venv below it rejects route-carrying specs.
+_ROUTES_CAPABLE_CONTRACT_MAJOR = 2
 
 
 def _registry_venv_dir() -> Path:
@@ -84,6 +94,53 @@ def _registry_python() -> Path:
 
 def _registry_bin() -> Path:
     return _registry_venv_dir() / "bin" / "tai42-marketplace"
+
+
+def registry_supports_declared_routes() -> bool:
+    """Whether the pinned registry can accept a PluginSpec that declares ``routes``
+    — i.e. its DEDICATED venv runs tai42-contract >= 2 (contract 2.0's PluginSpec
+    is the first with a ``routes`` field; older contracts reject it as an extra
+    input at seed time).
+
+    Gates the release-window skip of every e2e leg that admin-seeds a
+    route-carrying fixture (epsilon / epsilon_v2 / theta) into the registry: while
+    ``_MARKETPLACE_PIN`` runs an OLD tai-marketplace (tai42-contract <2) those
+    seeds are rejected, so the legs skip. Bumping ``_MARKETPLACE_PIN`` to a
+    routes-capable tai-marketplace commit once contract 2.0 publishes re-enables
+    them automatically. A plain importable predicate — pair it with
+    ``skip_unless_registry_supports_declared_routes`` for the pytest skip, and reuse
+    it from any future route-declaring spec (e.g. a reload-probe leg).
+
+    Reads the tai42-contract version installed in the REGISTRY venv
+    (:func:`_registry_python`), never the SUT's workspace contract — the registry's
+    contract is point-in-time and independent of the SUT's. The registry install is
+    lazy, so when that venv is not yet built this returns ``False`` (degrade to
+    skip, never crash collection); the registry-booting fixtures build the venv
+    before any gated leg runs, so in CI this reads the real installed version.
+    Raises loudly only if the venv exists but its contract version cannot be read or
+    parsed — never a silent swallow."""
+    from packaging.version import InvalidVersion, Version
+
+    py = _registry_python()
+    if not py.exists():
+        return False
+    proc = subprocess.run(
+        [str(py), "-c", "import importlib.metadata as m; print(m.version('tai42-contract'))"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"reading tai42-contract from the registry venv {py} failed "
+            f"(exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+        )
+    raw = proc.stdout.strip()
+    try:
+        version = Version(raw)
+    except InvalidVersion as exc:
+        raise RuntimeError(f"registry venv reported an unparseable tai42-contract version {raw!r}") from exc
+    return version.major >= _ROUTES_CAPABLE_CONTRACT_MAJOR
 
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"

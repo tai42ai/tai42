@@ -26,11 +26,32 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import pytest
 import yaml
 from fastmcp.client.client import CallToolResult
 
+from tai42_e2e.marketplace import registry_supports_declared_routes
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+_DECLARED_ROUTES_SKIP_REASON = (
+    "pinned marketplace registry (_MARKETPLACE_PIN) runs tai42-contract <2 and cannot accept declared "
+    "routes; bump _MARKETPLACE_PIN to a routes-capable tai-marketplace commit after contract 2.0 publishes."
+)
+
+
+def skip_unless_registry_supports_declared_routes() -> None:
+    """Skip the calling leg loudly when the pinned registry cannot accept a
+    route-carrying fixture spec (:func:`registry_supports_declared_routes`).
+
+    Call at the top of any leg that admin-seeds a declared-routes fixture
+    (epsilon / epsilon_v2 / theta): an explicit ``pytest.skip`` with the
+    bump-the-pin remedy, never a swallowed seed failure. The shared skip helper the
+    route-mounting / router-merge / CLI route legs (and any future route-declaring
+    spec) reuse — it must be requested only after the registry venv is built (a leg
+    that depends on ``marketplace_service`` has already booted it)."""
+    if not registry_supports_declared_routes():
+        pytest.skip(_DECLARED_ROUTES_SKIP_REASON)
 
 
 def probe_payload(result: CallToolResult) -> dict[str, Any]:

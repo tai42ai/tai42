@@ -27,7 +27,12 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from _market_support import distribution_absent, installed_refs, persisted_manifest
+from _market_support import (
+    distribution_absent,
+    installed_refs,
+    persisted_manifest,
+    skip_unless_registry_supports_declared_routes,
+)
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.marketplace import (
@@ -65,8 +70,14 @@ def route_fixtures_seeded(
 ) -> None:
     """Publish epsilon ``0.1.0`` + ``0.2.0`` and theta ``0.1.0`` into this module's
     registry through the real admin-seed + ingest pipeline. Kept out of the shared
-    browse catalog, so this spec seeds exactly the listings it installs."""
+    browse catalog, so this spec seeds exactly the listings it installs.
+
+    Skips this module's legs when the pinned registry cannot accept declared routes
+    (the fixtures declare ``routes``); ``marketplace_service`` has already built the
+    registry venv the gate reads."""
     import asyncio
+
+    skip_unless_registry_supports_declared_routes()
 
     async def seed() -> None:
         await seed_epsilon_listing(marketplace_service, package_index, fixture_artifacts)
