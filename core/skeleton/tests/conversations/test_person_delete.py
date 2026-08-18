@@ -39,11 +39,19 @@ def _person() -> Person:
         created_at=datetime.now(UTC),
         addresses=[
             PersonAddress(
-                door="channel", routes=["chat-a"], channel="twilio", our_identity="+1", address="+1000",
+                door="channel",
+                routes=["chat-a"],
+                channel="twilio",
+                our_identity="+1",
+                address="+1000",
                 linked_at=datetime.now(UTC),
             ),
             PersonAddress(
-                door="channel", routes=["chat-b"], channel="whatsapp", our_identity="+2", address="+2000",
+                door="channel",
+                routes=["chat-b"],
+                channel="whatsapp",
+                our_identity="+2",
+                address="+2000",
                 linked_at=datetime.now(UTC),
             ),
         ],
@@ -271,8 +279,6 @@ async def test_delete_person_501_without_a_backend(monkeypatch):
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
     from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 
-    monkeypatch.setattr(
-        ops, "get_conversations_manager", lambda: InMemoryConversationsManager(ConversationsSettings())
-    )
+    monkeypatch.setattr(ops, "get_conversations_manager", lambda: InMemoryConversationsManager(ConversationsSettings()))
     with pytest.raises(NotSupportedError):
         await ops.delete_conversation_person(_PERSON_ID)

@@ -108,9 +108,7 @@ async def test_thread_filters_narrow_the_listing_and_the_search(
 
     # (e) the route-scoped message search spans the thread's records; a matching word finds the
     # record whichever thread it lives on, and the envelope carries ``truncated``.
-    found = await bridge.api().get(
-        f"/api/conversations/{route_name}/messages/search?{urlencode({'q': needle})}"
-    )
+    found = await bridge.api().get(f"/api/conversations/{route_name}/messages/search?{urlencode({'q': needle})}")
     assert needle in [item["inbound_text"] for item in found["items"]]
     assert found["truncated"] is False
     # The search is admin-only and ``q`` is required: a bare call is a loud 400.

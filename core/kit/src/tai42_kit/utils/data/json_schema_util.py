@@ -121,12 +121,11 @@ def find_oversized_int(
         return None
 
     for child_path, value in children:
-        found = find_oversized_int(
-            value, minimum=minimum, maximum=maximum, path=child_path, depth=depth + 1, seen=seen
-        )
+        found = find_oversized_int(value, minimum=minimum, maximum=maximum, path=child_path, depth=depth + 1, seen=seen)
         if found is not None:
             return found
     return None
+
 
 reserved_words = set(keyword.kwlist) | set(dir(builtins))
 
