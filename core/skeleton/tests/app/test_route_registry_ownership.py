@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_skeleton.app.route_registry import (
     CORE_OWNER,
     CrossOwnerRouteCollision,
+    EpochRouteAuditError,
     RouteOwner,
     RouteRegistry,
 )
@@ -190,6 +191,10 @@ def test_rollback_owner_removes_only_that_owners_routes_and_shapes() -> None:
     paths = {meta.path for meta in registry.routes()}
     assert "/api/acme/one/ping" not in paths
     assert "/api/acme/two/relay" in paths
+    # A's recorded route module is pruned too (cleanup symmetry): a rolled-back owner
+    # registers nothing, so its reload extras drop with its routes. B's stay.
+    assert registry.owner_route_modules(_PLUGIN_A) == frozenset()
+    assert registry.owner_route_modules(_PLUGIN_B) == frozenset({_handler.__module__})
 
 
 def test_rollback_owner_refuses_the_core_owner() -> None:
@@ -216,6 +221,63 @@ def test_rollback_owner_targets_the_staged_generation_during_a_build() -> None:
     registry.commit_shape_staging()
     assert registry.match("/api/staged/a", "GET") is None
     assert registry.match("/api/staged/b", "GET") is not None
+
+
+def test_owner_route_modules_tracks_only_plugin_owners() -> None:
+    registry = RouteRegistry()
+    # A plugin route's registering module (where its handler is defined) is remembered
+    # under the owner, so a reload can re-fire exactly that module.
+    _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
+    assert registry.owner_route_modules(_PLUGIN_A) == frozenset({_handler.__module__})
+    # A core route is not tracked — core stays leaf-only on reload.
+    _record(registry, "/api/thing", ["GET"], CORE_OWNER, authed=True)
+    assert registry.owner_route_modules(CORE_OWNER) == frozenset()
+    # An owner that registered nothing yet is empty.
+    assert registry.owner_route_modules(_PLUGIN_B) == frozenset()
+
+
+def _stage_dropping(registry: RouteRegistry, keep: RouteOwner | None = None) -> None:
+    """Open a staged generation that re-records only ``keep`` (or nothing) — the
+    epoch-build state where a plugin's route-registering module failed to re-fire."""
+    registry.begin_shape_staging()
+    registry.reset_shape_index()
+    if keep is not None:
+        _record(registry, "/api/acme/one/ping", ["GET"], keep, public=True, authed=False)
+
+
+def test_audit_raises_when_a_still_declared_plugin_lost_all_its_routes() -> None:
+    registry = RouteRegistry()
+    _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
+    # The rebuild staged a generation that dropped A's route entirely, but the new
+    # manifest still declares A — a silent unmount the audit turns into a loud raise.
+    _stage_dropping(registry, keep=None)
+    with pytest.raises(EpochRouteAuditError, match="acme/one:web"):
+        registry.audit_plugin_routes_preserved({_PLUGIN_A})
+
+
+def test_audit_passes_when_the_plugin_was_dropped_from_the_manifest() -> None:
+    registry = RouteRegistry()
+    _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
+    # A staged generation without A's route is FINE when the new manifest no longer
+    # declares A (A is not in ``expected_owners``) — its routes are legitimately gone.
+    _stage_dropping(registry, keep=None)
+    registry.audit_plugin_routes_preserved(set())
+
+
+def test_audit_passes_when_the_plugin_re_registered() -> None:
+    registry = RouteRegistry()
+    _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
+    # A re-registered owner (even at a remapped path) keeps at least one staged route,
+    # so the audit passes.
+    _stage_dropping(registry, keep=_PLUGIN_A)
+    registry.audit_plugin_routes_preserved({_PLUGIN_A})
+
+
+def test_audit_is_a_no_op_outside_a_build() -> None:
+    registry = RouteRegistry()
+    _record(registry, "/api/acme/one/ping", ["GET"], _PLUGIN_A, public=True, authed=False)
+    # No staged generation (a cold boot writes committed directly) — nothing to audit.
+    registry.audit_plugin_routes_preserved({_PLUGIN_A})
 
 
 def test_staged_collision_does_not_touch_the_committed_surface() -> None:

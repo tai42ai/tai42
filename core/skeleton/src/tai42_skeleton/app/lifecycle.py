@@ -915,7 +915,26 @@ class TaiMCPLifecycleMixin(ABC):
         require_bus_for_backend(manifest)
         self.start(manifest)
         self._run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))
+        # Audit the STAGED route generation before the build commits it: fail the rebuild
+        # loudly if a plugin still declared in the manifest lost every one of its routes on
+        # the re-import, so the atomic swap never installs a route-dropping epoch (the old
+        # epoch keeps serving on the raise).
+        self._audit_plugin_routes_preserved()
         return {"status": "ok"}
+
+    def _audit_plugin_routes_preserved(self) -> None:
+        """Assert the epoch rebuild kept the routes of every still-declared plugin — the
+        loud guard against a silent route unmount. ``expected_owners`` is the plugin owner
+        identity of each route-declaring mount binding this build resolved (a plugin
+        dropped from the manifest, or bound route-less, is absent, so its legitimately-gone
+        routes never trip the guard). Uses the ONE owner-identity source ``custom_route``
+        stamps rows under, so the two never drift."""
+        from tai42_skeleton.app.http import plugin_owner
+
+        expected_owners = {
+            plugin_owner(binding) for binding in (self._mount_map or {}).values() if binding.declared_routes
+        }
+        route_registry.audit_plugin_routes_preserved(expected_owners)
 
     def _initialize_registries(self):
         if self._manifest is None:
@@ -1164,6 +1183,7 @@ class TaiMCPLifecycleMixin(ABC):
         never a silent pass. Imports are function-local to keep the app import
         chain free of the marketplace package.
         """
+        from tai42_skeleton.app.http import plugin_owner
         from tai42_skeleton.marketplace.compat import module_compat
         from tai42_skeleton.plugins.quarantine import quarantine_plugin
 
@@ -1181,9 +1201,21 @@ class TaiMCPLifecycleMixin(ABC):
         try:
             # A mount-bound module resolves its declared routes through the binding
             # carried on the contextvar for the span of its import; the bind also
-            # verifies every declared row registered once the import completes.
+            # verifies every declared row registered once the import completes. A bound
+            # plugin may register its routes in a SIBLING of the manifest leaf (the leaf
+            # imports the sibling for the ``@custom_route`` side-effect); re-importing
+            # the leaf alone leaves that sibling cached in ``sys.modules`` so its
+            # decorators never re-fire and its routes drop from the rebuilt epoch. Pop
+            # those sibling module(s) — the ones the live epoch recorded for THIS owner,
+            # never a wider set — so they re-fire under this same binding on reload. A
+            # self-registering leaf (its routes declared in the leaf itself) records only
+            # itself, so its extra set is empty and no other module is disturbed. Only a
+            # route-registering module is re-fired here, so a non-route import side-effect
+            # must live in a manifest-listed module to run on reload, never in a
+            # route-sibling that only the extras pop.
+            extra = route_registry.owner_route_modules(plugin_owner(binding)) - {module} if binding is not None else ()
             with bind_module(binding):
-                import_or_reload_package(module)
+                import_or_reload_package(module, extra)
         except Exception as exc:
             if binding is not None and savepoint is not None:
                 # Roll back so a quarantined declared-route module serves NOTHING: the

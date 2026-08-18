@@ -157,6 +157,59 @@ async def test_failed_build_does_not_advance_the_live_epoch_pointer() -> None:
     assert current_epoch().number == boot_number
 
 
+async def test_route_audit_failure_in_rebuild_keeps_old_epoch_serving(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A rebuild whose route re-import dropped a plugin still declared in the manifest
+    # fails the epoch build LOUDLY through the route audit, so the atomic swap never
+    # installs a route-dropping epoch — the previous epoch keeps serving.
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    from tai42_skeleton.app import registry_staging
+    from tai42_skeleton.app.route_registry import EpochRouteAuditError, RouteOwner, RouteRegistry
+
+    registry = RouteRegistry()
+    monkeypatch.setattr(registry_staging, "route_registry", registry)
+    owner = RouteOwner(kind="plugin", owner_ref="acme/one", item_name="web")
+
+    async def _plugin_handler(request: Request) -> Response:
+        return JSONResponse({"data": {}})
+
+    # The plugin's route serves in the live (committed) generation.
+    registry.record(
+        path="/api/acme/one/ping",
+        methods=["GET"],
+        name=None,
+        handler=_plugin_handler,
+        summary="s",
+        tags=["t"],
+        authed=False,
+        request_model=None,
+        response_model=None,
+        owner=owner,
+        public=True,
+    )
+
+    app_state = _install_boot("boot-app")
+    boot_epoch = current_epoch()
+
+    def _rebuild() -> None:
+        # The re-import left the plugin's route module cached, so the staged generation
+        # dropped its route while the manifest still declares it — the audit raises.
+        registry.reset_shape_index()
+        registry.audit_plugin_routes_preserved({owner})
+
+    with pytest.raises(EpochRouteAuditError, match="acme/one:web"):
+        await build_and_swap_epoch(
+            {"K": "v"},
+            rebuild=_rebuild,
+            build_serving_app=_serve("should-not-build"),
+        )
+
+    # Old surface still serving: the slot and the current-epoch pointer are untouched.
+    assert app_state["app"].name == "boot-app"
+    assert current_epoch() is boot_epoch
+
+
 # -- successful build + swap --------------------------------------------------
 
 

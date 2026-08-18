@@ -34,9 +34,13 @@ A future forking consumer must take that same job span. Two gaps are known and a
 
 import importlib
 import importlib.util
+import logging
 import os
 import pkgutil
 import sys
+from collections.abc import Iterable
+
+logger = logging.getLogger(__name__)
 
 
 def _discover_all_modules(root_pkg_name: str) -> set[str]:
@@ -70,7 +74,7 @@ def _stable_cycle_fallback(nodes: set[str]) -> list[str]:
     return sorted(nodes, key=lambda n: (n.count("."), n))
 
 
-def import_or_reload_package(root_pkg_name: str | None) -> list[str]:
+def import_or_reload_package(root_pkg_name: str | None, extra_modules: Iterable[str] = ()) -> list[str]:
     if not root_pkg_name:
         return []
 
@@ -80,6 +84,25 @@ def import_or_reload_package(root_pkg_name: str | None) -> list[str]:
     # the discovery failure propagates and aborts startup loudly rather than
     # booting a server silently missing its modules.
     managed = _discover_all_modules(root_pkg_name)
+
+    # ``extra_modules`` are the route-registering SIBLING module(s) of a bound plugin:
+    # its manifest leaf imports them for the ``@custom_route`` side-effect, so re-importing
+    # the leaf alone leaves them cached and their decorators never re-fire. Pop+reimport
+    # them alongside the leaf — under the caller's active binding — so their routes
+    # re-register into the staged epoch. A stale extra (a plugin update renamed its
+    # module) that no longer resolves is dropped: the leaf's own import pulls the current
+    # module, and the epoch-build audit fails loudly if a route still went missing.
+    extras: set[str] = set()
+    for name in extra_modules:
+        if name in managed:
+            continue
+        if importlib.util.find_spec(name) is None:
+            # A stale route-sibling of ``root_pkg_name``: notable but expected across a
+            # plugin update, so log the drop rather than pass it silently.
+            logger.info("dropping stale route-sibling extra %s of %s: no longer resolves", name, root_pkg_name)
+            continue
+        extras.add(name)
+    managed |= extras
 
     # Remove all managed modules from sys.modules
     for name in managed:

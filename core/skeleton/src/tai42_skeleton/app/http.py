@@ -24,11 +24,12 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
 
 
-def _plugin_owner(binding: MountBinding) -> RouteOwner:
+def plugin_owner(binding: MountBinding) -> RouteOwner:
     """The route owner identity a declared plugin route records under — one per bound
     module. The SINGLE source of that identity, shared by ``custom_route`` (which
-    stamps it on each recorded row) and the rollback (which deregisters by it), so the
-    two never drift."""
+    stamps it on each recorded row), the rollback (which deregisters by it), and the
+    reload's route-preservation audit (which resolves expected owners through it), so
+    they never drift."""
     return RouteOwner(kind="plugin", owner_ref=binding.owner_ref, item_name=binding.item_name)
 
 
@@ -135,7 +136,7 @@ class HttpSurface:
             resolved_path = binding.resolved_path(path)
             resolved_authed = not decl.public
             resolved_public = decl.public
-            owner = _plugin_owner(binding)
+            owner = plugin_owner(binding)
         else:
             resolved_path = path
             resolved_authed = True if authed is None else authed
@@ -211,7 +212,7 @@ class HttpSurface:
         if not 0 <= savepoint <= len(routes):
             raise ValueError(f"route-table savepoint {savepoint} is outside the current table of {len(routes)} routes")
         del routes[savepoint:]
-        route_registry.rollback_owner(_plugin_owner(binding))
+        route_registry.rollback_owner(plugin_owner(binding))
 
     def finalize(self, app):
         """Mount the sub-MCP router and wrap the registered middleware stack.
