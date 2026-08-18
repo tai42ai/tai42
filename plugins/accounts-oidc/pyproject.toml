@@ -32,7 +32,7 @@ dependencies = [
     # and userinfo transport — arrives transitively through tai42-kit; it is not
     # declared here. Both the `redis` and `jwt` extras are REQUIRED, not optional:
     # this plugin's storage IS Redis and its login flow verifies id_tokens.
-    "tai42-kit[redis,jwt]>=2.0,<4",
+    "tai42-kit[redis,jwt]>=3.0,<4",
 ]
 
 [project.urls]

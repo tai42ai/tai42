@@ -32,7 +32,7 @@ dependencies = [
     # holds around every reload body, and `tai42_kit.signals` + `tai42_kit.backend`
     # (signal_chain, BackendDispatchSettings), which the backend CLI and the
     # dispatch settings use.
-    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=2.0,<4",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres]>=3.0,<4",
     # The `tai` command client. The server owns no console script; it contributes
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
     "tai42-cli>=3.0,<4",

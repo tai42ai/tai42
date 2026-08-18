@@ -30,7 +30,7 @@ dependencies = [
     # helpers; the jq extra backs the callback condition/expression evaluation.
     # The floor names the first release carrying `tai42_kit.backend`
     # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
-    "tai42-kit[jq]>=2.0,<4",
+    "tai42-kit[jq]>=3.0,<4",
     # The broker SDK: worker runtime, ArqRedis pool, Job status/result API.
     "arq~=0.28.0",
     # Crontab iteration for the Redis-hash scheduler.
