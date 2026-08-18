@@ -311,6 +311,62 @@ async def test_a_route_the_person_never_wrote_under_is_404(fake, monkeypatch):
         await ops.get_conversation_thread("other", _THREAD)
 
 
+async def test_person_transcript_q_search_filters_the_merged_history(fake, monkeypatch):
+    # ``q`` on the aggregated door runs the BOUNDED person search across every route index and
+    # merges only the matching records; a filter that keeps a whole page reports truncated False.
+    fake.seed_route("chat-api")
+    fake.seed_route("line-b")
+    store = _store()
+    await store.create_record(
+        _person_record("m-widget-a", "chat-api", door="api", caller_principal="alice", created_at=10.0)
+    )
+    await store.create_record(
+        _person_record("m-plain-a", "chat-api", door="api", caller_principal="alice", created_at=20.0)
+    )
+    await store.create_record(_person_record("m-widget-b", "line-b", door="channel", created_at=30.0))
+    _seed_person(
+        fake,
+        _person(
+            [
+                _addr(door="api", address="alice/u7", routes=["chat-api"]),
+                _addr(
+                    door="channel", address="+2000", routes=["line-b"], channel="twilio", our_identity="+15550009999"
+                ),
+            ]
+        ),
+    )
+    _wire_manager(monkeypatch, _api_route("chat-api"), _channel_route("line-b"))
+    _as_caller(monkeypatch, _Caller("root", is_admin=True))
+
+    read = await ops.get_conversation_thread("chat-api", _THREAD, q="widget")
+
+    # Only the two ``widget`` records, merged across both route indexes; the plain one is gone.
+    assert [item["message_id"] for item in read["items"]] == ["m-widget-a", "m-widget-b"]
+    assert read["total"] == 2
+    assert read["truncated"] is False
+
+
+async def test_person_transcript_q_search_reports_truncated_on_budget(fake, monkeypatch):
+    # A route index that fills its per-index scan window may hold more, so the bounded person
+    # search reports truncated LOUDLY rather than silently serving a partial filter.
+    monkeypatch.setattr(records_module, "_FILTER_RECORD_SCAN", 2)
+    fake.seed_route("chat-api")
+    store = _store()
+    for index in range(3):
+        await store.create_record(
+            _person_record(
+                f"m-widget-{index}", "chat-api", door="api", caller_principal="alice", created_at=10.0 + index
+            )
+        )
+    _seed_person(fake, _person([_addr(door="api", address="alice/u7", routes=["chat-api"])]))
+    _wire_manager(monkeypatch, _api_route("chat-api"))
+    _as_caller(monkeypatch, _Caller("root", is_admin=True))
+
+    read = await ops.get_conversation_thread("chat-api", _THREAD, q="widget")
+
+    assert read["truncated"] is True
+
+
 async def test_a_target_mismatch_is_404(fake, monkeypatch):
     # The route resolves to a DIFFERENT target than the person is scoped to.
     other_target = ConversationRoute(

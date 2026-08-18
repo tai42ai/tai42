@@ -48,6 +48,30 @@ def test_tool_meta_record_defaults():
     assert rec.folder_id is None
     assert rec.tags == []
     assert rec.hidden is None
+    assert rec.badges == []
+
+
+def test_tool_meta_record_badges_round_trip():
+    from tai42_contract.tool_meta import ToolMetaRecord
+
+    rec = ToolMetaRecord(tool_name="web_search", badges=["storage-read", "network", "llm"])
+    again = ToolMetaRecord(**rec.model_dump())
+    assert again == rec
+    assert again.badges == ["storage-read", "network", "llm"]
+
+
+def test_tool_meta_record_badges_accept_hyphen_and_reject_slash():
+    import pytest
+    from pydantic import ValidationError
+
+    from tai42_contract.tool_meta import ToolMetaRecord
+
+    # A hyphenated vocabulary term is the canonical badge form (TAG_RE allows it).
+    assert ToolMetaRecord(tool_name="t", badges=["external-send"]).badges == ["external-send"]
+    # TAG_RE forbids the slash, so a namespaced/pathy badge is refused loudly.
+    for bad in ("storage/read", "Storage", "-leading", "has space"):
+        with pytest.raises(ValidationError):
+            ToolMetaRecord(tool_name="t", badges=[bad])
 
 
 def test_tool_meta_errors_carry_identity():

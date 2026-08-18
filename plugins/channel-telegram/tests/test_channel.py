@@ -342,3 +342,39 @@ async def test_notify_sender_identity_with_malformed_token_raises(
     with pytest.raises(ChannelDeliveryError, match="CHANNEL_TELEGRAM_BOT_TOKEN is malformed"):
         await TelegramChannel().notify(ChannelNotification(message="reply", recipient="555", sender_identity="123456"))
     assert http_recorder.requests == []
+
+
+# --- send_chat_action ("working on it" typing signal) ------------------------
+
+
+async def test_send_chat_action_posts_exact_body(http_recorder, fake_redis):
+    from tai42_channel_telegram.client import send_chat_action
+
+    await send_chat_action(555, "typing")
+    assert len(http_recorder.requests) == 1
+    request = http_recorder.requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == f"https://api.telegram.org/bot{_TOKEN}/sendChatAction"
+    assert json.loads(request.content) == {"chat_id": 555, "action": "typing"}
+
+
+async def test_send_chat_action_ok_false_raises(http_recorder, fake_redis):
+    from tai42_channel_telegram.client import send_chat_action
+
+    http_recorder.responder = lambda request: httpx.Response(200, json={"ok": False, "description": "no"})
+    with pytest.raises(ChannelDeliveryError, match="sendChatAction rejected"):
+        await send_chat_action(555, "typing")
+
+
+async def test_send_chat_action_unset_token_raises_delivery_error(
+    http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch
+):
+    # An unset token is a ChannelDeliveryError (not a raw ValueError) so the inbound
+    # door's `except ChannelDeliveryError` swallows it and the webhook still acks.
+    monkeypatch.delenv("CHANNEL_TELEGRAM_BOT_TOKEN")
+    reset_all_settings()
+    from tai42_channel_telegram.client import send_chat_action
+
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_TELEGRAM_BOT_TOKEN"):
+        await send_chat_action(555, "typing")
+    assert http_recorder.requests == []

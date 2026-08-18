@@ -282,6 +282,26 @@ return {'ok', fresh_json}
 """
 
 
+# One atomic person erase. KEYS[1]=person row key, KEYS[2]=the person's per-target index HASH.
+# ARGV[1]=person_id. Deletes the row and every index field pointing at this person — the index
+# is authoritative for which addresses belong, so removing by VALUE erases exactly this person's
+# mappings even if the row and index momentarily disagree. Same-key idempotent: a re-run on an
+# already-erased person removes nothing. Returns {row removed, index fields removed}.
+_ERASE_LUA = """
+-- conversations:person:erase
+local removed_row = redis.call('DEL', KEYS[1])
+local fields = redis.call('HGETALL', KEYS[2])
+local removed_fields = 0
+for i = 1, #fields, 2 do
+  if fields[i + 1] == ARGV[1] then
+    redis.call('HDEL', KEYS[2], fields[i])
+    removed_fields = removed_fields + 1
+  end
+end
+return {removed_row, removed_fields}
+"""
+
+
 class ConversationPersonStore:
     """The Redis-backed per-target person registry. Construction refuses with a loud 501
     without the redis conversations backend — a person folded across channels must not live in
@@ -362,6 +382,19 @@ class ConversationPersonStore:
         if status == "existing":
             return Person.model_validate_json(_as_str(result[1])), False
         raise RuntimeError(f"conversations: person index names a missing row: {_as_str(result[1])!r}")
+
+    async def erase(self, person: Person) -> tuple[bool, int]:
+        """Erase ``person`` from the registry ENTIRELY: its person row and every
+        ``door_address_key → person_id`` field of its per-target index (removed by value, so
+        exactly this person's addresses go, whatever the row currently lists). One atomic unit,
+        so a concurrent lookup never sees the row gone with an index still naming it. Idempotent:
+        a re-run on an already-erased person removes nothing. Returns ``(row_removed,
+        index_fields_removed)``."""
+        row_key = self.settings.person_key(person.person_id)
+        index_key = self.settings.person_index_key(person.target_kind, person.target_name)
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            result = await eval_script(r, _ERASE_LUA, 2, row_key, index_key, person.person_id)
+        return bool(int(result[0])), int(result[1])
 
     async def merge(self, person_id_a: str, person_id_b: str) -> Person:
         """Merge two persons of the SAME target into one and return the survivor. The store

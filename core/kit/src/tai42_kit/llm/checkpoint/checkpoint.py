@@ -2,16 +2,85 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import ormsgpack
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from tai42_kit.clients.settings import PostgresConnectionSettings, RedisConnectionSettings
 from tai42_kit.settings import not_configured_message
+from tai42_kit.utils.data.json_schema_util import MSGPACK_INT_MAX, MSGPACK_INT_MIN, find_oversized_int
 
 logger = logging.getLogger(__name__)
 
 CleanupFn = Callable[[], Awaitable[None]]
 Resource = Any
+
+
+class CheckpointSerializationError(Exception):
+    """A checkpoint value could not be msgpack-encoded by the saver's serializer.
+
+    The universal guard converts ormsgpack's ``MsgpackEncodeError`` into this
+    typed error so a value the serializer cannot encode fails loudly — never a
+    silent pickle fallback, never an opaque engine crash. When the cause is an
+    integer outside the native msgpack integer range (the door schema-level int64
+    injection cannot reach — plain tool-call args and tool results routed into
+    flow state), the message NAMES the offending path.
+    """
+
+
+def _raise_serialization_error(obj: Any, cause: ormsgpack.MsgpackEncodeError) -> None:
+    # The reactive guard fires only after msgpack aborts, so it names the true
+    # encode-failure culprit: an integer outside the native msgpack range. A value
+    # in (INT64_MAX, MSGPACK_INT_MAX] encoded fine and is not the culprit.
+    overflow = find_oversized_int(obj, minimum=MSGPACK_INT_MIN, maximum=MSGPACK_INT_MAX)
+    if overflow is not None:
+        path, value = overflow
+        raise CheckpointSerializationError(
+            f"checkpoint value at {path} = {value} exceeds the native msgpack integer range "
+            f"[{MSGPACK_INT_MIN}, {MSGPACK_INT_MAX}] and has no msgpack integer encoding"
+        ) from cause
+    raise CheckpointSerializationError(f"checkpoint value could not be msgpack-encoded: {cause}") from cause
+
+
+class _GuardedSerializer:
+    """Wraps a saver's serializer so a ``MsgpackEncodeError`` becomes a
+    :class:`CheckpointSerializationError` naming the offending path. All other
+    serializer methods delegate unchanged."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+        try:
+            return self._inner.dumps_typed(obj)
+        except ormsgpack.MsgpackEncodeError as exc:
+            _raise_serialization_error(obj, exc)
+            raise  # unreachable; _raise_serialization_error always raises
+
+    def dumps(self, obj: Any) -> bytes:
+        try:
+            return self._inner.dumps(obj)
+        except ormsgpack.MsgpackEncodeError as exc:
+            _raise_serialization_error(obj, exc)
+            raise  # unreachable; _raise_serialization_error always raises
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        return self._inner.loads_typed(data)
+
+    def loads(self, data: bytes) -> Any:
+        return self._inner.loads(data)
+
+
+def _guard_saver_serialization(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
+    """Wrap ``saver.serde`` in the serialization guard (idempotent). Every saver
+    the registry hands to a graph flows through here, so no checkpoint write can
+    reach the serializer unguarded."""
+    if not isinstance(saver.serde, _GuardedSerializer):
+        saver.serde = _GuardedSerializer(saver.serde)
+    return saver
 
 # Resolution order: the conn string first, then the base Redis namespace. The
 # offload needs a module-capable Redis, so the message also names the module
@@ -162,18 +231,21 @@ async def create_checkpoint_resource(
 
 
 def get_saver_from_resource(provider: str, resource: Resource) -> BaseCheckpointSaver:
+    # Every branch returns through the serialization guard: this is the single
+    # choke point that yields the saver a graph checkpoints through, so no saver
+    # can serialize a checkpoint value unguarded.
     match provider:
         case "memory":
-            return resource
+            return _guard_saver_serialization(resource)
         case "sqlite":
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # pyright: ignore[reportMissingImports]
 
-            return AsyncSqliteSaver(resource)
+            return _guard_saver_serialization(AsyncSqliteSaver(resource))
         case "postgres":
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # pyright: ignore[reportMissingImports]
 
-            return AsyncPostgresSaver(resource)
+            return _guard_saver_serialization(AsyncPostgresSaver(resource))
         case "redis":
-            return resource
+            return _guard_saver_serialization(resource)
         case _:
             raise ValueError(f"Unknown provider {provider}")

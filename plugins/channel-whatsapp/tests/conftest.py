@@ -134,11 +134,22 @@ tai42_app.bind(_stub_app)
 
 
 class FakeHttpx:
-    """Records every ``post`` call and replays queued responses (or raises queued exceptions)."""
+    """Records every ``post`` call and replays queued responses (or raises queued exceptions).
+
+    The mark-as-read + typing-indicator send (body carries ``status == "read"``)
+    is a distinct Meta call answering ``{"success": true}`` with no
+    ``messages[].id``; it is recorded in ``typing_calls`` and answered from
+    ``typing_response`` (a canned 200 ack unless a test overrides it), keeping the
+    ``responses`` queue aligned to the message-send/forward calls under test.
+    """
 
     def __init__(self, events: list[tuple[str, str]] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.typing_calls: list[dict[str, Any]] = []
         self.responses: list[httpx.Response | Exception] = []
+        # Override to exercise the typing-signal failure law (e.g. a 5xx that
+        # `_send` classifies into ChannelDeliveryError, or a raised transport error).
+        self.typing_response: httpx.Response | Exception | None = None
         self.events = events if events is not None else []
 
     async def post(
@@ -150,6 +161,13 @@ class FakeHttpx:
         headers: dict[str, str] | None = None,
         auth: tuple[str, str] | None = None,
     ) -> httpx.Response:
+        if isinstance(json, dict) and json.get("status") == "read":
+            self.typing_calls.append({"url": url, "data": data, "json": json, "headers": headers, "auth": auth})
+            if isinstance(self.typing_response, Exception):
+                raise self.typing_response
+            if self.typing_response is not None:
+                return self.typing_response
+            return httpx.Response(200, json={"success": True}, request=httpx.Request("POST", url))
         self.events.append(("http_post", url))
         self.calls.append({"url": url, "data": data, "json": json, "headers": headers, "auth": auth})
         return self._reply("post")

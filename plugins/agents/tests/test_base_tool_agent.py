@@ -156,11 +156,17 @@ class TestBuildAgentAndInput:
         captured = _patch_seams(monkeypatch)
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
         asyncio.run(bta._build_agent_and_input("sys", ["hi"], [], response_format=schema))
-        # The raw schema dict is pinned to the tool-calling strategy, never left to
-        # provider-dependent auto-routing.
+        # The raw schema dict is pinned to the tool-calling strategy (never left to
+        # provider-dependent auto-routing) as a TypedDict whose parse round-trips a
+        # value back to the dict shape while enforcing the injected int64 bound.
+        from pydantic import TypeAdapter, ValidationError
+
         threaded = captured["create"]["response_format"]
         assert isinstance(threaded, ToolStrategy)
-        assert threaded.schema == schema
+        adapter = TypeAdapter(threaded.schema)
+        assert adapter.validate_python({"value": 7}) == {"value": 7}
+        with pytest.raises(ValidationError):
+            adapter.validate_python({"value": 9223372036854775807 + 1})
 
     def test_explicit_providers_override_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)

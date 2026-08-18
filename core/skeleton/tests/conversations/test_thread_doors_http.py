@@ -66,6 +66,11 @@ def client(monkeypatch) -> TestClient:
     routes = [
         Route("/api/conversations/{route_name}/threads", router.list_conversation_threads, methods=["GET"]),
         Route("/api/conversations/{route_name}/transcript", router.get_conversation_thread, methods=["GET"]),
+        Route(
+            "/api/conversations/{route_name}/messages/search",
+            router.search_conversation_messages,
+            methods=["GET"],
+        ),
     ]
     return TestClient(Starlette(routes=routes))
 
@@ -145,6 +150,60 @@ async def test_the_thread_listing_answers_the_envelope(client):
     assert body["items"][0]["thread_id"] == _THREAD
     assert body["page"] == 1
     assert body["page_size"] == 1
+    # The envelope carries the LOUD truncation flag; an unfiltered listing is never truncated.
+    assert body["truncated"] is False
+
+
+async def test_the_thread_listing_rejects_an_unknown_status_at_the_edge(client):
+    await _seed()
+
+    response = client.get("/api/conversations/chat/threads?status=nope")
+
+    assert response.status_code == 400
+    assert "status must be one of" in response.json()["error"]
+
+
+async def test_the_thread_listing_filters_by_status_over_the_query(client):
+    await _seed()
+
+    match = client.get("/api/conversations/chat/threads?status=delivered")
+    miss = client.get("/api/conversations/chat/threads?status=failed")
+
+    assert [item["thread_id"] for item in match.json()["data"]["items"]] == [_THREAD]
+    assert miss.json()["data"]["items"] == []
+
+
+async def test_the_message_search_leg_answers_the_envelope(client):
+    await _seed()
+
+    hit = client.get("/api/conversations/chat/messages/search", params={"q": "the answer"})
+    miss = client.get("/api/conversations/chat/messages/search", params={"q": "zzz-none"})
+
+    assert hit.status_code == 200
+    body = hit.json()["data"]
+    assert [item["message_id"] for item in body["items"]] == ["t0"]
+    assert body["truncated"] is False
+    assert miss.json()["data"]["items"] == []
+
+
+async def test_the_message_search_leg_requires_q(client):
+    response = client.get("/api/conversations/chat/messages/search")
+
+    assert response.status_code == 400
+    assert "q is required" in response.json()["error"]
+
+
+async def test_the_transcript_q_filters_over_the_query(client):
+    await _seed()
+
+    hit = client.get("/api/conversations/chat/transcript", params={"thread_id": _THREAD, "q": "the answer"})
+    miss = client.get("/api/conversations/chat/transcript", params={"thread_id": _THREAD, "q": "zzz-none"})
+
+    assert [item["message_id"] for item in hit.json()["data"]["items"]] == ["t0"]
+    assert hit.json()["data"]["truncated"] is False
+    # A search that matches nothing in a real thread is an empty page, never a 404.
+    assert miss.status_code == 200
+    assert miss.json()["data"]["items"] == []
 
 
 @pytest.mark.parametrize("query", ["?page=nope", "?pageSize=many"])
@@ -323,3 +382,59 @@ async def test_delete_thread_door_answers_409_for_a_turn_in_flight(delete_client
     assert response.status_code == 409
     assert "turn in flight" in response.json()["error"]
     assert saver.deleted == []
+
+
+# -- the person-erase door ------------------------------------------------------------------
+
+
+@pytest.fixture
+def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
+    """The person-erase door mounted over the same fake redis (records AND the person store
+    share it), with the checkpoint access path stubbed so the aggregated thread's memory
+    delete is captured rather than dialled at a real provider."""
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    fake = FakeRecordRedis()
+    fake.seed_route("chat")
+    ctx = make_record_client_ctx(fake)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.records"), "client_ctx", ctx)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.persons"), "client_ctx", ctx)
+    router = _router()
+
+    op_globals = router._delete_conversation_person_op.__globals__
+    monkeypatch.setitem(op_globals, "get_conversations_manager", lambda: _DictManager())
+
+    saver = _RecordingSaver()
+
+    class _FakeRegistry:
+        async def get_checkpointer(self, provider: str, conn_string: str | None) -> _RecordingSaver:
+            return saver
+
+    class _FakeProviderSettings:
+        checkpoint = "memory"
+        checkpoint_conn_string = None
+
+    monkeypatch.setattr(
+        importlib.import_module("tai42_kit.llm.checkpoint.checkpoint_registry"),
+        "checkpoint_registry",
+        lambda: _FakeRegistry(),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("tai42_kit.llm.settings"),
+        "llm_provider_settings",
+        lambda: _FakeProviderSettings(),
+    )
+
+    routes = [Route("/api/conversations/persons/{person_id}", router.delete_conversation_person, methods=["DELETE"])]
+    return TestClient(Starlette(routes=routes), raise_server_exceptions=False), saver
+
+
+async def test_delete_person_door_erases_an_unknown_person_idempotently(person_delete_client):
+    # An unknown person is not a 404: the door answers 200 erased=false and forgets the
+    # aggregated checkpoint regardless (reachable from the id alone).
+    client, saver = person_delete_client
+
+    response = client.delete("/api/conversations/persons/p-unknown")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"person_id": "p-unknown", "removed": 0, "erased": False}
+    assert saver.deleted == ["bridge:@person:p-unknown"]

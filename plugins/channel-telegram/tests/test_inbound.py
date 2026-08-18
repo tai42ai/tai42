@@ -45,6 +45,16 @@ def _body(response: Any) -> dict[str, Any]:
     return json.loads(response.body)
 
 
+def _forward_requests(recorder: Any) -> list[httpx.Request]:
+    """Recorded outbound requests minus the inbound ``sendChatAction`` typing
+    signal, which fires for every processable message ahead of the ask/bridge split."""
+    return [r for r in recorder.requests if not str(r.url).endswith("/sendChatAction")]
+
+
+def _typing_requests(recorder: Any) -> list[httpx.Request]:
+    return [r for r in recorder.requests if str(r.url).endswith("/sendChatAction")]
+
+
 def test_route_metadata(stub_app):
     sys.modules.pop("tai42_channel_telegram.inbound", None)
     importlib.import_module("tai42_channel_telegram.inbound")
@@ -63,8 +73,9 @@ async def test_valid_reply_forwards_answer_and_clears_mapping(http_recorder, fak
 
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(http_recorder.requests) == 1
-    forward = http_recorder.requests[0]
+    forwards = _forward_requests(http_recorder)
+    assert len(forwards) == 1
+    forward = forwards[0]
     assert str(forward.url) == _CALLBACK
     assert json.loads(forward.content) == {"answer": "the blue one"}
     assert fake_redis.data == {}
@@ -148,7 +159,7 @@ async def test_reply_from_allowlisted_chat_forwards(http_recorder, fake_redis):
     response = await inbound(make_inbound_request(_reply_update(chat_id=888), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(http_recorder.requests) == 1
+    assert len(_forward_requests(http_recorder)) == 1
 
 
 async def test_reply_from_chat_allowlisted_only_by_username_forwards(
@@ -164,8 +175,9 @@ async def test_reply_from_chat_allowlisted_only_by_username_forwards(
     response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(http_recorder.requests) == 1
-    assert json.loads(http_recorder.requests[0].content) == {"answer": "the blue one"}
+    forwards = _forward_requests(http_recorder)
+    assert len(forwards) == 1
+    assert json.loads(forwards[0].content) == {"answer": "the blue one"}
     assert fake_redis.data == {}
 
 
@@ -218,7 +230,7 @@ async def test_uncorrelated_routed_message_reaches_bridge_with_verbatim_args(htt
     response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
-    assert http_recorder.requests == []
+    assert _forward_requests(http_recorder) == []  # bridge makes no forward call
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
     assert call.channel == "telegram"
@@ -226,6 +238,38 @@ async def test_uncorrelated_routed_message_reaches_bridge_with_verbatim_args(htt
     assert call.client_address == "777"
     assert call.text == "hello bridge"
     assert call.provider_message_id == "7"
+
+
+async def test_inbound_fires_typing_chat_action_before_bridge(http_recorder, fake_redis, conversations):
+    # Every processable message shows a "working on it" typing action: a
+    # sendChatAction POST carrying {chat_id, action: "typing"}, fired ahead of the
+    # ask/bridge split; the message still bridges.
+    response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    typing = _typing_requests(http_recorder)
+    assert len(typing) == 1
+    assert typing[0].method == "POST"
+    assert str(typing[0].url).endswith("/sendChatAction")
+    assert json.loads(typing[0].content) == {"chat_id": 777, "action": "typing"}
+    assert len(conversations.accept_calls) == 1  # bridge still reached
+
+
+async def test_typing_action_failure_is_logged_and_webhook_survives(
+    http_recorder, fake_redis, conversations, caplog
+):
+    # A non-200 on sendChatAction raises ChannelDeliveryError inside the client; the
+    # door catches it, logs at WARNING, and the message still bridges (never a 5xx
+    # that would make Telegram redeliver the whole update).
+    http_recorder.responder = lambda request: (
+        httpx.Response(500) if str(request.url).endswith("/sendChatAction") else httpx.Response(200, json={"ok": True})
+    )
+    with caplog.at_level("WARNING"):
+        response = await inbound(make_inbound_request(_text_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(_typing_requests(http_recorder)) == 1  # the signal was attempted
+    assert any("typing action" in record.message for record in caplog.records)
+    assert len(conversations.accept_calls) == 1  # bridge still reached
 
 
 async def test_uncorrelated_unrouted_message_is_acked_no_turn(http_recorder, fake_redis, conversations):
@@ -258,7 +302,7 @@ async def test_pending_question_reply_resolves_ask_not_bridge(http_recorder, fak
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(http_recorder.requests) == 1
+    assert len(_forward_requests(http_recorder)) == 1
     assert conversations.accept_calls == []
 
 
@@ -268,7 +312,7 @@ async def test_expired_force_reply_falls_through_to_bridge(http_recorder, fake_r
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
-    assert http_recorder.requests == []
+    assert _forward_requests(http_recorder) == []  # bridge makes no forward call
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
     assert call.client_address == "777"

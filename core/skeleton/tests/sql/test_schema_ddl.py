@@ -127,6 +127,19 @@ def test_tool_folders_root_name_uniqueness_uses_nulls_not_distinct() -> None:
     assert re.search(r"UNIQUE\s+NULLS NOT DISTINCT\s*\(\s*parent_id\s*,\s*name\s*\)", block) is not None
 
 
+def test_tool_meta_has_badges_array_column() -> None:
+    """`tool_meta.badges` is a NOT NULL TEXT[] defaulting to the empty array — the
+    operator-overlay half of a tool's informational capability badges, folded into
+    the CREATE TABLE body (no ALTER backfill). Text-level guard so a dropped/renamed
+    column fails without a live Postgres."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS tool_meta\s*\((.*?)\n\);", _baseline_sql(), re.DOTALL)
+    assert match is not None, "tool_meta table not found in the baseline"
+    block = match.group(1)
+    assert re.search(r"\bbadges\s+TEXT\[\]\s+NOT NULL\s+DEFAULT\s+'\{\}'", block) is not None, (
+        "badges must be a NOT NULL TEXT[] column defaulting to '{}' in the CREATE TABLE body"
+    )
+
+
 def test_tool_meta_hidden_is_nullable_tristate() -> None:
     """`tool_meta.hidden` is a NULLABLE boolean — the tri-state that lets NULL mean
     "defer to the plugin-declared visibility" while TRUE/FALSE force it. A

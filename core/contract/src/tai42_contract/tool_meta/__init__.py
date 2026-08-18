@@ -3,7 +3,7 @@ tool-metadata errors, and the :class:`ToolMetaStore` Protocol.
 
 tool_meta is an UNVERSIONED organizational overlay over ANY tool in the
 namespace, keyed by tool name — folders (real nesting entities) plus a per-tool
-row of ``display_name`` / ``folder_id`` / ``tags`` / ``hidden``. tai42-contract
+row of ``display_name`` / ``folder_id`` / ``tags`` / ``hidden`` / ``badges``. tai42-contract
 owns only the Protocol + models + errors; the concrete store (plain Postgres
 tables, cycle prevention, clean-slate name reclaim) lives in the skeleton, the
 same models-only split the preset contract follows.
@@ -73,6 +73,7 @@ class ToolMetaStore(Protocol):
         folder_id: str | None,
         tags: list[str],
         hidden: bool | None,
+        badges: list[str],
     ) -> ToolMetaRecord:
         """Write the FULL overlay row for ``tool_name`` (insert or replace). The
         caller passes the already-resolved state — merge-patch against the current
@@ -87,9 +88,9 @@ class ToolMetaStore(Protocol):
         when absent), and persist the result — so two concurrent patches to the
         same tool serialize on the lock instead of racing on separate connections
         and losing an update. ``patch`` carries ONLY the keys the caller sent
-        (``display_name`` / ``folder_id`` / ``tags`` / ``hidden``); a present value
-        writes — including a present ``None`` that CLEARS — while ``tags`` replaces
-        the whole set. ``display_name`` is already normalized by the caller (the
+        (``display_name`` / ``folder_id`` / ``tags`` / ``hidden`` / ``badges``); a
+        present value writes — including a present ``None`` that CLEARS — while
+        ``tags`` and ``badges`` each replace the whole set. ``display_name`` is already normalized by the caller (the
         blank-display-name refusal is the operation layer's job). Raise
         :class:`FolderNotFoundError` when a present ``folder_id`` names no folder."""
         ...

@@ -169,6 +169,29 @@ def delete_thread(
     emit_result(ctx_obj, data)
 
 
+@app.command("delete-person")
+@covers(("DELETE", "/api/conversations/persons/{person_id}"))
+def delete_person(
+    ctx: typer.Context,
+    person_id: Annotated[str, typer.Argument(help="Person id (uuid4).")],
+) -> None:
+    """Erase a linked person ENTIRELY — its aggregated ``bridge:@person:<id>`` thread (agent
+    checkpoint, answer records, thread indexes and mode override across every route it spans),
+    its person row, and every address→person index mapping.
+
+    Idempotent: erasing an already-gone person is not an error (``erased: false``), and its
+    aggregated checkpoint is forgotten regardless. A turn in flight on the aggregated thread is
+    refused (409, retry once it drains). The same write grant that forgets a thread erases a
+    person.
+
+    Example: ``tai conversations delete-person 4f1c0e2a-...``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.delete(f"/api/conversations/persons/{person_id}")
+    emit_result(ctx_obj, data)
+
+
 @app.command("send")
 @covers(("POST", "/api/conversations/{route_name}/thread/messages"))
 def send_message(
@@ -271,18 +294,65 @@ def list_threads(
     route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
     page: Annotated[int, typer.Option("--page", help="Page number, from 1.")] = 1,
     page_size: Annotated[int, typer.Option("--page-size", help="Threads per page (capped server-side).")] = 50,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Keep only threads whose newest record's delivery_status is this one."),
+    ] = None,
+    address: Annotated[
+        str | None,
+        typer.Option("--address", help="Keep only threads whose id client-address suffix contains this substring."),
+    ] = None,
 ) -> None:
     """List a route's conversation threads, newest activity first (admin only).
 
-    Example: ``tai conversations threads chat-line --page 1``
+    ``--status`` and ``--address`` filter the listing with a bounded server-side scan; a page
+    that spent its scan budget reports ``truncated: true`` (matches may lie beyond it). An
+    unknown ``--status`` is refused (400).
+
+    Example: ``tai conversations threads chat-line --page 1 --status failed``
     """
     ctx_obj = app_context(ctx)
+    params: dict = {"page": page, "pageSize": page_size}
+    if status is not None:
+        params["status"] = status
+    if address is not None:
+        params["address"] = address
     with ctx_obj.client() as client:
-        data = client.get(f"/api/conversations/{route_name}/threads", params={"page": page, "pageSize": page_size})
+        data = client.get(f"/api/conversations/{route_name}/threads", params=params)
     emit_records(
         ctx_obj,
         data,
         ["thread_id", "client_address", "last_activity_at", "message_count", "last_delivery_status"],
+        items_key="items",
+    )
+
+
+@app.command("search")
+@covers(("GET", "/api/conversations/{route_name}/messages/search"))
+def search_messages(
+    ctx: typer.Context,
+    route_name: Annotated[str, typer.Argument(help="Route name (slug).")],
+    q: Annotated[str, typer.Option("--q", help="The text to search the route's records for.")],
+    page: Annotated[int, typer.Option("--page", help="Page number, from 1.")] = 1,
+    page_size: Annotated[int, typer.Option("--page-size", help="Records per page (capped server-side).")] = 50,
+) -> None:
+    """Search a route's answer records by text, across all its threads (admin only).
+
+    Matches an inbound message or an answer containing ``q``. A bounded server-side scan, so a
+    page that spent its budget reports ``truncated: true`` (matches may lie beyond it).
+
+    Example: ``tai conversations search chat-line --q widget``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(
+            f"/api/conversations/{route_name}/messages/search",
+            params={"q": q, "page": page, "pageSize": page_size},
+        )
+    emit_records(
+        ctx_obj,
+        data,
+        ["created_at", "message_id", "route_name", "thread_id", "inbound_text", "answer", "delivery_status"],
         items_key="items",
     )
 
@@ -296,13 +366,19 @@ def get_transcript(
     page: Annotated[int, typer.Option("--page", help="Page number, from 1.")] = 1,
     page_size: Annotated[int, typer.Option("--page-size", help="Records per page (capped server-side).")] = 50,
     order: Annotated[str, typer.Option("--order", help="Record order: 'asc' (oldest first) or 'desc'.")] = "asc",
+    q: Annotated[
+        str | None,
+        typer.Option("--q", help="Keep only records whose inbound text or answer contains this substring."),
+    ] = None,
 ) -> None:
     """Read one thread's transcript. Any holder of the conversations read grant reads any
     thread's transcript on the route; an unknown thread or route is a plain 404.
 
     ``--order asc`` (the default) reads oldest first; ``--order desc`` reads newest first,
     so page 1 always holds the latest messages — the order a live tail wants. The window
-    pages that order from its own end.
+    pages that order from its own end. ``--q`` filters to matching records with a bounded
+    server-side scan; a page that spent its budget reports ``truncated: true``, and under
+    ``--q`` a thread with no match reads as an empty page rather than a 404.
 
     The thread id rides the query string, so an api-door id — which carries a
     percent-encoded principal — reaches the door spelled exactly as the listing showed it.
@@ -310,11 +386,11 @@ def get_transcript(
     Example: ``tai conversations transcript chat-line bridge:chat-line:+15550001111``
     """
     ctx_obj = app_context(ctx)
+    params: dict = {"thread_id": thread_id, "page": page, "pageSize": page_size, "order": order}
+    if q is not None:
+        params["q"] = q
     with ctx_obj.client() as client:
-        data = client.get(
-            f"/api/conversations/{route_name}/transcript",
-            params={"thread_id": thread_id, "page": page, "pageSize": page_size, "order": order},
-        )
+        data = client.get(f"/api/conversations/{route_name}/transcript", params=params)
     emit_records(
         ctx_obj,
         data,

@@ -34,11 +34,12 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
-from tai42_channel_whatsapp.client import send_flow, send_message
+from tai42_channel_whatsapp.client import mark_read_typing, send_flow, send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     already_seen,
@@ -318,6 +319,16 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
     # message-type drop: a guest who sent only a photo still opened Meta's window.
     if phone_number_id and wa_id:
         await mark_known_contact(phone_number_id, wa_id)
+
+    # Signal "working on it" the moment an inbound lands — mark it read and show a
+    # typing indicator BEFORE the type branches so it covers text, interactive,
+    # media, and correlated question-replies alike. A delivery failure is logged,
+    # never raised: an error here would 5xx the batch and make Meta redeliver it.
+    if phone_number_id:
+        try:
+            await mark_read_typing(phone_number_id, wamid)
+        except ChannelDeliveryError as exc:
+            logger.warning("whatsapp typing signal for %s failed: %s", wamid, exc)
 
     message_type = message.get("type")
     if message_type == "text":

@@ -327,6 +327,23 @@ class ThreadWindowQuery(BaseModel):
     )
 
 
+class ThreadListQuery(ThreadWindowQuery):
+    """The thread listing's optional filters on top of the shared window. Both are a BOUNDED
+    app-side post-scan (no per-route+status index), so a filtered page may report ``truncated``.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    status: str | None = Field(
+        default=None,
+        description="Keep only threads whose newest record's delivery_status is this one "
+        "(validated against the delivery-status vocabulary; an unknown value is a 400).",
+    )
+    address: str | None = Field(
+        default=None,
+        description="Keep only threads whose id client-address suffix contains this substring.",
+    )
+
+
 class TranscriptQuery(ThreadWindowQuery):
     """The transcript door's query on top of the shared window. ``thread_id`` is REQUIRED and
     holds at least one non-whitespace character — a client generated without it calls the door
@@ -340,6 +357,21 @@ class TranscriptQuery(ThreadWindowQuery):
         default="asc",
         description="``asc`` reads the transcript oldest first; ``desc`` is the live-tail order.",
     )
+    q: str | None = Field(
+        default=None,
+        description="Optional text filter — keep only records whose inbound text or answer "
+        "contains this substring (a BOUNDED scan, so a filtered page may report ``truncated``).",
+    )
+
+
+class MessageSearchQuery(ThreadWindowQuery):
+    """The route-scoped message-search door's query. ``q`` is REQUIRED and holds at least one
+    non-whitespace character; the search is a BOUNDED scan across the route's threads, so a page
+    may report ``truncated``.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    q: str = Field(min_length=1, pattern=r"\S", description="The text to search the route's records for.")
 
 
 class ThreadDeleteQuery(BaseModel):
@@ -403,13 +435,42 @@ def _person_routes(person: Person) -> set[str]:
     return {route for address in person.addresses for route in address.routes}
 
 
+def _parse_status_filter(status: str | None):
+    """The delivery-status set a thread listing filters on, validated against the enum per the
+    observability ``parse_run_filter`` precedent — an unknown value is a loud 400, never a
+    silent-ignore. A blank/absent value is no filter."""
+    if status is None or not status.strip():
+        return None
+    from tai42_skeleton.conversations.models import DeliveryStatus
+
+    valid = {member.value for member in DeliveryStatus}
+    if status not in valid:
+        raise BadRequestError(f"status must be one of {sorted(valid)}: {status!r}")
+    return frozenset({DeliveryStatus(status)})
+
+
+def _parse_address_filter(address: str | None) -> str | None:
+    """The client-address substring a thread listing filters on. A blank/absent value is no
+    filter; otherwise the trimmed substring, matched literally against the thread-id suffix."""
+    if address is None:
+        return None
+    trimmed = address.strip()
+    return trimmed or None
+
+
 @operation(
     summary="List a conversation route's threads",
     tags=["conversations"],
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
-    request_model=ThreadWindowQuery,
+    request_model=ThreadListQuery,
 )
-async def list_conversation_threads(route_name: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+async def list_conversation_threads(
+    route_name: str,
+    page: int = 1,
+    page_size: int = 50,
+    status: str | None = None,
+    address: str | None = None,
+) -> dict[str, Any]:
     """The threads of ``route_name``, newest activity first, one page at a time.
 
     A thread listing spans every caller and address on the route, so it is admin-only. Each
@@ -420,23 +481,34 @@ async def list_conversation_threads(route_name: str, page: int = 1, page_size: i
     when a record is created and again when its turn completes; a later delivery transition
     on the same record moves the record's ``updated_at`` but not the thread's activity.
 
+    ``status`` (one of the delivery-status vocabulary) keeps only threads whose summary status
+    matches; ``address`` keeps only threads whose id client-address suffix contains that
+    substring. Neither has a direct index — the per-status indexes are GLOBAL over
+    ``message_id``s, not per-route thread ids — so a filter is a BOUNDED app-side post-scan
+    and a page that spent its scan budget answers ``truncated: true`` LOUDLY, never a silent
+    cut. An unknown ``status`` is a loud 400.
+
     Authorization is decided BEFORE the route is looked up, so a non-admin is refused the
     same way whether the name routes or not — a 404-here/403-there pair would answer which
     route names exist to a caller with no business knowing. An unknown route is a loud 404
     to an admin; a ``page`` or ``page_size`` below 1, or a ``page`` above the served
-    maximum, is a 400. Returns ``{"items", "total", "page", "page_size", "next_page"}``,
-    where ``total`` counts the route's indexed threads.
+    maximum, is a 400. Returns
+    ``{"items", "total", "page", "page_size", "next_page", "truncated"}``, where ``total``
+    counts the route's indexed threads for an unfiltered listing, or the matches the bounded
+    scan found for a filtered one.
     """
     _validate_route_name(route_name)
     manager = _require_backend()
     require_admin(await resolve_caller())
     await _require_route(manager, route_name)
     offset, limit = _page_bounds(page, page_size)
+    status_filter = _parse_status_filter(status)
+    address_filter = _parse_address_filter(address)
     from tai42_skeleton.conversations.records import ConversationRecordStore
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     listed = await ConversationRecordStore(ConversationsSettings()).list_route_threads(
-        route_name, offset=offset, limit=limit
+        route_name, offset=offset, limit=limit, status=status_filter, address=address_filter
     )
     items = [
         {
@@ -454,6 +526,7 @@ async def list_conversation_threads(route_name: str, page: int = 1, page_size: i
         "page": page,
         "page_size": limit,
         "next_page": _next_page(page, limit, listed.total),
+        "truncated": listed.truncated,
     }
 
 
@@ -464,7 +537,7 @@ async def list_conversation_threads(route_name: str, page: int = 1, page_size: i
     request_model=TranscriptQuery,
 )
 async def get_conversation_thread(
-    route_name: str, thread_id: str, page: int = 1, page_size: int = 50, order: str = "asc"
+    route_name: str, thread_id: str, page: int = 1, page_size: int = 50, order: str = "asc", q: str | None = None
 ) -> dict[str, Any]:
     """One thread's records under ``route_name``, one page at a time.
 
@@ -472,6 +545,12 @@ async def get_conversation_thread(
     ``desc`` reads it newest first, which is the order a live tail wants because page 1 then
     always holds the latest messages. ``page``/``page_size`` window that order from its own
     end, so page 1 of ``desc`` is the newest page and never the oldest.
+
+    ``q`` filters to records whose inbound text or answer contains that substring — a BOUNDED
+    scan (the searched text lives inside the record content blob), so a page that spent its
+    scan budget answers ``truncated: true`` LOUDLY. A ``q`` read never 404s: the unknown-thread
+    404 below is gated on an UNFILTERED read, so under ``q`` an unknown thread and one that
+    matched nothing alike read as an EMPTY page.
 
     An admin reads whole records; a non-admin reads the caller-safe projection, which
     withholds the internal detail of the route key's run. An unknown ``route_name`` is a loud
@@ -483,8 +562,9 @@ async def get_conversation_thread(
     NOT that 404: it reads as an empty page carrying the indexed ``total``, until the prune
     pass reclaims the members and the thread becomes unknown.
 
-    Returns ``{"items", "total", "page", "page_size", "next_page", "order"}``, where
-    ``total`` counts the thread's indexed records.
+    Returns ``{"items", "total", "page", "page_size", "next_page", "order", "truncated"}``,
+    where ``total`` counts the thread's indexed records for an unfiltered read, or the matches
+    a bounded ``q`` scan found.
     """
     _validate_route_name(route_name)
     if not thread_id.strip():
@@ -492,6 +572,7 @@ async def get_conversation_thread(
     if order not in TRANSCRIPT_ORDERS:
         raise BadRequestError(f"order must be one of {list(TRANSCRIPT_ORDERS)}, got {order!r}")
     offset, limit = _page_bounds(page, page_size)
+    needle = q if (q is not None and q.strip()) else None
     manager = _require_backend()
     caller = await resolve_caller()
     from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -499,13 +580,16 @@ async def get_conversation_thread(
 
     if thread_id.startswith(PERSON_THREAD_PREFIX):
         return await _read_person_thread(
-            manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order
+            manager, route_name, thread_id, caller, page=page, offset=offset, limit=limit, order=order, q=needle
         )
     await _require_route(manager, route_name)
     transcript = await ConversationRecordStore(ConversationsSettings()).list_thread_records(
-        route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc"
+        route_name, thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=needle
     )
-    if transcript.total == 0:
+    # An unknown/expired thread reads as total==0. Under a ``q`` search total is the MATCH
+    # count, so an unfiltered read alone turns an empty index into the uniform 404; a search
+    # that found nothing in a thread that exists returns an empty page.
+    if needle is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
     return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
 
@@ -521,6 +605,7 @@ def _transcript_response(transcript, caller: Caller, *, page: int, limit: int, o
         "page_size": limit,
         "next_page": _next_page(page, limit, transcript.total),
         "order": order,
+        "truncated": transcript.truncated,
     }
 
 
@@ -534,15 +619,17 @@ async def _read_person_thread(
     offset: int,
     limit: int,
     order: str,
+    q: str | None = None,
 ) -> dict[str, Any]:
     """One page of a LINKED person's AGGREGATED transcript: the merged history across
     every route the person has written under, keyed by ``bridge:@person:{person_id}``.
 
     The supplied ``route_name`` must be one of the person's routes, while the fetch spans the
     indexes of ALL of them. An unknown ``route_name`` is a loud 404; a target mismatch, an
-    unknown person, a route the person never wrote under, or an empty aggregate answers the
-    uniform thread not-found. An admin reads whole records; a non-admin the caller-safe
-    projection."""
+    unknown person, or a route the person never wrote under answers the uniform thread
+    not-found. An empty aggregate is that 404 for an unfiltered read; under a ``q`` search it
+    is an empty page (the person is real, the search simply matched nothing). An admin reads
+    whole records; a non-admin the caller-safe projection."""
     person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
     route = await _require_route(manager, route_name)
     person = await _person_store().get_by_id(person_id)
@@ -556,11 +643,57 @@ async def _read_person_thread(
     from tai42_skeleton.conversations.settings import ConversationsSettings
 
     transcript = await ConversationRecordStore(ConversationsSettings()).list_person_thread_records(
-        sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc"
+        sorted(_person_routes(person)), thread_id, offset=offset, limit=limit, newest_first=order == "desc", q=q
     )
-    if transcript.total == 0:
+    if q is None and transcript.total == 0:
         raise _thread_not_found(thread_id)
     return _transcript_response(transcript, caller, page=page, limit=limit, order=order)
+
+
+@operation(
+    summary="Search a conversation route's messages",
+    tags=["conversations"],
+    errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
+    request_model=MessageSearchQuery,
+)
+async def search_conversation_messages(
+    route_name: str, q: str, page: int = 1, page_size: int = 50
+) -> dict[str, Any]:
+    """Every record on ``route_name`` whose inbound text or answer contains ``q``, across ALL
+    the route's threads, one page at a time.
+
+    The search spans every caller and address on the route, so it is admin-only, and each item
+    is the WHOLE record (the same shape the transcript serves an admin). ``q`` is REQUIRED and
+    non-blank. There is no per-route record index, so the search is a BOUNDED nested scan of
+    the route's threads and their records; a page that spent its scan budget answers
+    ``truncated: true`` LOUDLY, never a silent cut.
+
+    Authorization is decided BEFORE the route is looked up, so a non-admin is refused the same
+    way whether the name routes or not. An unknown route is a loud 404 to an admin; a blank
+    ``q``, a ``page``/``page_size`` below 1, or a ``page`` above the served maximum, is a 400.
+    Returns ``{"items", "total", "page", "page_size", "next_page", "truncated"}``, where
+    ``total`` is the matches the bounded scan found."""
+    _validate_route_name(route_name)
+    if not q.strip():
+        raise BadRequestError("q must be a non-blank search string")
+    manager = _require_backend()
+    require_admin(await resolve_caller())
+    await _require_route(manager, route_name)
+    offset, limit = _page_bounds(page, page_size)
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    found = await ConversationRecordStore(ConversationsSettings()).search_route_messages(
+        route_name, offset=offset, limit=limit, q=q
+    )
+    return {
+        "items": [record.view() for record in found.records],
+        "total": found.total,
+        "page": page,
+        "page_size": limit,
+        "next_page": _next_page(page, limit, found.total),
+        "truncated": found.truncated,
+    }
 
 
 @operation(
@@ -735,6 +868,73 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         for name in route_names:
             removed += await store.drop_thread(name, thread_id)
     return {"removed": removed, "route_name": route_name, "thread_id": thread_id}
+
+
+@operation(
+    summary="Delete a conversation person",
+    tags=["conversations"],
+    errors=[BadRequestError, ConflictError, NotSupportedError, UnavailableError],
+)
+async def delete_conversation_person(person_id: str) -> dict[str, Any]:
+    """Erase a LINKED person ENTIRELY, forgetting every store that names it:
+
+    - the person's aggregated ``bridge:@person:{person_id}`` thread — its agent checkpoint,
+      and across EVERY route the person wrote under its answer records, per-thread transcript
+      indexes, route-thread index memberships and per-thread mode override (the thread-delete
+      machinery, reused);
+    - the person row ``conversations:person:{person_id}``;
+    - every ``person_index`` ``door_address_key → person_id`` mapping of its addresses.
+
+    Caller authority is the door's grantable ``write`` action — the same grant that forgets a
+    thread. IDEMPOTENT and retryable: the person row is the durable marker of an owed erase and
+    is deleted LAST (atomically with its index mappings), so an interruption re-reads it and a
+    retry FINISHES. A person that is already gone (a retry, or one that never existed) is not a
+    404 — its aggregated checkpoint is forgotten regardless (it defaults to keep-forever) and
+    the call answers ``erased=false``. A turn IN FLIGHT on the aggregated thread is a 409
+    (retry once it drains), re-checked under the per-thread FIFO before any teardown so an
+    admitted turn cannot re-create memory behind the erase; a full queue is the retriable 503.
+    A blank ``person_id`` is a 400; no backend is a loud 501.
+
+    Returns ``{"person_id", "removed", "erased"}``, where ``removed`` counts the answer records
+    this call deleted across the person's routes and ``erased`` says whether THIS call removed
+    the person row."""
+    if not person_id.strip():
+        raise BadRequestError("person_id must be a non-blank person identifier")
+    _require_backend()
+    from tai42_skeleton.conversations.caps import get_turn_caps
+    from tai42_skeleton.conversations.records import ConversationRecordStore
+    from tai42_skeleton.conversations.settings import ConversationsSettings
+
+    store = ConversationRecordStore(ConversationsSettings())
+    person_store = _person_store()
+    thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
+    person = await person_store.get_by_id(person_id)
+    if person is None:
+        # Already erased (a retry) or never a person: reachable from the id alone, its
+        # aggregated checkpoint is forgotten regardless — keep-forever memory left behind
+        # otherwise — and nothing route-scoped remains to reclaim.
+        await _delete_thread_checkpoint(thread_id)
+        return {"person_id": person_id, "removed": 0, "erased": False}
+    route_names = sorted(_person_routes(person))
+    in_flight_409 = f"conversation person {person_id!r} has a turn in flight; retry once it drains"
+    if await store.thread_has_live_intake(thread_id):
+        raise ConflictError(in_flight_409)
+    caps = get_turn_caps()
+    caps.reserve_thread_slot(thread_id)
+    async with caps.run_reserved(thread_id):
+        # Re-check UNDER the FIFO, exactly as the thread delete does: an intake admitted while
+        # the lock was being taken is refused before any teardown, never left to re-stamp a
+        # route index behind the erase.
+        if await store.thread_has_live_intake(thread_id):
+            raise ConflictError(in_flight_409)
+        await _delete_thread_checkpoint(thread_id)
+        removed = 0
+        for name in route_names:
+            removed += await store.drop_thread(name, thread_id)
+        # The row (with its index mappings) goes LAST, atomically: it is the durable marker a
+        # retry finds the owed work by, so an interrupted run re-reads it and finishes.
+        erased, _fields = await person_store.erase(person)
+    return {"person_id": person_id, "removed": removed, "erased": erased}
 
 
 # -- operator send + per-thread mode ------------------------------------------------------

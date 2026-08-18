@@ -426,41 +426,154 @@ async def test_postgres_resource_closes_pool_on_setup_failure(monkeypatch):
 # --------------------------------------------------------------------------- #
 # get_saver_from_resource
 # --------------------------------------------------------------------------- #
+class _FakeSaver:
+    """A stand-in saver carrying the ``serde`` the serialization guard wraps."""
+
+    def __init__(self, resource=None):
+        self.resource = resource
+        self.serde = object()
+
+
 def test_get_saver_memory_and_redis_return_resource():
-    sentinel = object()
-    assert cp.get_saver_from_resource("memory", sentinel) is sentinel
-    assert cp.get_saver_from_resource("redis", sentinel) is sentinel
+    # The same resource object is returned (its serde is guarded in place), so the
+    # registry's cached resource identity is preserved.
+    memory_saver = _FakeSaver()
+    redis_saver = _FakeSaver()
+    assert cp.get_saver_from_resource("memory", memory_saver) is memory_saver
+    assert cp.get_saver_from_resource("redis", redis_saver) is redis_saver
+    assert isinstance(memory_saver.serde, cp._GuardedSerializer)
+    assert isinstance(redis_saver.serde, cp._GuardedSerializer)
 
 
 def test_get_saver_sqlite_wraps_resource(monkeypatch):
-    class _FakeSaver:
-        def __init__(self, resource):
-            self.resource = resource
-
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.sqlite.aio")
     saver_mod.AsyncSqliteSaver = _FakeSaver
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
     out = cp.get_saver_from_resource("sqlite", "conn")
     assert isinstance(out, _FakeSaver)
     assert out.resource == "conn"
+    # The saver the graph checkpoints through has its serializer guarded.
+    assert isinstance(out.serde, cp._GuardedSerializer)
 
 
 def test_get_saver_postgres_wraps_resource(monkeypatch):
-    class _FakeSaver:
-        def __init__(self, resource):
-            self.resource = resource
-
     saver_mod: Any = types.ModuleType("langgraph.checkpoint.postgres.aio")
     saver_mod.AsyncPostgresSaver = _FakeSaver
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", saver_mod)
     out = cp.get_saver_from_resource("postgres", "pool")
     assert isinstance(out, _FakeSaver)
     assert out.resource == "pool"
+    assert isinstance(out.serde, cp._GuardedSerializer)
 
 
 def test_get_saver_unknown_provider_raises():
     with pytest.raises(ValueError, match="Unknown provider"):
         cp.get_saver_from_resource("bogus", object())
+
+
+# --------------------------------------------------------------------------- #
+# Serialization guard — msgpack encode failure becomes a loud typed error
+# --------------------------------------------------------------------------- #
+# ormsgpack encodes an integer natively only within [-2**63, 2**64-1]; an integer
+# past that has no msgpack integer encoding and aborts the serializer. These are
+# the checkpoint doors the schema-level int64 injection cannot reach — a plain
+# tool-call argument and a tool result routed into flow state.
+_OVERSIZED_INT = 2**64
+
+
+def _guarded_memory_serde():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    return cp.get_saver_from_resource("memory", InMemorySaver()).serde
+
+
+def test_guard_tool_call_args_overflow_raises_typed_error_naming_path():
+    # The plain tool-call-args door: an oversized integer buried in a tool call's
+    # args aborts msgpack; the guard names the exact path instead of crashing.
+    serde = _guarded_memory_serde()
+    value = {"messages": [{"tool_calls": [{"args": {"count": _OVERSIZED_INT}}]}]}
+    with pytest.raises(cp.CheckpointSerializationError) as excinfo:
+        serde.dumps_typed(value)
+    message = str(excinfo.value)
+    assert "['messages'][0]['tool_calls'][0]['args']['count']" in message
+    assert str(_OVERSIZED_INT) in message
+
+
+def test_guard_tool_result_into_flow_state_overflow_raises_typed_error_naming_path():
+    # The tool-result-into-flow-state door: an oversized integer inside a tool
+    # result routed onto a flow-state channel aborts msgpack; the guard names it.
+    serde = _guarded_memory_serde()
+    value = {"flow_state": {"result": [0, {"total": -(2**63) - 1}]}}
+    with pytest.raises(cp.CheckpointSerializationError) as excinfo:
+        serde.dumps_typed(value)
+    assert "['flow_state']['result'][1]['total']" in str(excinfo.value)
+
+
+def test_guard_passes_through_in_range_values():
+    serde = _guarded_memory_serde()
+    type_, _ = serde.dumps_typed({"n": 7, "edge_low": -(2**63), "edge_high": 2**64 - 1})
+    assert type_ == "msgpack"
+
+
+def test_guard_names_the_true_msgpack_culprit_not_the_uint64():
+    # A payload carrying BOTH a valid uint64 (in [2**63, 2**64-1], which msgpack
+    # encodes fine) and a > 2**64 value (the real encode failure) must name the
+    # > 2**64 value — the reactive guard fires on msgpack's actual abort, so it
+    # names the true culprit rather than the in-range uint64.
+    serde = _guarded_memory_serde()
+    value = {"uint": 2**64 - 1, "huge": 2**64}
+    with pytest.raises(cp.CheckpointSerializationError) as excinfo:
+        serde.dumps_typed(value)
+    message = str(excinfo.value)
+    assert "['huge']" in message
+    assert str(2**64) in message
+    assert "['uint']" not in message
+
+
+def test_guard_keeps_valid_uint64_from_doors_5_and_6():
+    # Doors 5-6 carry arbitrary tool payloads that may hold a valid uint64; a
+    # payload with only an in-[2**63, 2**64-1] value encodes fine and does NOT
+    # raise at checkpoint.
+    serde = _guarded_memory_serde()
+    type_, _ = serde.dumps_typed({"result": {"total": 2**63}, "max": 2**64 - 1})
+    assert type_ == "msgpack"
+
+
+def test_guarded_saver_write_raises_typed_error_naming_path():
+    # A REAL checkpoint WRITE through the guarded saver (obtained via
+    # get_saver_from_resource, not calling serde.dumps_typed directly) triggers the
+    # guard for a > 2**64 channel value — proving the guard is wired into the saver
+    # the graph checkpoints through, not just the serde in isolation.
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    saver = cp.get_saver_from_resource("memory", InMemorySaver())
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"payload": {"count": 2**64}}
+    config: Any = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    with pytest.raises(cp.CheckpointSerializationError) as excinfo:
+        saver.put(config, checkpoint, {}, {"payload": 1})
+    message = str(excinfo.value)
+    assert "['count']" in message
+    assert str(2**64) in message
+
+
+def test_guard_non_integer_encode_failure_still_raises_typed_error():
+    # A value msgpack cannot encode for a reason other than integer overflow still
+    # becomes the loud typed error — never a silent pickle fallback.
+    serde = _guarded_memory_serde()
+    with pytest.raises(cp.CheckpointSerializationError, match="could not be msgpack-encoded"):
+        serde.dumps_typed({"handle": object()})
+
+
+def test_guard_is_idempotent():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    saver = cp.get_saver_from_resource("memory", InMemorySaver())
+    once = saver.serde
+    twice = cp.get_saver_from_resource("memory", saver).serde
+    assert once is twice
+    assert isinstance(twice, cp._GuardedSerializer)
 
 
 # --------------------------------------------------------------------------- #

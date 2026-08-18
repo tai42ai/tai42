@@ -115,10 +115,27 @@ async def test_tool_tags_map(install):
     # declares no visibility meta is not hidden.
     assert _json(resp) == {
         "data": [
-            {"name": "alpha", "tags": [], "hidden": False},
-            {"name": "beta", "tags": ["a", "z"], "hidden": False},
+            {"name": "alpha", "tags": [], "hidden": False, "badges": []},
+            {"name": "beta", "tags": ["a", "z"], "hidden": False, "badges": []},
         ]
     }
+
+
+async def test_tool_tags_exposes_plugin_declared_badges(install):
+    # ``badges`` reflects the tool's OWN declaration, read from the FastMCP ``meta``
+    # under the namespaced ``tai42/badges`` key and sorted for a stable wire order;
+    # a tool that declared none carries an empty list.
+    install(
+        _FakeTools(
+            {
+                "reader": _tool("reader", meta={"tai42/badges": ["network", "storage-read"]}),
+                "plain": _tool("plain"),
+            }
+        )
+    )
+    resp = await router.tool_tags(_req())
+    by_name = {entry["name"]: entry["badges"] for entry in _json(resp)["data"]}
+    assert by_name == {"reader": ["network", "storage-read"], "plain": []}
 
 
 async def test_tool_tags_exposes_plugin_declared_hidden(install):

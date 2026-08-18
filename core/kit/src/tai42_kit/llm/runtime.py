@@ -4,7 +4,14 @@ from typing import Any
 from langchain_core.messages import SystemMessage
 from pydantic import BaseModel
 
-from tai42_kit.utils.data.json_schema_util import validate_against_json_schema
+from tai42_kit.utils.data.json_schema_util import (
+    INT64_MAX,
+    INT64_MIN,
+    JsonSchemaValidationError,
+    find_oversized_int,
+    inject_int64_bounds,
+    validate_against_json_schema,
+)
 
 
 def build_agent_input(*user_messages: str) -> dict[str, Any]:
@@ -87,23 +94,42 @@ def validate_structured_output(structured: Any, response_format: Any) -> Any:
     """Validate a produced structured output against the ``response_format`` that
     forced it.
 
+    Every produced value is first walked UNCONDITIONALLY for an integer outside
+    the platform int64 range (a pydantic instance is model-dumped to JSON-native
+    types first): such an integer cannot be represented as a signed 64-bit
+    integer — the platform structured-output ceiling — so it is rejected here
+    with a
+    :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError`
+    naming the path — closing the native ``with_structured_output`` doors (which
+    have no retry rail) whatever the ``response_format`` shape. Then, by shape:
+
     * a pydantic model class → ``model_validate`` the produced value and return
       the validated instance;
     * a JSON-Schema ``dict`` → validate the raw value (a pydantic instance is
       dumped to JSON-native types first, so e.g. a ``datetime`` field validates
       as its ISO string) with the faithful draft-2020-12 validator — every
-      constraint keyword enforced — and return the value as produced;
+      constraint keyword enforced, plus the platform int64 range injected onto
+      every integer node — and return the value as produced;
     * anything else (e.g. a langchain response strategy) → returned as produced.
 
     A value that does not match raises loudly (``pydantic.ValidationError`` /
     :class:`~tai42_kit.utils.data.json_schema_util.JsonSchemaValidationError`) —
     never a silent pass-through of a non-conforming object.
     """
+    probe = structured.model_dump(mode="json") if isinstance(structured, BaseModel) else structured
+    overflow = find_oversized_int(probe, minimum=INT64_MIN, maximum=INT64_MAX)
+    if overflow is not None:
+        path, value = overflow
+        raise JsonSchemaValidationError(
+            f"structured output at {path} = {value} exceeds the platform int64 range "
+            f"[{INT64_MIN}, {INT64_MAX}] and cannot be represented as a signed 64-bit integer",
+            json_path=path,
+            offending_value=value,
+        )
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
         return response_format.model_validate(structured)
     if isinstance(response_format, dict):
-        instance = structured.model_dump(mode="json") if isinstance(structured, BaseModel) else structured
-        validate_against_json_schema(instance, response_format)
+        validate_against_json_schema(probe, inject_int64_bounds(response_format))
         return structured
     return structured
 

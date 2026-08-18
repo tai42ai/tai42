@@ -143,21 +143,37 @@ class _FakeCursor:
             (tool_name,) = params
             pg.meta.setdefault(
                 tool_name,
-                {"tool_name": tool_name, "display_name": None, "folder_id": None, "tags": [], "hidden": None},
+                {
+                    "tool_name": tool_name,
+                    "display_name": None,
+                    "folder_id": None,
+                    "tags": [],
+                    "hidden": None,
+                    "badges": [],
+                },
             )
         elif norm.startswith("UPDATE tool_meta SET display_name"):
-            display_name, folder_id, tags, hidden, tool_name = params
+            display_name, folder_id, tags, hidden, badges, tool_name = params
             row = pg.meta[tool_name]
-            row.update({"display_name": display_name, "folder_id": folder_id, "tags": list(tags), "hidden": hidden})
+            row.update(
+                {
+                    "display_name": display_name,
+                    "folder_id": folder_id,
+                    "tags": list(tags),
+                    "hidden": hidden,
+                    "badges": list(badges),
+                }
+            )
             self._one = pg.meta_tuple(tool_name)
         elif norm.startswith("INSERT INTO tool_meta"):
-            tool_name, display_name, folder_id, tags, hidden = params
+            tool_name, display_name, folder_id, tags, hidden, badges = params
             pg.meta[tool_name] = {
                 "tool_name": tool_name,
                 "display_name": display_name,
                 "folder_id": folder_id,
                 "tags": list(tags),
                 "hidden": hidden,
+                "badges": list(badges),
             }
             self._one = pg.meta_tuple(tool_name)
         elif norm.startswith("DELETE FROM tool_meta WHERE tool_name"):
@@ -171,16 +187,26 @@ class _FakeCursor:
                 pg.meta[new_name] = row
 
         # -- tool_meta reads -------------------------------------------------
-        elif norm == "SELECT display_name, folder_id, tags, hidden FROM tool_meta WHERE tool_name = %s FOR UPDATE":
+        elif (
+            norm
+            == "SELECT display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s FOR UPDATE"
+        ):
             (tool_name,) = params
             row = pg.meta.get(tool_name)
             self._one = (
-                None if row is None else (row["display_name"], row["folder_id"], list(row["tags"]), row["hidden"])
+                None
+                if row is None
+                else (row["display_name"], row["folder_id"], list(row["tags"]), row["hidden"], list(row["badges"]))
             )
-        elif norm == "SELECT tool_name, display_name, folder_id, tags, hidden FROM tool_meta WHERE tool_name = %s":
+        elif (
+            norm
+            == "SELECT tool_name, display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s"
+        ):
             (tool_name,) = params
             self._one = pg.meta_tuple(tool_name)
-        elif norm == "SELECT tool_name, display_name, folder_id, tags, hidden FROM tool_meta ORDER BY tool_name":
+        elif (
+            norm == "SELECT tool_name, display_name, folder_id, tags, hidden, badges FROM tool_meta ORDER BY tool_name"
+        ):
             self._all = [pg.meta_tuple(name) for name in sorted(pg.meta)]
         else:
             raise AssertionError(f"unhandled SQL in fake: {norm!r}")
@@ -245,7 +271,14 @@ class FakeToolMetaPg:
         row = self.meta.get(tool_name)
         if row is None:
             return None
-        return (row["tool_name"], row["display_name"], row["folder_id"], list(row["tags"]), row["hidden"])
+        return (
+            row["tool_name"],
+            row["display_name"],
+            row["folder_id"],
+            list(row["tags"]),
+            row["hidden"],
+            list(row["badges"]),
+        )
 
 
 def make_pg_ctx(pg: FakeToolMetaPg):

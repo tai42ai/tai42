@@ -53,13 +53,14 @@ def _folder_record(row: tuple[Any, ...]) -> FolderRecord:
 
 
 def _meta_record(row: tuple[Any, ...]) -> ToolMetaRecord:
-    tool_name, display_name, folder_id, tags, hidden = row
+    tool_name, display_name, folder_id, tags, hidden, badges = row
     return ToolMetaRecord(
         tool_name=tool_name,
         display_name=display_name,
         folder_id=None if folder_id is None else str(folder_id),
         tags=list(tags or []),
         hidden=hidden,
+        badges=list(badges or []),
     )
 
 
@@ -163,6 +164,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         folder_id: str | None,
         tags: list[str],
         hidden: bool | None,
+        badges: list[str],
     ) -> ToolMetaRecord:
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -175,13 +177,13 @@ class PostgresToolMetaStore(ToolMetaStore):
             # ``created_at`` is stamped on first insert and preserved on conflict — an
             # upsert re-writes only the mutable overlay columns.
             await cur.execute(
-                "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden) "
-                "VALUES (%s, %s, %s, %s, %s) "
+                "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, badges) "
+                "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (tool_name) DO UPDATE SET "
                 "display_name = EXCLUDED.display_name, folder_id = EXCLUDED.folder_id, "
-                "tags = EXCLUDED.tags, hidden = EXCLUDED.hidden "
-                "RETURNING tool_name, display_name, folder_id, tags, hidden",
-                (tool_name, display_name, folder_id, list(tags), hidden),
+                "tags = EXCLUDED.tags, hidden = EXCLUDED.hidden, badges = EXCLUDED.badges "
+                "RETURNING tool_name, display_name, folder_id, tags, hidden, badges",
+                (tool_name, display_name, folder_id, list(tags), hidden, list(badges)),
             )
             return _meta_record(_require_row(await cur.fetchone()))
 
@@ -204,7 +206,7 @@ class PostgresToolMetaStore(ToolMetaStore):
                 (tool_name,),
             )
             await cur.execute(
-                "SELECT display_name, folder_id, tags, hidden FROM tool_meta WHERE tool_name = %s FOR UPDATE",
+                "SELECT display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s FOR UPDATE",
                 (tool_name,),
             )
             current = _require_row(await cur.fetchone())
@@ -212,10 +214,12 @@ class PostgresToolMetaStore(ToolMetaStore):
             folder_id = None if current[1] is None else str(current[1])
             tags = list(current[2] or [])
             hidden = current[3]
+            badges = list(current[4] or [])
 
             # Apply only the fields the caller sent; a present value writes (a present
-            # ``None`` clears), ``tags`` replaces the whole set. ``display_name`` is
-            # already normalized upstream (blank-refusal is the operation's job).
+            # ``None`` clears), ``tags``/``badges`` each replace the whole set.
+            # ``display_name`` is already normalized upstream (blank-refusal is the
+            # operation's job).
             if "display_name" in patch:
                 display_name = patch["display_name"]
             if "folder_id" in patch:
@@ -224,14 +228,16 @@ class PostgresToolMetaStore(ToolMetaStore):
                 tags = list(patch["tags"])
             if "hidden" in patch:
                 hidden = patch["hidden"]
+            if "badges" in patch:
+                badges = list(patch["badges"])
 
             if folder_id is not None:
                 await self._require_folder(cur, folder_id)
             await cur.execute(
-                "UPDATE tool_meta SET display_name = %s, folder_id = %s, tags = %s, hidden = %s "
+                "UPDATE tool_meta SET display_name = %s, folder_id = %s, tags = %s, hidden = %s, badges = %s "
                 "WHERE tool_name = %s "
-                "RETURNING tool_name, display_name, folder_id, tags, hidden",
-                (display_name, folder_id, list(tags), hidden, tool_name),
+                "RETURNING tool_name, display_name, folder_id, tags, hidden, badges",
+                (display_name, folder_id, list(tags), hidden, list(badges), tool_name),
             )
             return _meta_record(_require_row(await cur.fetchone()))
 
@@ -242,7 +248,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             conn.cursor() as cur,
         ):
             await cur.execute(
-                "SELECT tool_name, display_name, folder_id, tags, hidden FROM tool_meta WHERE tool_name = %s",
+                "SELECT tool_name, display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s",
                 (tool_name,),
             )
             row = await cur.fetchone()
@@ -255,7 +261,7 @@ class PostgresToolMetaStore(ToolMetaStore):
             conn.cursor() as cur,
         ):
             await cur.execute(
-                "SELECT tool_name, display_name, folder_id, tags, hidden FROM tool_meta ORDER BY tool_name"
+                "SELECT tool_name, display_name, folder_id, tags, hidden, badges FROM tool_meta ORDER BY tool_name"
             )
             return [_meta_record(row) for row in await cur.fetchall()]
 

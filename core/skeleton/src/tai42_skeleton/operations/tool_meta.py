@@ -2,7 +2,8 @@
 
 The overlay is UNVERSIONED metadata over ANY tool in the namespace (native plugin
 tools, presets, flows), keyed by tool name: a ``display_name``, a folder placement,
-user ``tags``, and a tri-state ``hidden`` override. These operations are the single
+user ``tags``, a tri-state ``hidden`` override, and informational ``badges``. These
+operations are the single
 source of truth for the surface; the HTTP routes in ``routers/tool_meta.py`` are
 thin adapters over them. Nothing here binds or rebinds a live tool — the overlay is
 organizational, not behavioral — so no op is reload-gated and none fans out on the
@@ -14,9 +15,9 @@ Two doors carry the sharp rules:
   kept unchanged; a field PRESENT is written — including present-with-null, which
   CLEARS it (``display_name``/``folder_id``/``hidden`` back to their empty state, and
   ``hidden``'s cleared state is the tri-state NULL "defer to the plugin declaration").
-  A present ``tags`` array REPLACES the whole set (array values are atomic). Field
-  presence is detected at the HTTP edge (the extractor sends only the keys the caller
-  provided). A full-row replace is deliberately NOT offered — it would force every
+  A present ``tags`` or ``badges`` array REPLACES that whole set (array values are
+  atomic). Field presence is detected at the HTTP edge (the extractor sends only the
+  keys the caller provided). A full-row replace is deliberately NOT offered — it would force every
   partial editor (a display-name+tags editor, the visibility control) to re-send
   baselines, and one missed field would silently wipe another surface's data.
 * **A blank display_name is REFUSED loudly.** Any value empty AFTER ``strip()`` —
@@ -72,6 +73,7 @@ class ToolMetaUpsert(BaseModel):
     folder_id: str | None = None
     tags: list[str] = []
     hidden: bool | None = None
+    badges: list[str] = []
 
 
 class FolderCreate(BaseModel):
@@ -139,8 +141,8 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
     """Merge-patch the overlay row for ``tool_name`` (create it if absent). ``patch``
     holds ONLY the fields the caller sent; each is applied over the current row (or
     the empty defaults when none exists), absent fields unchanged. A blank
-    ``display_name`` is refused; a present-null clears; a present ``tags`` array
-    replaces the set. An unknown ``folder_id`` is a loud 400."""
+    ``display_name`` is refused; a present-null clears; a present ``tags`` or
+    ``badges`` array replaces that set. An unknown ``folder_id`` is a loud 400."""
     # OFF gate: a write needs the store — refuse with a named, machine-readable
     # reason rather than reaching for an absent Postgres.
     if not component_store_configured(SKELETON_COMPONENT):
@@ -161,6 +163,8 @@ async def upsert_tool_meta(tool_name: str, patch: dict[str, Any]) -> dict[str, A
         resolved["tags"] = patch["tags"]
     if "hidden" in patch:
         resolved["hidden"] = patch["hidden"]
+    if "badges" in patch:
+        resolved["badges"] = patch["badges"]
 
     try:
         record = await store.merge_meta(tool_name, patch=resolved)

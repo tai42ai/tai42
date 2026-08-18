@@ -12,9 +12,16 @@ the operator and Studio drive over the routing table.
 - ``DELETE /api/conversations/{route_name}`` (AUTHED) — delete a route by name; an
   unknown name is a loud 404.
 - ``GET /api/conversations/{route_name}/threads`` (AUTHED, admin) — the route's threads,
-  newest activity first, paged by ``?page=``/``?pageSize=``.
+  newest activity first, paged by ``?page=``/``?pageSize=`` and optionally filtered by
+  ``?status=`` (a delivery-status the summary must match) and ``?address=`` (a substring of
+  the thread-id client-address suffix). A filter is a bounded post-scan, so the envelope
+  carries ``truncated``.
+- ``GET /api/conversations/{route_name}/messages/search?q=`` (AUTHED, admin) — every record
+  on the route whose inbound text or answer contains ``q``, across all its threads, paged the
+  same way. A bounded scan, so the envelope carries ``truncated``.
 - ``GET /api/conversations/{route_name}/transcript?thread_id=`` (AUTHED) — one thread's
-  transcript, paged the same way and ordered by ``?order=asc|desc``. The
+  transcript, paged the same way, ordered by ``?order=asc|desc`` and optionally filtered by
+  ``?q=`` (a bounded scan over the record text, so the envelope carries ``truncated``). The
   thread id is a query value because it holds a percent-encoded principal that no path
   spelling round-trips.
 - ``DELETE /api/conversations/{route_name}/thread?thread_id=`` (AUTHED) — forget one
@@ -24,6 +31,11 @@ the operator and Studio drive over the routing table.
   prefix or it is a 400, and a person thread not on the named route is a 404. A turn in
   flight on the thread is a 409. The thread id is a query value, the same as the transcript
   door, because it holds a percent-encoded principal that no path spelling round-trips.
+- ``DELETE /api/conversations/persons/{person_id}`` (AUTHED) — erase a linked person
+  ENTIRELY: its aggregated ``bridge:@person:{id}`` thread (checkpoint, records, indexes, mode
+  override), its person row and every address→person index mapping. Idempotent — an already
+  erased person is not a 404; a turn in flight on the aggregated thread is a 409. The person
+  id rides the path (a uuid4, so it round-trips a path segment cleanly).
 - ``POST /api/conversations/{route_name}/thread/messages`` (AUTHED) — send an operator
   message BY HAND into a thread (no turn runs), delivered as the route identity. Body is
   ``{thread_id, text, address}``; returns ``{message_id, thread_id}``. The ``thread_id`` and
@@ -33,10 +45,10 @@ the operator and Studio drive over the routing table.
 - ``PUT /api/conversations/{route_name}/thread/mode`` (AUTHED) — set a thread's mode override
   from a ``{thread_id, mode}`` body.
 
-The write doors (route create, route delete, thread delete, operator send, mode set) share
-ONE authority: the grantable ``write`` action. The same write grant that creates a route
-deletes routes, forgets threads, sends operator messages and sets a thread's mode — no
-per-thread owner check.
+The write doors (route create, route delete, thread delete, person delete, operator send,
+mode set) share ONE authority: the grantable ``write`` action. The same write grant that
+creates a route deletes routes, forgets threads, erases persons, sends operator messages and
+sets a thread's mode — no per-thread owner check.
 
 - ``GET /api/conversation-configs`` (AUTHED) — list the per-target conversation configs
   (the ``multichannel`` opt-in + first-contact greeting), keyed ``(target_kind,
@@ -91,6 +103,7 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations.conversations import create_conversation_route as _create_conversation_route_op
 from tai42_skeleton.operations.conversations import delete_conversation_config as _delete_conversation_config_op
+from tai42_skeleton.operations.conversations import delete_conversation_person as _delete_conversation_person_op
 from tai42_skeleton.operations.conversations import delete_conversation_route as _delete_conversation_route_op
 from tai42_skeleton.operations.conversations import delete_conversation_thread as _delete_conversation_thread_op
 from tai42_skeleton.operations.conversations import get_conversation_config as _get_conversation_config_op
@@ -102,6 +115,7 @@ from tai42_skeleton.operations.conversations import list_conversation_configs as
 from tai42_skeleton.operations.conversations import list_conversation_routes as _list_conversation_routes_op
 from tai42_skeleton.operations.conversations import list_conversation_threads as _list_conversation_threads_op
 from tai42_skeleton.operations.conversations import list_failed_conversations as _list_failed_conversations_op
+from tai42_skeleton.operations.conversations import search_conversation_messages as _search_conversation_messages_op
 from tai42_skeleton.operations.conversations import (
     send_conversation_thread_message as _send_conversation_thread_message_op,
 )
@@ -171,26 +185,6 @@ delete_conversation_route = register_operation_route(
     action="write",
 )
 
-# The admin-tier failed-delivery listing sits on a literal path so the ``{route_name}``
-# get/delete doors above never capture it. It is registered BEFORE the read-one door for
-# the same reason it reads a literal segment.
-list_failed_conversations = register_operation_route(
-    tai42_app,
-    operation_metadata_of(_list_failed_conversations_op),
-    path="/api/conversations/messages/failed",
-    method="GET",
-    action="read",
-)
-
-get_conversation_message = register_operation_route(
-    tai42_app,
-    operation_metadata_of(_get_conversation_message_op),
-    path="/api/conversations/{route_name}/messages/{message_id}",
-    method="GET",
-    action="read",
-)
-
-
 async def _extract_paging(request: Request) -> dict:
     """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments (a
     GET reads its parameters from the query string, never a body). A non-integer is a loud
@@ -203,8 +197,60 @@ async def _extract_paging(request: Request) -> dict:
         raise BadRequestError(f"page and pageSize must be integers: page={page!r} pageSize={page_size!r}") from exc
 
 
+async def _extract_message_search_query(request: Request) -> dict:
+    """The route message-search door's REQUIRED ``?q=`` on top of the shared window. A missing
+    one is a loud 400 here; a blank one is the operation's own 400."""
+    q = request.query_params.get("q")
+    if q is None:
+        raise BadRequestError("q is required: GET /api/conversations/{route_name}/messages/search?q=...")
+    return {**await _extract_paging(request), "q": q}
+
+
+# The admin-tier failed-delivery listing and the route message search sit on literal paths so
+# the ``{route_name}`` get/delete doors above never capture them. Both are registered BEFORE
+# the read-one door — the message search on ``messages/search`` so ``search`` is never captured
+# as a ``{message_id}`` — for the same reason they read a literal segment.
+list_failed_conversations = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_failed_conversations_op),
+    path="/api/conversations/messages/failed",
+    method="GET",
+    action="read",
+)
+
+search_conversation_messages = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_search_conversation_messages_op),
+    path="/api/conversations/{route_name}/messages/search",
+    method="GET",
+    context_extractor=_extract_message_search_query,
+    action="read",
+)
+
+get_conversation_message = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_get_conversation_message_op),
+    path="/api/conversations/{route_name}/messages/{message_id}",
+    method="GET",
+    action="read",
+)
+
+
+async def _extract_thread_list_query(request: Request) -> dict:
+    """The thread listing's optional ``?status=`` / ``?address=`` filters on top of the shared
+    window (a GET reads its parameters from the query string). Both are passed through raw —
+    the operation validates ``status`` against the delivery-status vocabulary (400 on unknown)
+    and treats a blank filter as absent."""
+    return {
+        **await _extract_paging(request),
+        "status": request.query_params.get("status"),
+        "address": request.query_params.get("address"),
+    }
+
+
 async def _extract_transcript_query(request: Request) -> dict:
-    """The transcript door's ``?thread_id=`` and ``?order=`` on top of the shared window.
+    """The transcript door's ``?thread_id=``, ``?order=`` and optional ``?q=`` on top of the
+    shared window.
 
     The thread id rides the QUERY, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips — sent raw the
@@ -215,7 +261,12 @@ async def _extract_transcript_query(request: Request) -> dict:
     thread_id = request.query_params.get("thread_id")
     if thread_id is None:
         raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/transcript?thread_id=...")
-    return {**await _extract_paging(request), "thread_id": thread_id, "order": request.query_params.get("order", "asc")}
+    return {
+        **await _extract_paging(request),
+        "thread_id": thread_id,
+        "order": request.query_params.get("order", "asc"),
+        "q": request.query_params.get("q"),
+    }
 
 
 list_conversation_threads = register_operation_route(
@@ -223,7 +274,7 @@ list_conversation_threads = register_operation_route(
     operation_metadata_of(_list_conversation_threads_op),
     path="/api/conversations/{route_name}/threads",
     method="GET",
-    context_extractor=_extract_paging,
+    context_extractor=_extract_thread_list_query,
     action="read",
 )
 
@@ -262,6 +313,19 @@ delete_conversation_thread = register_operation_route(
     path="/api/conversations/{route_name}/thread",
     method="DELETE",
     context_extractor=_extract_thread_delete_query,
+    action="write",
+)
+
+# Erasing a linked PERSON — its aggregated thread, its person row and every address→person
+# index mapping — sits on its own ``persons/{person_id}`` literal first segment (``persons``
+# can never be a route slug), clear of the ``{route_name}`` doors. It carries the SAME write
+# action as the thread delete: the person id rides the path (a uuid4, no percent-encoded
+# principal, so unlike a thread id it round-trips a path segment cleanly).
+delete_conversation_person = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_delete_conversation_person_op),
+    path="/api/conversations/persons/{person_id}",
+    method="DELETE",
     action="write",
 )
 

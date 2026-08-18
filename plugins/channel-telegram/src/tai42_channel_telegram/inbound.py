@@ -27,10 +27,11 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import require_secret
 
-from tai42_channel_telegram.client import telegram_http
+from tai42_channel_telegram.client import send_chat_action, telegram_http
 from tai42_channel_telegram.correlation import clear_correlation, lookup_callback_url
 from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, telegram_settings
 
@@ -208,6 +209,15 @@ async def inbound(request: Request) -> Response:
     text = message.get("text")
     if not isinstance(text, str):
         return _ignored("message carries no text (a media message is not bridgeable)")
+
+    # Signal "working on it" the moment a processable message lands — a typing
+    # action shown BEFORE the ask/bridge split so it covers both paths. A delivery
+    # failure is logged, never raised: it must not fail the webhook (Telegram
+    # would redeliver the whole update).
+    try:
+        await send_chat_action(chat_id, "typing")
+    except ChannelDeliveryError as exc:
+        logger.warning("telegram inbound: typing action for chat_id=%s failed: %s", chat_id, exc)
 
     # ask_user wins when a ForceReply reply from a recipient chat matches a
     # still-pending question; an expired match falls through to the bridge.

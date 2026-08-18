@@ -275,6 +275,40 @@ def test_tool_meta_set_clear_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_tool_meta_set_sends_badges(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        # Repeatable --badge replaces the whole set; only the badges field is sent.
+        assert body == {"badges": ["storage-read", "network"]}
+        return data_response({"ok": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["tool-meta", "set", "web_search", "--badge", "storage-read", "--badge", "network"],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_tool_meta_set_clear_badges(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body == {"badges": []}
+        return data_response({"ok": True})
+
+    result = run_cli(monkeypatch, handler, ["tool-meta", "set", "web_search", "--clear-badges"])
+    assert result.exit_code == 0, result.output
+
+
+def test_tool_meta_set_rejects_conflicting_badge_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = run_cli(
+        monkeypatch,
+        lambda r: data_response({}),
+        ["tool-meta", "set", "web_search", "--badge", "llm", "--clear-badges"],
+    )
+    assert result.exit_code != 0
+
+
 def test_tool_meta_set_rejects_conflicting_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     result = run_cli(
         monkeypatch,
