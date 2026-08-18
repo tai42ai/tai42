@@ -43,7 +43,7 @@ def _patch_summary_build(*, main_config=None, provider="openai", get_llm=None):
     get_llm mock so callers can assert on the resolved (provider, **kwargs).
     """
     get_llm = get_llm if get_llm is not None else MagicMock(return_value=_summary_model())
-    main = SimpleNamespace(model_dump=lambda exclude_none: dict(main_config or {"model": "gpt-4o", "temperature": 0.0}))
+    main = SimpleNamespace(model_dump=lambda exclude_none: dict(main_config or {"model": "gpt-4o"}))
     prov = SimpleNamespace(llm=provider)
     with (
         patch.object(co, "get_llm", get_llm),
@@ -187,7 +187,7 @@ class TestSummaryModelUsesMainLLM:
                     trigger_tokens=5000, keep_messages=20, trim_tokens_to_summarize=4000, summary_prompt=None
                 ),
             ),
-            _patch_summary_build(main_config={"model": "gpt-4o", "temperature": 0.0}, provider="openai") as get_llm,
+            _patch_summary_build(main_config={"model": "gpt-4o"}, provider="openai") as get_llm,
         ):
             context_overflow_middlewares()
-        get_llm.assert_called_once_with("openai", model="gpt-4o", temperature=0.0)
+        get_llm.assert_called_once_with("openai", model="gpt-4o")

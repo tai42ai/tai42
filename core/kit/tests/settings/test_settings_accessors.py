@@ -54,6 +54,18 @@ def test_llm_settings_accessors_build():
     assert llm_settings_mod.embedding_settings().model == "text-embedding-3-small"
 
 
+def test_unset_temperature_absent_from_provider_kwargs():
+    # model_dump(exclude_none) feeds get_llm; an unset sampling param must not
+    # reach the provider, so its key is absent entirely (no injected default).
+    dumped = llm_settings_mod.LLMSettings().model_dump(exclude_none=True)
+    assert "temperature" not in dumped
+
+
+def test_configured_temperature_passes_through_unchanged():
+    dumped = llm_settings_mod.LLMSettings(temperature=0.7).model_dump(exclude_none=True)
+    assert dumped["temperature"] == 0.7
+
+
 def test_checkpoint_ttl_minutes_defaults_to_none():
     # Unset means keep every checkpoint forever — today's behavior.
     assert llm_settings_mod.llm_provider_settings().checkpoint_ttl_minutes is None

@@ -120,7 +120,7 @@ class EmbeddingSettings(TaiBaseSettings):
 class LLMSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="LLM_")
     model: str = "gpt-4o"  # Common to all
-    temperature: float = 0.0  # Common to all
+    temperature: float | None = None  # Sent to the provider only when configured
     max_tokens: int | None = None  # Common to most, optional in case default is used
     timeout: int | None = None  # Optional but supported by most
     base_url: str | None = None  # Ollama, OpenAI (self-hosted), Mistral
