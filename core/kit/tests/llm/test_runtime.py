@@ -21,7 +21,11 @@ from tai42_kit.llm.runtime import (
     extract_structured_output,
     validate_structured_output,
 )
-from tai42_kit.utils.data.json_schema_util import InvalidJsonSchemaError, JsonSchemaValidationError
+from tai42_kit.utils.data.json_schema_util import (
+    INT64_MAX,
+    InvalidJsonSchemaError,
+    JsonSchemaValidationError,
+)
 
 
 def test_build_agent_input_plain_user_messages():
@@ -205,3 +209,45 @@ def test_validate_value_invalid_schema_raises():
     """A malformed schema raises loudly instead of mis-validating the value."""
     with pytest.raises(InvalidJsonSchemaError):
         validate_structured_output(_VALID, {"type": "object", "required": "name"})
+
+
+# --- unconditional int64 walk closes the native BaseModel door -----------------
+# A plain-int BaseModel field accepts any Python int, so a value in
+# [2**63, 2**64-1] validates by pydantic yet has no signed-int64 encoding — it
+# would silently store (neither retryable nor loud) without the unconditional walk.
+
+
+class _Big(BaseModel):
+    n: int
+
+
+class _BigInner(BaseModel):
+    k: int
+
+
+class _BigOuter(BaseModel):
+    inner: _BigInner
+
+
+def test_validate_basemodel_rejects_oversized_top_level_int_naming_path():
+    over = INT64_MAX + 1  # 2**63: encodes in msgpack as uint64 but overflows int64
+    with pytest.raises(JsonSchemaValidationError) as exc:
+        validate_structured_output(_Big(n=over), _Big)
+    assert exc.value.offending_value == over
+    assert exc.value.json_path == "['n']"
+    assert "['n']" in str(exc.value)
+
+
+def test_validate_basemodel_rejects_oversized_nested_int():
+    over = INT64_MAX + 1
+    with pytest.raises(JsonSchemaValidationError) as exc:
+        validate_structured_output(_BigOuter(inner=_BigInner(k=over)), _BigOuter)
+    assert exc.value.json_path == "['inner']['k']"
+
+
+def test_validate_basemodel_conforming_value_reinflates_to_class():
+    # A conforming value passes the walk and re-inflates into the caller's class,
+    # preserving the .structured/result contract.
+    out = validate_structured_output({"n": 5}, _Big)
+    assert isinstance(out, _Big)
+    assert out.n == 5

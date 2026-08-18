@@ -2,11 +2,12 @@
 
 Thin wrappers over the ``/api/tool-meta*`` routes. The overlay is unversioned
 organizational metadata over ANY tool (native, preset, flow): a display name, a
-folder placement, user tags, and a tri-state visibility. The per-tool ``set``
-command mirrors the API's MERGE-PATCH: only the flags you pass are sent, so a
-field you omit is left unchanged. A CLEAR flag sends the explicit reset — a
-present-null (``--clear-display-name`` / ``--clear-folder``) or a present-empty
-array (``--clear-tags``) — distinct from omitting the flag entirely.
+folder placement, user tags, a tri-state visibility, and informational capability
+badges. The per-tool ``set`` command mirrors the API's MERGE-PATCH: only the flags
+you pass are sent, so a field you omit is left unchanged. A CLEAR flag sends the
+explicit reset — a present-null (``--clear-display-name`` / ``--clear-folder``) or a
+present-empty array (``--clear-tags`` / ``--clear-badges``) — distinct from omitting
+the flag entirely.
 """
 
 from __future__ import annotations
@@ -62,6 +63,13 @@ def set_tool_meta(
         list[str] | None, typer.Option("--tag", help="A user tag (repeatable); replaces the whole set when given.")
     ] = None,
     clear_tags: Annotated[bool, typer.Option("--clear-tags", help="Clear all user tags (send an empty set).")] = False,
+    badges: Annotated[
+        list[str] | None,
+        typer.Option("--badge", help="A capability badge (repeatable); replaces the whole set when given."),
+    ] = None,
+    clear_badges: Annotated[
+        bool, typer.Option("--clear-badges", help="Clear all capability badges (send an empty set).")
+    ] = False,
     visibility: Annotated[
         str | None,
         typer.Option("--visibility", help="Visibility override: default (defer) | shown | hidden."),
@@ -79,6 +87,8 @@ def set_tool_meta(
         raise typer.BadParameter("pass either --folder or --clear-folder, not both")
     if tags and clear_tags:
         raise typer.BadParameter("pass either --tag or --clear-tags, not both")
+    if badges and clear_badges:
+        raise typer.BadParameter("pass either --badge or --clear-badges, not both")
 
     body: dict[str, Any] = {}
     if display_name is not None:
@@ -93,6 +103,10 @@ def set_tool_meta(
         body["tags"] = list(tags)
     elif clear_tags:
         body["tags"] = []
+    if badges:
+        body["badges"] = list(badges)
+    elif clear_badges:
+        body["badges"] = []
     if visibility is not None:
         if visibility not in _VISIBILITY_TO_HIDDEN:
             raise typer.BadParameter("--visibility must be one of: default, shown, hidden")
@@ -101,7 +115,7 @@ def set_tool_meta(
     if not body:
         raise typer.BadParameter(
             "provide at least one field to set (--display-name/--clear-display-name, "
-            "--folder/--clear-folder, --tag/--clear-tags, or --visibility)"
+            "--folder/--clear-folder, --tag/--clear-tags, --badge/--clear-badges, or --visibility)"
         )
     with ctx_obj.client() as client:
         data = client.patch(f"/api/tool-meta/tools/{tool_name}", json=body)

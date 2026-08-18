@@ -365,14 +365,17 @@ CREATE TABLE IF NOT EXISTS tool_folders (
 -- TRUE = force hidden, FALSE = force visible (unhide a plugin-hidden tool) — a
 -- NOT-NULL boolean could not express "unhide a plugin-hidden tool". `folder_id`
 -- places the tool in a folder (NULL = unfiled); `tags` is the user's editable
--- categorization (merged with plugin-native tags by the UI). Hidden is UI
--- visibility only, never a security boundary — the tool stays callable.
+-- categorization (merged with plugin-native tags by the UI). `badges` is the
+-- operator-overlay half of a tool's INFORMATIONAL capability badges (unioned with
+-- the plugin-declared half for display); the labels are advisory, never enforced.
+-- Hidden is UI visibility only, never a security boundary — the tool stays callable.
 CREATE TABLE IF NOT EXISTS tool_meta (
     tool_name    TEXT         NOT NULL,
     display_name TEXT,
     folder_id    UUID         REFERENCES tool_folders(id),
     tags         TEXT[]       NOT NULL DEFAULT '{}',
     hidden       BOOLEAN,
+    badges       TEXT[]       NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (tool_name)
 );

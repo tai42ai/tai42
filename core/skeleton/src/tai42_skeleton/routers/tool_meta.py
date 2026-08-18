@@ -8,8 +8,8 @@ operation owns the store and the merge-patch resolution.
 The overlay upsert is a MERGE-PATCH (RFC-7396): the extractor forwards ONLY the
 keys the caller sent, so a field's ABSENCE (unchanged) is told apart from a
 present-null (clear) at the edge — the same presence-driven pattern the preset
-save-version door uses for ``output_schema``. A present ``tags`` array replaces the
-set. At least one field must be present.
+save-version door uses for ``output_schema``. A present ``tags`` or ``badges`` array
+replaces that set. At least one field must be present.
 
 The doors:
 
@@ -30,6 +30,7 @@ from typing import Any
 
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.plugins import TAG_RE
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.tool_meta import (
@@ -58,7 +59,7 @@ from tai42_skeleton.operations.tool_meta import (
 
 # The overlay's merge-patch fields, in a fixed order for a stable "at least one of"
 # message.
-_PATCH_FIELDS = ("display_name", "folder_id", "tags", "hidden")
+_PATCH_FIELDS = ("display_name", "folder_id", "tags", "hidden", "badges")
 
 
 async def _json_object(request: Request) -> dict[str, Any]:
@@ -115,6 +116,18 @@ async def _extract_upsert(request: Request) -> dict[str, Any]:
         if value is not None and not isinstance(value, bool):
             raise BadRequestError("'hidden' must be a boolean or null")
         patch["hidden"] = value
+    if "badges" in body:
+        value = body["badges"]
+        if not isinstance(value, list) or not all(isinstance(badge, str) for badge in value):
+            raise BadRequestError("'badges' must be a list of strings")
+        # Enforce the badge charset at the door (``TAG_RE`` — hyphens allowed, slashes
+        # and uppercase forbidden). The record re-checks it, but that runs only after
+        # the store's UPDATE; without this edge check a bad badge surfaces as a 500
+        # instead of a loud 400 naming the offender.
+        for badge in value:
+            if not TAG_RE.fullmatch(badge):
+                raise BadRequestError(f"badge {badge!r} must match {TAG_RE.pattern}")
+        patch["badges"] = value
     if not patch:
         raise BadRequestError(f"body must provide at least one of {list(_PATCH_FIELDS)}")
     return {"patch": patch}

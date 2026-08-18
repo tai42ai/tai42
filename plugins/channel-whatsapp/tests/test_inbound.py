@@ -1443,3 +1443,65 @@ async def test_inbound_window_zero_writes_no_marker(
     await handler(signed_request(message_payload(text="hello")))
 
     assert _CONTACT_KEY not in fake_redis.store  # allowlist-only mode: no tracking
+
+
+# --- "Working on it" read + typing signal ------------------------------------
+
+_TYPING_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+_TYPING_BODY = {
+    "messaging_product": "whatsapp",
+    "status": "read",
+    "message_id": _WAMID,
+    "typing_indicator": {"type": "text"},
+}
+
+
+async def test_inbound_fires_read_typing_signal_before_branches(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A bridge (uncorrelated) text still fires the mark-as-read + typing signal:
+    # the combined Graph v23.0 body to /{phone_number_id}/messages, Bearer-authed,
+    # and the message still bridges.
+    result = await handler(signed_request(message_payload(text="ship it")))
+
+    assert result.status_code == 200
+    assert len(fake_httpx.typing_calls) == 1
+    signal = fake_httpx.typing_calls[0]
+    assert signal["url"] == _TYPING_URL
+    assert signal["json"] == _TYPING_BODY
+    assert signal["headers"]["Authorization"].startswith("Bearer ")
+    assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
+
+
+async def test_correlated_question_reply_fires_typing_signal(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Firing at _handle_message (before the type branches) also covers a reply that
+    # correlates to a pending question — the path that never reaches the bridge.
+    await _seed_pending()
+    fake_httpx.responses.append(response(200))  # the answer forward
+
+    result = await handler(signed_request(message_payload(text="yes please")))
+
+    assert result.status_code == 200
+    assert [c["json"] for c in fake_httpx.typing_calls] == [_TYPING_BODY]  # typing fired
+    assert fake_httpx.calls[0]["url"] == _CALLBACK  # the answer was still forwarded
+    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
+    assert stub_app.conversations.accept_calls == []  # correlation hit, not the bridge
+
+
+async def test_typing_signal_delivery_failure_is_logged_and_batch_survives(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+):
+    # A 5xx on the typing send is classified by `_send` into ChannelDeliveryError,
+    # caught, and logged at WARNING — the inbound still 200-acks (never a 5xx that
+    # would make Meta redeliver the whole batch) and the message still bridges.
+    fake_httpx.typing_response = response(500, text="typing endpoint down")
+
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(message_payload(text="ship it")))
+
+    assert result.status_code == 200
+    assert len(fake_httpx.typing_calls) == 1  # the signal was attempted
+    assert any("typing signal" in record.message for record in caplog.records)
+    assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached

@@ -48,6 +48,7 @@ from tai42_contract.conversations import DeliveryReceipt
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
+from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
 from tai42_skeleton.conversations.models import TERMINAL_STATUSES, ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations.errors import NotSupportedError
@@ -88,6 +89,20 @@ _NO_EXPIRY_SCORE = "+inf"
 #: A thread whose newest members are all rowless is being reclaimed, not displayed.
 _THREAD_SUMMARY_SCAN = 20
 
+#: Candidate threads a FILTERED route-thread listing examines before it reports the page
+#: LOUDLY truncated. There is no per-route+status index, so a status/address filter is an
+#: app-side post-scan and each candidate costs a summary read; this bounds it to a fixed page.
+_FILTER_THREAD_SCAN = 500
+
+#: Candidate records a transcript ``q`` search — or a route-scoped message search — examines
+#: before it reports the page LOUDLY truncated. Each candidate costs one record read (a full
+#: HGETALL + parse, since the searched text lives inside the JSON content blob).
+_FILTER_RECORD_SCAN = 1_000
+
+#: Threads or records a filter scan reads in ONE ranged command, so no single reply carries a
+#: whole route or thread.
+_FILTER_SCAN_WINDOW = 200
+
 #: Members of one thread's index, and threads of one route's index, a prune pass reads in
 #: ONE command. Both bound a single reply, so no pass ever asks Redis for a whole index.
 _PRUNE_MEMBERS_PER_BATCH = 200
@@ -102,6 +117,26 @@ _PRUNE_WORK_PER_PASS = 5_000
 def _member(value: str | bytes) -> str:
     """A sorted-set member as text, whichever form the client is decoding into."""
     return value.decode() if isinstance(value, bytes) else value
+
+
+def _thread_address_suffix(thread_id: str, route_name: str) -> str | None:
+    """The client-address suffix a route-keyed thread id carries
+    (``bridge:{route_name}:{client_address}`` → ``client_address``), or ``None`` for a person
+    thread (``bridge:@person:{id}`` carries no address to match)."""
+    if thread_id.startswith(PERSON_THREAD_PREFIX):
+        return None
+    prefix = f"{BRIDGE_THREAD_PREFIX}{route_name}:"
+    if thread_id.startswith(prefix):
+        return thread_id[len(prefix) :]
+    return None
+
+
+def _record_matches(record: ConversationRecord, needle: str) -> bool:
+    """Whether ``needle`` (already lower-cased) occurs in the record's inbound text or its
+    answer — the two fields a conversation text search reads."""
+    if needle in record.inbound_text.lower():
+        return True
+    return record.answer is not None and needle in record.answer.lower()
 
 
 def _reindex(member_argv: str, score_argv: str) -> str:
@@ -388,21 +423,29 @@ class ThreadSummary:
 
 @dataclass(frozen=True)
 class ThreadPage:
-    """One page of a route's threads, newest activity first, with the indexed total the
-    page was cut from."""
+    """One page of a route's threads, newest activity first, with the total the page was cut
+    from — the route's indexed thread count for an unfiltered listing, or the number of
+    matches a bounded filter scan FOUND. ``truncated`` is True when a filter scan spent its
+    budget before the index was exhausted, so the page (and ``total``) is a bounded view and
+    matches may lie beyond it — surfaced LOUDLY, never a silent cut."""
 
     threads: list[ThreadSummary]
     total: int
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
 class TranscriptPage:
     """One page of a thread's records in the direction the read asked for — oldest first by
-    default, newest first under ``newest_first`` — with the thread's indexed total. A
-    ``total`` of 0 is a thread the index no longer holds at all."""
+    default, newest first under ``newest_first`` — with the total the page was cut from. For
+    an unfiltered read that is the thread's indexed record count and a ``total`` of 0 is a
+    thread the index no longer holds at all; for a ``q`` search it is the number of matches a
+    bounded scan FOUND. ``truncated`` is True when a search spent its budget before the index
+    was exhausted, so matches may lie beyond the page — surfaced LOUDLY, never a silent cut."""
 
     records: list[ConversationRecord]
     total: int
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -896,25 +939,118 @@ class ConversationRecordStore:
 
     # -- thread indexes (keyspaces 7-8) --------------------------------------
 
-    async def list_route_threads(self, route_name: str, *, offset: int, limit: int) -> ThreadPage:
+    async def list_route_threads(
+        self,
+        route_name: str,
+        *,
+        offset: int,
+        limit: int,
+        status: frozenset[DeliveryStatus] | None = None,
+        address: str | None = None,
+    ) -> ThreadPage:
         """One page of ``route_name``'s threads, newest activity first, each summarized from
         its NEWEST readable record — so the cost is the page, never the route's whole
         history. Reads nothing back into the index: a thread with no readable record left is
-        logged and omitted from the page, and the prune pass reclaims it."""
+        logged and omitted from the page, and the prune pass reclaims it.
+
+        With a ``status`` (the summary ``last_delivery_status`` must be one of the set) or an
+        ``address`` (a substring of the thread id's client-address suffix) filter, the read is
+        a BOUNDED app-side post-scan — there is no per-route+status index — so ``total`` is
+        the number of matches the scan found and it may report ``truncated`` (see
+        :meth:`_filter_route_threads`)."""
         key = self.settings.route_threads_key(route_name)
-        threads: list[ThreadSummary] = []
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            # Read the total the page is cut from BEFORE the page, so ``next_page`` can
-            # never be computed against a count the walk itself moved.
-            total = int(await awaited(r.zcard(key)))
-            for member, score in await awaited(r.zrevrange(key, offset, offset + limit - 1, withscores=True)):
-                summary = await self._thread_summary(r, route_name, _member(member), last_activity_at=float(score))
-                if summary is not None:
-                    threads.append(summary)
-        return ThreadPage(threads=threads, total=total)
+            if status is None and address is None:
+                # Read the total the page is cut from BEFORE the page, so ``next_page`` can
+                # never be computed against a count the walk itself moved.
+                total = int(await awaited(r.zcard(key)))
+                threads: list[ThreadSummary] = []
+                for member, score in await awaited(r.zrevrange(key, offset, offset + limit - 1, withscores=True)):
+                    summary = await self._thread_summary(r, route_name, _member(member), last_activity_at=float(score))
+                    if summary is not None:
+                        threads.append(summary)
+                return ThreadPage(threads=threads, total=total)
+            return await self._filter_route_threads(
+                r, route_name, key, offset=offset, limit=limit, status=status, address=address
+            )
+
+    async def _filter_route_threads(
+        self,
+        r: AsyncRedis,
+        route_name: str,
+        key: str,
+        *,
+        offset: int,
+        limit: int,
+        status: frozenset[DeliveryStatus] | None,
+        address: str | None,
+    ) -> ThreadPage:
+        """A FILTERED page of a route's threads: a bounded forward scan of the route index,
+        newest activity first, post-filtering each candidate by the client address in its id
+        (a cheap id test, applied first) and/or its summary ``last_delivery_status``. The
+        per-status indexes are GLOBAL and hold ``message_id``s, not thread ids, so there is no
+        direct per-route+status serve; this is the correct app-side post-filter.
+
+        The scan spends at most :data:`_FILTER_THREAD_SCAN` candidates, read in windows of
+        :data:`_FILTER_SCAN_WINDOW`. If it spends that budget before the index is exhausted it
+        reports ``truncated`` — the page (and ``total``) is then a bounded view and matches may
+        lie beyond it. ``total`` is the number of matches found; the page is the
+        ``offset``/``limit`` slice of them."""
+        matched: list[ThreadSummary] = []
+        examined = 0
+        rank = 0
+        truncated = False
+        while True:
+            window = await awaited(r.zrevrange(key, rank, rank + _FILTER_SCAN_WINDOW - 1, withscores=True))
+            if not window:
+                break
+            for member, score in window:
+                if examined >= _FILTER_THREAD_SCAN:
+                    truncated = True
+                    break
+                examined += 1
+                thread_id = _member(member)
+                if address is not None:
+                    suffix = _thread_address_suffix(thread_id, route_name)
+                    if suffix is None or address not in suffix:
+                        continue
+                summary = await self._thread_summary(r, route_name, thread_id, last_activity_at=float(score))
+                if summary is None:
+                    continue
+                if status is not None and summary.last_delivery_status not in status:
+                    continue
+                matched.append(summary)
+            if truncated:
+                break
+            rank += len(window)
+        return ThreadPage(threads=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+
+    async def _load_searched_record(self, r: AsyncRedis, message_id: str) -> ConversationRecord | None:
+        """The record ``message_id`` names, or ``None`` when its row is gone or unparseable —
+        both logged LOUDLY and left for the prune pass, never a silent skip. The shared read a
+        text search's bounded scan takes for each candidate id."""
+        hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+        if not hashed:
+            logger.warning(
+                "conversations: record %r is indexed but has no row; skipped in the search, left for the prune pass",
+                message_id,
+            )
+            return None
+        try:
+            return self._from_hash(hashed)
+        except (ValueError, KeyError):
+            logger.warning("conversations: record %r is corrupt and was skipped in the search", message_id)
+            return None
 
     async def list_thread_records(
-        self, route_name: str, thread_id: str, *, offset: int, limit: int, newest_first: bool = False
+        self,
+        route_name: str,
+        thread_id: str,
+        *,
+        offset: int,
+        limit: int,
+        newest_first: bool = False,
+        q: str | None = None,
     ) -> TranscriptPage:
         """One page of a thread's records — oldest first by default, newest first with
         ``newest_first`` (the live-tail order, where page 1 always holds the latest
@@ -924,36 +1060,68 @@ class ConversationRecordStore:
         ``total`` is 0 exactly when the index holds no record for that thread, which is how
         an unknown or fully expired thread is told from an empty page. A member whose row is
         gone or unparseable is logged and skipped; the index is left alone, so the page's
-        offsets and ``total`` stay the ones the caller asked against."""
+        offsets and ``total`` stay the ones the caller asked against.
+
+        With ``q`` the read is a BOUNDED text search over the record content: each candidate
+        costs a full row read (the searched text lives inside the JSON blob), so the scan
+        spends at most :data:`_FILTER_RECORD_SCAN` candidates and reports ``truncated`` if it
+        runs out of budget before the index is exhausted. ``total`` is then the number of
+        matches found and the page is the ``offset``/``limit`` slice of them; a thread with no
+        match reads as an empty page, told from an unknown thread by the empty-index short
+        circuit above."""
         thread_key = self.settings.thread_index_key(route_name, thread_id)
-        records: list[ConversationRecord] = []
         async with client_ctx(RedisClient, self.settings.redis) as r:
             total = int(await awaited(r.zcard(thread_key)))
             if total == 0:
                 return TranscriptPage(records=[], total=0)
+            if q is not None:
+                matched, truncated = await self._search_thread(
+                    r, thread_key, newest_first=newest_first, needle=q.lower()
+                )
+                return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+            records: list[ConversationRecord] = []
             end = offset + limit - 1
             window = r.zrevrange(thread_key, offset, end) if newest_first else r.zrange(thread_key, offset, end)
             for member in await awaited(window):
-                message_id = _member(member)
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
-                if not hashed:
-                    logger.warning(
-                        "conversations: record %r is indexed in thread %r but has no row; "
-                        "skipped in the transcript, left for the prune pass",
-                        message_id,
-                        thread_id,
-                    )
-                    continue
-                try:
-                    records.append(self._from_hash(hashed))
-                except (ValueError, KeyError):
-                    logger.warning(
-                        "conversations: record %r is corrupt and was skipped in the thread transcript", message_id
-                    )
+                record = await self._load_searched_record(r, _member(member))
+                if record is not None:
+                    records.append(record)
         return TranscriptPage(records=records, total=total)
 
+    async def _search_thread(
+        self, r: AsyncRedis, thread_key: str, *, newest_first: bool, needle: str
+    ) -> tuple[list[ConversationRecord], bool]:
+        """The records of one thread index matching ``needle``, walked in the requested order
+        in bounded windows, spending at most :data:`_FILTER_RECORD_SCAN` candidate reads.
+        Returns ``(matches, truncated)`` — ``truncated`` True when the budget ran out before
+        the index was exhausted."""
+        matched: list[ConversationRecord] = []
+        examined = 0
+        rank = 0
+        while True:
+            end = rank + _FILTER_SCAN_WINDOW - 1
+            window = r.zrevrange(thread_key, rank, end) if newest_first else r.zrange(thread_key, rank, end)
+            members = await awaited(window)
+            if not members:
+                return matched, False
+            for member in members:
+                if examined >= _FILTER_RECORD_SCAN:
+                    return matched, True
+                examined += 1
+                record = await self._load_searched_record(r, _member(member))
+                if record is not None and _record_matches(record, needle):
+                    matched.append(record)
+            rank += len(members)
+
     async def list_person_thread_records(
-        self, route_names: list[str], thread_id: str, *, offset: int, limit: int, newest_first: bool = False
+        self,
+        route_names: list[str],
+        thread_id: str,
+        *,
+        offset: int,
+        limit: int,
+        newest_first: bool = False,
+        q: str | None = None,
     ) -> TranscriptPage:
         """One page of a LINKED person's aggregated transcript — the k-way merge of the same
         ``thread_id`` (``bridge:@person:{id}``) across the person's N per-route indexes, so
@@ -966,9 +1134,14 @@ class ConversationRecordStore:
         in that same direction — the ``message_id`` tie-break mirrors redis's own equal-score
         member ordering, so cross-index ties page deterministically — then sliced
         ``[offset : offset + limit]``. NEVER a per-index offset (wrong global pages) and never
-        an ascending fetch reversed (wrong descending window)."""
+        an ascending fetch reversed (wrong descending window).
+
+        With ``q`` the read is a BOUNDED text search: at most :data:`_FILTER_RECORD_SCAN`
+        members are fetched from EACH index (an index that fills that window may hold more, so
+        the search reports ``truncated``), merged in the requested order, then read and matched
+        up to the same candidate budget. ``total`` is then the number of matches found and the
+        page is the ``offset``/``limit`` slice of them."""
         thread_keys = [self.settings.thread_index_key(route_name, thread_id) for route_name in route_names]
-        end = offset + limit - 1
         scored: list[tuple[float, str]] = []
         async with client_ctx(RedisClient, self.settings.redis) as r:
             total = 0
@@ -976,6 +1149,11 @@ class ConversationRecordStore:
                 total += int(await awaited(r.zcard(key)))
             if total == 0:
                 return TranscriptPage(records=[], total=0)
+            if q is not None:
+                return await self._search_person_thread(
+                    r, thread_keys, thread_id, offset=offset, limit=limit, newest_first=newest_first, needle=q.lower()
+                )
+            end = offset + limit - 1
             for key in thread_keys:
                 window = (
                     r.zrevrange(key, 0, end, withscores=True)
@@ -986,22 +1164,105 @@ class ConversationRecordStore:
             scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=newest_first)
             records: list[ConversationRecord] = []
             for _score, message_id in scored[offset : offset + limit]:
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
-                if not hashed:
-                    logger.warning(
-                        "conversations: record %r is indexed in person thread %r but has no row; "
-                        "skipped in the transcript, left for the prune pass",
-                        message_id,
-                        thread_id,
-                    )
-                    continue
-                try:
-                    records.append(self._from_hash(hashed))
-                except (ValueError, KeyError):
-                    logger.warning(
-                        "conversations: record %r is corrupt and was skipped in the person transcript", message_id
-                    )
+                record = await self._load_searched_record(r, message_id)
+                if record is not None:
+                    records.append(record)
         return TranscriptPage(records=records, total=total)
+
+    async def _search_person_thread(
+        self,
+        r: AsyncRedis,
+        thread_keys: list[str],
+        thread_id: str,
+        *,
+        offset: int,
+        limit: int,
+        newest_first: bool,
+        needle: str,
+    ) -> TranscriptPage:
+        """The bounded text search over a person's aggregated transcript: at most
+        :data:`_FILTER_RECORD_SCAN` members from each index (a filled window means the index
+        may hold more), merged in the requested order, read and matched up to the same budget.
+        ``truncated`` if any index filled its window or the match scan spent its budget."""
+        end = _FILTER_RECORD_SCAN - 1
+        scored: list[tuple[float, str]] = []
+        truncated = False
+        for key in thread_keys:
+            window = (
+                r.zrevrange(key, 0, end, withscores=True) if newest_first else r.zrange(key, 0, end, withscores=True)
+            )
+            fetched = await awaited(window)
+            if len(fetched) >= _FILTER_RECORD_SCAN:
+                truncated = True
+            scored.extend((float(score), _member(member)) for member, score in fetched)
+        scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=newest_first)
+        matched: list[ConversationRecord] = []
+        for examined, (_score, message_id) in enumerate(scored):
+            if examined >= _FILTER_RECORD_SCAN:
+                truncated = True
+                break
+            record = await self._load_searched_record(r, message_id)
+            if record is not None and _record_matches(record, needle):
+                matched.append(record)
+        return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
+
+    async def search_route_messages(self, route_name: str, *, offset: int, limit: int, q: str) -> TranscriptPage:
+        """Every record on ``route_name`` whose text matches ``q``, across ALL the route's
+        threads — a BOUNDED nested scan (the route's threads newest-active first, then each
+        thread's records newest first), since there is no per-route record index. The scan is
+        bounded in BOTH dimensions: it visits at most :data:`_FILTER_THREAD_SCAN` threads and
+        reads at most :data:`_FILTER_RECORD_SCAN` records, reporting ``truncated`` if either
+        budget runs out before the route is exhausted. Bounding threads too is load-bearing: a
+        route of many stranded members whose per-thread index is momentarily empty would
+        otherwise let the thread loop run unbounded without ever spending a record. ``total`` is
+        the number of matches found; the page is the ``offset``/``limit`` slice of them. A
+        member whose row is gone or unparseable is logged LOUDLY and skipped."""
+        needle = q.lower()
+        route_key = self.settings.route_threads_key(route_name)
+        matched: list[ConversationRecord] = []
+        examined = 0
+        threads_examined = 0
+        truncated = False
+        thread_rank = 0
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            while not truncated:
+                threads = [
+                    _member(m)
+                    for m in await awaited(r.zrevrange(route_key, thread_rank, thread_rank + _FILTER_SCAN_WINDOW - 1))
+                ]
+                if not threads:
+                    break
+                for thread_id in threads:
+                    if threads_examined >= _FILTER_THREAD_SCAN:
+                        truncated = True
+                        break
+                    threads_examined += 1
+                    thread_key = self.settings.thread_index_key(route_name, thread_id)
+                    member_rank = 0
+                    while True:
+                        members = [
+                            _member(m)
+                            for m in await awaited(
+                                r.zrevrange(thread_key, member_rank, member_rank + _FILTER_SCAN_WINDOW - 1)
+                            )
+                        ]
+                        if not members:
+                            break
+                        for message_id in members:
+                            if examined >= _FILTER_RECORD_SCAN:
+                                truncated = True
+                                break
+                            examined += 1
+                            record = await self._load_searched_record(r, message_id)
+                            if record is not None and _record_matches(record, needle):
+                                matched.append(record)
+                        if truncated:
+                            break
+                        member_rank += len(members)
+                    if truncated:
+                        break
+                thread_rank += len(threads)
+        return TranscriptPage(records=matched[offset : offset + limit], total=len(matched), truncated=truncated)
 
     async def _thread_summary(
         self, r: AsyncRedis, route_name: str, thread_id: str, *, last_activity_at: float

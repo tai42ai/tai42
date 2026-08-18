@@ -357,6 +357,17 @@ class FakeRecordRedis:
             index_key = index_prefix + person["target_kind"] + ":" + person["target_name"]
             self._hashes.setdefault(index_key, {})[dak] = new_id
             return ["ok", fresh_json]
+        if "conversations:person:erase" in script:
+            row_key, index_key = keys[0], keys[1]
+            person_id = argv[0]
+            removed_row = await self.delete(row_key)
+            index = self._hashes.get(index_key, {})
+            removed_fields = 0
+            for field, val in list(index.items()):
+                if val == person_id:
+                    del index[field]
+                    removed_fields += 1
+            return [removed_row, removed_fields]
         if "conversations:pair_code:mint" in script:
             open_key, new_code_key = keys[0], keys[1]
             new_hash, record_json, ttl, code_prefix = argv[0], argv[1], int(argv[2]), argv[3]

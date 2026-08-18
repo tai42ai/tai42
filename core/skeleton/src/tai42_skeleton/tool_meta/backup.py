@@ -82,7 +82,8 @@ async def export_tool_meta() -> dict[str, Any]:
             for folder_id, name, parent_id, created_at in await cur.fetchall()
         ]
         await cur.execute(
-            "SELECT tool_name, display_name, folder_id, tags, hidden, created_at FROM tool_meta ORDER BY tool_name"
+            "SELECT tool_name, display_name, folder_id, tags, hidden, badges, created_at "
+            "FROM tool_meta ORDER BY tool_name"
         )
         rows = [
             {
@@ -91,9 +92,10 @@ async def export_tool_meta() -> dict[str, Any]:
                 "folder_id": None if folder_id is None else str(folder_id),
                 "tags": list(tags or []),
                 "hidden": hidden,
+                "badges": list(badges or []),
                 "created_at": created_at.isoformat(),
             }
-            for tool_name, display_name, folder_id, tags, hidden, created_at in await cur.fetchall()
+            for tool_name, display_name, folder_id, tags, hidden, badges, created_at in await cur.fetchall()
         ]
     return {"folders": folders, "rows": rows}
 
@@ -154,17 +156,19 @@ async def import_tool_meta(payload: dict[str, Any], mode: Literal["skip", "overw
                 report["skipped_existing"] += 1
                 continue
             await cur.execute(
-                "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, badges, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (tool_name) DO UPDATE SET "
                 "display_name = EXCLUDED.display_name, folder_id = EXCLUDED.folder_id, "
-                "tags = EXCLUDED.tags, hidden = EXCLUDED.hidden, created_at = EXCLUDED.created_at",
+                "tags = EXCLUDED.tags, hidden = EXCLUDED.hidden, badges = EXCLUDED.badges, "
+                "created_at = EXCLUDED.created_at",
                 (
                     row["tool_name"],
                     row["display_name"],
                     row["folder_id"],
                     list(row["tags"] or []),
                     row["hidden"],
+                    list(row["badges"] or []),
                     datetime.fromisoformat(row["created_at"]),
                 ),
             )

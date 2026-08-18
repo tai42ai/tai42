@@ -100,7 +100,7 @@ async def test_delete_folder_with_subfolder_refused(pg: FakeToolMetaPg, store: P
 
 async def test_delete_folder_holding_overlay_row_refused(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
     folder = await store.create_folder("filed")
-    await store.upsert_meta("weather", display_name=None, folder_id=folder.id, tags=[], hidden=None)
+    await store.upsert_meta("weather", display_name=None, folder_id=folder.id, tags=[], hidden=None, badges=[])
     with pytest.raises(FolderNotEmptyError):
         await store.delete_folder(folder.id)
 
@@ -176,9 +176,13 @@ async def test_move_to_unknown_parent_not_found(pg: FakeToolMetaPg, store: Postg
 
 
 async def test_upsert_inserts_then_updates_on_conflict(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
-    first = await store.upsert_meta("weather", display_name="Weather", folder_id=None, tags=["a"], hidden=None)
+    first = await store.upsert_meta(
+        "weather", display_name="Weather", folder_id=None, tags=["a"], hidden=None, badges=[]
+    )
     assert (first.tool_name, first.display_name, first.tags) == ("weather", "Weather", ["a"])
-    second = await store.upsert_meta("weather", display_name="Forecast", folder_id=None, tags=["b"], hidden=True)
+    second = await store.upsert_meta(
+        "weather", display_name="Forecast", folder_id=None, tags=["b"], hidden=True, badges=[]
+    )
     assert second.display_name == "Forecast"
     assert second.tags == ["b"]
     assert second.hidden is True
@@ -187,15 +191,15 @@ async def test_upsert_inserts_then_updates_on_conflict(pg: FakeToolMetaPg, store
 
 async def test_get_meta_hit_and_miss(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
     assert await store.get_meta("weather") is None
-    await store.upsert_meta("weather", display_name="W", folder_id=None, tags=[], hidden=None)
+    await store.upsert_meta("weather", display_name="W", folder_id=None, tags=[], hidden=None, badges=[])
     got = await store.get_meta("weather")
     assert got is not None
     assert got.tool_name == "weather"
 
 
 async def test_list_meta_ordered_by_tool_name(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
-    await store.upsert_meta("zebra", display_name=None, folder_id=None, tags=[], hidden=None)
-    await store.upsert_meta("apple", display_name=None, folder_id=None, tags=[], hidden=None)
+    await store.upsert_meta("zebra", display_name=None, folder_id=None, tags=[], hidden=None, badges=[])
+    await store.upsert_meta("apple", display_name=None, folder_id=None, tags=[], hidden=None, badges=[])
     assert [r.tool_name for r in await store.list_meta()] == ["apple", "zebra"]
 
 
@@ -203,28 +207,44 @@ async def test_list_meta_ordered_by_tool_name(pg: FakeToolMetaPg, store: Postgre
 async def test_hidden_tri_state_round_trips(
     pg: FakeToolMetaPg, store: PostgresToolMetaStore, hidden: bool | None
 ) -> None:
-    await store.upsert_meta("t", display_name=None, folder_id=None, tags=[], hidden=hidden)
+    await store.upsert_meta("t", display_name=None, folder_id=None, tags=[], hidden=hidden, badges=[])
     got = await store.get_meta("t")
     assert got is not None
     assert got.hidden is hidden
 
 
 async def test_tags_round_trip(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
-    await store.upsert_meta("t", display_name=None, folder_id=None, tags=["x", "y", "z"], hidden=None)
+    await store.upsert_meta("t", display_name=None, folder_id=None, tags=["x", "y", "z"], hidden=None, badges=[])
     got = await store.get_meta("t")
     assert got is not None
     assert got.tags == ["x", "y", "z"]
 
 
+async def test_badges_round_trip(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
+    # The operator-overlay badge set persists and reads back verbatim (hyphen form,
+    # the TAG_RE charset the record enforces).
+    await store.upsert_meta(
+        "t", display_name=None, folder_id=None, tags=[], hidden=None, badges=["storage-read", "network"]
+    )
+    got = await store.get_meta("t")
+    assert got is not None
+    assert got.badges == ["storage-read", "network"]
+    # A full-row upsert replaces the badge set.
+    await store.upsert_meta("t", display_name=None, folder_id=None, tags=[], hidden=None, badges=["llm"])
+    replaced = await store.get_meta("t")
+    assert replaced is not None
+    assert replaced.badges == ["llm"]
+
+
 async def test_upsert_places_row_in_folder(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
     folder = await store.create_folder("bucket")
-    row = await store.upsert_meta("t", display_name=None, folder_id=folder.id, tags=[], hidden=None)
+    row = await store.upsert_meta("t", display_name=None, folder_id=folder.id, tags=[], hidden=None, badges=[])
     assert row.folder_id == folder.id
 
 
 async def test_upsert_unknown_folder_not_found(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
     with pytest.raises(FolderNotFoundError):
-        await store.upsert_meta("t", display_name=None, folder_id="no-such-folder", tags=[], hidden=None)
+        await store.upsert_meta("t", display_name=None, folder_id="no-such-folder", tags=[], hidden=None, badges=[])
     assert "t" not in pg.meta  # nothing written
 
 
@@ -232,7 +252,7 @@ async def test_upsert_unknown_folder_not_found(pg: FakeToolMetaPg, store: Postgr
 
 
 async def test_delete_meta_removes_row(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
-    await store.upsert_meta("t", display_name=None, folder_id=None, tags=[], hidden=None)
+    await store.upsert_meta("t", display_name=None, folder_id=None, tags=[], hidden=None, badges=[])
     await store.delete_meta("t")
     assert await store.get_meta("t") is None
 
@@ -244,7 +264,7 @@ async def test_delete_meta_missing_row_is_noop(pg: FakeToolMetaPg, store: Postgr
 
 
 async def test_rename_tool_rekeys_row(pg: FakeToolMetaPg, store: PostgresToolMetaStore) -> None:
-    await store.upsert_meta("old", display_name="Label", folder_id=None, tags=["k"], hidden=True)
+    await store.upsert_meta("old", display_name="Label", folder_id=None, tags=["k"], hidden=True, badges=[])
     await store.rename_tool("old", "new")
     assert await store.get_meta("old") is None
     moved = await store.get_meta("new")
@@ -255,8 +275,8 @@ async def test_rename_tool_rekeys_row(pg: FakeToolMetaPg, store: PostgresToolMet
 async def test_rename_tool_clean_slate_deletes_existing_destination(
     pg: FakeToolMetaPg, store: PostgresToolMetaStore
 ) -> None:
-    await store.upsert_meta("old", display_name="Old", folder_id=None, tags=["from-old"], hidden=None)
-    await store.upsert_meta("new", display_name="Ghost", folder_id=None, tags=["ghost"], hidden=True)
+    await store.upsert_meta("old", display_name="Old", folder_id=None, tags=["from-old"], hidden=None, badges=[])
+    await store.upsert_meta("new", display_name="Ghost", folder_id=None, tags=["ghost"], hidden=True, badges=[])
     await store.rename_tool("old", "new")
     # The old row's values win under ``new``; the pre-existing ghost was deleted first.
     dest = await store.get_meta("new")

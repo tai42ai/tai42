@@ -319,6 +319,21 @@ def test_run_response_format_nonconforming_structured_raises(monkeypatch: pytest
         asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=schema))
 
 
+def test_run_response_format_oversized_int_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The native ``with_structured_output`` door has no retry rail, so an integer
+    the model returns past the platform int64 range fails the validation step with
+    a loud typed error rather than aborting the serializer downstream."""
+    schema = {
+        "title": "Answer",
+        "type": "object",
+        "properties": {"count": {"type": "integer"}},
+        "required": ["count"],
+    }
+    _install_structured_llm(monkeypatch, _StructuredLLM({"count": 9223372036854775807 + 1}))
+    with pytest.raises(JsonSchemaValidationError):
+        asyncio.run(VqaAgent().run(image_url="http://img", query="describe", response_format=schema))
+
+
 # Every key in ``_UNHONORED_REASONS`` paired with a representative SET value: a
 # non-empty collection for a collection param, a meaningful value for a scalar
 # (``resume=False`` pins the falsy-but-present case). Each is rejected on BOTH faces,

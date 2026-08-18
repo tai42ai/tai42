@@ -146,6 +146,54 @@ def test_patch_tags_array_replaces_set(pg: FakeToolMetaPg) -> None:
     _run(run)
 
 
+def test_patch_badges_array_replaces_set_and_is_independent(pg: FakeToolMetaPg) -> None:
+    async def run() -> None:
+        # Seed tags + badges, then a badges-only patch replaces the badge set while
+        # leaving tags untouched (badges and tags are independent overlay sets).
+        await _patch_tool("weather", {"tags": ["t"], "badges": ["storage-read", "network"]})
+        row = _data(await _patch_tool("weather", {"badges": ["llm"]}))
+        assert row["badges"] == ["llm"]
+        assert row["tags"] == ["t"]
+        # A present-empty array clears the badge set.
+        cleared = _data(await _patch_tool("weather", {"badges": []}))
+        assert cleared["badges"] == []
+
+    _run(run)
+
+
+def test_patch_badges_not_a_list_is_400(pg: FakeToolMetaPg) -> None:
+    async def run() -> None:
+        resp = await _patch_tool("weather", {"badges": "storage-read"})
+        assert resp.status_code == 400
+        assert "badges" in _err(resp)
+
+    _run(run)
+
+
+@pytest.mark.parametrize("bad", ["storage/read", "Storage", "storage read"])
+def test_patch_badge_bad_charset_is_400_at_edge(pg: FakeToolMetaPg, bad: str) -> None:
+    # A badge outside TAG_RE (slash, uppercase, space) is refused as a loud 400 at
+    # the HTTP edge naming the offender — never a 500 from the record's later
+    # re-check inside the store transaction.
+    async def run() -> None:
+        resp = await _patch_tool("weather", {"badges": [bad]})
+        assert resp.status_code == 400
+        assert repr(bad) in _err(resp)
+        # The edge refusal fires before any store work — no row was written.
+        assert pg.meta == {}
+
+    _run(run)
+
+
+def test_patch_valid_hyphen_badge_succeeds(pg: FakeToolMetaPg) -> None:
+    # The canonical hyphenated badge form is inside TAG_RE and still stores.
+    async def run() -> None:
+        row = _data(await _patch_tool("weather", {"badges": ["storage-read"]}))
+        assert row["badges"] == ["storage-read"]
+
+    _run(run)
+
+
 @pytest.mark.parametrize("hidden", [None, True, False])
 def test_patch_hidden_tri_state(pg: FakeToolMetaPg, hidden: bool | None) -> None:
     async def run() -> None:

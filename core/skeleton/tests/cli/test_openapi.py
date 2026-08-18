@@ -144,10 +144,11 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
 # the version-tags PUT (neither reload-gated) declare NO 503 at all and are absent
 # from this set.
 _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
-    # The operator thread doors — the forget-thread DELETE and the operator-send POST — declare
-    # the per-thread FIFO's full-queue UnavailableError (retriable), and neither is reload-gated,
-    # so each carries that 503 alone.
+    # The operator thread/person doors — the forget-thread DELETE, the erase-person DELETE and
+    # the operator-send POST — declare the per-thread FIFO's full-queue UnavailableError
+    # (retriable), and none is reload-gated, so each carries that 503 alone.
     ("DELETE", "/api/conversations/{route_name}/thread"),
+    ("DELETE", "/api/conversations/persons/{person_id}"),
     ("GET", "/api/schedules"),
     ("GET", "/api/schedules/server-datetime"),
     ("POST", "/api/conversations/{route_name}/thread/messages"),
@@ -713,9 +714,12 @@ def test_the_thread_read_doors_document_their_query_parameters(spec: dict) -> No
     assert "requestBody" not in threads
     params = {p["name"]: p for p in threads["parameters"]}
     assert params["route_name"]["in"] == "path"
-    assert {name for name, p in params.items() if p["in"] == "query"} == {"page", "pageSize"}
+    # The listing also publishes its optional ``status``/``address`` filters.
+    assert {name for name, p in params.items() if p["in"] == "query"} == {"page", "pageSize", "status", "address"}
     assert params["page"]["required"] is False
     assert params["pageSize"]["required"] is False
+    assert params["status"]["required"] is False
+    assert params["address"]["required"] is False
     # Both bounds the door enforces: a page below 1 or past MAX_THREAD_PAGE is a 400, so a
     # generated client refuses the window before the round trip.
     assert params["page"]["schema"]["minimum"] == 1
@@ -724,7 +728,8 @@ def test_the_thread_read_doors_document_their_query_parameters(spec: dict) -> No
     transcript = spec["paths"]["/api/conversations/{route_name}/transcript"]["get"]
     assert "requestBody" not in transcript
     read = {p["name"]: p for p in transcript["parameters"]}
-    assert {name for name, p in read.items() if p["in"] == "query"} == {"thread_id", "page", "pageSize", "order"}
+    # The transcript also publishes its optional ``q`` text filter.
+    assert {name for name, p in read.items() if p["in"] == "query"} == {"thread_id", "page", "pageSize", "order", "q"}
     # The one required query value: a client generated without it cannot call the door.
     assert read["thread_id"]["required"] is True
     assert read["thread_id"]["schema"]["type"] == "string"
@@ -817,6 +822,7 @@ _READ_DOOR_QUERIES: dict[str, tuple[set[str], set[str], set[str]]] = {
         {"q", "kind", "category", "tags", "namespace", "tier", "contract", "sort", "page", "page_size"},
         {"tags"},
     ),
+    "/api/conversations/{route_name}/messages/search": ({"q"}, {"page", "pageSize"}, set()),
 }
 
 
@@ -850,6 +856,7 @@ _NON_EMPTY_QUERY_IDS = [
     ("/api/tool-runs", "get", "tool_name", False),
     ("/api/conversations/{route_name}/transcript", "get", "thread_id", True),
     ("/api/conversations/{route_name}/thread", "delete", "thread_id", True),
+    ("/api/conversations/{route_name}/messages/search", "get", "q", True),
 ]
 
 

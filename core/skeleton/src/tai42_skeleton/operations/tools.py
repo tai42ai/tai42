@@ -95,18 +95,26 @@ async def list_tools() -> list[str]:
     return sorted(tools.keys())
 
 
-@operation(summary="List each tool's native tags and declared visibility", tags=["tools"])
+@operation(summary="List each tool's native tags, declared visibility, and badges", tags=["tools"])
 async def tool_tags() -> list[dict]:
-    """The per-tool native-``tags`` map plus the plugin-declared visibility — one
-    ``{name, tags, hidden}`` entry per registered tool, ``tags`` sorted for a stable
-    wire order. ``hidden`` is the tool's OWN declaration, read from the FastMCP
-    ``meta`` under the namespaced ``tai42/hidden`` key (a tool that never declared it
-    is not hidden). The tool_meta overlay's tri-state override is merged on top
-    client-side; this read exposes only the declaration. Additive to the flat names
-    contract; a tool with no tags carries an empty list."""
+    """The per-tool native-``tags`` map plus the plugin-declared visibility and
+    capability badges — one ``{name, tags, hidden, badges}`` entry per registered
+    tool, ``tags`` and ``badges`` each sorted for a stable wire order. ``hidden`` is
+    the tool's OWN declaration, read from the FastMCP ``meta`` under the namespaced
+    ``tai42/hidden`` key (a tool that never declared it is not hidden); ``badges`` is
+    likewise the tool's OWN declared INFORMATIONAL capability badges, read from
+    ``meta`` under ``tai42/badges`` (a tool that declared none carries an empty list).
+    The tool_meta overlay's tri-state override and its own badge set are merged on
+    top client-side; this read exposes only the declaration. Additive to the flat
+    names contract; a tool with no tags carries an empty list."""
     tools = await tai42_app.tools.get_tools()
     return [
-        {"name": name, "tags": sorted(tool.tags), "hidden": (tool.meta or {}).get("tai42/hidden") is True}
+        {
+            "name": name,
+            "tags": sorted(tool.tags),
+            "hidden": (tool.meta or {}).get("tai42/hidden") is True,
+            "badges": sorted((tool.meta or {}).get("tai42/badges") or []),
+        }
         for name, tool in sorted(tools.items())
     ]
 

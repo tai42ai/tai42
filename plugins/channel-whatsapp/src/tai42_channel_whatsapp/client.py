@@ -82,6 +82,26 @@ async def _post(phone_number_id: str, payload: dict[str, object]) -> str:
     return messages[0]["id"]
 
 
+async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
+    """Mark inbound ``wamid`` read and show a typing indicator to its sender.
+
+    POSTs the combined mark-as-read + typing-indicator body to
+    ``{api}/{phone_number_id}/messages`` (Graph v23.0). Meta answers
+    ``{"success": true}`` with no ``messages[].id``, so this rides ``_send``
+    directly and discards the body — ``_post`` is unusable here (it demands a
+    returned message id). Raises ``ChannelDeliveryError`` on the ``_send`` failure
+    modes; the inbound caller swallows it — a typing hint must never fail a batch.
+    """
+    url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": wamid,
+        "typing_indicator": {"type": "text"},
+    }
+    await _send(url, payload)
+
+
 async def send_message(phone_number_id: str, to: str, body: str) -> str:
     """Send one WhatsApp text message; return its ``wamid``."""
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}}

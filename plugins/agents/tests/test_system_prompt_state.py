@@ -274,6 +274,39 @@ class TestToolStrategyEndToEnd:
         # structured_response channel the platform extraction reads.
         assert result.structured == {"value": 7}
 
+    def test_oversized_int_structured_output_reprompts_via_the_retry_rail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The injected int64 bound makes the tool-calling parse reject an oversized
+        # integer, so the ToolStrategy ``handle_errors`` retry rail re-prompts the
+        # model instead of letting the value reach (and abort) the checkpoint
+        # serializer. The model is scripted to first answer out of range, then in
+        # range: the second model call proves the retry fired, and the final
+        # structured_response carries the in-range object.
+        schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
+        oversized = 9223372036854775807 + 1
+        model = RecordingChatModel(
+            [
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "Answer", "args": {"value": oversized}}]),
+                AIMessage(content="", tool_calls=[{"id": "call_2", "name": "Answer", "args": {"value": 7}}]),
+            ]
+        )
+        _seams(monkeypatch, model, InMemorySaver())
+
+        result = asyncio.run(
+            bta.ainvoke_tools_agent("sys", ["hi"], [], config=_config("t-retry"), response_format=schema)
+        )
+
+        # Two model calls: the first answer was rejected and the model re-prompted.
+        assert len(model._seen) == 2
+        # The retry produced the in-range object on the structured_response channel.
+        assert result.structured == {"value": 7}
+        # The second model call carried the structured-output error as a tool message,
+        # i.e. the run went through the handle_errors re-prompt path.
+        from langchain_core.messages import ToolMessage
+
+        assert any(isinstance(message, ToolMessage) for message in model._seen[1])
+
     def test_stream_projection_suppresses_the_synthetic_structured_tool_events(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

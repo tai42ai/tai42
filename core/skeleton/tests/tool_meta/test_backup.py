@@ -49,10 +49,19 @@ class _Cursor:
                 for f in sorted(pg.folders.values(), key=lambda f: f["id"])
             ]
         elif norm == (
-            "SELECT tool_name, display_name, folder_id, tags, hidden, created_at FROM tool_meta ORDER BY tool_name"
+            "SELECT tool_name, display_name, folder_id, tags, hidden, badges, created_at "
+            "FROM tool_meta ORDER BY tool_name"
         ):
             self._all = [
-                (m["tool_name"], m["display_name"], m["folder_id"], list(m["tags"]), m["hidden"], m["created_at"])
+                (
+                    m["tool_name"],
+                    m["display_name"],
+                    m["folder_id"],
+                    list(m["tags"]),
+                    m["hidden"],
+                    list(m["badges"]),
+                    m["created_at"],
+                )
                 for m in sorted(pg.meta.values(), key=lambda m: m["tool_name"])
             ]
         elif norm == "SELECT id FROM tool_folders":
@@ -68,7 +77,7 @@ class _Cursor:
                     raise UniqueViolation()  # NULLS-NOT-DISTINCT (parent_id, name)
             pg.folders[fid] = {"id": fid, "name": name, "parent_id": parent_id, "created_at": created_at}
         elif norm.startswith("INSERT INTO tool_meta"):
-            tool_name, display_name, folder_id, tags, hidden, created_at = params
+            tool_name, display_name, folder_id, tags, hidden, badges, created_at = params
             if folder_id is not None and folder_id not in pg.folders:
                 raise ForeignKeyViolation()
             pg.meta[tool_name] = {
@@ -77,6 +86,7 @@ class _Cursor:
                 "folder_id": folder_id,
                 "tags": list(tags),
                 "hidden": hidden,
+                "badges": list(badges),
                 "created_at": created_at,
             }
         else:
@@ -176,6 +186,7 @@ async def test_round_trip_restores_same_name_folders_under_different_parents(pg:
             "folder_id": "arch-nested",
             "tags": ["a"],
             "hidden": None,
+            "badges": ["network", "storage-read"],
             "created_at": ts,
         }
     }
@@ -200,6 +211,8 @@ async def test_round_trip_restores_same_name_folders_under_different_parents(pg:
         ("Archive", "work"),
     }
     assert pg.meta["weather"]["folder_id"] == "arch-nested"
+    # The badge set survives the export/import round-trip verbatim.
+    assert pg.meta["weather"]["badges"] == ["network", "storage-read"]
 
 
 async def test_round_trip_restores_child_listed_before_parent(pg: FakeBackupPg) -> None:
@@ -230,6 +243,7 @@ async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
             "folder_id": "f1",
             "tags": [],
             "hidden": None,
+            "badges": ["network"],
             "created_at": ts,
         }
     }
@@ -245,6 +259,7 @@ async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
                 "folder_id": "f1",
                 "tags": ["x"],
                 "hidden": None,
+                "badges": ["storage-write"],
                 "created_at": ts.isoformat(),
             }
         ],
@@ -268,3 +283,4 @@ async def test_skip_vs_overwrite_over_existing_rows(pg: FakeBackupPg) -> None:
     assert over["skipped_existing"] == 0
     assert pg.folders["f1"]["name"] == "Renamed"
     assert pg.meta["weather"]["display_name"] == "New label"
+    assert pg.meta["weather"]["badges"] == ["storage-write"]  # the overwrite replaced the badge set

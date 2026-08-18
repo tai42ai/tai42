@@ -11,7 +11,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 
 from tai42_agents._internal.recovery import _tool_error_middleware
@@ -27,6 +27,21 @@ from tai42_agents.deep_agent.factory import (
 from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 _FAKE_LLM = cast(BaseChatModel, "LLM")
+
+_INT64_OVERFLOW = 2**63
+
+
+def _assert_bound_to_model(strategy: ToolStrategy[Any], model: type[BaseModel]) -> None:
+    """A subagent whose response_format was ``model`` emits a bounded ToolStrategy:
+    its schema (validated exactly as the tool-calling parse does, via a pydantic
+    ``TypeAdapter``) accepts a conforming value, rejects an oversized int under the
+    int64 bound, and binds under the model's name so structured tool-name stream
+    suppression still matches."""
+    adapter = TypeAdapter(strategy.schema)
+    assert adapter.validate_python({"x": 1}) == {"x": 1}
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"x": _INT64_OVERFLOW})
+    assert getattr(strategy.schema, "__name__", None) == model.__name__
 
 
 class _FakeRunnable:
@@ -167,7 +182,9 @@ def test_resolve_subagent_emits_response_format() -> None:
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
     assert isinstance(sub["response_format"], ToolStrategy)
-    assert sub["response_format"].schema is M
+    # ...and bounded: an oversized int is a retryable parse failure, and the schema
+    # binds under the model's name.
+    _assert_bound_to_model(sub["response_format"], M)
 
 
 def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +209,9 @@ def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch
     # The schema is pinned to the tool-calling strategy, never provider-dependent
     # auto-routing.
     assert isinstance(captured["response_format"], ToolStrategy)
-    assert cast(ToolStrategy[Any], captured["response_format"]).schema is M
+    # ...and bounded: an oversized int is a retryable parse failure, and the schema
+    # binds under the model's name.
+    _assert_bound_to_model(cast(ToolStrategy[Any], captured["response_format"]), M)
 
 
 def test_build_deep_agent_leads_with_system_purge_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,7 +240,9 @@ def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypat
     # provider-dependent auto-routing.
     threaded = calls[-1]["response_format"]
     assert isinstance(threaded, ToolStrategy)
-    assert cast(ToolStrategy[Any], threaded).schema is M
+    # ...and bounded: an oversized int is a retryable parse failure, and the schema
+    # binds under the model's name.
+    _assert_bound_to_model(cast(ToolStrategy[Any], threaded), M)
 
 
 def test_build_deep_agent_collapses_empty_subagents(monkeypatch: pytest.MonkeyPatch) -> None:
