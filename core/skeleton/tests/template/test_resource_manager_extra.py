@@ -411,6 +411,34 @@ async def test_delete_template_dir_evicts_only_under_prefix(monkeypatch: pytest.
     assert await manager.render_by_id("other.j2", {"y": 7}) == "7"
 
 
+async def test_evict_compiled_public_seam_drops_one_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The public seam the fleet ``evict_template`` op applies on a sibling worker: it
+    # drops one compiled key and is idempotent on an already-absent key.
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, _ = _manager({"m.j2": "{{ x }}"})
+    await manager.render_by_id("m.j2", {"x": 1})
+    assert manager.get_cache_info().currsize == 1
+
+    manager.evict_compiled("m.j2")
+    assert manager.get_cache_info().currsize == 0
+    manager.evict_compiled("m.j2")  # idempotent: no-op, must not raise
+    manager.evict_compiled("never-cached.j2")  # unknown key: no-op
+
+
+async def test_evict_dir_public_seam_drops_under_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The directory counterpart the fleet op applies for a dir delete: prefix semantics
+    # (``dir`` -> ``dir/``), dropping only compilations under it.
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, _ = _manager({"dir/a.j2": "{{ x }}", "other.j2": "{{ y }}"})
+    await manager.render_by_id("dir/a.j2", {"x": 1})
+    await manager.render_by_id("other.j2", {"y": 2})
+    assert manager.get_cache_info().currsize == 2
+
+    manager.evict_dir("dir")
+    assert manager.get_cache_info().currsize == 1
+    assert await manager.render_by_id("other.j2", {"y": 7}) == "7"
+
+
 async def test_delete_template_dir_success_delegates() -> None:
     manager, store = _manager({"dir/a.j2": "A", "dir/b.j2": "B"})
     await manager.delete_template_dir("dir")

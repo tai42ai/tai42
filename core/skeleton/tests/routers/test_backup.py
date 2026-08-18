@@ -121,6 +121,12 @@ class _FakeConfigManager:
 class _FakeResourceManager:
     def __init__(self, templates=None):
         self._templates = dict(templates or {})
+        self.cleared = 0
+
+    def clear_cache(self) -> None:
+        # A template restore drops the compiled cache fleet-wide; the router import
+        # broadcasts ``clear_template_cache`` and this local apply runs the self entry.
+        self.cleared += 1
 
     async def list_resources(self) -> list[str]:
         return list(self._templates)
@@ -499,7 +505,12 @@ async def test_templates_roundtrip(monkeypatch):
     manager._templates = {}  # wipe
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["templates"]})))["data"]
     assert data["ok"] is True
-    assert data["sections"]["templates"] == _report(created=1)
+    # A restore that wrote keys drops the compiled cache fleet-wide; the section report
+    # carries the eviction fan-out, as the manifest/env sections do.
+    templates_report = data["sections"]["templates"]
+    assert templates_report.pop("fanout")["mode"] == "local-only"
+    assert templates_report == _report(created=1)
+    assert manager.cleared == 1
     assert manager._templates == {"greeting.j2": "hello {{ name }}"}
 
 
@@ -1087,8 +1098,12 @@ async def test_import_templates_existing_path_overwrites(monkeypatch):
         await import_backup(_post_req({"document": document, "sections": ["templates"], "mode": "overwrite"}))
     )["data"]
     assert data["ok"] is True
-    # The path already existed; overwrite replaces its content as an update.
-    assert data["sections"]["templates"] == _report(updated=1)
+    # The path already existed; overwrite replaces its content as an update, and the
+    # store mutation drops the compiled cache fleet-wide (fan-out on the report).
+    templates_report = data["sections"]["templates"]
+    assert templates_report.pop("fanout")["mode"] == "local-only"
+    assert templates_report == _report(updated=1)
+    assert manager.cleared == 1
     assert manager._templates == {"greeting.j2": "new"}
 
 

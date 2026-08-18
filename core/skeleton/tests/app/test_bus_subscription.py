@@ -26,11 +26,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.storage import Storage
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.template import resource_manager as rm_mod
+from tai42_skeleton.template.settings import TemplateCacheSettings
 
 tai42_app.bind(app)
 
@@ -278,24 +282,121 @@ async def test_app_context_builds_local_bus_and_manages_the_subscription(monkeyp
     assert task.cancelled()
 
 
+# -- evict_template / clear_template_cache dispatch ---------------------------
+#
+# A receiving worker's dispatch drops its own compiled-template cache, so a store
+# write on another worker never leaves this one rendering the stale body. Driven
+# against a REAL ResourceManager over an in-memory provider so the eviction is the
+# real cache control, not a stub.
+
+
+class _StubStorage(Storage):
+    """In-memory provider: enough for a compile-once render + cache eviction."""
+
+    def __init__(self, items: dict[str, str]) -> None:
+        self.items = dict(items)
+
+    async def load(self, path: str) -> str:
+        try:
+            return self.items[path]
+        except KeyError as exc:
+            raise FileNotFoundError(path) from exc
+
+    async def list(self) -> list[str]:
+        return sorted(self.items)
+
+    async def upload(self, path: str, content: str) -> None:
+        self.items[path] = content
+
+    async def delete(self, path: str) -> None:
+        self.items.pop(path, None)
+
+    async def delete_dir(self, path: str) -> None:
+        prefix = path.rstrip("/") + "/"
+        for key in [k for k in self.items if k.startswith(prefix)]:
+            del self.items[key]
+
+
+def _install_manager(monkeypatch: pytest.MonkeyPatch, items: dict[str, str]) -> ResourceManager:
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager = ResourceManager(_StubStorage(items))
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
+    return manager
+
+
+async def test_dispatch_evict_template_drops_the_worker_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _install_manager(monkeypatch, {"m.j2": "v1 {{ x }}"})
+    assert await manager.render_by_id("m.j2", {"x": 1}) == "v1 1"  # populate this worker's cache
+    assert manager.get_cache_info().currsize == 1
+
+    result = await _Mixin()._dispatch_bus_op({"op": "evict_template", "path": "m.j2"})
+
+    assert result == {"evicted": "m.j2"}
+    assert manager.get_cache_info().currsize == 0  # the stale compilation is gone
+
+
+async def test_dispatch_evict_template_prefix_drops_only_the_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _install_manager(monkeypatch, {"dir/a.j2": "{{ x }}", "other.j2": "{{ y }}"})
+    await manager.render_by_id("dir/a.j2", {"x": 1})
+    await manager.render_by_id("other.j2", {"y": 2})
+    assert manager.get_cache_info().currsize == 2
+
+    result = await _Mixin()._dispatch_bus_op({"op": "evict_template", "path": "dir", "prefix": True})
+
+    assert result == {"evicted": "dir"}
+    # Only the compilation under the prefix is dropped; the sibling stays cached.
+    assert manager.get_cache_info().currsize == 1
+    assert await manager.render_by_id("other.j2", {"y": 9}) == "9"
+
+
+async def test_dispatch_evict_template_without_a_path_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_manager(monkeypatch, {"m.j2": "{{ x }}"})
+    # A malformed fleet op must fail its confirmation, never apply a partial op.
+    with pytest.raises(ValueError, match="evict_template fleet op missing 'path'"):
+        await _Mixin()._dispatch_bus_op({"op": "evict_template"})
+
+
+async def test_dispatch_clear_template_cache_drops_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _install_manager(monkeypatch, {"a.j2": "{{ x }}", "b.j2": "{{ y }}"})
+    await manager.render_by_id("a.j2", {"x": 1})
+    await manager.render_by_id("b.j2", {"y": 2})
+    assert manager.get_cache_info().currsize == 2
+
+    result = await _Mixin()._dispatch_bus_op({"op": "clear_template_cache"})
+
+    assert result == {"cleared": True}
+    assert manager.get_cache_info().currsize == 0
+
+
 # -- drift guard: the contract's mutating-op set vs this dispatch --------------
 
 
 def test_registry_mutating_ops_match_the_dispatch() -> None:
-    """``REGISTRY_MUTATING_FLEET_OPS`` is a SECOND source of truth for op names
-    that live as literals in ``_dispatch_bus_op``. A backend base reads the
-    contract set to decide whether a pool holding a registry snapshot must be
-    turned over, so an op added here and not there turns over nothing and leaves
-    stale workers serving — silently. This test is the only thing preventing that
-    divergence.
+    """``POOL_TURNOVER_FLEET_OPS`` is a SECOND source of truth for op names that
+    live as literals in ``_dispatch_bus_op``. A backend base reads the contract set
+    to decide whether a pool that persists across jobs must be turned over, so an op
+    added here and not there turns over nothing and leaves stale workers serving —
+    silently. This test is the only thing preventing that divergence.
 
-    ``list_failed_mcps`` is a query and ``recycle`` ends the process, so they are
-    the two dispatched ops that are deliberately NOT in the mutating set."""
+    ``list_failed_mcps`` is a query and ``recycle`` ends the process, so both are
+    dispatched ops that are deliberately NOT pool-turnover ops. The two template-cache
+    ops (``evict_template`` / ``clear_template_cache``) drop the compiled-template cache
+    rather than the tool registry, so they are NOT registry-mutating but ARE
+    pool-turnover ops (a persisted worker's compiled cache goes stale)."""
     import ast
     import inspect
     import textwrap
 
-    from tai42_contract.backend import REGISTRY_MUTATING_FLEET_OPS
+    from tai42_contract.backend import (
+        POOL_TURNOVER_FLEET_OPS,
+        REGISTRY_MUTATING_FLEET_OPS,
+        TEMPLATE_EVICTION_FLEET_OPS,
+    )
+
+    # The template-eviction ops must ride the pool-turnover set (so a forking backend's
+    # children are recycled) while staying OUT of the registry-mutating set.
+    assert TEMPLATE_EVICTION_FLEET_OPS <= POOL_TURNOVER_FLEET_OPS
+    assert not (TEMPLATE_EVICTION_FLEET_OPS & REGISTRY_MUTATING_FLEET_OPS)
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(TaiMCPLifecycleMixin._dispatch_bus_op)))
     dispatched: set[str] = set()
@@ -306,7 +407,10 @@ def test_registry_mutating_ops_match_the_dispatch() -> None:
             elements = comparator.elts if isinstance(comparator, ast.Tuple | ast.List | ast.Set) else [comparator]
             dispatched.update(e.value for e in elements if isinstance(e, ast.Constant) and isinstance(e.value, str))
 
-    assert dispatched == REGISTRY_MUTATING_FLEET_OPS | {"list_failed_mcps", "recycle"}
+    assert dispatched == POOL_TURNOVER_FLEET_OPS | {
+        "list_failed_mcps",
+        "recycle",
+    }
 
 
 def test_the_bus_apply_window_matches_the_contract_agreement() -> None:

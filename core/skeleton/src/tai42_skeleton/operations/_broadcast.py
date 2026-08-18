@@ -22,6 +22,13 @@ Failure discipline splits the callers into two disciplines, selected by
   already committed, so a failed local apply still broadcasts (siblings converge
   on the persisted state) and then re-raises with the fleet report attached — a
   stranded fleet never hides behind a local error.
+
+A store-backed publisher whose apply can fail EITHER before it mutates the store
+(nothing to converge — a not-found, a rejected path) OR once destructive mutation
+may have begun (siblings must converge) names the pre-mutation exception types in
+``pre_mutation_errors``: those keep the abort-before-publish discipline even under
+``publish_on_local_failure=True``, so a spurious fan-out never rides a failure that
+changed nothing, while a mid-mutation failure still publishes.
 """
 
 from __future__ import annotations
@@ -184,6 +191,7 @@ async def broadcast(
     apply: Callable[[], Awaitable[Any]],
     *,
     publish_on_local_failure: bool = False,
+    pre_mutation_errors: tuple[type[BaseException], ...] = (),
 ) -> dict[str, Any]:
     """Validate targets, pin the expected membership, apply locally per the
     self-targeting rule, then broadcast.
@@ -192,6 +200,12 @@ async def broadcast(
     the whole fleet or the explicit worker list; ``apply`` runs this worker's own
     apply and returns its result (rides the self entry as the payload). Returns the
     :class:`~tai42_skeleton.app.bus.FleetResult` as a JSON-ready dict.
+
+    ``pre_mutation_errors`` names the local-apply exception types that ALWAYS keep the
+    abort-before-publish discipline — a failure raised before any destructive mutation,
+    which leaves siblings genuinely untouched — even under ``publish_on_local_failure``.
+    A failure of any other type under ``publish_on_local_failure`` still broadcasts. When
+    ``publish_on_local_failure`` is ``False`` this is moot: every local failure aborts.
 
     Both pre-apply steps exist for the same reason: everything the report is judged
     against must be read before the local apply can change it. See
@@ -218,8 +232,10 @@ async def broadcast(
         try:
             result = await apply()
         except Exception as exc:
-            if not publish_on_local_failure:
-                # Abort-before-publish: nothing is broadcast, siblings untouched.
+            if not publish_on_local_failure or isinstance(exc, pre_mutation_errors):
+                # Abort-before-publish: nothing is broadcast, siblings untouched — the
+                # apply either opts out of post-failure publish, or failed before any
+                # destructive mutation could begin (``pre_mutation_errors``).
                 raise
             local_failure = exc
             local = LocalApplyResult(outcome=OpOutcome.failed, error=f"{type(exc).__name__}: {exc}")

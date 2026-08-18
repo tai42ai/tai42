@@ -1,11 +1,11 @@
-"""Pool turnover after a registry-mutating fleet op.
+"""Pool turnover after a pool-turnover fleet op.
 
 Only a runtime whose worker processes PERSIST ACROSS JOBS holds a snapshot of
-this process's tool registry, so only that runtime gets wired. When it is, the
-turnover runs inside the op's apply and before its terminal reply: the manifest
-env the replacement workers inherit is refreshed first, the budget is derived
-from the bus apply window so a stall reports a truthful ``failed``, and a raise
-propagates rather than reporting a false ``applied``.
+this process's tool registry (or its own compiled-template cache), so only that
+runtime gets wired. When it is, the turnover runs inside the op's apply and before
+its terminal reply: the manifest env the replacement workers inherit is refreshed
+first, the budget is derived from the bus apply window so a stall reports a truthful
+``failed``, and a raise propagates rather than reporting a false ``applied``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import ClassVar
 import pytest
 from tai42_contract.backend.runtime import (
     BUS_APPLY_TIMEOUT_ENV,
-    REGISTRY_MUTATING_FLEET_OPS,
+    POOL_TURNOVER_FLEET_OPS,
     BackendRuntime,
 )
 
@@ -112,15 +112,28 @@ async def test_the_hook_is_registered_before_the_build(app: FakeApp, monkeypatch
     await asyncio.wait_for(task, timeout=5)
 
 
-@pytest.mark.parametrize("op_name", sorted(REGISTRY_MUTATING_FLEET_OPS))
-async def test_a_mutating_op_turns_the_pool_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
+@pytest.mark.parametrize("op_name", sorted(POOL_TURNOVER_FLEET_OPS))
+async def test_a_pool_turnover_op_turns_the_pool_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
+    # Every pool-turnover op recycles a persisting pool — a registry mutation the
+    # workers snapshot, AND a template eviction their compiled cache would miss (a
+    # forking backend's children are bus non-members reached only by turnover).
+    await _handler(app)(op_name)
+
+    assert wired.turnovers == [(op_name, 27.0)]
+
+
+@pytest.mark.parametrize("op_name", ["evict_template", "clear_template_cache"])
+async def test_a_template_eviction_op_turns_the_pool_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
+    # Called out explicitly: a template edit reaches only bus members, so a forking
+    # backend's prefork children keep rendering the stale compilation until the pool
+    # turns over — the same canonical mechanism a reload rides.
     await _handler(app)(op_name)
 
     assert wired.turnovers == [(op_name, 27.0)]
 
 
 @pytest.mark.parametrize("op_name", ["list_failed_mcps", "recycle"])
-async def test_a_non_mutating_op_turns_nothing_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
+async def test_a_non_turnover_op_turns_nothing_over(wired: FakeThreadWorker, app: FakeApp, op_name: str) -> None:
     # A query mutates no registry and a recycle ends the process, so replacing
     # workers for either would be pure downtime.
     await _handler(app)(op_name)
