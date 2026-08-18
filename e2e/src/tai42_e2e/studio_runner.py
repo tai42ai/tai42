@@ -58,6 +58,7 @@ from tai42_e2e.manifests import build_studio_stack
 from tai42_e2e.marketplace import (
     MarketplaceService,
     forge_fixture_artifacts,
+    registry_supports_declared_routes,
     seed_epsilon_listing,
     seed_fixture_catalog,
 )
@@ -385,7 +386,14 @@ def _start_marketplace(infra: Infra, root: Path, runner: StudioRunnerSettings) -
         # the marketplace-web spec assert a router/middleware listing browses + filters
         # while the shared pytest catalog stays alpha/beta/gamma. Its kinds are neither
         # tool nor extension, so it never disturbs the existing browse assertions.
-        asyncio.run(seed_epsilon_listing(service, index, artifacts))
+        #
+        # Epsilon carries a declared `routes` block (contract 2.0). The registry is
+        # pinned to tai42-contract <2, which rejects `routes` at seed time; skip the seed
+        # until the pin is bumped, mirroring the pytest route legs' gate. The browser
+        # specs that read this listing are already skipped (marketplace-web.spec.ts
+        # publish-circular), so the seed carries no test value until the pin is bumped.
+        if registry_supports_declared_routes():
+            asyncio.run(seed_epsilon_listing(service, index, artifacts))
         website = _MarketplaceWebSite(
             _resolve_web_repo(),
             port=runner.ui_mp_web_port,
