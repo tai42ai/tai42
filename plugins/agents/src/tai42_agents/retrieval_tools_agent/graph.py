@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from typing import Annotated, Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import RemoveMessage, ToolMessage
+from langchain_core.messages import RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -40,6 +40,7 @@ from langgraph.utils.runnable import RunnableCallable
 from pydantic import ValidationError
 from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.utils.data.string_util import text_to_md5
 
 from tai42_agents._internal.recovery import _tool_error_middleware
@@ -83,11 +84,15 @@ class RetrievalToolsGraph:
         checkpoint: BaseCheckpointSaver | None = None,
         overwrite_store: bool = False,
         tools_limit: int = 10,
+        system_prompt: str | None = None,
     ):
         self.tools = list(tools)
         self.llm = llm
         self.store = store
         self.checkpoint = checkpoint
+        # Per-run model configuration, prepended at each model call — never part
+        # of the checkpointed message state.
+        self.system_prompt = system_prompt
         self.tool_registry: dict[str, BaseTool] = {}
 
         # Namespace the store index per resolved tool-set (a stable hash of the
@@ -105,9 +110,17 @@ class RetrievalToolsGraph:
         self._should_continue_node: Callable[..., Any] | None = None
         self._overwrite_store = overwrite_store
         self._tools_limit = tools_limit
-        # The leading-user normalization runs last, after the history is reduced, so a
-        # thread opening with an assistant message leads user-first for the next model call.
-        self._context_middlewares = [*context_overflow_middlewares(), LeadingUserMiddleware()]
+        # The system purge runs first so a stored system message never reaches the
+        # other strategies or the model; the leading-user normalization runs last,
+        # after the history is reduced, so a thread opening with an assistant
+        # message leads user-first for the next model call. The per-run system
+        # prompt is shared with the context-overflow middlewares so the trimming
+        # budget covers the full outgoing request, prompt included.
+        self._context_middlewares = [
+            SystemPurgeMiddleware(),
+            *context_overflow_middlewares(system_prompt=self.system_prompt),
+            LeadingUserMiddleware(),
+        ]
 
     async def abuild(self) -> Any:
         store = self.store
@@ -172,7 +185,12 @@ class RetrievalToolsGraph:
             selected_tools = [self._registered_tool(tool_id) for tool_id in ids]
             llm_with_tools = self.llm.bind_tools([self.retrieve_tools_tool(), *selected_tools])
 
-            response = await llm_with_tools.ainvoke(state["messages"])
+            # The per-run system prompt is prepended for this model call only;
+            # state carries user/assistant/tool messages exclusively.
+            messages = state["messages"]
+            if self.system_prompt:
+                messages = [SystemMessage(content=self.system_prompt), *messages]
+            response = await llm_with_tools.ainvoke(messages)
             return {"messages": [response]}
 
         self._agent_node = RunnableCallable(func=None, afunc=node)

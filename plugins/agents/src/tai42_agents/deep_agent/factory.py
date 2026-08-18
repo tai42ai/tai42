@@ -26,10 +26,12 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_settings
 
 from tai42_agents._internal.recovery import _tool_error_middleware
+from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.deep_agent.backend import SKILLS_ROOT, build_backend
 from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
@@ -225,7 +227,7 @@ async def _resolve_subagent(
     if spec.interrupt_on:
         sub["interrupt_on"] = spec.interrupt_on
     if spec.response_format is not None:
-        sub["response_format"] = spec.response_format
+        sub["response_format"] = as_tool_strategy(spec.response_format)
     if spec.llm_provider:
         sub["model"] = await get_llm_async(
             provider=spec.llm_provider,
@@ -290,7 +292,7 @@ async def _compile_nested_subagent(
         backend=backend,
         store=store,
         interrupt_on=child.interrupt_on,
-        response_format=child.response_format,
+        response_format=as_tool_strategy(child.response_format),
         # Same tool-error visibility on the nested subagent's own tool node and on its
         # own auto-added general-purpose subagent, which inherits the child's skills.
         middleware=[_tool_error_middleware],
@@ -325,7 +327,8 @@ async def build_deep_agent(
 
     ``response_format`` (a pydantic model or langchain response strategy) makes the
     agent return a validated structured object in ``state['structured_response']``;
-    ``None`` keeps free-form text.
+    a raw schema is routed through the tool-calling strategy so structured output
+    never depends on provider-native support. ``None`` keeps free-form text.
     """
     subagent_specs = list(subagents or [])
     _validate(tools or [], subagent_specs, skills)
@@ -354,10 +357,12 @@ async def build_deep_agent(
         checkpointer=checkpointer,
         store=store,
         interrupt_on=interrupt_on,
-        response_format=response_format,
-        # A tool-logic failure surfaces to the model as an error ToolMessage rather
-        # than aborting the run; every other exception stays a loud abort. The
+        response_format=as_tool_strategy(response_format),
+        # The system purge leads so a stored system message never reaches the model
+        # alongside the per-run prompt (state never carries one). A tool-logic
+        # failure surfaces to the model as an error ToolMessage rather than
+        # aborting the run; every other exception stays a loud abort. The
         # leading-user middleware keeps a thread that opens with an assistant message
         # user-first for strict-ordering providers.
-        middleware=[_tool_error_middleware, LeadingUserMiddleware()],
+        middleware=[SystemPurgeMiddleware(), _tool_error_middleware, LeadingUserMiddleware()],
     )

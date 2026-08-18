@@ -16,6 +16,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import SystemMessage
 from langchain_core.tools import StructuredTool
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
@@ -54,7 +56,7 @@ def _patch_seams(
         return "checkpointer-obj"
 
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
-    monkeypatch.setattr(bta, "context_overflow_middlewares", lambda: ["mw"])
+    monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: ["mw"])
     monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: level == "DEBUG"))
     monkeypatch.setattr(bta, "init_langgraph_config", lambda config: {"configurable": {"thread_id": "t"}})
 
@@ -73,7 +75,14 @@ def _patch_seams(
     fake_agent.astream = fake_astream
 
     def fake_create_agent(
-        llm: Any, *, tools: Any, checkpointer: Any, middleware: Any, debug: bool, response_format: Any = None
+        llm: Any,
+        *,
+        tools: Any,
+        checkpointer: Any,
+        middleware: Any,
+        debug: bool,
+        response_format: Any = None,
+        system_prompt: Any = None,
     ) -> Any:
         captured["create"] = {
             "llm": llm,
@@ -82,6 +91,7 @@ def _patch_seams(
             "middleware": middleware,
             "debug": debug,
             "response_format": response_format,
+            "system_prompt": system_prompt,
         }
         return fake_agent
 
@@ -112,23 +122,45 @@ class TestBuildAgentAndInput:
         assert captured["create"]["llm"] == "llm-obj"
         assert captured["create"]["tools"] == [tool]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
-        # The context-overflow middleware is threaded through, with the tool-error
-        # middleware appended so a tool-logic failure never aborts the loop.
-        assert captured["create"]["middleware"][0] == "mw"
+        # The system-purge middleware leads (state never carries a system message),
+        # the context-overflow middleware is threaded through, and the tool-error
+        # middleware is appended so a tool-logic failure never aborts the loop.
+        assert isinstance(captured["create"]["middleware"][0], bta.SystemPurgeMiddleware)
+        assert captured["create"]["middleware"][1] == "mw"
         assert captured["create"]["middleware"][-1] is bta._tool_error_middleware
         assert captured["create"]["debug"] is True
         # No response_format requested -> the text-behavior default is threaded through.
         assert captured["create"]["response_format"] is None
-        # System prompt + user message threaded into the built input.
-        roles = {message["role"]: message["content"] for message in messages["messages"]}
-        assert roles["system"] == "sys-prompt"
-        assert roles["user"] == "hi"
+        # The system prompt is per-run graph configuration, not an input message:
+        # it reaches create_agent as system_prompt and the built input carries only
+        # the user message, so checkpointed state stays system-free.
+        assert isinstance(captured["create"]["system_prompt"], SystemMessage)
+        assert captured["create"]["system_prompt"].content == "sys-prompt"
+        assert messages == {"messages": [{"role": "user", "content": "hi"}]}
 
-    def test_response_format_is_threaded_into_create_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_system_content_kwargs_become_a_system_prompt_content_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_seams(monkeypatch)
+        asyncio.run(
+            bta._build_agent_and_input(
+                "sys-prompt", ["hi"], [], system_content_kwargs={"cache_control": {"type": "ephemeral"}}
+            )
+        )
+        # The cache_control block form survives into the per-run system prompt.
+        system_prompt = captured["create"]["system_prompt"]
+        assert isinstance(system_prompt, SystemMessage)
+        assert system_prompt.content == [{"type": "text", "text": "sys-prompt", "cache_control": {"type": "ephemeral"}}]
+
+    def test_response_format_is_threaded_into_create_agent_as_tool_strategy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         captured = _patch_seams(monkeypatch)
         schema = {"title": "Answer", "type": "object", "properties": {"value": {"type": "integer"}}}
         asyncio.run(bta._build_agent_and_input("sys", ["hi"], [], response_format=schema))
-        assert captured["create"]["response_format"] == schema
+        # The raw schema dict is pinned to the tool-calling strategy, never left to
+        # provider-dependent auto-routing.
+        threaded = captured["create"]["response_format"]
+        assert isinstance(threaded, ToolStrategy)
+        assert threaded.schema == schema
 
     def test_explicit_providers_override_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_seams(monkeypatch)

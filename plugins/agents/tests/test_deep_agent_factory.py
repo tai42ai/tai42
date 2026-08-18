@@ -6,11 +6,13 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.deep_agent import factory
@@ -162,7 +164,10 @@ def test_resolve_subagent_emits_response_format() -> None:
 
     spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", response_format=M)
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
-    assert sub["response_format"] is M
+    # The schema is pinned to the tool-calling strategy, never provider-dependent
+    # auto-routing.
+    assert isinstance(sub["response_format"], ToolStrategy)
+    assert sub["response_format"].schema is M
 
 
 def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,7 +189,39 @@ def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch
             response_format=M,
         )
     )
-    assert captured["response_format"] is M
+    # The schema is pinned to the tool-calling strategy, never provider-dependent
+    # auto-routing.
+    assert isinstance(captured["response_format"], ToolStrategy)
+    assert cast(ToolStrategy[Any], captured["response_format"]).schema is M
+
+
+def test_build_deep_agent_leads_with_system_purge_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The purge middleware leads the main agent's stack, so a thread whose stored
+    # history carries a system message (written by another face) runs cleanly:
+    # state never reaches the model with one alongside the per-run prompt.
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    assert isinstance(captured["middleware"][0], SystemPurgeMiddleware)
+
+
+def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
+    class M(BaseModel):
+        x: int
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: calls.append(kwargs) or _FakeRunnable())
+    child = ResolvedSubAgentSpec(name="leaf", description="l", system_prompt="sp", response_format=M)
+    asyncio.run(
+        factory._compile_nested_subagent(
+            child, parent_model=_FAKE_LLM, parent_tools=[], store=InMemoryStore(), backend=object()
+        )
+    )
+    # The nested leaf's schema is pinned to the tool-calling strategy, never
+    # provider-dependent auto-routing.
+    threaded = calls[-1]["response_format"]
+    assert isinstance(threaded, ToolStrategy)
+    assert cast(ToolStrategy[Any], threaded).schema is M
 
 
 def test_build_deep_agent_collapses_empty_subagents(monkeypatch: pytest.MonkeyPatch) -> None:

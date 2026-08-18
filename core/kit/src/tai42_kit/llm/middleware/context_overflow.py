@@ -9,7 +9,7 @@ from langchain.agents.middleware import (
     SummarizationMiddleware,
 )
 from langchain.agents.middleware.context_editing import ClearToolUsesEdit
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import Messages, add_messages
 from langgraph.runtime import Runtime
@@ -29,10 +29,10 @@ from tai42_kit.llm.settings import (
 _METHOD_ORDER = {"context_editing": 0, "summarization": 1, "trimming": 2}
 
 
-def _build_middleware(method: str) -> AgentMiddleware:
+def _build_middleware(method: str, system_prompt: SystemMessage | None = None) -> AgentMiddleware:
     match method:
         case "trimming":
-            return TrimmingMiddleware()
+            return TrimmingMiddleware(system_prompt=system_prompt)
 
         case "summarization":
             settings = summarization_middleware_settings()
@@ -65,16 +65,23 @@ def _build_middleware(method: str) -> AgentMiddleware:
     raise ValueError(f"Unsupported context-overflow method: '{method}'")
 
 
-def context_overflow_middlewares() -> list[AgentMiddleware]:
+def context_overflow_middlewares(system_prompt: SystemMessage | str | None = None) -> list[AgentMiddleware]:
     """Build the configured context-overflow middleware(s).
 
     Reads ``CONTEXT_OVERFLOW_METHODS`` and returns the corresponding
     middlewares ordered by :data:`_METHOD_ORDER`, ready to spread into a
     ``create_agent`` ``middleware`` list (which runs every middleware hook
     automatically). For a raw ``StateGraph`` use :func:`areduce_context`.
+
+    ``system_prompt`` is the caller's per-run system prompt (a ``SystemMessage``
+    or its plain text). It never appears in graph state but is part of every
+    outgoing request, so the trimming strategy counts it against its token
+    budget (see :class:`~tai42_kit.llm.settings.TrimmingMiddlewareSettings`).
     """
+    if isinstance(system_prompt, str):
+        system_prompt = SystemMessage(content=system_prompt) if system_prompt else None
     methods = sorted(context_overflow_settings().methods, key=_METHOD_ORDER.__getitem__)
-    return [_build_middleware(method) for method in methods]
+    return [_build_middleware(method, system_prompt) for method in methods]
 
 
 async def areduce_context(

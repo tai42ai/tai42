@@ -392,6 +392,21 @@ def test_deep_agent_rejects_response_format_without_title() -> None:
         )
 
 
+def test_deep_agent_astream_rejects_oneof_response_format_with_untitled_variant() -> None:
+    """A ``oneOf`` ``response_format`` whose variants lack titles (each binds its own
+    structured-output name) is rejected up front, even though the container is
+    titled."""
+    schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
+    with pytest.raises(ValueError, match="oneOf variants must each"):
+        _drain_astream(DeepAgent().astream(tool_names=[], user_message="go", response_format=schema))
+
+
+def test_deep_agent_run_rejects_oneof_response_format_with_untitled_variant() -> None:
+    schema = {"title": "Top", "oneOf": [{"title": "A", "type": "object"}, {"type": "object"}]}
+    with pytest.raises(ValueError, match="oneOf variants must each"):
+        asyncio.run(DeepAgent().run(tool_names=[], user_message="go", response_format=schema))
+
+
 def _install_fake_resolve(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _FakeCompiledGraph) -> None:
     """Point the agent's ``_resolve_and_build`` at a scripted compiled graph, so
     ``run`` drains the fake through the shared streaming core with no live LLM."""

@@ -1,5 +1,6 @@
-"""build_agent_input / build_user_output / structured-output extraction: pure
-message-shaping and structured-output-validation helpers."""
+"""build_agent_input / build_system_message / build_user_output /
+structured-output extraction: pure message-shaping and
+structured-output-validation helpers."""
 
 import json
 from datetime import datetime
@@ -11,8 +12,11 @@ from pydantic import BaseModel, ValidationError
 
 pytest.importorskip("langgraph")
 
+from langchain_core.messages import SystemMessage
+
 from tai42_kit.llm.runtime import (
     build_agent_input,
+    build_system_message,
     build_user_output,
     extract_structured_output,
     validate_structured_output,
@@ -25,26 +29,27 @@ def test_build_agent_input_plain_user_messages():
     assert out == {"messages": [{"role": "user", "content": "hi"}, {"role": "user", "content": "there"}]}
 
 
-def test_build_agent_input_custom_role_and_coercion():
+def test_build_agent_input_coerces_content_to_str():
     # Pass a non-str to exercise the str() coercion of message content.
-    out = build_agent_input(cast(str, 42), role="assistant")
-    assert out["messages"] == [{"role": "assistant", "content": "42"}]
+    out = build_agent_input(cast(str, 42))
+    assert out["messages"] == [{"role": "user", "content": "42"}]
 
 
-def test_build_agent_input_plain_system_message():
-    out = build_agent_input("q", system_message="be brief")
-    assert out["messages"][0] == {"role": "system", "content": "be brief"}
-    assert out["messages"][1] == {"role": "user", "content": "q"}
+def test_build_system_message_plain():
+    out = build_system_message("be brief")
+    assert isinstance(out, SystemMessage)
+    assert out.content == "be brief"
 
 
-def test_build_agent_input_system_with_content_kwargs():
-    out = build_agent_input(
-        "q", system_message="be brief", system_content_kwargs={"cache_control": {"type": "ephemeral"}}
-    )
-    assert out["messages"][0] == {
-        "role": "system",
-        "content": [{"type": "text", "text": "be brief", "cache_control": {"type": "ephemeral"}}],
-    }
+def test_build_system_message_with_content_kwargs():
+    out = build_system_message("be brief", {"cache_control": {"type": "ephemeral"}})
+    assert isinstance(out, SystemMessage)
+    assert out.content == [{"type": "text", "text": "be brief", "cache_control": {"type": "ephemeral"}}]
+
+
+def test_build_system_message_empty_is_none():
+    assert build_system_message("") is None
+    assert build_system_message(None) is None
 
 
 def test_build_user_output_empty():

@@ -1,40 +1,44 @@
 import json
 from typing import Any
 
+from langchain_core.messages import SystemMessage
 from pydantic import BaseModel
 
 from tai42_kit.utils.data.json_schema_util import validate_against_json_schema
 
 
-def build_agent_input(
-    *user_messages: str,
-    role: str = "user",
-    system_message: str | None = None,
-    system_content_kwargs: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def build_agent_input(*user_messages: str) -> dict[str, Any]:
     """Build a LangGraph agent input (``{"messages": [...]}``) from raw text.
 
-    Prepends an optional system message (as structured content when
-    *system_content_kwargs* is given, e.g. ``cache_control``, else a plain
-    string), then appends each of *user_messages* under *role*, coercing each to
-    ``str``.
+    Appends each of *user_messages* as a user turn, coercing each to ``str``.
+    The system prompt is deliberately NOT part of the input: agent input becomes
+    checkpointed conversation state, and the system prompt is per-run model
+    configuration — build it with :func:`build_system_message` and hand it to the
+    graph factory (``create_agent(system_prompt=...)``) so it is applied at the
+    model-call boundary instead of persisted into thread history.
     """
-    messages = []
-    if system_message:
-        if system_content_kwargs:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": system_message, **system_content_kwargs}],
-                }
-            )
-        else:
-            messages.append({"role": "system", "content": system_message})
+    return {"messages": [{"role": "user", "content": str(content)} for content in user_messages]}
 
-    for content in user_messages:
-        messages.append({"role": role, "content": str(content)})
 
-    return {"messages": messages}
+def build_system_message(
+    system_message: str | None,
+    system_content_kwargs: dict[str, Any] | None = None,
+) -> SystemMessage | None:
+    """Build the per-run system prompt as a ``SystemMessage``, or ``None`` for an
+    empty one.
+
+    With *system_content_kwargs* (e.g. ``cache_control`` for prompt caching) the
+    content is a single structured text block carrying those keys; otherwise it is
+    the plain string. Hand the result to the graph factory
+    (``create_agent(system_prompt=...)``), never into the input messages — the
+    system prompt is per-run configuration and must stay out of checkpointed
+    thread state.
+    """
+    if not system_message:
+        return None
+    if system_content_kwargs:
+        return SystemMessage(content=[{"type": "text", "text": system_message, **system_content_kwargs}])
+    return SystemMessage(content=system_message)
 
 
 def build_user_output(state: dict[str, Any]) -> str:

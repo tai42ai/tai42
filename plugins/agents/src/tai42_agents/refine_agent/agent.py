@@ -27,6 +27,7 @@ from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
+from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_user_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
@@ -37,6 +38,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_e
 from tai42_agents._internal.reject import reject_unhonored, reject_untitled_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import aproject_agent_events
+from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.refine_agent.prompt import (
     CRITIC_APPROVAL_MESSAGE,
     CRITIC_SYSTEM_MESSAGE,
@@ -110,16 +112,19 @@ async def _run_refine_loop(
     critic_llm_kwargs: dict[str, Any] | None,
     evaluator_config: dict[str, Any] | None,
     critic_config: dict[str, Any] | None,
-    response_format: Any = None,
+    strategy: Any = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     """Run the Evaluator↔Critic loop to approval.
 
     Returns ``(final_agent, final_input, final_config)`` for the final approved
     evaluator pass the caller streams.
 
-    Without a ``response_format`` this is the loop's own evaluator resumed on its
-    checkpointed thread with a "Critic Approved." prompt. With a ``response_format``
-    set, the final pass runs on a SECOND evaluator built with that schema on a FRESH
+    ``strategy`` is the already-wrapped structured-output ``ToolStrategy`` (or
+    ``None``); the caller wraps once and binds this same object into both the
+    structured final pass here and the stream projection, so the synthetic tool
+    names match by identity. Without one this is the loop's own evaluator resumed
+    on its checkpointed thread with a "Critic Approved." prompt. With one, the
+    final pass runs on a SECOND evaluator built with that strategy on a FRESH
     thread, fed the negotiation history explicitly as input — never a checkpoint
     resume of the text-shaped loop thread into the structured graph.
 
@@ -147,18 +152,33 @@ async def _run_refine_loop(
         conn_string=llm_provider_settings().checkpoint_conn_string,
     )
     is_enabled_for_debug = logging_settings().is_enabled_for("DEBUG")
+    # Each role's system message is its graph's per-run system_prompt, applied at
+    # the model-call boundary and never written into the checkpointed thread; the
+    # system-purge middleware removes any system message a stored history carries,
+    # and the context-overflow middlewares receive the prompt so the trimming
+    # budget covers the full outgoing request.
     evaluator: Any = create_agent(
         evaluator_llm,
         tools=list(tools),
+        system_prompt=EVALUATOR_SYSTEM_MESSAGE,
         checkpointer=checkpointer,
-        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
+        middleware=[
+            SystemPurgeMiddleware(),
+            *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            _tool_error_middleware,
+        ],
         debug=is_enabled_for_debug,
     )
     critic: Any = create_agent(
         critic_llm,
         tools=list(tools),
+        system_prompt=CRITIC_SYSTEM_MESSAGE,
         checkpointer=checkpointer,
-        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
+        middleware=[
+            SystemPurgeMiddleware(),
+            *context_overflow_middlewares(system_prompt=CRITIC_SYSTEM_MESSAGE),
+            _tool_error_middleware,
+        ],
         debug=is_enabled_for_debug,
     )
 
@@ -170,7 +190,7 @@ async def _run_refine_loop(
     await _repair_dangling_tool_calls(critic, critic_config)
 
     iteration = 0
-    evaluator_input: dict[str, Any] = build_agent_input(evaluator_message, system_message=EVALUATOR_SYSTEM_MESSAGE)
+    evaluator_input: dict[str, Any] = build_agent_input(evaluator_message)
 
     while iteration < max_iterations:
         evaluator_state = await evaluator.ainvoke(evaluator_input, evaluator_config)
@@ -179,7 +199,7 @@ async def _run_refine_loop(
         if iteration > 0:
             critic_input: dict[str, Any] = {"messages": [{"role": "user", "content": evaluator_output}]}
         else:
-            critic_input = build_agent_input(critic_message, evaluator_output, system_message=CRITIC_SYSTEM_MESSAGE)
+            critic_input = build_agent_input(critic_message, evaluator_output)
 
         critic_state = await critic.ainvoke(critic_input, critic_config)
         critic_output = build_user_output(critic_state)
@@ -195,7 +215,7 @@ async def _run_refine_loop(
     else:
         raise RuntimeError(f"Max iterations ({max_iterations}) reached without critic approval")
 
-    if response_format is None:
+    if strategy is None:
         return evaluator, _final_evaluator_input(), evaluator_config
 
     # Force the final answer into the schema without re-shaping the loop thread:
@@ -206,10 +226,15 @@ async def _run_refine_loop(
     structured_evaluator: Any = create_agent(
         evaluator_llm,
         tools=list(tools),
+        system_prompt=EVALUATOR_SYSTEM_MESSAGE,
         checkpointer=checkpointer,
-        middleware=[*context_overflow_middlewares(), _tool_error_middleware],
+        middleware=[
+            SystemPurgeMiddleware(),
+            *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            _tool_error_middleware,
+        ],
         debug=is_enabled_for_debug,
-        response_format=response_format,
+        response_format=strategy,
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}
     return structured_evaluator, final_input, init_langgraph_config(None)
@@ -313,6 +338,9 @@ class RefineAgent(Agent):
             "refine_agent.astream", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
         )
         reject_untitled_response_format("refine_agent", response_format)
+        # Wrap the schema ONCE and bind that same strategy into both the structured
+        # final pass and the projection, so the synthetic tool names match by identity.
+        strategy = as_tool_strategy(response_format)
         resolved_tools = await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
         final_agent, final_input, final_config = await _run_refine_loop(
             tools=resolved_tools,
@@ -330,11 +358,11 @@ class RefineAgent(Agent):
             critic_llm_kwargs=critic_llm_kwargs,
             evaluator_config=evaluator_langgraph_config,
             critic_config=critic_langgraph_config,
-            response_format=response_format,
+            strategy=strategy,
         )
         saw_structured = False
         async for event in aproject_agent_events(
-            final_agent, final_input, final_config, response_format=response_format
+            final_agent, final_input, final_config, response_format=response_format, structured_strategy=strategy
         ):
             if isinstance(event, StructuredFinal):
                 saw_structured = True

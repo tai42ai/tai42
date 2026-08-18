@@ -13,6 +13,12 @@ vocabulary:
 * :class:`StructuredFinal` — a requested structured (response_format) output,
   validated against the requested format before emission.
 
+A requested ``response_format`` routed through the tool-calling strategy makes
+the model emit a synthetic tool call carrying the payload; that call and its
+echo ToolMessage are internal routing mechanics, so neither surfaces as a
+:class:`ToolCallStep`/:class:`ToolResultStep` — the payload arrives exactly once
+as the terminal :class:`StructuredFinal`.
+
 A provider that omits a field (a reasoning block, usage, a tool-call id) simply
 produces fewer events. But a chunk whose SHAPE is malformed — not a
 ``(message, metadata)`` pair, not a node->update mapping, or a node update value
@@ -28,6 +34,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.tools import StructuredTool
 
@@ -46,6 +53,7 @@ from tai42_contract.agent.events import (
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import _build_agent_and_input
+from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
 
@@ -55,6 +63,25 @@ def _channel_value(value: Any) -> Any:
     if isinstance(value, Overwrite):
         return value.value
     return value
+
+
+def _structured_tool_names(strategy: Any) -> frozenset[str]:
+    """The name(s) of the synthetic tool a structured-output ``strategy`` binds.
+
+    ``strategy`` is the very ``ToolStrategy`` the graph was compiled with, so
+    ``as_tool_strategy`` is an identity pass-through here and the derived names
+    are exactly the schema-spec names langchain routes the synthetic tool call
+    by: a dict or schema class binds one spec, a Python union or a JSON-Schema
+    ``oneOf`` fans out into one spec per variant. Because it is the SAME object
+    the graph bound, the names match by identity — not by re-deriving them, which
+    for an untitled variant would mint a fresh random ``response_format_<hex>``.
+    A ``ProviderStrategy`` (provider-native routing) and ``None`` (no format
+    requested) bind no synthetic tool, so no name is suppressed.
+    """
+    strategy = as_tool_strategy(strategy)
+    if isinstance(strategy, ToolStrategy):
+        return frozenset(spec.name for spec in strategy.schema_specs)
+    return frozenset()
 
 
 # --------------------------------------------------------------------------
@@ -117,6 +144,11 @@ async def astream_tools_agent_events(
     Cancellation (``asyncio.CancelledError``) propagates out unchanged so the
     caller can do its own abort bookkeeping.
     """
+    # Wrap the structured-output schema ONCE and bind that same strategy object into
+    # both the graph and the projection: the synthetic tool the graph binds and the
+    # names the projection suppresses derive from one object, so an untitled ``oneOf``
+    # variant's random name matches by identity rather than re-derivation.
+    strategy = as_tool_strategy(response_format)
     agent, messages, config = await _build_agent_and_input(
         system_message,
         user_message,
@@ -126,9 +158,11 @@ async def astream_tools_agent_events(
         llm_kwargs,
         config,
         system_content_kwargs=system_content_kwargs,
-        response_format=response_format,
+        response_format=strategy,
     )
-    async for event in aproject_agent_events(agent, messages, config, response_format=response_format):
+    async for event in aproject_agent_events(
+        agent, messages, config, response_format=response_format, structured_strategy=strategy
+    ):
         yield event
 
 
@@ -137,14 +171,22 @@ async def aproject_agent_events(
     agent_input: Any,
     config: dict[str, Any],
     response_format: Any = None,
+    structured_strategy: Any = None,
 ) -> AsyncIterator[StreamEvent]:
     """Project a compiled LangGraph agent's ``astream`` into :class:`StreamEvent`s.
 
     Provider- and harness-agnostic: works for any ``create_agent`` /
     ``create_deep_agent`` compiled graph, already built (model bound,
-    ``thread_id`` set). Pass the ``response_format`` the agent was built with so
-    the terminal :class:`StructuredFinal` payload is validated against it (a
+    ``thread_id`` set). Pass the RAW ``response_format`` the agent was built with
+    so the terminal :class:`StructuredFinal` payload is validated against it (a
     non-conforming output raises rather than being emitted).
+
+    ``structured_strategy`` is the exact ``ToolStrategy`` object the graph was
+    compiled with; its schema-spec names are the synthetic structured-output
+    tool's call/result names — internal routing mechanics kept out of the step
+    events. Binding that same object (not a re-derived one) is what makes an
+    untitled ``oneOf`` variant's random name match. When it is omitted the names
+    are derived from ``response_format`` as a fallback.
 
     For a deep agent, a subagent invocation surfaces as a ``task`` tool
     ToolCall/ToolResult pair; its internal steps stay inside it.
@@ -158,6 +200,13 @@ async def aproject_agent_events(
     answer_parts: list[str] = []
     last_update_text = ""
     structured_response: Any = None
+    # The synthetic structured-output tool is routing mechanics, keyed by the same
+    # name langchain routes it by; its call/result never surface as steps. The names
+    # come from the strategy object the graph bound (identity, not re-derivation);
+    # a caller that did not thread it falls back to the raw schema.
+    structured_tools = _structured_tool_names(
+        structured_strategy if structured_strategy is not None else response_format
+    )
 
     async for item in agent.astream(agent_input, config, stream_mode=["updates", "messages"]):
         # With a list ``stream_mode`` LangGraph yields ``(mode, chunk)``; anything
@@ -207,6 +256,8 @@ async def aproject_agent_events(
                     if text:
                         last_update_text = text
                     for tool_call in getattr(message, "tool_calls", None) or []:
+                        if tool_call.get("name") in structured_tools:
+                            continue
                         call_id = tool_call.get("id")
                         if not call_id:
                             # Synthesize an id when the provider omits one; the
@@ -226,6 +277,8 @@ async def aproject_agent_events(
                     if usage is not None:
                         yield usage
                 elif isinstance(message, ToolMessage):
+                    if getattr(message, "name", "") in structured_tools:
+                        continue
                     yield ToolResultStep(
                         tool=getattr(message, "name", "") or "",
                         call_id=getattr(message, "tool_call_id", "") or "",

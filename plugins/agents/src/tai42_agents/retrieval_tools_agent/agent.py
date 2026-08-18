@@ -217,6 +217,9 @@ class RetrievalToolsAgent(Agent):
             provider=checkpoint_provider, conn_string=provider_settings.checkpoint_conn_string
         )
 
+        # The system prompt is per-run graph configuration, prepended at each
+        # model call inside the graph — never part of the checkpointed input.
+        system_prompt = RETRIEVAL_SYSTEM_MESSAGE.format(system_message=rendered_system)
         agent = await RetrievalToolsGraph(
             tools=resolved_tools,
             llm=llm,
@@ -224,11 +227,11 @@ class RetrievalToolsAgent(Agent):
             checkpoint=checkpointer,
             overwrite_store=overwrite_store,
             tools_limit=tools_limit,
+            system_prompt=system_prompt,
         ).abuild()
 
         config = init_langgraph_config(config)
-        system_prompt = RETRIEVAL_SYSTEM_MESSAGE.format(system_message=rendered_system)
-        messages = build_agent_input(rendered_user, system_message=system_prompt)
+        messages = build_agent_input(rendered_user)
         # The single spot both faces (run drains astream) build through, so a thread
         # poisoned by an aborted turn is repaired here before the run.
         await _repair_dangling_tool_calls(agent, config)

@@ -99,24 +99,67 @@ def test_overflow_dropping_newest_human_raises_named_error():
     assert "UNIQUEHUMANTOKEN" not in message
 
 
-def test_overflow_required_counts_only_first_system(monkeypatch):
-    # include_system=True force-keeps only the first system message, so the
-    # reported requirement is first-system + newest-human, never every system.
+def test_system_prompt_tokens_count_against_the_budget():
+    # The per-run system prompt lives outside graph state, yet it is part of every
+    # outgoing request: with include_system=True its tokens count against
+    # max_tokens, so a history that alone fits the budget is trimmed down to
+    # budget-minus-prompt.
     from langchain_core.messages.utils import count_tokens_approximately
 
-    mw = TrimmingMiddleware(max_tokens=10)
     msgs: list[AnyMessage] = [
-        SystemMessage("first " * 50, id="s1"),
-        SystemMessage("second " * 50, id="s2"),
-        HumanMessage("UNIQUEHUMANTOKEN " * 20, id="h"),
+        HumanMessage("a " * 40, id="1"),
+        AIMessage("b " * 40, id="2"),
+        HumanMessage("c", id="3"),
     ]
+    budget = count_tokens_approximately(msgs)
+    system_prompt = SystemMessage("s " * 20)
+
+    # The same budget without a system prompt keeps the whole history.
+    assert TrimmingMiddleware(max_tokens=budget).before_model({"messages": msgs}, _RUNTIME) is None
+
+    mw = TrimmingMiddleware(system_prompt=system_prompt, max_tokens=budget)
+    update = mw.before_model({"messages": msgs}, _RUNTIME)
+    assert update is not None
+    kept = update["messages"][1:]
+    # Older turns were dropped, the newest human survives, and the trimmed
+    # history plus the system prompt now fits the configured budget.
+    kept_ids = {m.id for m in kept}
+    assert "3" in kept_ids
+    assert len(kept) < len(msgs)
+    assert count_tokens_approximately([system_prompt, *kept]) <= budget
+
+
+def test_include_system_false_leaves_the_budget_to_history_alone():
+    # include_system=False scopes max_tokens to the history only: the per-run
+    # system prompt is not counted, so a history that fits stays untouched.
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    msgs: list[AnyMessage] = [
+        HumanMessage("a " * 40, id="1"),
+        AIMessage("b " * 40, id="2"),
+        HumanMessage("c", id="3"),
+    ]
+    budget = count_tokens_approximately(msgs)
+    mw = TrimmingMiddleware(system_prompt=SystemMessage("s " * 20), max_tokens=budget, include_system=False)
+    assert mw.before_model({"messages": msgs}, _RUNTIME) is None
+
+
+def test_overflow_with_system_prompt_names_it_in_the_error():
+    # A budget too small for the system prompt plus the newest human message is
+    # an unservable overflow; the error carries the measured totals and the env
+    # key, never the message text.
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    system_prompt = SystemMessage("s " * 50)
+    human = HumanMessage("UNIQUEHUMANTOKEN " * 20, id="h")
+    mw = TrimmingMiddleware(system_prompt=system_prompt, max_tokens=10)
     with pytest.raises(TrimmingBudgetTooSmallError) as excinfo:
-        mw.before_model({"messages": msgs}, _RUNTIME)
+        mw.before_model({"messages": [human]}, _RUNTIME)
     message = str(excinfo.value)
-    first_only = count_tokens_approximately([msgs[0], msgs[2]])
-    all_systems = count_tokens_approximately([msgs[0], msgs[1], msgs[2]])
-    assert f"{first_only} tokens needed" in message
-    assert f"{all_systems} tokens needed" not in message
+    required = count_tokens_approximately([system_prompt, human])
+    assert f"{required} tokens needed" in message
+    assert "TRIMMING_MIDDLEWARE_MAX_TOKENS" in message
+    assert "UNIQUEHUMANTOKEN" not in message
 
 
 def test_full_wipe_with_human_present_raises(monkeypatch):
