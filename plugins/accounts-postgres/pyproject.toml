@@ -31,7 +31,7 @@ dependencies = [
     # the `redis` extra backs the login rate limiter and the shared bootstrap
     # token. Both are REQUIRED, not optional: the plugin's storage IS Postgres and
     # its throttle IS Redis, so both client modules must resolve for it to import.
-    "tai42-kit[postgres,redis]>=2.0,<3",
+    "tai42-kit[postgres,redis]>=2.0,<4",
     # argon2id password hashing (RFC 9106 defaults).
     "argon2-cffi>=23",
 ]
