@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: connector-google
 package: tai42-connector-google
-version: 0.3.0
+version: 1.0.0
 description: >-
   Google (Gmail, Calendar, Drive) OAuth connector provider for the TAI
   ecosystem. Pure descriptor data; depends only on tai42-contract.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-google
-contract: '>=2,<3'
+contract: '>=2.0,<3'
 categories:
   - connectors
 tags:
