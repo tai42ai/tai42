@@ -156,6 +156,74 @@ async def test_redis_checkpoint_resumes_across_replicas_over_sse_run_door(
     )
 
 
+async def test_system_prompt_is_per_run_never_checkpointed_across_replicas(
+    agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
+) -> None:
+    """The system prompt is per-run model configuration, never checkpointed thread
+    state. A thread run with one system prompt on replica A, resumed with a DIFFERENT
+    system prompt on replica B, replays NO stored system message: replica B's model
+    call carries only its OWN per-run prompt (never replica A's) plus the restored
+    user/assistant history. Proves the system prompt is applied fresh per run via
+    ``create_agent(system_prompt=...)`` — prepended at the model-call boundary, not
+    written into graph/checkpoint state — so on cross-replica resume the new prompt
+    wins and replica A's prompt appears nowhere: not as a system message, not replayed
+    into the restored history.
+
+    This leg pins the per-run *configuration* seam only. It does NOT exercise
+    ``SystemPurgeMiddleware``: the tools_agent flow never writes a system message into
+    thread state, so no stored ``SystemMessage`` exists for the middleware to strip and
+    this leg would stay green with the middleware removed. The purge of a
+    ``SystemMessage`` already sitting in stored history is a state-level concern that no
+    stack-surface door can plant (the public ``append_thread_messages`` tool rejects the
+    ``system`` role), covered instead by
+    ``core/kit/tests/llm/test_system_purge_middleware.py``."""
+    thread_id = uniq("thread")
+    name_token = uniq("name")
+    sys_a = f"system-alpha {uniq('sysa')}"
+    sys_b = f"system-bravo {uniq('sysb')}"
+    llm_stub.reset()
+    llm_stub.script(
+        [
+            {"content": f"Nice to meet you, {name_token}."},
+            {"content": f"Your name is {name_token}."},
+        ]
+    )
+    langgraph_config = {"configurable": {"thread_id": thread_id}}
+
+    # Turn 1 on replica A: a distinctive per-run system prompt states the name under a
+    # pinned thread id.
+    async with agents_redis_stack.mcp(port=agents_redis_stack.port_a) as mcp_a:
+        await mcp_a.call_tool(
+            "tools_agent",
+            {"system_prompt": sys_a, "user_message": f"my name is {name_token}", "langgraph_config": langgraph_config},
+        )
+
+    # Turn 2 on replica B: same thread id, a DIFFERENT per-run system prompt.
+    async with agents_redis_stack.mcp(port=agents_redis_stack.port_b) as mcp_b:
+        await mcp_b.call_tool(
+            "tools_agent",
+            {"system_prompt": sys_b, "user_message": "what is my name?", "langgraph_config": langgraph_config},
+        )
+
+    requests = llm_stub.requests
+    assert len(requests) == 2, f"expected 2 LLM round-trips, saw {len(requests)}"
+    second = requests[1]["messages"]
+    system_messages = [m for m in second if m.get("role") == "system"]
+    # Exactly ONE system message reached the model on resume — replica B's own per-run
+    # prompt — never a second replayed from the checkpoint.
+    assert len(system_messages) == 1, f"resume did not carry exactly one system message: {second}"
+    assert sys_b in json.dumps(system_messages), f"replica B's own per-run system prompt was not applied: {second}"
+    # Replica A's system prompt was never checkpointed, so it appears NOWHERE in the
+    # resumed request — not as a system message, not replayed into the history.
+    assert sys_a not in json.dumps(second), (
+        "replica A's system prompt was checkpointed and replayed on resume; it must be per-run only"
+    )
+    # The user/assistant history DID cross workers, so the absent replica-A prompt is a
+    # genuine per-run swap on a live resume, not an empty resume: replica A's turn is in
+    # replica B's model call.
+    assert name_token in json.dumps(second), "the checkpointed conversation did not cross workers"
+
+
 async def test_redis_store_round_trip_through_stack(
     agents_redis_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
 ) -> None:
