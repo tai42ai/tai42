@@ -28,7 +28,7 @@ dependencies = [
     "tai42-contract>=2.1,<3",
     # HttpxClient + RedisClient pooling, TaiBaseSettings + the settings cache
     # registry. The [redis] extra carries the correlation store's driver.
-    "tai42-kit[redis]>=2.0,<3",
+    "tai42-kit[redis]>=2.0,<4",
     # The whole Slack surface is two HTTPS POSTs — no slack_sdk, no Bolt.
     "httpx>=0.28",
     # Request/Response types of the inbound route handler (the contract's

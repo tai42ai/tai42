@@ -29,7 +29,7 @@ dependencies = [
     # harness unresolvable.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=2.1,<3",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=2.0,<3",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=2.0,<4",
     "tai42-skeleton[toolbox,files]>=4.1,<5",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing

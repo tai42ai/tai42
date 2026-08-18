@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=2.1,<3",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Graph REST module wires to.
-    "tai42-kit[curl]>=2.0,<3",
+    "tai42-kit[curl]>=2.0,<4",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",

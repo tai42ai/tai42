@@ -27,7 +27,7 @@ dependencies = [
     # handle, the Storage base, the assert_not_root guard, and ObjectStat.
     "tai42-contract>=2.1,<3",
     # Leaf helpers: the settings base class and the settings-cache decorator.
-    "tai42-kit>=2.0,<3",
+    "tai42-kit>=2.0,<4",
     # Async file I/O for the driver's non-blocking reads/writes.
     "aiofiles>=24",
     # The settings config type used by the backend's settings class.
