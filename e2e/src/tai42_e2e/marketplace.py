@@ -58,12 +58,13 @@ _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # that CLI path and nothing older. An unresolvable pin fails the out-of-band
 # install loudly rather than silently resolving an older ``db init``-only ref.
 #
-# This pin runs tai42-contract <2, whose PluginSpec has NO ``routes`` field, so
-# the registry rejects a route-carrying fixture spec at seed time. The
-# route-marketplace legs gate on :func:`registry_supports_declared_routes`. Bump
-# this pin to a routes-capable tai-marketplace commit (tai42-contract >=2) once
-# contract 2.0 publishes to re-enable those legs.
-_MARKETPLACE_PIN = "7bc9b7c7b67a2fca91f7d9842a874bf600e75c60"
+# This pin runs a routes-capable tai-marketplace (tai42-contract >=2, whose
+# PluginSpec carries the ``routes`` field), so the registry accepts route-carrying
+# fixture specs at seed time and the route-marketplace legs RUN (they gate on
+# :func:`registry_supports_declared_routes`, which is satisfied here). This commit
+# is the first tai-marketplace with the contract-2 route surface (api pins
+# tai42-contract >=2,<3 + tai42-kit >=2,<3, resolving contract 2.1.0 + kit 2.0.0).
+_MARKETPLACE_PIN = "19b1ce33fd46baafff5f39a83003c5aa54ab8c53"
 
 # The first tai42-contract major whose PluginSpec accepts a declared ``routes``
 # field (contract 2.0). A registry venv below it rejects route-carrying specs.
