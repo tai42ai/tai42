@@ -9,6 +9,13 @@ A thin skin over the app's resource manager (``tai42_app.storage.resource_manage
 * ``render_template`` — render inline content OR a stored template with kwargs.
 * ``clear_templates_cache`` — drop the compiled-template cache.
 
+**Fleet eviction:** the compiled template is held in a per-worker cache, so a store
+write on one worker leaves every sibling rendering the old body. Each write op writes
+the store, then broadcasts an ``evict_template`` op (``clear_templates_cache`` broadcasts
+``clear_template_cache``) over the worker bus with the same primitive the config reload
+door uses, so every worker drops the stale compilation; the response embeds the per-worker
+fleet report and an unconfirmed worker is logged loudly.
+
 **Path-argument hardening:** every logical template key reaching the store runs
 through the shared lexical containment guard (:func:`safe_template_path`) INSIDE the
 operation, so the guard defends the MCP tool and CLI edges as well as the HTTP route
@@ -25,7 +32,9 @@ from jinja2 import TemplateError
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.path_guard import _TEMPLATE_ROOT, UnsafeTemplatePathError, safe_template_path
 
@@ -128,12 +137,26 @@ async def upload_template(path: str, content: str) -> dict:
     """Write ``content`` to the template store under ``path`` (create or overwrite).
 
     The write target is guarded against a root escape before it reaches the store.
+
+    The store write is a single durable act, but the compiled template is held in a
+    per-worker cache, so the write is followed by a fleet ``evict_template`` broadcast:
+    this worker's local apply persists and evicts, and every sibling drops the stale
+    compilation on dispatch. The response embeds the per-worker fleet report so a
+    caller has deterministic proof the eviction propagated; an unconfirmed worker is
+    logged loudly, matching the reload broadcast.
     """
     key = _safe_key(path)
     if not isinstance(content, str):
         raise BadRequestError("content must be a string")
-    await tai42_app.storage.resource_manager.upload_template(path=key, content=content)
-    return {"path": key, "uploaded": True}
+    manager = tai42_app.storage.resource_manager
+    fleet = FleetResult.model_validate(
+        await broadcast(
+            {"op": "evict_template", "path": key},
+            None,
+            lambda: manager.upload_template(path=key, content=content),
+        )
+    )
+    return {"path": key, "uploaded": True, "fanout": fleet_fanout(fleet)}
 
 
 @operation(
@@ -148,10 +171,21 @@ async def delete_template(path: str) -> dict:
 
     Idempotent: an already-absent path is a no-op success (the store treats a
     missing template as a no-op rather than raising), so this returns ``200``.
+
+    The store delete is followed by a fleet ``evict_template`` broadcast so every
+    worker drops the stale compilation, not only the one that served this call; the
+    response embeds the per-worker fleet report.
     """
     key = _safe_key(path)
-    await tai42_app.storage.resource_manager.delete_template(key)
-    return {"path": key, "deleted": True}
+    manager = tai42_app.storage.resource_manager
+    fleet = FleetResult.model_validate(
+        await broadcast(
+            {"op": "evict_template", "path": key},
+            None,
+            lambda: manager.delete_template(key),
+        )
+    )
+    return {"path": key, "deleted": True, "fanout": fleet_fanout(fleet)}
 
 
 @operation(
@@ -174,13 +208,33 @@ async def delete_template_dir(path: str) -> dict:
     # the provider rather than rely on each backend's own root check.
     if _resolves_to_template_root(key):
         raise BadRequestError("refusing to delete the template root; a directory path is required")
+    manager = tai42_app.storage.resource_manager
+    # The store delete is this worker's local apply; the fleet ``evict_template`` op
+    # carries the directory key (``prefix`` marks the prefix semantics) so every sibling
+    # drops every stale compilation under it.
+    #
+    # Failure splits by phase. A pre-mutation failure deleted nothing — a missing
+    # directory (``FileNotFoundError`` → 404) or a rejected path (``ValueError`` → 400)
+    # — so it aborts before any broadcast, siblings untouched, and its typed outcome is
+    # mapped here unchanged. A failure once destructive deletion may have begun leaves
+    # the store partially mutated, so the eviction MUST still fan out (it is idempotent —
+    # a spurious evict costs one re-render) before the original error propagates loudly
+    # as a ``FleetBroadcastError`` carrying the fleet report.
     try:
-        await tai42_app.storage.resource_manager.delete_template_dir(key)
+        fleet = FleetResult.model_validate(
+            await broadcast(
+                {"op": "evict_template", "path": key, "prefix": True},
+                None,
+                lambda: manager.delete_template_dir(key),
+                publish_on_local_failure=True,
+                pre_mutation_errors=(FileNotFoundError, ValueError),
+            )
+        )
     except FileNotFoundError as exc:
         raise NotFoundError(f"template directory {key!r} not found") from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    return {"path": key, "deleted": True}
+    return {"path": key, "deleted": True, "fanout": fleet_fanout(fleet)}
 
 
 @operation(
@@ -227,6 +281,19 @@ async def render_template(
 
 @operation(summary="Clear the template render cache", tags=["templates"])
 async def clear_templates_cache() -> dict:
-    """Drop every compiled template from the render cache."""
-    tai42_app.storage.resource_manager.clear_cache()
-    return {"cleared": True}
+    """Drop every compiled template from the render cache, fleet-wide.
+
+    The manual escape hatch that pairs with the automatic per-key eviction: it
+    broadcasts a ``clear_template_cache`` op so every worker cold-starts its compiled
+    cache, not only the one that served this call. The response embeds the per-worker
+    fleet report.
+    """
+    manager = tai42_app.storage.resource_manager
+
+    async def _apply() -> None:
+        manager.clear_cache()
+
+    fleet = FleetResult.model_validate(
+        await broadcast({"op": "clear_template_cache"}, None, _apply),
+    )
+    return {"cleared": True, "fanout": fleet_fanout(fleet)}

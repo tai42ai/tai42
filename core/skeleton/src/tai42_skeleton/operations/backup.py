@@ -25,12 +25,19 @@ from typing import Any
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.backup.registry import BackupMode, import_mode
 from tai42_skeleton.operations import BadRequestError, operation
+from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 
 logger = logging.getLogger(__name__)
 
 _DOCUMENT_VERSION = 1
+
+# The restore section whose store the compiled-template cache shadows. A restore of it
+# rewrites keys on THIS worker only, so the fleet's compiled caches (and any forking
+# backend's prefork children) go stale until the eviction below fans out.
+_TEMPLATES_SECTION = "templates"
 
 
 class BackupImport(BaseModel):
@@ -120,10 +127,29 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
                 ok = False
                 continue
             reports[name] = report
+            if name == _TEMPLATES_SECTION and (report.get("created") or report.get("updated")):
+                # The templates importer wrote the store on THIS worker with a local-only
+                # evict; a restore rewriting many keys drops every worker's compiled cache
+                # in one broadcast rather than per key (cheaper, and on a forking backend
+                # it turns the prefork pool over once — matching reload semantics). The
+                # fan-out rides the section report, as the manifest/env sections do.
+                report["fanout"] = await _evict_templates_fleetwide()
             if report.get("errors"):
                 ok = False
 
     return {"ok": ok, "sections": reports}
+
+
+async def _evict_templates_fleetwide() -> dict[str, Any]:
+    """Broadcast a ``clear_template_cache`` so every worker cold-starts its compiled
+    cache after a template restore, returning the per-worker fan-out summary."""
+    manager = tai42_app.storage.resource_manager
+
+    async def _apply() -> None:
+        manager.clear_cache()
+
+    fleet = FleetResult.model_validate(await broadcast({"op": "clear_template_cache"}, None, _apply))
+    return fleet_fanout(fleet)
 
 
 def _absent_section_report(error: str) -> dict[str, Any]:

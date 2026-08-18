@@ -17,7 +17,9 @@ import pytest
 
 from tai42_contract.backend import (
     CONSUMING_RUNTIME,
+    POOL_TURNOVER_FLEET_OPS,
     REGISTRY_MUTATING_FLEET_OPS,
+    TEMPLATE_EVICTION_FLEET_OPS,
     Backend,
     BackendRuntime,
     ExecutionMode,
@@ -68,6 +70,19 @@ def test_registry_mutating_ops_exclude_query_and_recycle():
         }
     )
     assert expected == REGISTRY_MUTATING_FLEET_OPS
+
+
+def test_pool_turnover_ops_are_the_registry_and_template_superset():
+    # The turnover gate reads this superset, not the registry set alone: a template
+    # eviction leaves a persisting pool holding a stale compilation, so it too must
+    # recycle. The template ops ride the turnover set while staying OUT of the
+    # registry-mutating set (they touch no tool registry).
+    template_ops = frozenset({"evict_template", "clear_template_cache"})
+    assert template_ops == TEMPLATE_EVICTION_FLEET_OPS
+    assert POOL_TURNOVER_FLEET_OPS == REGISTRY_MUTATING_FLEET_OPS | TEMPLATE_EVICTION_FLEET_OPS
+    assert not (TEMPLATE_EVICTION_FLEET_OPS & REGISTRY_MUTATING_FLEET_OPS)
+    assert "list_failed_mcps" not in POOL_TURNOVER_FLEET_OPS
+    assert "recycle" not in POOL_TURNOVER_FLEET_OPS
 
 
 def test_build_and_aclose_default_to_nothing():

@@ -357,13 +357,28 @@ class ResourceManager:
             self._cached_template_ids.clear()
             logger.info("ResourceManager cache cleared.")
 
-    def _evict_compiled(self, template_id: str) -> None:
-        """Evict a single compiled template from the cache (no-op if caching is
-        off)."""
+    def evict_compiled(self, template_id: str) -> None:
+        """Evict a single compiled template from the cache (no-op if caching is off).
+
+        The public eviction seam: a store write replaces content the compiled cache
+        keys by id, so both the local write paths and a fleet ``evict_template`` op
+        applied on a sibling worker drop the one stale key here. Idempotent — an
+        already-absent key is a no-op.
+        """
         invalidate = getattr(self._get_compiled_template, "cache_invalidate", None)
         if invalidate is not None:
             invalidate(template_id)
         self._cached_template_ids.discard(template_id)
+
+    def evict_dir(self, path: str) -> None:
+        """Evict every compiled template under ``path/`` (no-op if caching is off).
+
+        The directory counterpart of :meth:`evict_compiled`, applying the provider's
+        prefix semantics (everything under ``path/``): a dir delete on this worker and
+        a fleet ``evict_template`` op carrying a directory key both drop every stale
+        compilation under the prefix through this one seam. Idempotent.
+        """
+        self._evict_compiled_prefix(path.rstrip("/") + "/")
 
     def _evict_compiled_prefix(self, prefix: str) -> None:
         """Evict every compiled template whose id falls under ``prefix``.
@@ -483,7 +498,7 @@ class ResourceManager:
         content.
         """
         await self.provider.upload(path, content)
-        self._evict_compiled(path)
+        self.evict_compiled(path)
 
     async def list_resources(self) -> list[str]:
         """List every stored resource path in the storage provider."""
@@ -495,14 +510,12 @@ class ResourceManager:
         # The compiled cache retains an entry per path until TTL; evict only the
         # deleted key so its stale compilation is dropped while other templates
         # stay cached.
-        self._evict_compiled(path)
+        self.evict_compiled(path)
         return result
 
     async def delete_template_dir(self, path: str) -> None:
         """Delete every stored template under ``path/`` and evict their compiled
         entries (eviction runs even on a partial-delete failure)."""
-        # Match the provider's prefix semantics: everything under ``path/``.
-        prefix = path.rstrip("/") + "/"
         try:
             return await self.provider.delete_dir(path)
         finally:
@@ -510,4 +523,4 @@ class ResourceManager:
             # deleted, so evict regardless of outcome — never serve content under
             # this dir after a partial delete. Only keys under the prefix are
             # dropped; templates outside it stay cached.
-            self._evict_compiled_prefix(prefix)
+            self.evict_dir(path)

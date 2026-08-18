@@ -14,8 +14,10 @@ from starlette.requests import Request
 import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
+from tai42_skeleton.app import instance
 from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
+from tests._fakes.bus import FakeBus
 
 
 def _req(body=None) -> Request:
@@ -70,6 +72,9 @@ def manager(monkeypatch):
     # reads ``tai42_app`` from the OP module, so the fake is installed there (the
     # same module-local ``tai42_app`` symbol the handlers resolve at call time).
     monkeypatch.setattr(templates_ops, "tai42_app", fake_app)
+    # The write ops broadcast the eviction over the worker bus, so a recording bus is
+    # installed for the ``broadcast`` primitive; with no remotes the fan-out is local-only.
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
     return tm
 
 
@@ -140,14 +145,18 @@ async def test_delete_absent_path_is_idempotent_200(manager, monkeypatch):
     monkeypatch.setattr(manager, "delete_template", _noop_delete)
     resp = await router.delete_template(_req({"path": "never-existed.j2"}))
     assert resp.status_code == 200
-    assert _data(resp)["data"] == {"path": "never-existed.j2", "deleted": True}
+    data = _data(resp)["data"]
+    assert data["path"] == "never-existed.j2"
+    assert data["deleted"] is True
     assert seen == ["never-existed.j2"]
 
 
 async def test_delete_dir(manager):
     resp = await router.delete_template_dir(_req({"path": "prompts/archive"}))
     assert resp.status_code == 200
-    assert _data(resp)["data"] == {"path": "prompts/archive", "deleted": True}
+    data = _data(resp)["data"]
+    assert data["path"] == "prompts/archive"
+    assert data["deleted"] is True
     assert manager.deleted == ["prompts/archive"]
 
 
@@ -252,7 +261,7 @@ async def test_render(manager):
 
 async def test_clear_cache(manager):
     resp = await router.clear_templates_cache(_req())
-    assert _data(resp)["data"] == {"cleared": True}
+    assert _data(resp)["data"]["cleared"] is True
     assert manager.cleared is True
 
 

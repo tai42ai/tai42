@@ -76,6 +76,10 @@ class Storage(ABC):
 
     @abstractmethod
     async def delete_dir(self, path: str) -> None:
+        """Delete every object under ``path``. Path and existence validation
+        (``ValueError`` / ``FileNotFoundError``) must complete before any
+        deletion begins — once destruction starts, failures surface as other
+        exception types, so callers can treat those two as pre-mutation."""
         raise NotImplementedError
 
     async def load_bytes(self, path: str) -> bytes:

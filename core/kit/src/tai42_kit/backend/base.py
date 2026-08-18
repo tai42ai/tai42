@@ -19,7 +19,7 @@ from tai42_contract.backend import Backend
 from tai42_contract.backend.runtime import (
     BUS_APPLY_TIMEOUT_DEFAULT,
     BUS_APPLY_TIMEOUT_ENV,
-    REGISTRY_MUTATING_FLEET_OPS,
+    POOL_TURNOVER_FLEET_OPS,
     BackendRuntime,
     ExecutionMode,
 )
@@ -371,8 +371,10 @@ class ManagedBackend(Backend):
     # -- pool turnover -------------------------------------------------------
 
     def _install_turnover(self, runtime: BackendRuntime) -> None:
-        """Wire a pool turnover into every registry-mutating fleet op, for a
-        runtime whose workers hold a snapshot of this process's tool registry.
+        """Wire a pool turnover into every pool-turnover fleet op, for a runtime
+        whose workers hold a snapshot of this process's tool registry OR their own
+        compiled-template cache — both go stale under a bus op that reaches only
+        bus members.
 
         The handler runs inside the op's apply, before its terminal reply, so a
         raise makes that op report ``failed`` rather than a false ``applied``.
@@ -381,7 +383,7 @@ class ManagedBackend(Backend):
             return
 
         async def _on_fleet_op_applied(op_name: str) -> None:
-            if op_name not in REGISTRY_MUTATING_FLEET_OPS:
+            if op_name not in POOL_TURNOVER_FLEET_OPS:
                 return
             self._refresh_manifest_env()
             await runtime.turn_over_pool(reason=op_name, budget=_turnover_budget())

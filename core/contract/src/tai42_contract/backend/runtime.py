@@ -53,8 +53,33 @@ REGISTRY_MUTATING_FLEET_OPS: Final[frozenset[str]] = frozenset(
 """Worker-bus ops that mutate this process's tool registry.
 
 ``list_failed_mcps`` is a query and ``recycle`` ends the process, so neither is
-here. A runtime whose workers hold a snapshot of the registry must turn its pool
-over after one of these applies."""
+here. These are one input to :data:`POOL_TURNOVER_FLEET_OPS`, the set the turnover
+gate actually reads."""
+
+
+TEMPLATE_EVICTION_FLEET_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "evict_template",
+        "clear_template_cache",
+    }
+)
+"""Worker-bus ops that drop this process's compiled-template cache.
+
+A runtime whose worker processes render templates and PERSIST ACROSS JOBS hold their
+own compiled cache; a store edit dispatched over the bus reaches only bus MEMBERS, so
+those workers keep serving a stale compilation until the pool turns over. One input to
+:data:`POOL_TURNOVER_FLEET_OPS`."""
+
+
+POOL_TURNOVER_FLEET_OPS: Final[frozenset[str]] = REGISTRY_MUTATING_FLEET_OPS | TEMPLATE_EVICTION_FLEET_OPS
+"""Worker-bus ops after which a pool that PERSISTS ACROSS JOBS must be turned over —
+the superset of "mutates the tool registry" and "evicts the compiled-template cache".
+
+A registry mutation leaves persisted workers holding a stale snapshot; a template
+eviction leaves them holding a stale compilation; either way the fix is the same
+canonical pool turnover. The turnover gate reads THIS set, so a runtime whose workers
+hold a snapshot of the registry OR their own compiled cache turns its pool over after
+one of these applies."""
 
 
 BUS_APPLY_TIMEOUT_ENV: Final[str] = "TAI_BUS_APPLY_TIMEOUT"

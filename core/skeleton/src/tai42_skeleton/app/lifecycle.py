@@ -663,6 +663,20 @@ class TaiMCPLifecycleMixin(ABC):
         if op_name == "list_failed_mcps":
             # Bare list, matching the self-apply shape — see reload_failed_mcps above.
             return tai42_app.admin.list_failed_mcps()
+        if op_name == "evict_template":
+            # The template store was written on the origin worker; drop this worker's
+            # stale compilation so its next render reflects the new content. ``prefix``
+            # marks a directory delete (evict everything under the key).
+            resource_manager = tai42_app.storage.resource_manager
+            path = _op_field(op, "path")
+            if op.get("prefix"):
+                resource_manager.evict_dir(path)
+            else:
+                resource_manager.evict_compiled(path)
+            return {"evicted": path}
+        if op_name == "clear_template_cache":
+            tai42_app.storage.resource_manager.clear_cache()
+            return {"cleared": True}
         if op_name == "recycle":
             return await self._apply_recycle()
         raise ValueError(f"unknown fleet op {op_name!r}")

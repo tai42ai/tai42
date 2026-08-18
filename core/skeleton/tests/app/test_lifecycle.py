@@ -673,6 +673,28 @@ def test_start_clears_cached_resource_manager():
     asyncio.run(run())
 
 
+def test_reload_starts_from_a_cold_template_cache():
+    # Fleet-reload parity for the compiled-template cache: a config reload rebuilds the
+    # resource manager (start() drops the cache), so its compiled-template cache starts
+    # cold on every worker that applies the reload — a stale compilation never outlives
+    # the config it was rendered under. The per-key ``evict_template`` broadcast covers a
+    # single upload; a full reload cold-starts the whole cache through this same reset,
+    # so no separate reload hook is registered (that would clear a manager about to be
+    # discarded).
+    manifest = Manifest.model_validate({})
+
+    async def run():
+        async with app.app_context(manifest):
+            warm = app.storage.resource_manager  # builds + caches a manager
+            assert app._resource_manager_cache is warm
+            await reload_with(app, manifest)
+            # The reload dropped the cache; the next access builds a fresh, cold manager.
+            assert app._resource_manager_cache is None
+            assert app.storage.resource_manager is not warm
+
+    asyncio.run(run())
+
+
 def test_module_handlers_and_middleware_idempotent_across_update():
     # A lifecycle module registers a startup/shutdown handler + a middleware on
     # import. Each start()/update() re-imports it and re-fires the decorators;
