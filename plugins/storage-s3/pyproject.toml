@@ -27,7 +27,7 @@ dependencies = [
     # and the tai42_app handle the backend registers through.
     "tai42-contract>=2.0,<3",
     # PooledClient + TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=1.9,<2",
+    "tai42-kit>=1.9,<3",
     # The async S3 driver and its config/exception types (imported directly).
     "aioboto3>=15,<16",
     "botocore>=1.40,<1.41",
