@@ -254,9 +254,7 @@ async def test_inbound_fires_typing_chat_action_before_bridge(http_recorder, fak
     assert len(conversations.accept_calls) == 1  # bridge still reached
 
 
-async def test_typing_action_failure_is_logged_and_webhook_survives(
-    http_recorder, fake_redis, conversations, caplog
-):
+async def test_typing_action_failure_is_logged_and_webhook_survives(http_recorder, fake_redis, conversations, caplog):
     # A non-200 on sendChatAction raises ChannelDeliveryError inside the client; the
     # door catches it, logs at WARNING, and the message still bridges (never a 5xx
     # that would make Telegram redeliver the whole update).

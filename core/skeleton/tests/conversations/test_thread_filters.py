@@ -108,14 +108,10 @@ async def test_status_and_address_filters_compose(store):
     now = time.time()
     await store.create_record(_record("m0", created_at=now, thread_id="bridge:line:+15550002222"))
     await store.create_record(
-        _record(
-            "m1", created_at=now + 1, thread_id="bridge:line:+15550002200", delivery_status=DeliveryStatus.FAILED
-        )
+        _record("m1", created_at=now + 1, thread_id="bridge:line:+15550002200", delivery_status=DeliveryStatus.FAILED)
     )
     await store.create_record(
-        _record(
-            "m2", created_at=now + 2, thread_id="bridge:line:+15559990000", delivery_status=DeliveryStatus.FAILED
-        )
+        _record("m2", created_at=now + 2, thread_id="bridge:line:+15559990000", delivery_status=DeliveryStatus.FAILED)
     )
 
     page = await store.list_route_threads(
@@ -260,9 +256,7 @@ async def test_search_route_messages_reports_truncated_on_budget(store, monkeypa
 
 async def test_search_route_messages_skips_a_rowless_member_loudly(store, fake, caplog):
     now = time.time()
-    await store.create_record(
-        _record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget one")
-    )
+    await store.create_record(_record("a0", created_at=now, thread_id="bridge:line:+1000", inbound_text="widget one"))
     await store.create_record(
         _record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="widget two")
     )

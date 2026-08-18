@@ -82,6 +82,7 @@ def _guard_saver_serialization(saver: BaseCheckpointSaver) -> BaseCheckpointSave
         saver.serde = _GuardedSerializer(saver.serde)
     return saver
 
+
 # Resolution order: the conn string first, then the base Redis namespace. The
 # offload needs a module-capable Redis, so the message also names the module
 # requirement a plain Redis can't meet. Shared verbatim by the boot gate.

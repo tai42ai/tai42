@@ -612,9 +612,7 @@ async def test_send_interactive_list_builder_shape(fake_redis: FakeRedis, fake_h
     }
 
 
-async def test_mark_read_typing_rides_send_and_tolerates_no_message_id(
-    fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
+async def test_mark_read_typing_rides_send_and_tolerates_no_message_id(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # Meta's combined mark-as-read + typing-indicator send answers {"success": true}
     # with NO messages[].id. It must ride `_send` (which `_post`'s id-guard would
     # reject) and post the exact Graph v23.0 body to /{phone_number_id}/messages.

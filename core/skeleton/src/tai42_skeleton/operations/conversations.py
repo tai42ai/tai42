@@ -656,9 +656,7 @@ async def _read_person_thread(
     errors=[BadRequestError, ForbiddenError, NotFoundError, NotSupportedError],
     request_model=MessageSearchQuery,
 )
-async def search_conversation_messages(
-    route_name: str, q: str, page: int = 1, page_size: int = 50
-) -> dict[str, Any]:
+async def search_conversation_messages(route_name: str, q: str, page: int = 1, page_size: int = 50) -> dict[str, Any]:
     """Every record on ``route_name`` whose inbound text or answer contains ``q``, across ALL
     the route's threads, one page at a time.
 

@@ -185,6 +185,7 @@ delete_conversation_route = register_operation_route(
     action="write",
 )
 
+
 async def _extract_paging(request: Request) -> dict:
     """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments (a
     GET reads its parameters from the query string, never a body). A non-integer is a loud
