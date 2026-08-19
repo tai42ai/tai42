@@ -18,9 +18,12 @@ from typing import Any
 
 import pytest
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage, ToolMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
-from pydantic import ValidationError
+from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import PrivateAttr, ValidationError
 from tai42_contract.agent import (
     Agent,
     MessageDelta,
@@ -807,3 +810,129 @@ def test_tool_input_rejects_unknown_key() -> None:
     """A typo'd key is rejected loudly at validation rather than silently ignored."""
     with pytest.raises(ValidationError, match="max_iteration"):
         RefineAgentInput.model_validate({"evaluator_message": "hi", "max_iteration": 5})
+
+
+# ---------------------------------------------------------------------------
+# Rolling cache mark: the evaluator graph strips accumulated marks at the model call
+# ---------------------------------------------------------------------------
+
+
+class _RecordingChatModel(BaseChatModel):
+    """Returns a fresh ``AIMessage`` carrying a fixed content on every call (a new id
+    each time, so the checkpoint reducer appends rather than dedups) and records the
+    exact message list each model call received; ``bind_tools`` is a no-op."""
+
+    _content: str = PrivateAttr()
+    _seen: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
+
+    def __init__(self, content: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._content = content
+
+    @property
+    def _llm_type(self) -> str:
+        return "recording"
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        self._seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self._content))])
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        return self
+
+
+def _mark_count(messages: list[BaseMessage]) -> int:
+    """Number of messages carrying a ``cache_control`` block (a cache breakpoint)."""
+    return sum(
+        isinstance(m.content, list) and any(isinstance(b, dict) and "cache_control" in b for b in m.content)
+        for m in messages
+    )
+
+
+def _patch_loop_real(
+    monkeypatch: pytest.MonkeyPatch,
+    evaluator_model: BaseChatModel,
+    critic_model: BaseChatModel,
+    saver: InMemorySaver,
+) -> list[Any]:
+    """Patch every non-loop seam so ``_run_refine_loop`` compiles REAL ``create_agent``
+    graphs (real middleware wiring) over the two provider-keyed models and one shared
+    checkpointer. Returns a list the spied ``create_agent`` appends each compiled agent
+    to (evaluator first, critic second, per run)."""
+    created: list[Any] = []
+    real_create_agent = agent_mod.create_agent
+
+    def spy_create_agent(*args: Any, **kwargs: Any) -> Any:
+        agent = real_create_agent(*args, **kwargs)
+        created.append(agent)
+        return agent
+
+    monkeypatch.setattr(agent_mod, "create_agent", spy_create_agent)
+
+    async def _get_llm_async(provider: str, **kwargs: Any) -> BaseChatModel:
+        return evaluator_model if provider == "eval" else critic_model
+
+    monkeypatch.setattr(agent_mod, "get_llm_async", _get_llm_async)
+
+    async def _get_checkpointer(provider: str, conn_string: Any) -> InMemorySaver:
+        return saver
+
+    monkeypatch.setattr(agent_mod, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=_get_checkpointer))
+    monkeypatch.setattr(agent_mod, "context_overflow_middlewares", lambda system_prompt=None: [])
+    monkeypatch.setattr(agent_mod, "logging_settings", lambda: _LoggingSettings())
+    monkeypatch.setattr(agent_mod, "llm_provider_settings", lambda: _ProviderSettings())
+    monkeypatch.setattr(agent_mod, "llm_settings", lambda: _LlmSettings())
+    # Keep the caller's thread_id so the two runs land on the same checkpointed thread.
+    monkeypatch.setattr(
+        agent_mod, "init_langgraph_config", lambda config: config or {"configurable": {"thread_id": "t"}}
+    )
+    return created
+
+
+def test_evaluator_graph_rolls_accumulated_cache_marks_on_a_reused_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two refine runs on the same evaluator thread each mark their first user turn;
+    the marks persist into the reused thread's history. Without rolling, the second
+    run's evaluator model call would replay two user-side breakpoints and grow past the
+    provider cap. The evaluator graph's ``RollingCacheMarkMiddleware`` strips every
+    older mark at the model call, so the second run's draft call sends exactly one —
+    the newest — while the checkpointed thread keeps both."""
+    evaluator_model = _RecordingChatModel("draft")
+    critic_model = _RecordingChatModel(f"ok {CRITIC_APPROVAL_MESSAGE}")
+    saver = InMemorySaver()
+    created = _patch_loop_real(monkeypatch, evaluator_model, critic_model, saver)
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    mark = {"cache_control": {"type": "ephemeral"}}
+    eval_cfg = {"configurable": {"thread_id": "eval-t"}}
+    critic_cfg = {"configurable": {"thread_id": "critic-t"}}
+
+    def _run(message: str) -> None:
+        _collect(
+            agent,
+            evaluator_message=message,
+            critic_message="review it",
+            user_content_kwargs=mark,
+            evaluator_llm_provider="eval",
+            critic_llm_provider="critic",
+            evaluator_langgraph_config=eval_cfg,
+            critic_langgraph_config=critic_cfg,
+        )
+
+    _run("first task")
+    _run("second task")
+
+    # Per run, create_agent is called for the evaluator then the critic; the second
+    # run's evaluator draft is the third model call the evaluator model received
+    # (run-1 loop draft, run-1 final pass, run-2 loop draft).
+    second_run_draft = evaluator_model._seen[2]
+    # Two user-side marks live in the replayed history; the older is stripped, so the
+    # outgoing request carries exactly one breakpoint.
+    assert _mark_count(second_run_draft) == 1
+    newest_user = [m for m in second_run_draft if isinstance(m, HumanMessage)][-1]
+    assert newest_user.content == [{"type": "text", "text": "second task", "cache_control": {"type": "ephemeral"}}]
+    # The rewrite is request-scoped: the checkpointed thread still holds both marks, so
+    # the next turn re-rolls from the same history rather than losing the record.
+    snapshot = asyncio.run(created[-2].aget_state(eval_cfg))
+    assert _mark_count(snapshot.values.get("messages", [])) == 2

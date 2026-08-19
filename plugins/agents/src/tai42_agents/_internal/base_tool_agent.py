@@ -17,6 +17,7 @@ from langchain_core.tools import StructuredTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
@@ -45,8 +46,8 @@ async def _compile_tools_agent(
     The model resolves from the kit LLM settings (``llm_kwargs`` override the
     defaults), the checkpointer from the checkpoint registry (so every caller
     resolving the same ``checkpoint_provider`` reaches the same saver), and the
-    system-purge, context-overflow, leading-user and tool-error middleware are
-    attached.
+    system-purge, context-overflow, leading-user, rolling-cache-mark and
+    tool-error middleware are attached.
 
     ``system_message`` (with optional ``system_content_kwargs``, e.g.
     ``cache_control`` for prompt caching) becomes the graph's per-run
@@ -79,6 +80,7 @@ async def _compile_tools_agent(
             SystemPurgeMiddleware(),
             *context_overflow_middlewares(system_prompt=system_prompt),
             LeadingUserMiddleware(),
+            RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
         debug=logging_settings().is_enabled_for("DEBUG"),

@@ -624,6 +624,66 @@ class TestSystemPromptPerRun:
 
 
 # --------------------------------------------------------------------------
+# Rolling cache mark: the raw agent node strips accumulated marks at the model call
+# --------------------------------------------------------------------------
+
+
+def _mark_count(messages: list[BaseMessage]) -> int:
+    """Number of messages carrying a ``cache_control`` block (a cache breakpoint)."""
+    return sum(
+        isinstance(m.content, list) and any(isinstance(b, dict) and "cache_control" in b for b in m.content)
+        for m in messages
+    )
+
+
+def _marked_user(text: str) -> dict[str, Any]:
+    block = {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+    return {"messages": [{"role": "user", "content": [block]}]}
+
+
+class TestRollingCacheMark:
+    def test_agent_node_rolls_accumulated_cache_marks_on_a_reused_thread(self) -> None:
+        # Every turn marks its user message; the marks persist into the reused
+        # thread's history. The agent node runs no wrap_model_call middleware (its
+        # context pipeline goes through areduce_context, which does not honor it), so
+        # without the explicit roll the second turn's model call would carry two
+        # user-side breakpoints and grow unbounded. The node's explicit
+        # ``roll_cache_marks`` strips every older mark, so each model call sends
+        # exactly one — the newest — while the checkpointed thread keeps both.
+        alpha = _tool("alpha", "the alpha tool")
+        alpha_id = text_to_md5("alpha")
+        llm = ScriptedChatModel(
+            [
+                AIMessage(content=json.dumps({"status": "success", "message": "done", "result": "one"})),
+                AIMessage(content=json.dumps({"status": "success", "message": "done", "result": "two"})),
+            ]
+        )
+        graph = asyncio.run(
+            RetrievalToolsGraph(
+                tools=[alpha], llm=llm, store=StubStore([alpha_id]), checkpoint=InMemorySaver()
+            ).abuild()
+        )
+        config = {"configurable": {"thread_id": "roll-t"}}
+
+        asyncio.run(graph.ainvoke(_marked_user("first"), config))
+        asyncio.run(graph.ainvoke(_marked_user("second"), config))
+
+        # First model call: only the turn-1 user mark exists — inert, one breakpoint.
+        assert _mark_count(llm._seen[0]) == 1
+        # Second model call: history holds turn-1 + turn-2 user marks; the older one is
+        # stripped, so the outgoing request carries exactly one user-side breakpoint.
+        second_call = llm._seen[1]
+        assert _mark_count(second_call) == 1
+        # The surviving mark is the newest turn's user message, not the older one.
+        newest_user = [m for m in second_call if isinstance(m, HumanMessage)][-1]
+        assert newest_user.content == [{"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}}]
+        # The roll is request-scoped: the checkpointed thread still holds both marks, so
+        # the next turn re-rolls from the same history rather than losing the record.
+        snapshot = asyncio.run(graph.aget_state(config))
+        assert _mark_count(snapshot.values.get("messages", [])) == 2
+
+
+# --------------------------------------------------------------------------
 # StreamEvent projection over a real compiled graph
 # --------------------------------------------------------------------------
 

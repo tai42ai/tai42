@@ -27,6 +27,7 @@ from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
+from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_user_output
@@ -174,6 +175,7 @@ async def _run_refine_loop(
         middleware=[
             SystemPurgeMiddleware(),
             *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
         debug=is_enabled_for_debug,
@@ -186,6 +188,7 @@ async def _run_refine_loop(
         middleware=[
             SystemPurgeMiddleware(),
             *context_overflow_middlewares(system_prompt=CRITIC_SYSTEM_MESSAGE),
+            RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
         debug=is_enabled_for_debug,
@@ -240,6 +243,7 @@ async def _run_refine_loop(
         middleware=[
             SystemPurgeMiddleware(),
             *context_overflow_middlewares(system_prompt=EVALUATOR_SYSTEM_MESSAGE),
+            RollingCacheMarkMiddleware(),
             _tool_error_middleware,
         ],
         debug=is_enabled_for_debug,
@@ -280,9 +284,8 @@ class RefineAgentInput(BaseModel):
         description=(
             "Content-block keys merged into the evaluator's first user message's text block (e.g. "
             "cache_control for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
-            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
-            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
-            "fails the call loudly."
+            "On a checkpointed thread the model call keeps only the newest mark (older marks are "
+            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
         ),
     )
     evaluator_llm_provider: str | None = None
