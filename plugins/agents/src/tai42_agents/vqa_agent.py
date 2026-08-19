@@ -101,6 +101,14 @@ _UNHONORED_REASONS: dict[str, str] = {
     "resume_checkpoint_id": "it runs no checkpointer, so there is no checkpoint to fork from",
     "checkpoint_provider": "it runs no checkpointer",
     "store_provider": "it wires no long-term store",
+    "system_content_kwargs": (
+        "it builds its own multimodal prompt and routes no message through the tools-agent input builder, "
+        "so there is no system content block to carry these keys"
+    ),
+    "user_content_kwargs": (
+        "it builds its own multimodal prompt and routes no message through the tools-agent input builder, "
+        "so there is no user content block to carry these keys"
+    ),
 }
 # The unhonored parameters whose unset default is an empty sequence/string; every
 # other defaults to ``None`` and is set when not ``None``.

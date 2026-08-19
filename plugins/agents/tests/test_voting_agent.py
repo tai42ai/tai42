@@ -185,6 +185,25 @@ def test_astream_event_order_tool_call_final_structured(monkeypatch, app_tools, 
     assert final.data.judge.model is None
 
 
+def test_astream_threads_user_content_kwargs_to_the_judge_stream(monkeypatch, app_tools, resource_manager) -> None:
+    """``user_content_kwargs`` reaches the judge's event stream, marking the judge's
+    last user message for caching; the judge system prompt is internal so no
+    ``system_content_kwargs`` seat exists."""
+    captured: dict[str, Any] = {}
+
+    async def fake_judge(**kwargs: Any):
+        captured["user_content_kwargs"] = kwargs.get("user_content_kwargs")
+        yield MessageFinal(text="VERDICT")
+
+    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
+    monkeypatch.setattr(agent_module, "astream_tools_agent_events", fake_judge)
+
+    cache = {"cache_control": {"type": "ephemeral"}}
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    asyncio.run(_collect(agent.astream(judge_message="decide", voter_message="answer", user_content_kwargs=cache)))
+    assert captured["user_content_kwargs"] == cache
+
+
 def test_run_drains_to_voting_output(monkeypatch, app_tools, resource_manager) -> None:
     captured: dict[str, Any] = {}
     monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke([]))
@@ -535,6 +554,7 @@ _UNHONORED_CASES = [
     ("store_provider", "redis"),
     ("llm_kwargs", {"model": "x"}),
     ("response_format", _NotVotingOutput),
+    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 

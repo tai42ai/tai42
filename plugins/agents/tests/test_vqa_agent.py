@@ -355,6 +355,8 @@ _UNHONORED_CASES = [
     ("resume_checkpoint_id", "cp"),
     ("checkpoint_provider", "redis"),
     ("store_provider", "redis"),
+    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
+    ("user_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 

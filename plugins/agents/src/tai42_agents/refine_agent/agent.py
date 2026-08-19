@@ -80,6 +80,10 @@ _UNHONORED_REASONS: dict[str, str] = {
     "llm_provider": "the loop uses role-named evaluator_llm_provider/critic_llm_provider",
     "store_provider": "it wires no long-term store",
     "llm_kwargs": "the loop uses role-named evaluator_llm_kwargs/critic_llm_kwargs",
+    "system_content_kwargs": (
+        "its evaluator/critic system messages are internal fixed prompts, never built as content blocks "
+        "through build_system_message; use user_content_kwargs to mark the evaluator's first user turn"
+    ),
 }
 # The unhonored parameters whose unset default is an empty sequence or empty string
 # — a truthy value is a rejected request. Every other unhonored parameter defaults
@@ -113,11 +117,16 @@ async def _run_refine_loop(
     evaluator_config: dict[str, Any] | None,
     critic_config: dict[str, Any] | None,
     strategy: Any = None,
+    user_content_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     """Run the Evaluator↔Critic loop to approval.
 
     Returns ``(final_agent, final_input, final_config)`` for the final approved
     evaluator pass the caller streams.
+
+    ``user_content_kwargs`` (e.g. ``cache_control``) carries content-block keys onto
+    the evaluator's first user turn — the run's primary caller-supplied message —
+    where it persists in the checkpointed history the final pass re-sends.
 
     ``strategy`` is the already-wrapped structured-output ``ToolStrategy`` (or
     ``None``); the caller wraps once and binds this same object into both the
@@ -190,7 +199,7 @@ async def _run_refine_loop(
     await _repair_dangling_tool_calls(critic, critic_config)
 
     iteration = 0
-    evaluator_input: dict[str, Any] = build_agent_input(evaluator_message)
+    evaluator_input: dict[str, Any] = build_agent_input(evaluator_message, user_content_kwargs=user_content_kwargs)
 
     while iteration < max_iterations:
         evaluator_state = await evaluator.ainvoke(evaluator_input, evaluator_config)
@@ -266,6 +275,16 @@ class RefineAgentInput(BaseModel):
     response_format: dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
+    user_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the evaluator's first user message's text block (e.g. "
+            "cache_control for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
+            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
+            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
+            "fails the call loudly."
+        ),
+    )
     evaluator_llm_provider: str | None = None
     critic_llm_provider: str | None = None
     checkpoint_provider: str | None = None
@@ -318,16 +337,21 @@ class RefineAgent(Agent):
         critic_llm_kwargs: dict[str, Any] | None = None,
         evaluator_langgraph_config: dict[str, Any] | None = None,
         critic_langgraph_config: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         response_format: Any = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the final evaluator pass; the Evaluator↔Critic loop runs silently
         until approval (or raises at ``max_iterations``).
 
-        ``tool_names``, ``checkpoint_provider``, and ``response_format`` are the
-        honored contract parameters; every other :class:`~tai42_contract.agent.Agent`
+        ``tool_names``, ``checkpoint_provider``, ``response_format`` and
+        ``user_content_kwargs`` are the honored contract parameters;
+        ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
+        onto the evaluator's first user turn, a provider-unknown key surfacing as a
+        loud provider error. Every other :class:`~tai42_contract.agent.Agent`
         parameter has no seat in the role-named loop and is rejected loudly (see
-        :data:`_UNHONORED_REASONS`).
+        :data:`_UNHONORED_REASONS`), including ``system_content_kwargs`` — the
+        evaluator/critic system messages are internal fixed prompts.
 
         With a ``response_format`` set, only the final approved answer is forced into
         the schema, surfaced as a terminal
@@ -359,6 +383,7 @@ class RefineAgent(Agent):
             evaluator_config=evaluator_langgraph_config,
             critic_config=critic_langgraph_config,
             strategy=strategy,
+            user_content_kwargs=user_content_kwargs,
         )
         saw_structured = False
         async for event in aproject_agent_events(

@@ -128,6 +128,7 @@ async def astream_tools_agent_events(
     llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
     system_content_kwargs: dict[str, Any] | None = None,
+    user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> AsyncIterator[StreamEvent]:
     """Run the tools agent and yield a normalized :class:`StreamEvent` stream.
@@ -158,6 +159,7 @@ async def astream_tools_agent_events(
         llm_kwargs,
         config,
         system_content_kwargs=system_content_kwargs,
+        user_content_kwargs=user_content_kwargs,
         response_format=strategy,
     )
     async for event in aproject_agent_events(

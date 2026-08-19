@@ -39,6 +39,31 @@ def test_build_agent_input_coerces_content_to_str():
     assert out["messages"] == [{"role": "user", "content": "42"}]
 
 
+def test_build_agent_input_user_content_kwargs_marks_only_last_message():
+    # The cache breakpoint marks the end of the stable prefix, so only the final
+    # user turn becomes a structured content block; earlier turns stay plain.
+    out = build_agent_input("first", "last", user_content_kwargs={"cache_control": {"type": "ephemeral"}})
+    assert out == {
+        "messages": [
+            {"role": "user", "content": "first"},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "last", "cache_control": {"type": "ephemeral"}}],
+            },
+        ]
+    }
+
+
+def test_build_agent_input_no_user_content_kwargs_stays_plain_strings():
+    out = build_agent_input("a", "b", user_content_kwargs=None)
+    assert out == {"messages": [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]}
+
+
+def test_build_agent_input_user_content_kwargs_without_messages_raises():
+    with pytest.raises(ValueError, match="no user messages to carry them on"):
+        build_agent_input(user_content_kwargs={"cache_control": {"type": "ephemeral"}})
+
+
 def test_build_system_message_plain():
     out = build_system_message("be brief")
     assert isinstance(out, SystemMessage)
@@ -54,6 +79,16 @@ def test_build_system_message_with_content_kwargs():
 def test_build_system_message_empty_is_none():
     assert build_system_message("") is None
     assert build_system_message(None) is None
+
+
+def test_build_system_message_content_kwargs_without_message_raises():
+    # An empty system message with system_content_kwargs is a caller config error —
+    # the keys have no carrier — so it raises loudly rather than silently discarding
+    # them (symmetric with build_agent_input's kwargs-with-no-carrier raise).
+    with pytest.raises(ValueError, match="no system message to carry them on"):
+        build_system_message("", {"cache_control": {"type": "ephemeral"}})
+    with pytest.raises(ValueError, match="no system message to carry them on"):
+        build_system_message(None, {"cache_control": {"type": "ephemeral"}})
 
 
 def test_build_user_output_empty():

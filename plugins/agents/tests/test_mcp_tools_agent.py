@@ -692,3 +692,44 @@ def test_tool_input_rejects_unknown_key() -> None:
     flag misspelled) raises at validation rather than silently vanishing."""
     with pytest.raises(ValidationError):
         mcp_mod.McpToolsAgentInput.model_validate({"mcp_config": {}, "inject_envv": True})
+
+
+def test_astream_threads_content_kwargs_to_the_delegated_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``system_content_kwargs`` / ``user_content_kwargs`` reach the delegated event
+    stream, where the kit marks the system prompt and last user message for caching."""
+    captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cache = {"cache_control": {"type": "ephemeral"}}
+    asyncio.run(
+        _collect(
+            agent.astream(
+                mcp_config={"mcpServers": {"s1": {"command": "run"}}},
+                user_message="hi",
+                system_message="sys",
+                system_content_kwargs=cache,
+                user_content_kwargs=cache,
+            )
+        )
+    )
+    assert captured["system_content_kwargs"] == cache
+    assert captured["user_content_kwargs"] == cache
+
+
+def test_run_threads_content_kwargs_to_the_delegated_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run`` forwards ``system_content_kwargs`` / ``user_content_kwargs`` to the
+    stream face, where they reach the delegated event stream — the honor reaches the
+    seam on the run face too, in parity with astream."""
+    captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cache = {"cache_control": {"type": "ephemeral"}}
+    asyncio.run(
+        agent.run(
+            mcp_config={"mcpServers": {"s1": {"command": "run"}}},
+            user_message="hi",
+            system_message="sys",
+            system_content_kwargs=cache,
+            user_content_kwargs=cache,
+        )
+    )
+    assert captured["system_content_kwargs"] == cache
+    assert captured["user_content_kwargs"] == cache
