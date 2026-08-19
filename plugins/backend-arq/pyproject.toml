@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-arq"
-version = "1.0.2"
+version = "1.0.3"
 description = "arq execution backend for the TAI ecosystem — worker runtime and Redis-hash scheduling over arq."
 readme = "README.md"
 requires-python = ">=3.13"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-twilio"
-version = "1.0.2"
+version = "1.0.3"
 description = "Twilio provisioning tools for the TAI ecosystem: manifest-loaded REST tools that list a Twilio account's incoming phone numbers, read a number's inbound-message webhook, and set a number's inbound-message webhook URL."
 readme = "README.md"
 requires-python = ">=3.13"
