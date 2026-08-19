@@ -18,13 +18,21 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from starlette.routing import Route
+from tai42_contract.app import tai42_app
 from tai42_contract.plugins import RouteDecl
 
 from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, bind_module
 from tai42_skeleton.app.route_registry import RouteOwner, RouteRegistry
+from tai42_skeleton.app.server import TaiMCP
+from tai42_skeleton.marketplace.compat import CompatVerdict
 
 _PLUGIN_DIST_ROOT = Path(__file__).parent / "_fixtures" / "_plugin_dist"
+
+# A no-distribution compat verdict: the fixture packages are on ``sys.path`` but not pip
+# installed, so the role loops proceed with a logged note rather than a dist-backed range.
+_UNKNOWN_VERDICT = CompatVerdict("unknown", "no dist")
 
 # The sibling-route fixture (channel shape): the manifest leaf imports the sibling.
 _SIBLING_LEAF = "route_sibling_plugin.register"
@@ -302,3 +310,178 @@ def test_dual_route_leaf_and_sibling_both_survive_a_rebuild(plugin_dist: RouteRe
     assert registry.match(_DUAL_INBOUND_PATH, "POST") is not None
     assert _regprobe.exec_count[_DUAL_LEAF] == 1
     assert _regprobe.exec_count[_DUAL_SIBLING] == 1
+
+
+def test_channel_walk_under_a_bound_leaf_is_unchanged_by_the_mount_map(plugin_dist: RouteRegistry) -> None:
+    # The channel shape driven exactly as ``_import_additive_plugin`` does — an OUTER
+    # ``bind_module`` for the manifest leaf PLUS the mount map — must be unchanged by the
+    # per-submodule resolution: the leaf's own binding equals the active one, so it is not
+    # re-bound, and the route-carrying sibling (absent from the map) keeps the leaf's
+    # binding and registers the plugin's route.
+    registry = plugin_dist
+    mount_map = {_SIBLING_LEAF: _SIBLING_BINDING}
+    with bind_module(_SIBLING_BINDING):
+        import_or_reload_package(_SIBLING_LEAF, mount_map=mount_map)
+    assert registry.match(_SIBLING_PATH, "POST") is not None
+    assert registry.owner_route_modules(_SIBLING_OWNER) == frozenset({_SIBLING_MODULE})
+
+
+def test_multi_router_package_walk_binds_each_submodule_under_its_own_binding(plugin_dist: RouteRegistry) -> None:
+    # The accounts-postgres shape wired under a NON-route role: the manifest names the ROOT
+    # package, whose walk carries NO outer binding. Each route submodule the map binds must
+    # register under ITS OWN binding — never bare (which raises) and never under a sibling's
+    # binding — with each module executed exactly once.
+    import _regprobe  # pyright: ignore[reportMissingImports]  (on sys.path via the plugin_dist fixture)
+
+    registry = plugin_dist
+    mount_map = {_LOGIN_LEAF: _LOGIN_BINDING, _USERS_LEAF: _USERS_BINDING}
+    _regprobe.exec_count.clear()
+
+    reloaded = import_or_reload_package("multi_router_plugin", mount_map=mount_map)
+
+    assert "multi_router_plugin" in reloaded
+    assert registry.match(_LOGIN_PATH, "POST") is not None
+    assert registry.match(_USERS_PATH, "GET") is not None
+    # Neither submodule ran under the other's binding (that would record /api/login/me).
+    assert registry.match("/api/login/me", "GET") is None
+    assert _regprobe.exec_count[_LOGIN_LEAF] == 1
+    assert _regprobe.exec_count[_USERS_LEAF] == 1
+
+
+_FOREIGN_ROUTES_LEAF = "foreign_role_plugin.routes"
+_FOREIGN_OWNER = RouteOwner(kind="plugin", owner_ref="fixture/accounts", item_name="login")
+_FOREIGN_ROUTES_BINDING = MountBinding(
+    owner_ref="fixture/accounts",
+    item_name="login",
+    base="login",
+    declared_routes=(RouteDecl(path="/session", methods=["POST"], public=True),),
+)
+_FOREIGN_ROUTES_PATH = "/api/login/session"
+
+
+@pytest.fixture
+def foreign_role_dist(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteRegistry]:
+    """Put the foreign-role fixture distribution on ``sys.path``, route its ``custom_route``
+    registrations into a FRESH registry, and forget its modules before and after."""
+    registry = RouteRegistry()
+    monkeypatch.setattr("tai42_skeleton.app.http.route_registry", registry)
+    monkeypatch.syspath_prepend(str(_PLUGIN_DIST_ROOT))
+    _forget(("foreign_role_plugin",))
+    try:
+        yield registry
+    finally:
+        _forget(("foreign_role_plugin",))
+
+
+def test_package_walk_under_foreign_role_binds_a_mapped_route_submodule(foreign_role_dist: RouteRegistry) -> None:
+    # A package listed under a NON-route role: importing it runs the ``provider`` side-effect
+    # AND the walk sweeps in ``routes`` — a mapped route submodule that captures
+    # ``mount_base()`` and registers its route at import. The walk carries no binding, so
+    # ``routes`` is bound from the mount map by its OWN name: the import succeeds, its
+    # ``mount_base()`` resolves to its declared base, and its route registers under its
+    # own binding.
+    registry = foreign_role_dist
+    app = TaiMCP(name="foreign-role-walk")
+    mount_map = {_FOREIGN_ROUTES_LEAF: _FOREIGN_ROUTES_BINDING}
+
+    with tai42_app.bound(app):
+        reloaded = import_or_reload_package("foreign_role_plugin", mount_map=mount_map)
+
+    provider = sys.modules["foreign_role_plugin.provider"]
+    routes = sys.modules["foreign_role_plugin.routes"]
+    assert provider.REGISTERED is True
+    assert set(reloaded) >= {"foreign_role_plugin", "foreign_role_plugin.provider", _FOREIGN_ROUTES_LEAF}
+    # ``mount_base()`` captured at import resolved to the submodule's own declared base.
+    assert routes.MOUNT_BASE == "/api/login"
+    meta = registry.match(_FOREIGN_ROUTES_PATH, "POST")
+    assert meta is not None
+    assert meta.owner == _FOREIGN_OWNER
+    assert meta.public is True
+
+
+def test_unmapped_route_submodule_in_a_foreign_walk_still_raises(foreign_role_dist: RouteRegistry) -> None:
+    # The loud-failure floor: a route submodule the walk reaches with NEITHER its own
+    # binding in the map NOR any active binding calls ``mount_base()`` at import and must
+    # still raise exactly as today, quarantining the walked package rather than booting a
+    # silently mis-mounted route.
+    app = TaiMCP(name="foreign-role-unmapped")
+    with tai42_app.bound(app), pytest.raises(MountRegistrationError, match="no mount binding present"):
+        import_or_reload_package("foreign_role_plugin", mount_map={})
+
+
+def _fastmcp_route_paths(app: TaiMCP) -> list[str]:
+    return [route.path for route in app._fast_mcp._additional_http_routes if isinstance(route, Route)]
+
+
+def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
+    plugin_dist: RouteRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The accounts-postgres shape: the ROOT package is a lifecycle entry AND its two route
+    # submodules are their own router entries. Driven through the REAL role-loop dedup
+    # (``_import_additive_plugin`` with the pass's run-once ledger), the lifecycle walk runs
+    # each route module body once under its own binding, and the router loop — reaching
+    # already-executed modules — does NOT re-run them. Exactly one execution per module per
+    # pass, all routes registered, completeness green (no MountRegistrationError). A second
+    # pass with a FRESH ledger re-executes cleanly, proving the ledger is per-pass.
+    import _regprobe  # pyright: ignore[reportMissingImports]  (on sys.path via the plugin_dist fixture)
+
+    registry = plugin_dist
+    monkeypatch.setattr("tai42_skeleton.marketplace.compat.module_compat", lambda module, dist_map: _UNKNOWN_VERDICT)
+    app = TaiMCP(name="accounts-shape")
+    app._mount_map = {_LOGIN_LEAF: _LOGIN_BINDING, _USERS_LEAF: _USERS_BINDING}
+
+    def _one_pass() -> None:
+        _regprobe.exec_count.clear()
+        registry.reset_shape_index()
+        executed: set[str] = set()
+        # Lifecycle loop: the root package sweeps in both route submodules under their bindings.
+        assert app._import_additive_plugin("multi_router_plugin", "lifecycle", {}, executed) is True
+        # Router loop: each route submodule is its own entry — already executed by the walk.
+        assert app._import_additive_plugin(_LOGIN_LEAF, "router", {}, executed) is True
+        assert app._import_additive_plugin(_USERS_LEAF, "router", {}, executed) is True
+        # The walk executed the submodules and the ledger recorded them, so the router loop skipped.
+        assert {_LOGIN_LEAF, _USERS_LEAF} <= executed
+        assert _regprobe.exec_count[_LOGIN_LEAF] == 1
+        assert _regprobe.exec_count[_USERS_LEAF] == 1
+        assert registry.match(_LOGIN_PATH, "POST") is not None
+        assert registry.match(_USERS_PATH, "GET") is not None
+
+    _one_pass()
+    # A second reload pass re-executes cleanly with a fresh ledger — no leak across passes.
+    _one_pass()
+
+
+def test_foreign_walk_submodule_failure_rolls_back_symmetrically(foreign_role_dist: RouteRegistry) -> None:
+    # A route submodule swept in by a foreign-role walk whose binding declares a route it
+    # never registers fails the bind-time completeness check. Because the walk newly binds
+    # it, the importer guards it with the same savepoint/rollback the own-role import uses:
+    # the row it DID commit is rolled back before the fault propagates, so a failed foreign
+    # walk leaves NO half-registered state — symmetric with a first-import failure today.
+    registry = foreign_role_dist
+    app = TaiMCP(name="foreign-role-rollback")
+    binding = MountBinding(
+        owner_ref="fixture/accounts",
+        item_name="login",
+        base="login",
+        declared_routes=(
+            RouteDecl(path="/session", methods=["POST"], public=True),
+            RouteDecl(path="/never", methods=["GET"], public=True),
+        ),
+    )
+    mount_map = {_FOREIGN_ROUTES_LEAF: binding}
+
+    with (
+        tai42_app.bound(app),
+        pytest.raises(MountRegistrationError, match="never registered"),
+    ):
+        import_or_reload_package(
+            "foreign_role_plugin",
+            mount_map=mount_map,
+            route_savepoint=app._http_surface.route_table_savepoint,
+            route_rollback=app._http_surface.rollback_module_routes,
+        )
+
+    # The /session row the module committed before the completeness fault is gone from BOTH
+    # the metadata registry and the served FastMCP route table.
+    assert registry.match(_FOREIGN_ROUTES_PATH, "POST") is None
+    assert _FOREIGN_ROUTES_PATH not in _fastmcp_route_paths(app)
