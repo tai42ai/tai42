@@ -17,7 +17,8 @@ from tai42_kit.settings import reset_all_settings
 from tai42_channel_slack.channel import SlackChannel, _deliver_form, _render_text, open_modal_view
 from tai42_channel_slack.correlation import remaining_seconds
 from tai42_channel_slack.forms import build_message_blocks
-from tests.conftest import (
+
+from .conftest import (
     TEST_ALLOWED_RECIPIENT,
     TEST_BOT_TOKEN,
     TEST_BOT_USER_ID,

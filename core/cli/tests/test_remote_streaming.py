@@ -13,7 +13,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import run_cli, sse_response
+from .remote_harness import run_cli, sse_response
 
 
 def test_agents_run_streams_each_frame(monkeypatch: pytest.MonkeyPatch) -> None:

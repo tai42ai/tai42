@@ -15,7 +15,13 @@ from collections.abc import Iterator
 
 import pytest
 import yaml
-from _config_k8s_support import (  # pyright: ignore[reportMissingImports]
+
+from tai42_e2e import diagnostics
+from tai42_e2e.booting import allocate_and_build
+from tai42_e2e.harness import release_resources
+from tai42_e2e.stack import Infra, TaiStack
+
+from ._config_k8s_support import (  # pyright: ignore[reportMissingImports]
     K8S_CONFIGMAP_NAME,
     K8S_MANIFEST_KEY,
     K8S_NAMESPACE,
@@ -23,12 +29,7 @@ from _config_k8s_support import (  # pyright: ignore[reportMissingImports]
     build_config_k8s_stack,
     real_k8s_config,
 )
-from _fake_k8s import FakeKubernetes  # pyright: ignore[reportMissingImports]
-
-from tai42_e2e import diagnostics
-from tai42_e2e.booting import allocate_and_build
-from tai42_e2e.harness import release_resources
-from tai42_e2e.stack import Infra, TaiStack
+from ._fake_k8s import FakeKubernetes  # pyright: ignore[reportMissingImports]
 
 # No backend worker: this profile is route-mounting + config-mode only.
 pytestmark = pytest.mark.backendless

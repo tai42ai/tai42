@@ -237,7 +237,8 @@ def _claim_exchange_client(monkeypatch, *, seeded: dict[str, str], valid: set[st
     from tai42_kit.utils.data.string_util import hash_api_key
 
     from tai42_skeleton.access_control import claim_links as claim_links_module
-    from tests.access_control.conftest import FakeRedis, make_client_ctx
+
+    from ..access_control.conftest import FakeRedis, make_client_ctx
 
     settings = AccessControlSettings()
     strings = {

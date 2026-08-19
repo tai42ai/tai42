@@ -23,7 +23,8 @@ from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.plugins.registry import build_registry, set_current_registry
-from tests.routers._auth_boundary import wire_store_from_route_strings
+
+from ._auth_boundary import wire_store_from_route_strings
 
 # tier 1: path -> template key. The SPA matcher is deliberately BROAD (``/.*``) —
 # it also matches ``/api/plugins``, so this doubles as the prefix-collision pin.

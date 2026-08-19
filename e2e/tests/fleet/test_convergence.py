@@ -26,7 +26,10 @@ from collections.abc import Callable
 
 import pytest
 import yaml
-from _fleet import (
+
+from tai42_e2e.stack import TaiStack
+
+from ._fleet import (
     assert_fleet_fanout,
     build_fleet_env_stack_builder,
     build_fleet_stack,
@@ -35,8 +38,6 @@ from _fleet import (
     manifest_file,
     wait_present,
 )
-
-from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.backendless
 

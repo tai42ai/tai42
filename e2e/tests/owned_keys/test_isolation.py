@@ -15,10 +15,11 @@ from typing import Any
 
 import httpx
 import redis as redis_lib
-from _owned_support import mint_owned, mint_owner
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+from ._owned_support import mint_owned, mint_owner
 
 _ADD_EVENT = "interaction.add"
 _ANSWERED_EVENT = "interaction.answered"

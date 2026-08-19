@@ -12,7 +12,8 @@ from __future__ import annotations
 from starlette.routing import Route
 
 import tai42_skeleton.routers.marketplace as router
-from tests.routers._auth_boundary import AUTHED, boundary_client
+
+from ._auth_boundary import AUTHED, boundary_client
 
 
 def test_install_and_search_reject_without_auth(monkeypatch) -> None:

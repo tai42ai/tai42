@@ -16,7 +16,7 @@ from typing import ClassVar
 
 from tai42_contract.backend.runtime import BackendRuntime
 
-from tests.backend.fakes import FakeOnLoopBackend, FakeOnLoopWorker
+from .fakes import FakeOnLoopBackend, FakeOnLoopWorker
 
 _Runtimes = Mapping[str, type[BackendRuntime]]
 

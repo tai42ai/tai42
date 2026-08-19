@@ -19,7 +19,8 @@ def test_import_registers_provider_as_side_effect():
     # Importing the package must register GithubStorage via the decorator; the
     # fake facet records the class it was handed.
     import tai42_storage_github
-    from tests.conftest import _fake_app
+
+    from .conftest import _fake_app
 
     assert _fake_app.storage.registered is tai42_storage_github.GithubStorage
 

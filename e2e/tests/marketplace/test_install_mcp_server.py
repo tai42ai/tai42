@@ -24,14 +24,6 @@ install. It is part of the ``TAI_E2E_MARKETPLACE``-gated suite (collected only w
 from __future__ import annotations
 
 import pytest
-from _market_support import (
-    api_tool_names,
-    distribution_absent,
-    installed_refs,
-    manifest_mcp_titles,
-    probe_payload,
-    uninstall_and_assert_clean,
-)
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.marketplace import (
@@ -45,6 +37,15 @@ from tai42_e2e.marketplace import (
 )
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
+
+from ._market_support import (
+    api_tool_names,
+    distribution_absent,
+    installed_refs,
+    manifest_mcp_titles,
+    probe_payload,
+    uninstall_and_assert_clean,
+)
 
 pytestmark = pytest.mark.backendless
 

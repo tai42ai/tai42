@@ -25,11 +25,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import redis as redis_lib
-from _bridge_support import BridgeHarness
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import SESSION_COOKIE, WebChatClient, get_chat_page
+
+from ._bridge_support import BridgeHarness
 
 _ENTRY_THROTTLE_MATCH = "channel:web:entry_throttle:*"
 

@@ -154,7 +154,7 @@ def test_set_fields_only_preserved_for_scalar_nested_and_unset_fields():
 def test_agent_base_tool_advertises_exact_model_schema():
     async def run() -> None:
         async with app.app_context(_nested_manifest()):
-            from tests.agent._fixtures import EchoInput, NestedInput
+            from ._fixtures import EchoInput, NestedInput
 
             echo = await app.tools.get_tool("echo_fields")
             nested = await app.tools.get_tool("nested_fields")
@@ -169,7 +169,7 @@ def test_agent_base_tool_advertises_exact_model_schema():
 def test_branch_schema_equals_base_plus_extension_params():
     async def run() -> None:
         async with app.app_context(_cache_manifest("echo_fields")):
-            from tests.agent._fixtures import EchoInput
+            from ._fixtures import EchoInput
 
             base = await app.tools.get_tool("echo_fields")
             branch = await app.tools.get_tool("echo_fields_cache")
@@ -264,7 +264,7 @@ def test_agent_run_tool_accepts_extension_combo():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            from tests.agent._fixtures import EchoInput
+            from ._fixtures import EchoInput
 
             tools = await app.tools.get_tools()
             assert {"echo_fields", "echo_fields_loud"} <= set(tools)
@@ -304,7 +304,7 @@ def test_cache_and_chain_compose_over_agent_run_tool_across_a_real_run():
 
     async def run() -> None:
         async with app.app_context(manifest):
-            from tests.agent._fixtures import EchoInput
+            from ._fixtures import EchoInput
 
             tools = await app.tools.get_tools()
             assert {"echo_fields", "echo_fields_cache", "echo_fields_chain"} <= set(tools)

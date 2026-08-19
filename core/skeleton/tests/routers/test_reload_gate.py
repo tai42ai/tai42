@@ -41,7 +41,8 @@ from tai42_skeleton.routers import schedules as schedules_router
 from tai42_skeleton.routers import sub_mcp as sub_mcp_router
 from tai42_skeleton.routers import tool_runs as tool_runs_router
 from tai42_skeleton.routers import tools as tools_router
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 def _dummy_req(**path_params: Any) -> Request:

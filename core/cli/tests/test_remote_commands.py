@@ -12,7 +12,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import data_response, error_response, run_cli, visible
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def _parse_tool_call(request: httpx.Request) -> tuple[str, dict[str, object]]:

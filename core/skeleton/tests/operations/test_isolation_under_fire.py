@@ -34,7 +34,8 @@ from tai42_skeleton.operations import notifications as notifications_ops
 from tai42_skeleton.operations import tool_runs as tool_runs_ops
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-from tests._fakes.tool_runs_redis import FakeRedis as ToolRunsFakeRedis
+
+from .._fakes.tool_runs_redis import FakeRedis as ToolRunsFakeRedis
 
 KEY = "k-fire"
 OWNER = "alice"

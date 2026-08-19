@@ -18,7 +18,8 @@ import tai42_skeleton.routers.config as router
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tests.routers._auth_boundary import wire_store_from_route_strings
+
+from ._auth_boundary import wire_store_from_route_strings
 
 # tier 1: path -> template key. Every config door maps to one protected template.
 _PATH_PATTERNS = {

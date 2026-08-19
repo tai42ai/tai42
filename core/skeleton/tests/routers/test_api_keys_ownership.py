@@ -23,8 +23,9 @@ import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
-from tests.access_control.test_policy_store import _MemStore
+
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+from ..access_control.test_policy_store import _MemStore
 
 
 class _SpyProvider(ApiKeyIdentityProvider):

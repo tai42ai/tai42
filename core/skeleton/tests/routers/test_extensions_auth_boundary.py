@@ -10,7 +10,8 @@ from __future__ import annotations
 from starlette.routing import Route
 
 import tai42_skeleton.routers.extensions as router
-from tests.routers._auth_boundary import AUTHED, boundary_client
+
+from ._auth_boundary import AUTHED, boundary_client
 
 _ROUTES = [Route("/api/extensions", router.list_extensions, methods=["GET"])]
 _STANCES = {r"/api/extensions": AUTHED}

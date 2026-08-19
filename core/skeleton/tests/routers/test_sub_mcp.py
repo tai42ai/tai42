@@ -75,7 +75,8 @@ def install(monkeypatch):
     """
     from tai42_skeleton.access_control import management as management_module
     from tai42_skeleton.sub_mcp import store as sub_mcp_store
-    from tests.access_control.conftest import FakeRedis, make_client_ctx
+
+    from ..access_control.conftest import FakeRedis, make_client_ctx
 
     # A successful register/unregister bumps the policy version (so cached capability
     # projections re-read the new mount set), which goes through ``management``'s Redis —

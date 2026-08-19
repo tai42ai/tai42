@@ -18,11 +18,12 @@ from collections.abc import Callable
 
 import pytest
 import yaml
-from _fleet import manifest_file
 
 from tai42_e2e import wait_for
 from tai42_e2e.manifests import build_bare_stack
 from tai42_e2e.stack import TaiStack
+
+from ._fleet import manifest_file
 
 pytestmark = pytest.mark.backendless
 

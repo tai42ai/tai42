@@ -67,7 +67,7 @@ def test_side_effecting_init_runs_exactly_once():
     # pop+reimport step is the ONLY import — the __init__ runs exactly once.
     # ``walk_packages`` would import the package to recurse, then reimport it,
     # running the __init__ twice (the double-register bug).
-    from tests.app._fixtures import counter_probe
+    from ._fixtures import counter_probe
 
     counter_probe.INIT_CALLS.clear()
     reloaded = import_or_reload_package("tests.app._fixtures.side_effect_pkg")

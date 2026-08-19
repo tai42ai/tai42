@@ -10,7 +10,8 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors.providers import ProviderDescriptor
 
 from tai42_connector.google.core import connector
-from tests import conftest
+
+from . import conftest
 
 # entry_point -> scopes for each pkg-launched stdio sub-service.
 EXPECTED_SUB_SERVICES = {
@@ -151,7 +152,7 @@ def test_pkg_manager_present_for_entry_point_sub_services() -> None:
 def test_registration_recorded_on_import() -> None:
     """The conftest recording fake captured the import-time registration; assert
     it received exactly the descriptor the builder produces."""
-    from tests.conftest import REGISTERED
+    from .conftest import REGISTERED
 
     google = [d for d in REGISTERED if d.id == "google"]
     assert len(google) == 1

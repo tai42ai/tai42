@@ -20,7 +20,10 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
-from _support import (
+
+from tai42_e2e.waiting import wait_for_async
+
+from ._support import (
     ChannelCase,
     await_true,
     cancel_and_join,
@@ -30,8 +33,6 @@ from _support import (
     post_callback,
     post_inbound,
 )
-
-from tai42_e2e.waiting import wait_for_async
 
 pytestmark = pytest.mark.backendless
 

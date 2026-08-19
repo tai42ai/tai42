@@ -15,10 +15,11 @@ from _rbac_support import (  # pyright: ignore[reportMissingImports]  (resolved 
     create_user_with_role,
     mint_owned_key,
 )
-from _trigger_support import MISS_MESSAGE, mint_link, no_auth
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+from ._trigger_support import MISS_MESSAGE, mint_link, no_auth
 
 # A verifier config naming an env var that is only dereferenced at signature-VERIFY
 # time; the BIND validates the verifier NAME against the registry, so no secret is

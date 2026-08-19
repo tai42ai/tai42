@@ -35,7 +35,8 @@ from tai42_skeleton.operations.templates import (
     upload_template,
 )
 from tai42_skeleton.template import TemplateNotFoundError
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _ResourceManager:

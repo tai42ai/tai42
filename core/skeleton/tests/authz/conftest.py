@@ -14,7 +14,8 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.role_gate import reset_route_index
 from tai42_skeleton.app.route_registry import RouteAction, route_registry
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 # The routes the suite's probe operations are registered at — all grantable ``write``.
 PROBE_ROUTES = ("/api/things/wipe", "/api/things/write", "/api/things/read")

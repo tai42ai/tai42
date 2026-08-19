@@ -78,9 +78,10 @@ def live_worker() -> Iterator[Any]:
     """Boot a real prefork worker (concurrency 1) in a background thread, wired to
     the Redis broker, with the prefork-turnover signals connected. Torn down by
     requesting worker shutdown and reaping any surviving pool child."""
-    import tests._live_probe as probe  # registers the probe task on celery_app
     from tai42_backend_celery.core import prefork
     from tai42_backend_celery.core.app import celery_app
+
+    from . import _live_probe as probe  # registers the probe task on celery_app
 
     celery_app.conf.update(broker_url=_BROKER, result_backend=_BROKER)
 

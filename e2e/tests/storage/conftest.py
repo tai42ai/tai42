@@ -18,13 +18,13 @@ from urllib.parse import urlparse
 
 import pytest
 
-# Resolved via the tests/storage path insertion (pytest prepend import mode).
-from _fake_github import FakeGithub  # pyright: ignore[reportMissingImports]
-
 from tai42_e2e.ports import allocate_port
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.variants import GITHUB_STUB_ENV, S3_AXIS_BUCKET, github_stub_base, open_s3_client, s3_coordinates
 from tai42_e2e.waiting import wait_for
+
+# Resolved via the tests/storage path insertion (pytest prepend import mode).
+from ._fake_github import FakeGithub  # pyright: ignore[reportMissingImports]
 
 
 def _ensure_s3_bucket() -> None:

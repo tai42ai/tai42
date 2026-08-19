@@ -45,7 +45,8 @@ from tai42_skeleton.marketplace.errors import (
 from tai42_skeleton.marketplace.installer import Installer
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
-from tests.marketplace._specs import make_resolved, make_spec
+
+from ._specs import make_resolved, make_spec
 
 
 def _tool_provides(module: str) -> list[dict[str, str]]:

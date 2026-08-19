@@ -22,7 +22,17 @@ import uuid
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import (
+    BRIDGE_TWILIO_CLIENT,
+    BRIDGE_WHATSAPP_CLIENT,
+    BRIDGE_WHATSAPP_PHONE_ID,
+    BRIDGE_WHATSAPP_PHONE_ID_B,
+    BRIDGE_WHATSAPP_PHONE_ID_C,
+)
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
@@ -33,15 +43,6 @@ from _bridge_support import (
     wait_whatsapp_send,
     whatsapp_get_verify,
 )
-
-from tai42_e2e.manifests import (
-    BRIDGE_TWILIO_CLIENT,
-    BRIDGE_WHATSAPP_CLIENT,
-    BRIDGE_WHATSAPP_PHONE_ID,
-    BRIDGE_WHATSAPP_PHONE_ID_B,
-    BRIDGE_WHATSAPP_PHONE_ID_C,
-)
-from tai42_e2e.settings import HarnessSettings
 
 # The scripted-LLM + FakeWhatsApp round-trips (verify handshake, correlated reply, ask/select)
 # are the mock leg for BOTH the 'whatsapp' channel seam and the 'llm' seam (build_bridge_stack

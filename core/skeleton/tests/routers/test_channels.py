@@ -10,7 +10,8 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.routers import channels as router
-from tests._helpers import DeliverOnlyChannel
+
+from .._helpers import DeliverOnlyChannel
 
 
 class _Chan(DeliverOnlyChannel):

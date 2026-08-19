@@ -50,9 +50,11 @@ api-gate = [
     { name = "pyyaml", specifier = ">=6" },
 ]
 dev = [
+    { name = "fakeredis", extras = ["lua"], specifier = ">=2.21" },
     { name = "packaging", specifier = ">=24" },
     { name = "pytest", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "trustme", specifier = ">=1.1" },
 ]
 
 [[package]]

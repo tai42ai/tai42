@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from types import SimpleNamespace
 
-from _support import TwilioCase  # pyright: ignore[reportMissingImports]
+from ._support import TwilioCase  # pyright: ignore[reportMissingImports]
 
 
 def _case(*, public_base_url: str | None, real: Iterable[str] = ()) -> TwilioCase:

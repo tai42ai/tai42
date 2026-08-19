@@ -27,12 +27,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from _market_support import (
-    distribution_absent,
-    installed_refs,
-    persisted_manifest,
-    skip_unless_registry_supports_declared_routes,
-)
 
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.marketplace import (
@@ -50,6 +44,13 @@ from tai42_e2e.marketplace import (
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+from ._market_support import (
+    distribution_absent,
+    installed_refs,
+    persisted_manifest,
+    skip_unless_registry_supports_declared_routes,
+)
 
 pytestmark = pytest.mark.backendless
 

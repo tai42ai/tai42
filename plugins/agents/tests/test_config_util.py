@@ -22,7 +22,8 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
 from tai42_agents.settings import AgentsLimitsSettings, agents_limits_settings
-from tests.conftest import RecordingMonitoringWriter
+
+from .conftest import RecordingMonitoringWriter
 
 CALLBACKS = ["callback-a", "callback-b"]
 

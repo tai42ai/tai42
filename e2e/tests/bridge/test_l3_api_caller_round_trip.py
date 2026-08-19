@@ -16,9 +16,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import BridgeHarness, script_reply, wait_record_status
 
 from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import BridgeHarness, script_reply, wait_record_status
 
 # Every test scripts llm_stub and asserts the scripted answer flows back through the door, so
 # this is the mock leg for the 'llm' seam — build_bridge_stack wires the bridge LLM env, so

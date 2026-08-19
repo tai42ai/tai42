@@ -10,7 +10,8 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors.providers import ProviderDescriptor
 
 from tai42_connector.atlassian.core import connector as connector_mod
-from tests import conftest
+
+from . import conftest
 
 ATLASSIAN_MCP_URL = "https://mcp.atlassian.com/v1/mcp/authv2"
 
@@ -141,7 +142,7 @@ def test_launch_spec_xor_holds_for_every_sub_service() -> None:
 def test_registration_recorded_on_import() -> None:
     """The conftest recording fake captured the import-time registration; assert
     it received exactly the descriptor the builder produces."""
-    from tests.conftest import REGISTERED
+    from .conftest import REGISTERED
 
     atlassian = [d for d in REGISTERED if d.id == "atlassian"]
     assert len(atlassian) == 1

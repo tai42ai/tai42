@@ -26,16 +26,17 @@ from collections.abc import Callable
 from urllib.parse import urlencode
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.settings import HarnessSettings
+from tai42_e2e.webchat import WebChatClient
+
+from ._bridge_support import (
     BridgeHarness,
     cancel_and_join,
     request_mentions,
     script_reply,
     wait_record_status,
 )
-
-from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.webchat import WebChatClient
 
 # The scripted-LLM turns are the 'llm' mock leg; a real LLM breaks the scripting. The web
 # channel itself has no vendor and so no real/mock split — it is always real.

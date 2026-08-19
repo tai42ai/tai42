@@ -17,7 +17,12 @@ from collections.abc import Callable, Iterator
 
 import pytest
 import yaml
-from _fleet import (
+
+from tai42_e2e.booting import boot_stack
+from tai42_e2e.llmstub import LlmStub
+from tai42_e2e.stack import Infra, TaiStack
+
+from ._fleet import (
     build_backup_populated_stack,
     build_backup_source_stack,
     build_fleet_env_stack_builder,
@@ -25,10 +30,6 @@ from _fleet import (
     converged_digest,
     manifest_file,
 )
-
-from tai42_e2e.booting import boot_stack
-from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.stack import Infra, TaiStack
 
 pytestmark = pytest.mark.backendless
 

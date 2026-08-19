@@ -20,11 +20,12 @@ import contextlib
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
-from _checkpoint_support import checkpoint_conn_string  # pyright: ignore[reportMissingImports]
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, empty_checkpoint
 
 from tai42_e2e.stack import TaiStack
+
+from ._checkpoint_support import checkpoint_conn_string  # pyright: ignore[reportMissingImports]
 
 
 @contextlib.asynccontextmanager

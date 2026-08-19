@@ -25,7 +25,8 @@ import pytest
 from tai42_contract.backend.runtime import BackendRuntime
 
 from tai42_kit.signals import signal_chain
-from tests.backend.fakes import (
+
+from .fakes import (
     FakeApp,
     FakeForkingBackend,
     FakeOnLoopBackend,

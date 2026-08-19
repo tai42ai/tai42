@@ -16,7 +16,8 @@ from tai42_kit.settings import SettingsClassInfo, SettingsFieldInfo, TaiBaseSett
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.routers import config as router
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _SecretDemoSettings(TaiBaseSettings):

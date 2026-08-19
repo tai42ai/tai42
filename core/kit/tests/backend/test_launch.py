@@ -18,7 +18,8 @@ from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 
 from tai42_kit.backend import DEFAULT_DRAIN_TIMEOUT_SECONDS, BackendDispatchSettings, ManagedBackend
 from tai42_kit.signals import signal_chain
-from tests.backend.fakes import (
+
+from .fakes import (
     FakeApp,
     FakeForkingBackend,
     FakeOnLoopBackend,

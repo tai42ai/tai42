@@ -15,18 +15,35 @@ fixture only covers the otherwise-incidental categories read.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 # ``prometheus_client`` freezes its value backend (the multiprocess mmap class vs
 # the in-process mutex class) the first time it is imported, choosing mmap only
 # when ``PROMETHEUS_MULTIPROC_DIR`` is already set. The writer entry points assert
 # the mmap backend is active, mirroring production where the launcher sets this
-# before any import. Set it here — the earliest point in the test process, before
-# any test module imports ``prometheus_client`` — so the suite runs mmap-frozen.
-# No test writes counters to this scratch dir; render tests point the collector at
-# their own tmp dirs.
-os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", os.path.join(tempfile.gettempdir(), "tai42_prometheus_test"))
+# before any import. Set it to a fresh per-session dir here — at conftest
+# module-import time, before any test module imports ``prometheus_client`` — so a
+# package-scoped skeleton run freezes mmap. A whole-repo run's rootdir conftest
+# sets it first, and this guard then defers to that shared dir. No test writes
+# counters here; render tests point the collector at their own tmp dirs.
+if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(prefix="tai42_prometheus_")
+    atexit.register(shutil.rmtree, os.environ["PROMETHEUS_MULTIPROC_DIR"], ignore_errors=True)
+
+# The manifest-driven suites name fixture packages by dotted path
+# (``tests.fixtures.dummy_agent``, ``tests.app._fixtures.tools_b``) that the app's
+# own importer resolves through ``importlib`` and, on reload, pops from
+# ``sys.modules`` to re-import. Under ``--import-mode=importlib`` pytest never puts
+# the package root on ``sys.path``, so a popped ``tests.*`` module would be
+# unfindable. Anchor ``tests`` as a discoverable namespace package by putting the
+# package root on ``sys.path`` — the implicit prepend-mode behavior, made explicit.
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import logging
 from contextlib import asynccontextmanager
@@ -38,9 +55,10 @@ import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
-from tests._fakes.interactions_redis import FakeRedis
-from tests.tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
-from tests.versioning.conftest import FakeVersioningPg
+
+from ._fakes.interactions_redis import FakeRedis
+from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
+from .versioning.conftest import FakeVersioningPg
 
 
 @pytest.fixture

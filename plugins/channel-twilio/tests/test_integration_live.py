@@ -20,7 +20,8 @@ from tai42_kit.settings import reset_all_settings
 from tai42_channel_twilio import TwilioChannel
 from tai42_channel_twilio.client import send_message
 from tai42_channel_twilio.settings import twilio_settings
-from tests.conftest import FakeRedis, make_delivery
+
+from .conftest import FakeRedis, make_delivery
 
 _ENV_KEYS = (
     "CHANNEL_TWILIO_ACCOUNT_SID",

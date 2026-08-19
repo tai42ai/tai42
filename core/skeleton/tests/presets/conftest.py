@@ -22,7 +22,8 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 tai42_app.bind(instance.build_app())
 

@@ -34,7 +34,8 @@ from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, Wor
 from tai42_skeleton.config.secret_seal import ResolvedSecretError
 from tai42_skeleton.config.service import ConfigService, OrphanEnvWriteError
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, apply_response
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator

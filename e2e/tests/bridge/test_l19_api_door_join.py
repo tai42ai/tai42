@@ -19,7 +19,11 @@ from collections.abc import Callable
 from urllib.parse import quote, urlencode
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     LINKED_TEXT,
     TWILIO_INBOUND_PATH,
     BridgeHarness,
@@ -29,9 +33,6 @@ from _bridge_support import (
     wait_send_to,
     wait_twilio_send,
 )
-
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
-from tai42_e2e.settings import HarnessSettings
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio"),

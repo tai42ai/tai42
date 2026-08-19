@@ -43,7 +43,8 @@ from tai42_channel_web.store import (
     set_gate,
     update_session_params,
 )
-from tests.conftest import CALLBACK, IDENTITY, OTHER_IDENTITY, SESSION_TOKEN, VISITOR_ID, FakeRedis
+
+from .conftest import CALLBACK, IDENTITY, OTHER_IDENTITY, SESSION_TOKEN, VISITOR_ID, FakeRedis
 
 pytestmark = pytest.mark.usefixtures("web_env")
 

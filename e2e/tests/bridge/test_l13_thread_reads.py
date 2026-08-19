@@ -29,16 +29,17 @@ from collections.abc import Callable
 from urllib.parse import quote, urlencode
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     TWILIO_INBOUND_PATH,
     BridgeHarness,
     post_inbound,
     script_reply,
     wait_twilio_send,
 )
-
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
-from tai42_e2e.settings import HarnessSettings
 
 # Every leg scripts the LLM stub and asserts the scripted answer back, so the whole module
 # is the 'llm' mock leg; the twilio-driven ones additionally need FakeTwilio's signed

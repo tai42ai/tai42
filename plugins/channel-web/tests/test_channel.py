@@ -15,7 +15,8 @@ from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_web import channel as channel_module
 from tai42_channel_web.channel import WebChannel
-from tests.conftest import CALLBACK, IDENTITY, VISITOR_ID, FakeRedis, make_delivery, make_notification
+
+from .conftest import CALLBACK, IDENTITY, VISITOR_ID, FakeRedis, make_delivery, make_notification
 
 pytestmark = pytest.mark.usefixtures("web_env")
 

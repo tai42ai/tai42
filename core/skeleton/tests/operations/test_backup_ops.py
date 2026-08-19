@@ -13,7 +13,8 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations.backup import import_backup
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _RecordingResourceManager:

@@ -194,7 +194,8 @@ async def test_start_resets_stale_sub_app_routes():
     # generation stops serving after a re-init.
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.manifest import Manifest
-    from tests.app._fixtures.reload import reload_with
+
+    from ._fixtures.reload import reload_with
 
     manifest = Manifest.model_validate({})
 

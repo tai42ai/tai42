@@ -14,7 +14,8 @@ from click.testing import CliRunner
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq import worker as worker_module
-from tests.conftest import FakeRedisConn, FakeRqWorker
+
+from .conftest import FakeRedisConn, FakeRqWorker
 
 # --- worker classes ----------------------------------------------------------
 

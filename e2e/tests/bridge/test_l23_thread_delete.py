@@ -19,7 +19,11 @@ from collections.abc import Callable
 from urllib.parse import urlencode
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     TWILIO_INBOUND_PATH,
     BridgeHarness,
     post_inbound,
@@ -27,9 +31,6 @@ from _bridge_support import (
     script_reply,
     wait_twilio_send,
 )
-
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT
-from tai42_e2e.settings import HarnessSettings
 
 # The scripted LLM turns are the 'llm' mock leg; the twilio signed inbound the 'twilio' one.
 pytestmark = pytest.mark.skipif(

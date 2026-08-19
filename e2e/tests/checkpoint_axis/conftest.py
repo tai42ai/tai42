@@ -12,10 +12,11 @@ import functools
 from collections.abc import Iterator
 
 import pytest
-from _checkpoint_support import build_checkpoint_stack  # pyright: ignore[reportMissingImports]
 
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.stack import Infra, TaiStack
+
+from ._checkpoint_support import build_checkpoint_stack  # pyright: ignore[reportMissingImports]
 
 # No backend worker: the sweep runs in the serve worker handling the HTTP request.
 pytestmark = pytest.mark.backendless

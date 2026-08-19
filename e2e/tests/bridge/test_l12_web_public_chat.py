@@ -25,10 +25,11 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from _bridge_support import BridgeHarness, cancel_and_join, request_mentions, script_reply
 
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.webchat import SESSION_COOKIE, WebChatClient, mint_unregistered_token, transcript_keys
+
+from ._bridge_support import BridgeHarness, cancel_and_join, request_mentions, script_reply
 
 # The scripted-LLM turns are the 'llm' mock leg; a real LLM breaks the scripting. The web
 # channel itself has no vendor and so no real/mock split — it is always real.

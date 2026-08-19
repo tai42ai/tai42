@@ -25,7 +25,7 @@ from tai42_skeleton.settings.audit_log import AuditLogSettings
 from tai42_skeleton.settings.rate_limit import FamilyOverride, RateLimitSettings
 
 # Import the fake as a package-relative module (tests is a package).
-from tests._fakes.interactions_redis import FakeRedis
+from .._fakes.interactions_redis import FakeRedis
 
 # A refusal audit line; the trailing ``reason=`` group is absent for a 429 (the
 # limiter carries no DenialCause).

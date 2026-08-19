@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _bridge_support import BridgeHarness
+from ._bridge_support import BridgeHarness
 
 
 async def test_checkpoint_sweep_runs_and_reports_provider(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

@@ -25,11 +25,6 @@ from __future__ import annotations
 
 import pytest
 import yaml
-from _market_support import (
-    MarketInstaller,
-    distribution_absent,
-    skip_unless_registry_supports_declared_routes,
-)
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.marketplace import (
@@ -41,6 +36,12 @@ from tai42_e2e.marketplace import (
 )
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
+
+from ._market_support import (
+    MarketInstaller,
+    distribution_absent,
+    skip_unless_registry_supports_declared_routes,
+)
 
 pytestmark = pytest.mark.backendless
 

@@ -15,8 +15,9 @@ import pytest
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
 
 from tai42_kit.backend import ManagedBackend, check_backend_declarations, check_runtime_declarations
-from tests.backend._self_wiring import DelegatingBackend, SelfWiringBackend
-from tests.backend.fakes import (
+
+from ._self_wiring import DelegatingBackend, SelfWiringBackend
+from .fakes import (
     FakeForkingBackend,
     FakeOnLoopBackend,
     FakeOnLoopWorker,

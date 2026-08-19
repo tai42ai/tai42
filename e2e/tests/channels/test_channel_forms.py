@@ -26,12 +26,13 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from _support import cancel_and_join, is_pending, post_callback, post_inbound, tool_content_text
 
 from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+from ._support import cancel_and_join, is_pending, post_callback, post_inbound, tool_content_text
 
 pytestmark = [
     pytest.mark.backendless,

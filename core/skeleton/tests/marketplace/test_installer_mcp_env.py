@@ -32,7 +32,8 @@ from tai42_skeleton.marketplace.errors import InstallEnvError
 from tai42_skeleton.marketplace.installer import Installer
 from tai42_skeleton.marketplace.manifest_patch import apply_provides
 from tai42_skeleton.marketplace.store import InstallRecord
-from tests.marketplace._specs import make_resolved, make_spec
+
+from ._specs import make_resolved, make_spec
 
 
 def _mcp_spec(*, version: str = "1.0.0", env: dict[str, str] | None = None) -> PluginSpec:

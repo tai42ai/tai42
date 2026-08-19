@@ -18,7 +18,8 @@ from tai42_cli.commands.fleet import (
     _relative_since,
     _worker_display_row,
 )
-from tests.remote_harness import data_response, run_cli, strip_ansi
+
+from .remote_harness import data_response, run_cli, strip_ansi
 
 
 def _worker(**overrides: Any) -> dict[str, Any]:

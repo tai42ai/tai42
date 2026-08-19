@@ -42,8 +42,9 @@ from tai42_skeleton.operations import api_keys as api_keys_ops
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.tools.binding import CLIENT_TOOL_NAME_MAX_LEN
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
-from tests.access_control.test_policy_store import _MemStore
+
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+from ..access_control.test_policy_store import _MemStore
 
 # The enforcer's alru cache is created and used across boots — a benign loop-reset artifact.
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
@@ -262,7 +263,7 @@ def test_a_fenced_operation_is_refused_while_the_operation_surface_rebuilds(ac) 
     # and waved through. The refusal is retriable, not a verdict on the key.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from tests.authz._fixtures import execution_probe
+            from ._fixtures import execution_probe
 
             with _rebuilding_operation_surface():
                 execution_probe.calls.clear()
@@ -283,7 +284,7 @@ def test_the_client_tool_seam_is_refused_while_the_operation_surface_rebuilds(ac
     # resolution wait — the discriminator itself is what refuses on this path.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from tests.authz._fixtures import execution_probe
+            from ._fixtures import execution_probe
 
             runnable = app._tool_binding._client_runnable(await app.tools.get_tool(_FENCED_OP))
 
@@ -354,7 +355,7 @@ def test_a_fire_still_refuses_when_the_surface_is_unsettled_with_no_reload_to_wa
     # the dispatch being waved through as a capability tool.
     async def run() -> None:
         async with app.app_context(_manifest()):
-            from tests.authz._fixtures import execution_probe
+            from ._fixtures import execution_probe
 
             with _rebuilding_operation_surface():
                 execution_probe.calls.clear()
@@ -488,7 +489,7 @@ def test_a_hook_firing_a_fenced_operation_is_denied_under_a_non_admin_key(ac, ca
 
     async def run() -> list[tuple[str, str]]:
         async with app.app_context(_manifest()):
-            from tests.authz._fixtures import execution_probe
+            from ._fixtures import execution_probe
 
             manager = InMemoryHooksManager(HooksSettings())
             await manager.register(

@@ -15,7 +15,8 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.inbound import inbound
 from tai42_channel_telegram.settings import TelegramSettings
-from tests.conftest import make_inbound_request
+
+from .conftest import make_inbound_request
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
 _VALID_HEADERS = {"X-Telegram-Bot-Api-Secret-Token": "s3cret_token"}

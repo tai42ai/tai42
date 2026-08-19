@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
-from prometheus_client.parser import text_string_to_metric_families
 
 
 @dataclass(frozen=True)
@@ -21,6 +20,12 @@ class Scrape:
         """The value of the sample of ``family`` whose labels are a superset of
         ``labels``, or ``None`` if no such sample exists. ``None`` (not 0.0)
         distinguishes "family/label absent" from "present and zero"."""
+        # Deferred: importing prometheus_client freezes its value backend
+        # (multiprocess mmap vs in-process mutex) at first import. Keeping it out of
+        # this module's import graph lets the pytest11 entry point register without
+        # freezing that choice before a conftest sets PROMETHEUS_MULTIPROC_DIR.
+        from prometheus_client.parser import text_string_to_metric_families
+
         for parsed in text_string_to_metric_families(self.raw):
             for s in parsed.samples:
                 if s.name != family:

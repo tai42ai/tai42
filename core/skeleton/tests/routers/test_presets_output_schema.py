@@ -25,7 +25,8 @@ import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.routers import presets as router
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures", "tai42_toolbox.extensions.output_schema"],

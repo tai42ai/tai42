@@ -11,7 +11,7 @@ import json
 
 import httpx
 
-from tests.remote_harness import data_response, run_cli
+from .remote_harness import data_response, run_cli
 
 
 def _capture():

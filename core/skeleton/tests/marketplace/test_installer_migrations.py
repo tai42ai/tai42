@@ -17,8 +17,9 @@ from tai42_contract.plugins import PluginSpec
 from tai42_kit.db import AppliedMigration
 
 from tai42_skeleton.marketplace import installer as installer_module
-from tests.marketplace._specs import make_resolved, make_spec, tool_item
-from tests.marketplace.test_installer import Harness
+
+from ._specs import make_resolved, make_spec, tool_item
+from .test_installer import Harness
 
 
 def _spec_with_migrations(*, name: str = "acct", package: str = "tai42-acct", version: str = "1.0.0") -> PluginSpec:

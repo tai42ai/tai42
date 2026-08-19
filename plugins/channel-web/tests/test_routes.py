@@ -37,7 +37,8 @@ from tai42_channel_web.store import (
     set_gate,
     transcript_order,
 )
-from tests.conftest import (
+
+from .conftest import (
     CALLBACK,
     CLIENT_HOST,
     ENTRY_ASSET,

@@ -18,7 +18,8 @@ from tai42_contract.tool_meta import (
 )
 
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
-from tests.tool_meta.conftest import FakeToolMetaPg
+
+from .conftest import FakeToolMetaPg
 
 # -- folders: create / rename / move / delete / list -------------------------
 

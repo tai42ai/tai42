@@ -19,7 +19,8 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import tool_extensions as ops
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 def _fake_manifest(*, tools: list, mcp: list) -> Manifest:

@@ -36,7 +36,8 @@ from tai42_skeleton.authz.middleware import AuthzMiddleware
 from tai42_skeleton.authz.resolver import resolve_dispatch
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.errors import PermissionDenied
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 # The enforcer's alru cache is created and used across boots — a benign loop-reset artifact.
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")

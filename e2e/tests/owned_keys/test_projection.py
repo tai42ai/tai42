@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _owned_support import SCOPE, mint_owned, mint_owner
-
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+from ._owned_support import SCOPE, mint_owned, mint_owner
 
 # The root key the auth bootstrap seeds (``seed_bootstrap_key`` → ``e2e-root``, ``*``).
 _ROOT_USER_ID = "e2e-root"

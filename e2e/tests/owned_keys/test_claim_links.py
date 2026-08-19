@@ -8,11 +8,11 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from _owned_support import mint_owned, mint_owner
-
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+from ._owned_support import mint_owned, mint_owner
 
 # The single uniform exchange-miss message the handler answers for EVERY miss
 # (unknown / used / revoked-key / expired). Asserting the body carries it — not

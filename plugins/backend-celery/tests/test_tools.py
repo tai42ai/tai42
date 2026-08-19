@@ -10,7 +10,8 @@ from celery.exceptions import TimeoutError as CeleryTimeoutError
 from redbeat.decoder import RedBeatJSONEncoder
 
 import tai42_backend_celery.tools.tools as tools
-from tests.conftest import FakeRedis
+
+from .conftest import FakeRedis
 
 # Canonical task/worker tools every backend exposes.
 TASK_WORKER_TOOLS = [

@@ -19,9 +19,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _rbac_support import create_role, create_user_with_role
-
 from tai42_e2e.stack import TaiStack
+
+from ._rbac_support import create_role, create_user_with_role
 
 
 async def test_reserved_admin_role_and_assigned_role_guards(

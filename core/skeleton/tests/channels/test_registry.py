@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from tai42_skeleton.channels.registry import ChannelRegistry
-from tests._helpers import DeliverOnlyChannel
+
+from .._helpers import DeliverOnlyChannel
 
 
 class _Chan(DeliverOnlyChannel):

@@ -11,7 +11,8 @@ from tai42_contract.channels import ChannelDeliveryError, ChannelNotification
 
 from tai42_channel_twilio.channel import TwilioChannel
 from tai42_channel_twilio.correlation import PendingQuestionExistsError
-from tests.conftest import FakeHttpx, FakeRedis, make_delivery, response
+
+from .conftest import FakeHttpx, FakeRedis, make_delivery, response
 
 pytestmark = pytest.mark.usefixtures("twilio_env")
 

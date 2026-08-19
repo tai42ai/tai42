@@ -23,7 +23,8 @@ The artifacts live in the tai-distribution checkout and render through
 from __future__ import annotations
 
 import pytest
-from _upgrade_path_support import (
+
+from ._upgrade_path_support import (
     GATE_CONDITION,
     MIGRATE_ARGS,
     PREVIOUS_FRAMEWORK_VERSIONS,

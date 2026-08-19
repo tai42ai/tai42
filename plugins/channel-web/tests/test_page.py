@@ -19,7 +19,8 @@ from tai42_channel_web.page import (
     render_page,
     render_refusal,
 )
-from tests.conftest import ENTRY_ASSET, IDENTITY, STYLE_ASSET, write_manifest
+
+from .conftest import ENTRY_ASSET, IDENTITY, STYLE_ASSET, write_manifest
 
 
 def test_public_dir_is_the_packaged_bundle_directory():

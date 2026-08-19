@@ -47,14 +47,15 @@ from tai42_skeleton.routers import api_keys
 # its module is imported. Importing here (after the conftest binds ``tai42_app``) makes that probe
 # deterministic in isolation instead of relying on another test module's collection order.
 from tai42_skeleton.routers import hooks as _hooks  # noqa: F401
-from tests.access_control.conftest import (
+
+from ..access_control.conftest import (
     FakeAccessControlPg,
     FakeRedis,
     _FakeApp,
     make_client_ctx,
     make_pg_ctx,
 )
-from tests.access_control.test_policy_store import _MemStore
+from ..access_control.test_policy_store import _MemStore
 
 S = access_control_settings()
 

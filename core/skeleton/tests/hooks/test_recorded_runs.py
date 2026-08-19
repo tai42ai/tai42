@@ -30,7 +30,8 @@ from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-from tests._fakes.tool_runs_redis import FakeRedis
+
+from .._fakes.tool_runs_redis import FakeRedis
 
 
 class _Tools:

@@ -22,7 +22,8 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tests.access_control.conftest import FakeAccessControlPg, make_pg_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
 
 AUTHED = "authed"
 PUBLIC = "public"

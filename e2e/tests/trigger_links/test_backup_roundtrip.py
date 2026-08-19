@@ -15,10 +15,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from _trigger_support import MISS_MESSAGE, mint_link, no_auth, register_record_hook, wait_records
-
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+from ._trigger_support import MISS_MESSAGE, mint_link, no_auth, register_record_hook, wait_records
 
 
 async def _export(admin: ApiClient) -> dict[str, Any]:

@@ -28,9 +28,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _rbac_support import create_role, create_user_with_role, hook_body
-
 from tai42_e2e.stack import TaiStack
+
+from ._rbac_support import create_role, create_user_with_role, hook_body
 
 # The grantable feature tags the broadest role holds WRITE on — every product family the
 # accounts profile mounts a fenced route under, so a fenced-route denial is provably the

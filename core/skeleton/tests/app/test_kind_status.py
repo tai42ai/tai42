@@ -18,7 +18,8 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import init_monitoring, reset_monitoring
 from tai42_skeleton.plugins.registry import StudioPluginError
-from tests._helpers import DeliverOnlyChannel
+
+from .._helpers import DeliverOnlyChannel
 
 _PLUGGABLE_KINDS = [
     "identity",

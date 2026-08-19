@@ -8,7 +8,8 @@ import pytest
 from httpx import HTTPStatusError, Request
 
 from tai42_storage_github import GithubStorage
-from tests.conftest import make_response
+
+from .conftest import make_response
 
 
 @pytest.mark.parametrize("root", ["", "/", ".", "  ", "//", "a/..", "./x/../..", "../x", "/.."])

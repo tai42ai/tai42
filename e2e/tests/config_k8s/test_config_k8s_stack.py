@@ -11,11 +11,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _config_k8s_support import K8S_MANIFEST_KEY  # pyright: ignore[reportMissingImports]
-from _fake_k8s import FakeKubernetes  # pyright: ignore[reportMissingImports]
 
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+
+from ._config_k8s_support import K8S_MANIFEST_KEY  # pyright: ignore[reportMissingImports]
+from ._fake_k8s import FakeKubernetes  # pyright: ignore[reportMissingImports]
 
 # These assertions read the FAKE apiserver's introspection counters (ConfigMap reads,
 # Secret/ConfigMap PATCHes, the armed-conflict retry), so they are the k8s MOCK leg. A real

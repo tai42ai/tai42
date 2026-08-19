@@ -13,7 +13,8 @@ from arq.jobs import JobStatus
 
 from tai42_backend_arq import scheduler
 from tai42_backend_arq.settings import TaskFailedError
-from tests.conftest import DeleteOnLockRedis
+
+from .conftest import DeleteOnLockRedis
 
 
 def _job_type(**results: Any) -> type:

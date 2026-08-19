@@ -29,7 +29,8 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.routers import agents as agents_router
 from tai42_skeleton.routers import presets as presets_router
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],

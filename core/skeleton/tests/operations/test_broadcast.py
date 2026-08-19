@@ -19,7 +19,8 @@ import pytest
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import _broadcast
 from tai42_skeleton.operations._broadcast import broadcast
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, bus: FakeBus) -> FakeBus:

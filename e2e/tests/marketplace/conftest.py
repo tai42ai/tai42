@@ -26,7 +26,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from _market_support import MarketInstaller
 
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
@@ -59,6 +58,8 @@ from tai42_e2e.marketplace import (
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import Infra, TaiStack
+
+from ._market_support import MarketInstaller
 
 _MARKETPLACE_DIR = Path(__file__).parent
 

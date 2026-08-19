@@ -14,17 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
-    LINKED_TEXT,
-    TWILIO_INBOUND_PATH,
-    WHATSAPP_INBOUND_PATH,
-    BridgeHarness,
-    extract_pair_code,
-    post_inbound,
-    script_reply,
-    wait_send_to,
-    wait_twilio_send,
-)
 
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
@@ -35,6 +24,18 @@ from tai42_e2e.manifests import (
     BRIDGE_WHATSAPP_PHONE_ID,
 )
 from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
+    LINKED_TEXT,
+    TWILIO_INBOUND_PATH,
+    WHATSAPP_INBOUND_PATH,
+    BridgeHarness,
+    extract_pair_code,
+    post_inbound,
+    script_reply,
+    wait_send_to,
+    wait_twilio_send,
+)
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("llm") or HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),

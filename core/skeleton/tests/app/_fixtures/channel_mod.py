@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery
 
-from tests._helpers import DeliverOnlyChannel
+from ..._helpers import DeliverOnlyChannel
 
 
 class _FixtureChannel(DeliverOnlyChannel):

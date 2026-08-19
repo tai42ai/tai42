@@ -55,7 +55,7 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app import instance, lifecycle
 from tai42_skeleton.manifest import Manifest
 
-from tests.conftest import APP as RECORDING_APP
+from .conftest import APP as RECORDING_APP
 
 # One agents entry: the real generic tools-agent, gated in by its registration name.
 _MANIFEST = {"agents": [{"title": "tai42-agents", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]}]}

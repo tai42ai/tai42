@@ -25,7 +25,8 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.operations import NotFoundError, NotSupportedError
 from tai42_skeleton.operations import tool_meta as ops
 from tai42_skeleton.routers import tool_meta as router
-from tests.tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
+
+from ..tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 
 tai42_app.bind(instance.build_app())
 

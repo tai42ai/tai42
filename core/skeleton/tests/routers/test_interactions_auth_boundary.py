@@ -22,8 +22,9 @@ from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
-from tests._fakes.interactions_redis import FakeRedis as InteractionsFake
-from tests.routers._auth_boundary import wire_store_from_route_strings
+
+from .._fakes.interactions_redis import FakeRedis as InteractionsFake
+from ._auth_boundary import wire_store_from_route_strings
 
 # tier 1: path -> template key; tier 2 (Redis ``ac:route:``): template -> resource id.
 _PATH_PATTERNS = {

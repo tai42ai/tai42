@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from tai42_channel_slack import inbound
-from tests.conftest import TEST_SIGNING_SECRET, body_json, make_request, signed_headers
+
+from .conftest import TEST_SIGNING_SECRET, body_json, make_request, signed_headers
 
 pytestmark = pytest.mark.usefixtures("slack_env")
 

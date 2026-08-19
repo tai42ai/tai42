@@ -24,7 +24,8 @@ from tai42_contract.backend.runtime import (
 
 from tai42_kit.backend import ManagedBackend
 from tai42_kit.backend.base import _turnover_budget
-from tests.backend.fakes import (
+
+from .fakes import (
     FakeApp,
     FakeForkingBackend,
     FakeOnLoopBackend,

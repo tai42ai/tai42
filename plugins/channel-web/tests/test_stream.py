@@ -20,7 +20,8 @@ from tai42_channel_web import store, stream
 from tai42_channel_web.settings import WebSettings, web_settings
 from tai42_channel_web.store import append_message
 from tai42_channel_web.stream import StreamLimitError, check_stream_admission, stream_transcript
-from tests.conftest import IDENTITY, VISITOR_ID, FakeRedis
+
+from .conftest import IDENTITY, VISITOR_ID, FakeRedis
 
 pytestmark = pytest.mark.usefixtures("web_env")
 

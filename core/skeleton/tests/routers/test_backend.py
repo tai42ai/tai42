@@ -20,7 +20,8 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.routers import backend as router
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _FakeBackend:

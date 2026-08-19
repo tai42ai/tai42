@@ -26,7 +26,8 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.operations.registry import operation_registry
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
 # The enforcer's alru cache is created and used across boots — a benign loop-reset test
 # artifact, exactly as the other AC-e2e suites document.
