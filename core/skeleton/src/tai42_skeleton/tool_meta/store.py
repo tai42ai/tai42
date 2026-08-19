@@ -164,7 +164,7 @@ class PostgresToolMetaStore(ToolMetaStore):
         folder_id: str | None,
         tags: list[str],
         hidden: bool | None,
-        badges: list[str],
+        badges: list[str] | None = None,
     ) -> ToolMetaRecord:
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
@@ -175,7 +175,8 @@ class PostgresToolMetaStore(ToolMetaStore):
             if folder_id is not None:
                 await self._require_folder(cur, folder_id)
             # ``created_at`` is stamped on first insert and preserved on conflict — an
-            # upsert re-writes only the mutable overlay columns.
+            # upsert re-writes only the mutable overlay columns. A ``None`` ``badges``
+            # writes the empty set.
             await cur.execute(
                 "INSERT INTO tool_meta (tool_name, display_name, folder_id, tags, hidden, badges) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "
@@ -183,7 +184,7 @@ class PostgresToolMetaStore(ToolMetaStore):
                 "display_name = EXCLUDED.display_name, folder_id = EXCLUDED.folder_id, "
                 "tags = EXCLUDED.tags, hidden = EXCLUDED.hidden, badges = EXCLUDED.badges "
                 "RETURNING tool_name, display_name, folder_id, tags, hidden, badges",
-                (tool_name, display_name, folder_id, list(tags), hidden, list(badges)),
+                (tool_name, display_name, folder_id, list(tags), hidden, list(badges or [])),
             )
             return _meta_record(_require_row(await cur.fetchone()))
 

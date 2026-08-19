@@ -186,7 +186,7 @@ delete_conversation_route = register_operation_route(
 )
 
 
-async def _extract_paging(request: Request) -> dict:
+async def _extract_page_window(request: Request) -> dict:
     """The ``?page=`` / ``?pageSize=`` window as the thread read doors' flat arguments (a
     GET reads its parameters from the query string, never a body). A non-integer is a loud
     400 here; the operation range-checks the pair and caps the size."""
@@ -204,7 +204,7 @@ async def _extract_message_search_query(request: Request) -> dict:
     q = request.query_params.get("q")
     if q is None:
         raise BadRequestError("q is required: GET /api/conversations/{route_name}/messages/search?q=...")
-    return {**await _extract_paging(request), "q": q}
+    return {**await _extract_page_window(request), "q": q}
 
 
 # The admin-tier failed-delivery listing and the route message search sit on literal paths so
@@ -237,13 +237,15 @@ get_conversation_message = register_operation_route(
 )
 
 
-async def _extract_thread_list_query(request: Request) -> dict:
-    """The thread listing's optional ``?status=`` / ``?address=`` filters on top of the shared
-    window (a GET reads its parameters from the query string). Both are passed through raw —
-    the operation validates ``status`` against the delivery-status vocabulary (400 on unknown)
-    and treats a blank filter as absent."""
+async def _extract_paging(request: Request) -> dict:
+    """The thread listing's shared ``?page=`` / ``?pageSize=`` window plus its optional
+    ``?status=`` / ``?address=`` filters (a GET reads its parameters from the query string).
+    The two filters are passed through raw — the operation validates ``status`` against the
+    delivery-status vocabulary (400 on unknown) and treats a blank filter as absent. The
+    other read doors that only take the window parse it through :func:`_extract_page_window`
+    directly, so they never inherit these filter kwargs."""
     return {
-        **await _extract_paging(request),
+        **await _extract_page_window(request),
         "status": request.query_params.get("status"),
         "address": request.query_params.get("address"),
     }
@@ -263,7 +265,7 @@ async def _extract_transcript_query(request: Request) -> dict:
     if thread_id is None:
         raise BadRequestError("thread_id is required: GET /api/conversations/{route_name}/transcript?thread_id=...")
     return {
-        **await _extract_paging(request),
+        **await _extract_page_window(request),
         "thread_id": thread_id,
         "order": request.query_params.get("order", "asc"),
         "q": request.query_params.get("q"),
@@ -275,7 +277,7 @@ list_conversation_threads = register_operation_route(
     operation_metadata_of(_list_conversation_threads_op),
     path="/api/conversations/{route_name}/threads",
     method="GET",
-    context_extractor=_extract_thread_list_query,
+    context_extractor=_extract_paging,
     action="read",
 )
 

@@ -63,6 +63,10 @@ def set_tool_meta(
         list[str] | None, typer.Option("--tag", help="A user tag (repeatable); replaces the whole set when given.")
     ] = None,
     clear_tags: Annotated[bool, typer.Option("--clear-tags", help="Clear all user tags (send an empty set).")] = False,
+    visibility: Annotated[
+        str | None,
+        typer.Option("--visibility", help="Visibility override: default (defer) | shown | hidden."),
+    ] = None,
     badges: Annotated[
         list[str] | None,
         typer.Option("--badge", help="A capability badge (repeatable); replaces the whole set when given."),
@@ -70,10 +74,6 @@ def set_tool_meta(
     clear_badges: Annotated[
         bool, typer.Option("--clear-badges", help="Clear all capability badges (send an empty set).")
     ] = False,
-    visibility: Annotated[
-        str | None,
-        typer.Option("--visibility", help="Visibility override: default (defer) | shown | hidden."),
-    ] = None,
 ) -> None:
     """Merge-patch a tool's overlay. Only the flags you pass are sent; omit a field
     to leave it unchanged.
