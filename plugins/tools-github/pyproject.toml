@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=2.2,<3",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the GitHub REST module wires to.
-    "tai42-kit[curl]>=3.1,<4",
+    "tai42-kit[curl]>=3.2,<4",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.11",

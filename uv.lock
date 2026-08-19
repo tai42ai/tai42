@@ -4961,7 +4961,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "2.1.1"
+version = "2.2.0"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5775,7 +5775,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "3.1.1"
+version = "3.2.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
