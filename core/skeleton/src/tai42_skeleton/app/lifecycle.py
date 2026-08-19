@@ -1079,8 +1079,16 @@ class TaiMCPLifecycleMixin(ABC):
         # ``_import_additive_plugin``). Reserved-prefix violations fail the build here.
         self._mount_map = self._build_mount_map()
 
+        # The pass's run-once ledger: a package walk under one role can sweep in a
+        # module that is ALSO its own manifest entry under another role (a root package
+        # listed under a non-route role whose route submodules are their own router
+        # entries). The ledger records every module body a role loop runs so a later
+        # loop does not run it again — exactly one execution per module per pass. Local,
+        # so a fresh epoch build starts with an empty ledger (never leaks across reloads).
+        executed_modules: set[str] = set()
+
         for module in self._manifest.lifecycle_modules or []:
-            self._import_additive_plugin(module, "lifecycle", dist_map)
+            self._import_additive_plugin(module, "lifecycle", dist_map, executed_modules)
 
         # Identity/accounts providers register only on lifecycle-module import, so
         # their registries are settled here — abort now if a configured provider
@@ -1091,14 +1099,14 @@ class TaiMCPLifecycleMixin(ABC):
         # ``tai42_app.webhook_verifiers.register(...)`` side-effect — the registry
         # was reset at the top of start(), so every (re)load re-registers cleanly.
         for module in self._manifest.webhook_verifier_modules or []:
-            self._import_additive_plugin(module, "webhook_verifier", dist_map)
+            self._import_additive_plugin(module, "webhook_verifier", dist_map, executed_modules)
 
         # Import-only channel plugins: each import runs the module's
         # ``tai42_app.channels.register(...)`` side-effect and binds the plugin's
         # inbound HTTP route. Imported like the verifier modules — the registry
         # was reset at the top of start(), so every (re)load re-registers cleanly.
         for module in self._manifest.channel_modules or []:
-            self._import_additive_plugin(module, "channel", dist_map)
+            self._import_additive_plugin(module, "channel", dist_map, executed_modules)
 
         # Import the composed effective router set (defaults + extras + a single
         # last catch-all, per default_routers). Each import runs the module's
@@ -1107,21 +1115,21 @@ class TaiMCPLifecycleMixin(ABC):
         # swap installs it, so a router first imported on a live reload serves the
         # instant the swap completes — no restart.
         for module in self._effective_router_modules():
-            self._import_additive_plugin(module, "router", dist_map)
+            self._import_additive_plugin(module, "router", dist_map, executed_modules)
 
         for module in self._manifest.middlewares_modules or []:
-            self._import_additive_plugin(module, "middleware", dist_map)
+            self._import_additive_plugin(module, "middleware", dist_map, executed_modules)
 
         # The scalar slots ABORT boot on incompat/import failure instead of
         # quarantining: the server cannot run without its backend/storage/
         # monitoring, so a skipped slot would be a silently crippled server.
-        self._import_core_plugin(self._manifest.backend_module, "backend_module", dist_map)
-        self._import_core_plugin(self._manifest.storage_module, "storage_module", dist_map)
-        self._import_core_plugin(self._manifest.monitoring_module, "monitoring_module", dist_map)
+        self._import_core_plugin(self._manifest.backend_module, "backend_module", dist_map, executed_modules)
+        self._import_core_plugin(self._manifest.storage_module, "storage_module", dist_map, executed_modules)
+        self._import_core_plugin(self._manifest.monitoring_module, "monitoring_module", dist_map, executed_modules)
 
         quarantined_extension_modules: set[str] = set()
         for extension in self._manifest.extensions_modules or []:
-            if not self._import_additive_plugin(extension, "extensions", dist_map):
+            if not self._import_additive_plugin(extension, "extensions", dist_map, executed_modules):
                 quarantined_extension_modules.add(extension)
         try:
             self._extension_registry.validation()
@@ -1143,14 +1151,14 @@ class TaiMCPLifecycleMixin(ABC):
 
         quarantined_tool_modules: set[str] = set()
         for cfg in self._manifest.tools:
-            if not self._import_additive_plugin(cfg.module, "tools", dist_map):
+            if not self._import_additive_plugin(cfg.module, "tools", dist_map, executed_modules):
                 quarantined_tool_modules.add(cfg.module)
 
         # Importing an agents-module fires its @tai42_app.agents.agent decorator, which
         # registers the agent + auto-generates its run tool. Done after tools so
         # an agent tool can reference a base tool already loaded above.
         for cfg in self._manifest.agents:
-            self._import_additive_plugin(cfg.module, "agents", dist_map)
+            self._import_additive_plugin(cfg.module, "agents", dist_map, executed_modules)
 
         if self._manifest.mcp:
             successes, failures = self._run_blocking(self._load_mcps)
@@ -1183,7 +1191,9 @@ class TaiMCPLifecycleMixin(ABC):
             ignore |= self._manifest.include_module_tools_map.get(module, frozenset())
         self._tool_registry.validation(ignore=frozenset(ignore))
 
-    def _import_additive_plugin(self, module: str, kind: str, dist_map: dict[str, list[str]]) -> bool:
+    def _import_additive_plugin(
+        self, module: str, kind: str, dist_map: dict[str, list[str]], executed_modules: set[str]
+    ) -> bool:
         """Import one ADDITIVE manifest module under the plugin-compat gate.
 
         An incompatible module is never imported (importing it is exactly what
@@ -1196,11 +1206,20 @@ class TaiMCPLifecycleMixin(ABC):
         (no dist mapping / no declared range) proceeds with a logged note,
         never a silent pass. Imports are function-local to keep the app import
         chain free of the marketplace package.
+
+        ``executed_modules`` is the pass's ledger of already-run module bodies: a
+        module a prior role loop's package walk already executed under its own
+        binding (the accounts-postgres shape — a root package under a non-route role
+        whose route submodules are also their own router entries) is not re-imported
+        here, so each module body runs EXACTLY once per pass. On success the modules
+        this import ran are added to the ledger.
         """
         from tai42_skeleton.app.http import plugin_owner
         from tai42_skeleton.marketplace.compat import module_compat
         from tai42_skeleton.plugins.quarantine import quarantine_plugin
 
+        if module in executed_modules:
+            return True
         verdict = module_compat(module, dist_map)
         if verdict.status == "incompatible":
             quarantine_plugin(module, f"{kind} module not loaded: {verdict.reason}")
@@ -1210,8 +1229,11 @@ class TaiMCPLifecycleMixin(ABC):
         binding = self._mount_map.get(module)
         # Savepoint the FastMCP route table before a BOUND module imports, so a failure
         # can roll back exactly the routes it committed. A bindingless (core/operator)
-        # module records no owner-isolable rows, so it takes no savepoint/rollback.
+        # module records no owner-isolable rows, so it takes no savepoint/rollback — but a
+        # route submodule this walk sweeps in under ITS OWN binding is guarded per-module
+        # by the importer through the savepoint/rollback handles passed below.
         savepoint = self._http_surface.route_table_savepoint() if binding is not None else None
+        reloaded: list[str] = []
         try:
             # A mount-bound module resolves its declared routes through the binding
             # carried on the contextvar for the span of its import; the bind also
@@ -1229,7 +1251,13 @@ class TaiMCPLifecycleMixin(ABC):
             # route-sibling that only the extras pop.
             extra = route_registry.owner_route_modules(plugin_owner(binding)) - {module} if binding is not None else ()
             with bind_module(binding):
-                import_or_reload_package(module, extra)
+                reloaded = import_or_reload_package(
+                    module,
+                    extra,
+                    mount_map=self._mount_map,
+                    route_savepoint=self._http_surface.route_table_savepoint,
+                    route_rollback=self._http_surface.rollback_module_routes,
+                )
         except Exception as exc:
             if binding is not None and savepoint is not None:
                 # Roll back so a quarantined declared-route module serves NOTHING: the
@@ -1240,16 +1268,25 @@ class TaiMCPLifecycleMixin(ABC):
             logger.exception("%s module %s failed to import; quarantining it", kind, module)
             quarantine_plugin(module, f"{kind} module failed to import: {exc}")
             return False
+        executed_modules.update(reloaded)
         return True
 
-    def _import_core_plugin(self, module: str | None, slot: str, dist_map: dict[str, list[str]]) -> None:
+    def _import_core_plugin(
+        self, module: str | None, slot: str, dist_map: dict[str, list[str]], executed_modules: set[str]
+    ) -> None:
         """Import one SCALAR-slot module (backend/storage/monitoring), aborting
         boot with the typed :class:`CorePluginBootError` on incompat or ANY
         import failure — the server cannot run without its scalar slots, so a
         quarantine-and-continue would be a silently crippled server. ``None``
         (slot unset) is a no-op. The error names the plugin, the versions in
-        play (via the compat reason), and the remedy."""
+        play (via the compat reason), and the remedy.
+
+        ``executed_modules`` is the pass's run-once ledger: a slot module a prior
+        role loop's walk already executed is not re-imported, and the modules this
+        import runs join the ledger."""
         if not module:
+            return
+        if module in executed_modules:
             return
         from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
 
@@ -1261,12 +1298,18 @@ class TaiMCPLifecycleMixin(ABC):
         if verdict.status == "unknown":
             logger.info("plugin compat unknown for %s %s: %s", slot, module, verdict.reason)
         try:
-            import_or_reload_package(module)
+            reloaded = import_or_reload_package(
+                module,
+                mount_map=self._mount_map,
+                route_savepoint=self._http_surface.route_table_savepoint,
+                route_rollback=self._http_surface.rollback_module_routes,
+            )
         except Exception as exc:
             raise CorePluginBootError(
                 f"{slot} plugin {module!r} failed to import: {exc}; the server cannot run without its {slot} — "
                 "fix or update the plugin, or point the manifest at a working one"
             ) from exc
+        executed_modules.update(reloaded)
 
     def _abort_if_auth_provider_quarantined(self) -> None:
         """Abort boot when a configured auth provider quarantined — the auth-slot

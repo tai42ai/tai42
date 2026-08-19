@@ -38,7 +38,9 @@ import logging
 import os
 import pkgutil
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
+
+from tai42_skeleton.app.mount_map import MountBinding, bind_module, current_mount_binding
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +76,50 @@ def _stable_cycle_fallback(nodes: set[str]) -> list[str]:
     return sorted(nodes, key=lambda n: (n.count("."), n))
 
 
-def import_or_reload_package(root_pkg_name: str | None, extra_modules: Iterable[str] = ()) -> list[str]:
+def _import_module_under_binding(
+    name: str,
+    mount_map: Mapping[str, MountBinding],
+    route_savepoint: Callable[[], int] | None,
+    route_rollback: Callable[[MountBinding, int], None] | None,
+) -> None:
+    """Execute module ``name`` under ITS OWN mount binding when the map declares one
+    and it is not already the active binding, else under whatever context the walk
+    already carries. A route submodule reached through a foreign role's package walk
+    thus resolves ``mount_base()`` and registers its declared rows against ITS item's
+    binding; a sibling with no binding keeps the leaf's, and a module whose own binding
+    is already active is not re-bound (its rows must land in the live context so its
+    completeness check still sees them).
+
+    A submodule the walk newly binds is savepoint-guarded when ``route_savepoint``/
+    ``route_rollback`` are supplied: a mid-import ``custom_route`` fault or a bind-time
+    completeness fault rolls the submodule's committed rows back before the fault
+    propagates, so a failed foreign-walk import leaves no half-registered state — the
+    same guarantee the own-role import gives itself."""
+    binding = mount_map.get(name)
+    if binding is not None and binding != current_mount_binding():
+        savepoint = route_savepoint() if route_savepoint is not None else None
+        try:
+            with bind_module(binding):
+                importlib.import_module(name)
+        except BaseException:
+            if route_rollback is not None and savepoint is not None:
+                route_rollback(binding, savepoint)
+            raise
+    else:
+        importlib.import_module(name)
+
+
+def import_or_reload_package(
+    root_pkg_name: str | None,
+    extra_modules: Iterable[str] = (),
+    *,
+    mount_map: Mapping[str, MountBinding] | None = None,
+    route_savepoint: Callable[[], int] | None = None,
+    route_rollback: Callable[[MountBinding, int], None] | None = None,
+) -> list[str]:
     if not root_pkg_name:
         return []
+    module_bindings: Mapping[str, MountBinding] = mount_map or {}
 
     importlib.invalidate_caches()
 
@@ -120,7 +163,7 @@ def import_or_reload_package(root_pkg_name: str | None, extra_modules: Iterable[
     reloaded = []
     for name in order:
         try:
-            importlib.import_module(name)
+            _import_module_under_binding(name, module_bindings, route_savepoint, route_rollback)
             reloaded.append(name)
         except ImportError as e:
             # A manifest-named module that fails to import is corrupt
