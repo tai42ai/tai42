@@ -20,7 +20,8 @@ from tai42_skeleton.operations import BadRequestError, OperationRegistry, operat
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 from tai42_skeleton.operations.projection import project_operations
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _Admin:

@@ -6,11 +6,12 @@ the top-level ``tests/conftest.py``."""
 from __future__ import annotations
 
 import pytest
-from _support import CASE_CLASSES, ChannelCase
 
 from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
+
+from ._support import CASE_CLASSES, ChannelCase
 
 # The stub-delivery-asserting channel specs read outbound sends off the in-process
 # FakeSlack/FakeTelegram/FakeTwilio (``case.sends_matching``). Under ``TAI_E2E_REAL=<channel>``

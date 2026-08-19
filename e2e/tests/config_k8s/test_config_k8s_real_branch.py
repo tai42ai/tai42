@@ -10,10 +10,10 @@ real leg is READY, not run.
 
 from __future__ import annotations
 
-from _config_k8s_support import real_k8s_config  # pyright: ignore[reportMissingImports]
-
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import StackConfig, Topology
+
+from ._config_k8s_support import real_k8s_config  # pyright: ignore[reportMissingImports]
 
 
 def _k8s_cfg() -> StackConfig:

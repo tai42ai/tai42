@@ -57,7 +57,8 @@ from tai42_skeleton.config.boundary import (
 )
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 from tai42_skeleton.config.service import ConfigService
-from tests.config.test_service import FakeConfigStore, FakeReloadAdmin, RecordingBus
+
+from .test_service import FakeConfigStore, FakeReloadAdmin, RecordingBus
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

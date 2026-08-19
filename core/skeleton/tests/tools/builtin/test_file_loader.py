@@ -72,7 +72,8 @@ async def test_file_loader_rejects_traversal_id(bind_app) -> None:
     from tai42_skeleton.storage import StorageRegistry
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
-    from tests.template.test_resource_manager import _InMemoryStorage
+
+    from ...template.test_resource_manager import _InMemoryStorage
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)

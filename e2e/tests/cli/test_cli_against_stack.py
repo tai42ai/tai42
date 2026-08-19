@@ -16,9 +16,9 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from _cli_support import cli_json, run_cli  # pyright: ignore[reportMissingImports]
-
 from tai42_e2e.stack import TaiStack
+
+from ._cli_support import cli_json, run_cli  # pyright: ignore[reportMissingImports]
 
 
 def test_reads_across_groups(cli_stack: TaiStack, tmp_path: Path) -> None:

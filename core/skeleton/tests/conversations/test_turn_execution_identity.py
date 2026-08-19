@@ -38,8 +38,8 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
+from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")

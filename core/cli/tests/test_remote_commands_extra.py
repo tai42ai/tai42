@@ -14,7 +14,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import Handler, data_response, run_cli, visible
+from .remote_harness import Handler, data_response, run_cli, visible
 
 # -- keys --------------------------------------------------------------------
 

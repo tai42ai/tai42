@@ -42,7 +42,8 @@ from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.adapters.mcp_tool_to_func import _detect_transport
-from tests.app._fixtures.reload import reload_with
+
+from ._fixtures.reload import reload_with
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP

@@ -22,10 +22,10 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from _bridge_support import BridgeHarness, wait_probe_record
-
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import SESSION_COOKIE, WebChatClient, get_chat_page
+
+from ._bridge_support import BridgeHarness, wait_probe_record
 
 # An https callback with no server behind it — the api-door tool legs map their reply to null
 # and wait inline, so the callback is suppressed and never dialled; it names no reachable host.

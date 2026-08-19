@@ -13,17 +13,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from _market_support import (
-    cli_env,
-    distribution_absent,
-    installed_refs,
-    ok_json,
-    run_cli,
-    skip_unless_registry_supports_declared_routes,
-    tai_bin,
-    wait_tool_absent,
-    wait_tool_live,
-)
 
 from tai42_e2e.marketplace import (
     ALPHA_PACKAGE,
@@ -41,6 +30,18 @@ from tai42_e2e.marketplace import (
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+from ._market_support import (
+    cli_env,
+    distribution_absent,
+    installed_refs,
+    ok_json,
+    run_cli,
+    skip_unless_registry_supports_declared_routes,
+    tai_bin,
+    wait_tool_absent,
+    wait_tool_live,
+)
 
 pytestmark = pytest.mark.backendless
 

@@ -27,13 +27,6 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 import yaml
-from _market_support import (
-    api_tool_names,
-    compat_block,
-    installed_payload,
-    outcomes_by_ref,
-    quarantined_by_name,
-)
 from psycopg.types.json import Json
 
 from tai42_e2e import diagnostics
@@ -49,6 +42,14 @@ from tai42_e2e.marketplace import (
 )
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 from tai42_e2e.stack import Infra, StackResources, TaiStack
+
+from ._market_support import (
+    api_tool_names,
+    compat_block,
+    installed_payload,
+    outcomes_by_ref,
+    quarantined_by_name,
+)
 
 pytestmark = pytest.mark.backendless
 

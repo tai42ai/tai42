@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _rbac_support import create_role
-
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+from ._rbac_support import create_role
 
 
 async def _role_grants(admin: ApiClient, name: str) -> dict[str, str]:

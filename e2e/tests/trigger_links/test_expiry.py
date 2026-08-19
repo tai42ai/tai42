@@ -10,10 +10,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from _trigger_support import MISS_MESSAGE, mint_link, no_auth, register_record_hook, wait_records
-
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+from ._trigger_support import MISS_MESSAGE, mint_link, no_auth, register_record_hook, wait_records
 
 
 async def test_timed_link_expires_and_frees_its_name(

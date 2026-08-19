@@ -25,7 +25,7 @@ import asyncio
 import json
 import time
 
-from tests.conftest import FakePubSubRedis
+from .conftest import FakePubSubRedis
 
 _BUS_CHANNEL = "tai:bus"
 

@@ -12,10 +12,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from _trigger_support import MISS_MESSAGE, mint_link, no_auth, record_values, register_record_hook, wait_records
-
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
+
+from ._trigger_support import MISS_MESSAGE, mint_link, no_auth, record_values, register_record_hook, wait_records
 
 
 async def test_fire_is_multi_use_across_replicas_and_hides_its_topic(

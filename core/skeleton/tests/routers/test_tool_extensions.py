@@ -27,7 +27,8 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 from tai42_skeleton.routers import tool_extensions as router
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 _EXT_MODULE = "tests.app._fixtures.ext_kinds"
 _TOOLS_B = "tests.app._fixtures.tools_b"

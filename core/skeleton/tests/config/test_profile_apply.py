@@ -33,8 +33,9 @@ from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, FreshLife, RecycleRe
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
-from tests._fakes.bus import FakeBus
-from tests.config.test_service import FakeConfigStore, FakeReloadAdmin
+
+from .._fakes.bus import FakeBus
+from .test_service import FakeConfigStore, FakeReloadAdmin
 
 # ---------------------------------------------------------------------------
 # Helpers

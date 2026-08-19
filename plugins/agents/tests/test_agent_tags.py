@@ -13,7 +13,8 @@ from tai42_agents.deep_agent import agent as _deep_agent  # noqa: F401
 from tai42_agents.refine_agent import agent as _refine_agent  # noqa: F401
 from tai42_agents.retrieval_tools_agent import agent as _retrieval_agent  # noqa: F401
 from tai42_agents.voting_agent import agent as _voting_agent  # noqa: F401
-from tests.conftest import APP
+
+from .conftest import APP
 
 _AGENT_NAMES = [
     "deep_agent",

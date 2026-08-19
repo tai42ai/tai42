@@ -16,7 +16,6 @@ import importlib.metadata
 from pathlib import Path
 
 import pytest
-from _market_support import resolve_path
 
 from tai42_e2e.marketplace import (
     ZETA_COMPAT_VERSION,
@@ -29,6 +28,8 @@ from tai42_e2e.marketplace import (
     forge_zeta_wheel,
 )
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
+
+from ._market_support import resolve_path
 
 # The marketplace registry specs boot no skeleton stack and no backend worker;
 # skip on non-default backend legs.

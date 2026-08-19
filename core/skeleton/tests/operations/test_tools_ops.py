@@ -36,7 +36,8 @@ from tai42_skeleton.operations import tools as tools_ops
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools.binding import UnknownToolError
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _Tools:

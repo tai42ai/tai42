@@ -17,7 +17,8 @@ import tai42_skeleton.template.path_guard as path_guard
 from tai42_skeleton.app import instance
 from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 def _req(body=None) -> Request:

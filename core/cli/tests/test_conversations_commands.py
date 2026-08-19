@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import data_response, error_response, run_cli, visible
+from .remote_harness import data_response, error_response, run_cli, visible
 
 
 def test_create_carries_the_initial_mode(monkeypatch: pytest.MonkeyPatch) -> None:

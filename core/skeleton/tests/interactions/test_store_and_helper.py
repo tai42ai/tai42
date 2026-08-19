@@ -21,7 +21,8 @@ from tai42_contract.secrets import SecretValue
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.origin import reset_interaction_origin, set_interaction_origin
-from tests._helpers import await_add_event
+
+from .._helpers import await_add_event
 
 
 @pytest.fixture(autouse=True)

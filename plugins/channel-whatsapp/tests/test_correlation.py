@@ -22,7 +22,8 @@ from tai42_channel_whatsapp.correlation import (
     reserve_pending,
     restore_pending,
 )
-from tests.conftest import FakeRedis
+
+from .conftest import FakeRedis
 
 pytestmark = pytest.mark.usefixtures("whatsapp_env")
 

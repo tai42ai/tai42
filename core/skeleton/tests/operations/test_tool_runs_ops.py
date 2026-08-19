@@ -31,7 +31,8 @@ from tai42_skeleton.operations.decorator import operation_metadata_of
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.operations.tool_runs import ToolRunStore
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-from tests._fakes.tool_runs_redis import FakeRedis
+
+from .._fakes.tool_runs_redis import FakeRedis
 
 
 @pytest.fixture(autouse=True)

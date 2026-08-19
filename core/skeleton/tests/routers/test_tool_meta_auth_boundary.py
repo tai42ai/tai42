@@ -11,7 +11,8 @@ from __future__ import annotations
 from starlette.routing import Route
 
 import tai42_skeleton.routers.tool_meta as router
-from tests.routers._auth_boundary import AUTHED, boundary_client
+
+from ._auth_boundary import AUTHED, boundary_client
 
 _ROUTES = [
     Route("/api/tool-meta", router.list_tool_meta, methods=["GET"]),

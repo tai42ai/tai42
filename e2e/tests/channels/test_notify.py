@@ -13,7 +13,12 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
-from _support import (
+
+from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
+from tai42_e2e.stack import TaiStack
+from tai42_e2e.waiting import wait_for_async
+
+from ._support import (
     ChannelCase,
     await_true,
     cancel_and_join,
@@ -22,10 +27,6 @@ from _support import (
     post_inbound,
     tool_content_text,
 )
-
-from tai42_e2e.netfixtures import FakeSlack, FakeTelegram, FakeTwilio
-from tai42_e2e.stack import TaiStack
-from tai42_e2e.waiting import wait_for_async
 
 pytestmark = pytest.mark.backendless
 

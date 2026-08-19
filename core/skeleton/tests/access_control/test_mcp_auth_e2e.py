@@ -26,7 +26,8 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tests.access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
+
+from .conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
 
 # The enforcer's alru cache is created in the test's loop and first used in the
 # TestClient's separate portal loop — a benign loop-change reset that is a test

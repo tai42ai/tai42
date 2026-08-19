@@ -21,7 +21,8 @@ from tai42_kit.settings import reset_all_settings
 from tai42_channel_whatsapp import WhatsAppChannel
 from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.settings import whatsapp_settings
-from tests.conftest import FakeRedis, make_delivery
+
+from .conftest import FakeRedis, make_delivery
 
 _ENV_KEYS = (
     "CHANNEL_WHATSAPP_ACCESS_TOKEN",

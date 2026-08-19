@@ -24,7 +24,11 @@ import json
 from collections.abc import Callable
 
 import pytest
-from _support import (
+
+from tai42_e2e.stack import TaiStack
+from tai42_e2e.webchat import SESSION_COOKIE, mint_unregistered_token
+
+from ._support import (
     WebChannelCase,
     await_true,
     cancel_and_join,
@@ -33,9 +37,6 @@ from _support import (
     is_pending,
     post_callback,
 )
-
-from tai42_e2e.stack import TaiStack
-from tai42_e2e.webchat import SESSION_COOKIE, mint_unregistered_token
 
 pytestmark = pytest.mark.backendless
 

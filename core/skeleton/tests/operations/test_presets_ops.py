@@ -33,7 +33,8 @@ from tai42_skeleton.operations.projection import project_operations
 # Importing the router registers the routes, which forces ``destructive`` on the
 # DELETE op (the adapter's DELETE rule) so the projection oracle sees it.
 from tai42_skeleton.routers import presets as _presets_router  # noqa: F401
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],

@@ -24,8 +24,8 @@ from tai42_skeleton.marketplace.errors import (
     RouteMountError,
 )
 from tai42_skeleton.marketplace.routes import OwnedRoute
-from tests.marketplace._specs import make_resolved, make_spec, router_item
 
+from ._specs import make_resolved, make_spec, router_item
 from .test_installer import Harness, installer_module
 
 

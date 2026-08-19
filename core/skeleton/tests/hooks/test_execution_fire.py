@@ -25,9 +25,10 @@ from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.operations.errors import PermissionDenied
-from tests.access_control.conftest import FakeAccessControlPg, make_pg_ctx
-from tests.access_control.conftest import FakeRedis as AcFakeRedis
-from tests.access_control.conftest import make_client_ctx as make_ac_client_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
+from ..access_control.conftest import FakeRedis as AcFakeRedis
+from ..access_control.conftest import make_client_ctx as make_ac_client_ctx
 
 
 def _manager() -> InMemoryHooksManager:

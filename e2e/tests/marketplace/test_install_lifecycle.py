@@ -12,16 +12,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from _market_support import (
+
+from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, MarketplaceService
+from tai42_e2e.stack import TaiStack
+
+from ._market_support import (
     api_tool_names,
     distribution_absent,
     installed_refs,
     uninstall_and_assert_clean,
     wait_tool_live,
 )
-
-from tai42_e2e.marketplace import ALPHA_PACKAGE, ALPHA_REF, MarketplaceService
-from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.backendless
 

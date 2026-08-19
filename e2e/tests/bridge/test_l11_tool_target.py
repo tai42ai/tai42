@@ -17,14 +17,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
-    TWILIO_INBOUND_PATH,
-    BridgeHarness,
-    post_inbound,
-    wait_probe_record,
-    wait_record_status,
-    wait_twilio_send,
-)
 
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
@@ -33,6 +25,15 @@ from tai42_e2e.manifests import (
     BRIDGE_TWILIO_FROM_B,
 )
 from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
+    TWILIO_INBOUND_PATH,
+    BridgeHarness,
+    post_inbound,
+    wait_probe_record,
+    wait_record_status,
+    wait_twilio_send,
+)
 
 # An https callback URL with no server behind it — the delivery POST connection-refuses, so
 # an api-door async record exhausts its (shortened) attempts and lands terminal ``failed``.

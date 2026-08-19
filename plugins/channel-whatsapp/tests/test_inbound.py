@@ -24,7 +24,8 @@ from tai42_channel_whatsapp.inbound import (
     _MAX_FORM_REJECTIONS,
     AnswerForwardError,
 )
-from tests.conftest import (
+
+from .conftest import (
     PHONE_NUMBER_ID,
     WA_ID,
     FakeHttpx,

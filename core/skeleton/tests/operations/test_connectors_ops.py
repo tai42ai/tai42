@@ -29,7 +29,8 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations import connectors as conn_ops
 from tai42_skeleton.operations.projection import project_operations
-from tests.connectors.conftest import (
+
+from ..connectors.conftest import (
     CID,
     CID2,
     make_noauth_record,

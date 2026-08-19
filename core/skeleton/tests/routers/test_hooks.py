@@ -24,9 +24,10 @@ from tai42_skeleton.hooks.trigger_links import ResolvedTrigger
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import hooks as hooks_ops
 from tai42_skeleton.routers import hooks
-from tests.access_control.conftest import FakeAccessControlPg, make_pg_ctx
-from tests.access_control.conftest import FakeRedis as AcFakeRedis
-from tests.access_control.conftest import make_client_ctx as make_ac_client_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
+from ..access_control.conftest import FakeRedis as AcFakeRedis
+from ..access_control.conftest import make_client_ctx as make_ac_client_ctx
 
 
 @pytest.fixture(autouse=True)

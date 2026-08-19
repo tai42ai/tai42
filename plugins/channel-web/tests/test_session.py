@@ -19,7 +19,8 @@ from tai42_channel_web.session import (
     set_session_cookie,
 )
 from tai42_channel_web.settings import WebSettings
-from tests.conftest import ORIGIN, PLAIN_COOKIE, SECURE_COOKIE, SESSION_TOKEN, build_request
+
+from .conftest import ORIGIN, PLAIN_COOKIE, SECURE_COOKIE, SESSION_TOKEN, build_request
 
 
 def test_minted_tokens_are_unguessable_and_unique():

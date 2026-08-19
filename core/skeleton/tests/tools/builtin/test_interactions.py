@@ -23,7 +23,8 @@ from tai42_skeleton.access_control.user import CrossIdentityAudienceError
 from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.tools.builtin import interactions as builtin_interactions
-from tests._helpers import await_add_event
+
+from ..._helpers import await_add_event
 
 
 @pytest.fixture(autouse=True)

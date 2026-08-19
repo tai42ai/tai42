@@ -23,7 +23,11 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from _fleet import (
+
+from tai42_e2e.netfixtures import OAuthIdp
+from tai42_e2e.stack import TaiStack
+
+from ._fleet import (
     assert_fleet_fanout,
     build_fleet_connectors_stack,
     connectors_resource_kwargs,
@@ -31,9 +35,6 @@ from _fleet import (
     converged_digest,
     wait_present,
 )
-
-from tai42_e2e.netfixtures import OAuthIdp
-from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.backendless
 

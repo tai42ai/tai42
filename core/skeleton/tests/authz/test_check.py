@@ -30,7 +30,8 @@ from tai42_skeleton.authz import check, synthesize_path
 from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL, CallerIdentity, resolve_caller_identity
 from tai42_skeleton.operations import OperationRegistry, operation
 from tai42_skeleton.operations.errors import PermissionDenied
-from tests.authz.conftest import FENCED_TEMPLATE_ROUTE, PROBE_ROUTES, SHADOW_ROUTE
+
+from .conftest import FENCED_TEMPLATE_ROUTE, PROBE_ROUTES, SHADOW_ROUTE
 
 # alru caches are held across the several ``asyncio.run`` loops a test opens — a benign
 # loop-reset artifact, since a real process serves one loop for its lifetime.

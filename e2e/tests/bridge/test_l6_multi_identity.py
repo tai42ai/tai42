@@ -9,13 +9,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
-    TWILIO_INBOUND_PATH,
-    BridgeHarness,
-    post_inbound,
-    script_reply,
-    wait_twilio_send,
-)
 
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
@@ -24,6 +17,14 @@ from tai42_e2e.manifests import (
     BRIDGE_TWILIO_FROM_B,
 )
 from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
+    TWILIO_INBOUND_PATH,
+    BridgeHarness,
+    post_inbound,
+    script_reply,
+    wait_twilio_send,
+)
 
 # The scripted-LLM + FakeTwilio round-trips are the mock leg for BOTH the 'twilio' channel seam
 # and the 'llm' seam (build_bridge_stack wires the LLM env too, so TAI_E2E_REAL=llm also sends

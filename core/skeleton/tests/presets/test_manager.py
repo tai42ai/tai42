@@ -25,7 +25,8 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.binding import UnknownToolError
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],

@@ -23,10 +23,11 @@ from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksM
 from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.hooks.trigger_links import TriggerLinkError, create_trigger_link, resolve_trigger_token
-from tests.access_control.conftest import FakeAccessControlPg, make_pg_ctx
-from tests.access_control.conftest import FakeRedis as FakeAccessControlRedis
-from tests.access_control.conftest import make_client_ctx as make_access_control_client_ctx
-from tests.hooks.conftest import FakeRedis, make_client_ctx
+
+from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
+from ..access_control.conftest import FakeRedis as FakeAccessControlRedis
+from ..access_control.conftest import make_client_ctx as make_access_control_client_ctx
+from ..hooks.conftest import FakeRedis, make_client_ctx
 
 
 @pytest.fixture(autouse=True)

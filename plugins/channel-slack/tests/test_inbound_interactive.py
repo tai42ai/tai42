@@ -21,7 +21,8 @@ from tai42_channel_slack.forms import (
     build_modal_view,
 )
 from tai42_channel_slack.inbound import slack_interactive
-from tests.conftest import (
+
+from .conftest import (
     TEST_BOT_TOKEN,
     TEST_SIGNING_SECRET,
     body_json,

@@ -23,7 +23,8 @@ from tai42_channel_whatsapp.client import (
 )
 from tai42_channel_whatsapp.correlation import PendingQuestionExistsError
 from tai42_channel_whatsapp.flows import build_flow
-from tests.conftest import ALLOWED_A, ALLOWED_B, PHONE_NUMBER_ID, FakeHttpx, FakeRedis, make_delivery, response
+
+from .conftest import ALLOWED_A, ALLOWED_B, PHONE_NUMBER_ID, FakeHttpx, FakeRedis, make_delivery, response
 
 pytestmark = pytest.mark.usefixtures("whatsapp_env")
 

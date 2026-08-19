@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from _owned_support import mint_owner
-
 from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
+
+from ._owned_support import mint_owner
 
 
 async def _register_scope(root: ApiClient, scope_id: str) -> None:

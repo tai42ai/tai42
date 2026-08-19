@@ -11,7 +11,8 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
-from _support import ChannelCase, await_true, cancel_and_join, find_add, is_pending, post_inbound, tool_content_text
+
+from ._support import ChannelCase, await_true, cancel_and_join, find_add, is_pending, post_inbound, tool_content_text
 
 pytestmark = pytest.mark.backendless
 

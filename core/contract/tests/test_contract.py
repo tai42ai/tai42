@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Any
 
 import pydantic
 import pytest
-from _helpers import protocol_members  # stdlib-only helper, no application package
 
 import tai42_contract
+
+from ._helpers import protocol_members  # stdlib-only helper, no application package
 
 # The frozen facade surface: the 63 (sub-protocol, member) pairs over 60
 # distinct flat names, grouped into the 20 sub-protocols. This is the

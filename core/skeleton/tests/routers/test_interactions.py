@@ -40,7 +40,8 @@ from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.routers import interactions as router
-from tests._helpers import await_add_event
+
+from .._helpers import await_add_event
 
 
 @pytest.fixture(autouse=True)

@@ -11,7 +11,16 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import (
+    BRIDGE_TWILIO_CLIENT,
+    BRIDGE_TWILIO_FROM,
+    BRIDGE_WHATSAPP_CLIENT,
+    BRIDGE_WHATSAPP_PHONE_ID,
+)
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     TWILIO_INBOUND_PATH,
     TWILIO_STATUS_PATH,
     WHATSAPP_INBOUND_PATH,
@@ -22,14 +31,6 @@ from _bridge_support import (
     wait_twilio_send,
     wait_whatsapp_send,
 )
-
-from tai42_e2e.manifests import (
-    BRIDGE_TWILIO_CLIENT,
-    BRIDGE_TWILIO_FROM,
-    BRIDGE_WHATSAPP_CLIENT,
-    BRIDGE_WHATSAPP_PHONE_ID,
-)
-from tai42_e2e.settings import HarnessSettings
 
 # One test drives the scripted-LLM + FakeTwilio flow, the other the scripted-LLM + FakeWhatsApp
 # flow, so this module is the mock leg for the 'twilio', 'whatsapp' AND 'llm' seams

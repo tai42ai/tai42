@@ -13,7 +13,8 @@ from tai42_contract.app import tai42_app
 
 import tai42_skeleton.routers.manifest as router
 from tai42_skeleton.app import instance
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 def _req(body=None, **path_params) -> Request:

@@ -38,7 +38,8 @@ from tai42_skeleton.routers import tools as tools_router
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
-from tests._fakes.tool_runs_redis import FakeRedis
+
+from .._fakes.tool_runs_redis import FakeRedis
 
 
 @pytest.fixture(autouse=True)

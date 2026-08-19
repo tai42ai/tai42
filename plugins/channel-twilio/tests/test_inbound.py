@@ -13,7 +13,8 @@ from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 import tai42_channel_twilio.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_twilio.correlation import reserve_pending
 from tai42_channel_twilio.inbound import AnswerForwardError
-from tests.conftest import (
+
+from .conftest import (
     FakeHttpx,
     FakeRedis,
     build_request,

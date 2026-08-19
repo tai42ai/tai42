@@ -21,7 +21,12 @@ import re
 from collections.abc import Awaitable, Callable
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
+from tai42_e2e.settings import HarnessSettings
+from tai42_e2e.webchat import WebChatClient
+
+from ._bridge_support import (
     INVALID_CODE_TEXT,
     LINK_REPLY_PREFIX,
     LINKED_TEXT,
@@ -32,10 +37,6 @@ from _bridge_support import (
     post_inbound,
     wait_send_to,
 )
-
-from tai42_e2e.manifests import BRIDGE_TWILIO_CLIENT, BRIDGE_TWILIO_FROM
-from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.webchat import WebChatClient
 
 pytestmark = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),

@@ -15,7 +15,8 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import manifest_patch
 from tai42_skeleton.marketplace.errors import ManifestBindingError, ManifestCollisionError
 from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
-from tests.marketplace._specs import make_spec
+
+from ._specs import make_spec
 
 
 def _item(kind: str, name: str, module: str) -> dict:

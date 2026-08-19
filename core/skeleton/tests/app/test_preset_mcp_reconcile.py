@@ -32,7 +32,8 @@ import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 
 class _FakeMcpTool:

@@ -20,7 +20,8 @@ from tai42_contract.presets import PresetBody
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
-from tests.versioning.conftest import FakeVersioningPg
+
+from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],

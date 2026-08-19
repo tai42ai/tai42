@@ -16,7 +16,7 @@ import json
 import httpx
 import pytest
 
-from tests.remote_harness import data_response, run_cli
+from .remote_harness import data_response, run_cli
 
 # -- hooks register ----------------------------------------------------------
 

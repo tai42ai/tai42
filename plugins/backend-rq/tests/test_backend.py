@@ -19,7 +19,8 @@ from tai42_contract.backend.runtime import ExecutionMode
 
 from tai42_backend_rq import worker as worker_module
 from tai42_backend_rq.backend import RqBackend, RqBeatRuntime, RqDashboardRuntime
-from tests.conftest import FakeRedisConn, FakeRqWorker
+
+from .conftest import FakeRedisConn, FakeRqWorker
 
 # The registration decorator's static type is a union (decorator-or-class);
 # at runtime the stub app returns the class unchanged.

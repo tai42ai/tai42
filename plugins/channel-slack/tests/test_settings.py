@@ -12,7 +12,8 @@ from tai42_channel_slack.settings import (
     slack_redis_settings,
     slack_settings,
 )
-from tests.conftest import (
+
+from .conftest import (
     TEST_ALLOWED_RECIPIENT,
     TEST_BOT_TOKEN,
     TEST_BOT_USER_ID,

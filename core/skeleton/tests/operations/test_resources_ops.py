@@ -108,7 +108,8 @@ async def test_rejects_traversal_id(monkeypatch: pytest.MonkeyPatch) -> None:
     # the op maps the guard's ``UnsafeTemplatePathError`` to the route 400.
     from tai42_skeleton.storage import StorageRegistry
     from tai42_skeleton.template import ResourceManager
-    from tests.template.test_resource_manager import _InMemoryStorage
+
+    from ..template.test_resource_manager import _InMemoryStorage
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)

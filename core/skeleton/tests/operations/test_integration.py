@@ -17,7 +17,8 @@ from tai42_skeleton.cli.openapi import build_openapi_spec
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.registry import operation_registry
 from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
-from tests.app._fixtures.reload import reload_with
+
+from ..app._fixtures.reload import reload_with
 
 
 @pytest.fixture(autouse=True)

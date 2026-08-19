@@ -13,7 +13,8 @@ import pytest
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_slack.inbound import slack_inbound
-from tests.conftest import (
+
+from .conftest import (
     TEST_ALLOWED_RECIPIENT,
     TEST_DEFAULT_RECIPIENT,
     TEST_SIGNING_SECRET,

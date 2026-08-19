@@ -15,7 +15,8 @@ from botocore.exceptions import ClientError
 from tai42_contract.storage import ObjectStat, Storage
 
 from tai42_storage_s3 import S3Storage
-from tests.conftest import FakeBody, FakePaginator, forbidden_error, not_found_error
+
+from .conftest import FakeBody, FakePaginator, forbidden_error, not_found_error
 
 
 def test_s3storage_is_registered_storage_subclass() -> None:
@@ -26,7 +27,7 @@ def test_s3storage_is_registered_storage_subclass() -> None:
 def test_import_registers_provider_as_side_effect() -> None:
     # Importing the package must register S3Storage via the decorator; the stub
     # facet records the class it was handed.
-    from tests.conftest import _stub_app
+    from .conftest import _stub_app
 
     assert _stub_app.storage.registered is S3Storage
 

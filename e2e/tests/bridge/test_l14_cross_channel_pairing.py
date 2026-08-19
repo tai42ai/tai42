@@ -19,7 +19,16 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from _bridge_support import (
+
+from tai42_e2e.manifests import (
+    BRIDGE_TWILIO_CLIENT,
+    BRIDGE_TWILIO_FROM,
+    BRIDGE_WHATSAPP_CLIENT,
+    BRIDGE_WHATSAPP_PHONE_ID,
+)
+from tai42_e2e.settings import HarnessSettings
+
+from ._bridge_support import (
     INVALID_CODE_TEXT,
     LINK_REPLY_PREFIX,
     LINKED_TEXT,
@@ -30,14 +39,6 @@ from _bridge_support import (
     post_inbound,
     wait_send_to,
 )
-
-from tai42_e2e.manifests import (
-    BRIDGE_TWILIO_CLIENT,
-    BRIDGE_TWILIO_FROM,
-    BRIDGE_WHATSAPP_CLIENT,
-    BRIDGE_WHATSAPP_PHONE_ID,
-)
-from tai42_e2e.settings import HarnessSettings
 
 # The whole leg is the mock leg for both channel seams: it drives FakeTwilio and FakeWhatsApp
 # signed inbound and reads their in-process sends. No LLM turn runs (a tool target dispatches

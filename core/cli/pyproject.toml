@@ -68,6 +68,12 @@ include = ["tai42_cli*"]
 tai42_cli = ["py.typed"]
 
 [tool.pytest.ini_options]
+# importlib import mode + package-less test dirs (no tests/__init__.py): each test
+# module loads under a unique path-derived name, so a whole-repo run collecting
+# every member's ``tests`` tree never collides on shared basenames. Intra-suite
+# helper imports are relative (``from .conftest``), resolving the same under the
+# scoped rootdir here and the repo-root rootdir of a whole-repo run.
+addopts = ["--import-mode=importlib"]
 testpaths = ["tests"]
 xfail_strict = true
 # Warnings are errors so a real defect that only surfaces as a warning fails the

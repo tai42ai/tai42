@@ -18,15 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from _market_support import (
-    cli_env,
-    installed_refs,
-    ok_json,
-    outcomes_by_ref,
-    run_cli,
-    uninstall_and_assert_clean,
-    wait_tool_live,
-)
 
 from tai42_e2e.marketplace import (
     ALPHA_PACKAGE,
@@ -40,6 +31,16 @@ from tai42_e2e.marketplace import (
 from tai42_e2e.pkgsource import BuiltWheel
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
+
+from ._market_support import (
+    cli_env,
+    installed_refs,
+    ok_json,
+    outcomes_by_ref,
+    run_cli,
+    uninstall_and_assert_clean,
+    wait_tool_live,
+)
 
 pytestmark = pytest.mark.backendless
 

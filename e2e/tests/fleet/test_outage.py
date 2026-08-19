@@ -38,7 +38,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 import yaml
-from _fleet import (
+
+from tai42_e2e import wait_for_async
+from tai42_e2e.manifests import build_bare_stack
+from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology
+from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
+from tai42_e2e.variants import bus_census
+
+from ._fleet import (
     FLEET_WORKERS,
     assert_fleet_fanout,
     build_fleet_connectors_stack,
@@ -48,12 +55,6 @@ from _fleet import (
     converged_digest,
     manifest_file,
 )
-
-from tai42_e2e import wait_for_async
-from tai42_e2e.manifests import build_bare_stack
-from tai42_e2e.stack import Infra, StackConfig, StackResources, TaiStack, Topology
-from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
-from tai42_e2e.variants import bus_census
 
 if TYPE_CHECKING:
     from tai42_e2e.netfixtures import OAuthIdp

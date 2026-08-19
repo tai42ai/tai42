@@ -24,7 +24,8 @@ from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, OperationRegistry, operation_metadata_of
 from tai42_skeleton.operations import manifest as manifest_ops
 from tai42_skeleton.operations.projection import is_tier2, project_operations
-from tests._fakes.bus import FakeBus
+
+from .._fakes.bus import FakeBus
 
 
 class _Admin:

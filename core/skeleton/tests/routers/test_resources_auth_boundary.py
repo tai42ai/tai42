@@ -13,7 +13,8 @@ from starlette.routing import Route
 
 import tai42_skeleton.routers.resources as router
 from tai42_skeleton.access_control.role_gate import DenialCause, grant_map_admits, resolve_route_meta
-from tests.routers._auth_boundary import AUTHED, boundary_client
+
+from ._auth_boundary import AUTHED, boundary_client
 
 _ROUTES = [
     Route("/api/resources/get", router.fetch_resource, methods=["GET"]),

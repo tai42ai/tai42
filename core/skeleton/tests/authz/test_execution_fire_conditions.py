@@ -30,8 +30,9 @@ from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import api_keys as api_keys_ops
 from tai42_skeleton.operations.errors import PermissionDenied
 from tai42_skeleton.template import TemplateNotFoundError
-from tests.access_control.conftest import FakeRedis, make_client_ctx
-from tests.access_control.test_policy_store import _MemStore
+
+from ..access_control.conftest import FakeRedis, make_client_ctx
+from ..access_control.test_policy_store import _MemStore
 
 # alru caches are held across the several ``asyncio.run`` loops a test opens — a benign
 # loop-reset artifact, since a real process serves one loop for its lifetime.
