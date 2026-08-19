@@ -26,6 +26,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_settings
@@ -363,6 +364,12 @@ async def build_deep_agent(
         # failure surfaces to the model as an error ToolMessage rather than
         # aborting the run; every other exception stays a loud abort. The
         # leading-user middleware keeps a thread that opens with an assistant message
-        # user-first for strict-ordering providers.
-        middleware=[SystemPurgeMiddleware(), _tool_error_middleware, LeadingUserMiddleware()],
+        # user-first for strict-ordering providers. The rolling-cache-mark middleware
+        # keeps a per-turn-marked thread to one user-side cache breakpoint at the call.
+        middleware=[
+            SystemPurgeMiddleware(),
+            _tool_error_middleware,
+            LeadingUserMiddleware(),
+            RollingCacheMarkMiddleware(),
+        ],
     )

@@ -212,6 +212,44 @@ class TestStoredSystemMessageIsPurged:
         assert [m.content for m in messages[:2]] == ["earlier turn", "earlier answer"]
 
 
+def _mark_count(messages: list[BaseMessage]) -> int:
+    """Number of messages carrying a ``cache_control`` block (a cache breakpoint)."""
+    return sum(
+        isinstance(m.content, list) and any(isinstance(b, dict) and "cache_control" in b for b in m.content)
+        for m in messages
+    )
+
+
+class TestRollingCacheMark:
+    def test_per_turn_marking_sends_one_breakpoint_on_a_reused_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Every turn marks its user message; the marks persist into the reused
+        # thread's history. Without rolling, the second turn's model call would carry
+        # two user-side breakpoints (turn-1 and turn-2) and grow unbounded. The
+        # rolling-cache-mark middleware strips every older mark at the model call, so
+        # each call sends exactly one — the newest.
+        model = RecordingChatModel([AIMessage(content="first"), AIMessage(content="second")])
+        saver = InMemorySaver()
+        _seams(monkeypatch, model, saver)
+        kwargs = {"cache_control": {"type": "ephemeral"}}
+
+        asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
+        asyncio.run(bta.ainvoke_tools_agent("sys", ["again"], [], config=_config("t-roll"), user_content_kwargs=kwargs))
+
+        # First model call: only the turn-1 user mark exists — inert, one breakpoint.
+        assert _mark_count(model._seen[0]) == 1
+        # Second model call: history holds turn-1 + turn-2 user marks; the older one is
+        # stripped, so the outgoing request carries exactly one user-side breakpoint.
+        second_call = model._seen[1]
+        assert _mark_count(second_call) == 1
+        # The surviving mark is the newest turn's user message, not the older one.
+        newest_user = [m for m in second_call if isinstance(m, HumanMessage)][-1]
+        assert newest_user.content == [{"type": "text", "text": "again", "cache_control": {"type": "ephemeral"}}]
+        # The rewrite is request-scoped: the checkpointed thread still holds both marks,
+        # so the next turn re-rolls from the same history rather than losing the record.
+        stored = asyncio.run(_state_messages("t-roll"))
+        assert _mark_count(stored) == 2
+
+
 class _Cat(BaseModel):
     meow: int
 

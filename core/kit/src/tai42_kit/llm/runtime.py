@@ -22,9 +22,9 @@ def build_agent_input(*user_messages: str, user_content_kwargs: dict[str, Any] |
     turn becomes a single structured text block carrying those keys, earlier turns
     staying plain strings — a cache breakpoint marks the end of the stable prefix,
     so it belongs on the final block; with no messages to carry them it raises.
-    On a checkpointed thread each marked turn persists into history, so marks
-    accumulate across turns and the provider caps breakpoints per request
-    (Anthropic: 4) — exceeding it fails the call loudly.
+    On a checkpointed thread the model call keeps only the newest mark (older marks
+    are stripped), so per-turn marking stays within the provider's breakpoint cap
+    (Anthropic: 4).
     The system prompt is deliberately NOT part of the input: agent input becomes
     checkpointed conversation state, and the system prompt is per-run model
     configuration — build it with :func:`build_system_message` and hand it to the

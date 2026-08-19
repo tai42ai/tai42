@@ -184,9 +184,9 @@ class VotingAgentInput(BaseModel):
 
     ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control`` for
     Anthropic prompt caching) onto the judge's last user message; a provider-unknown
-    key surfaces as a loud provider error. On a checkpointed thread each marked turn
-    persists into history, so marks accumulate across turns and the provider caps
-    breakpoints per request (Anthropic: 4) — exceeding it fails the call loudly. The
+    key surfaces as a loud provider error. On a checkpointed thread the model call keeps
+    only the newest mark (older marks are stripped), so per-turn marking stays within the
+    provider's breakpoint cap (Anthropic: 4). The
     judge/voter system messages are internal fixed prompts, so ``system_content_kwargs``
     has no seat and is rejected.
 

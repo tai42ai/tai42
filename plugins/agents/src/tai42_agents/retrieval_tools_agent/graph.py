@@ -40,6 +40,7 @@ from langgraph.utils.runnable import RunnableCallable
 from pydantic import ValidationError
 from tai42_kit.llm.middleware.context_overflow import areduce_context, context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
+from tai42_kit.llm.middleware.rolling_cache_mark import roll_cache_marks
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.utils.data.string_util import text_to_md5
 
@@ -190,6 +191,12 @@ class RetrievalToolsGraph:
             messages = state["messages"]
             if self.system_prompt:
                 messages = [SystemMessage(content=self.system_prompt), *messages]
+            # Raw graph node: wrap_model_call middleware never runs here, so the
+            # rolling cache-mark strip is applied request-scoped before the call —
+            # keeping only the newest user-side cache breakpoint, never written back
+            # into state.
+            rolled = roll_cache_marks(messages)
+            messages = rolled if rolled is not None else messages
             response = await llm_with_tools.ainvoke(messages)
             return {"messages": [response]}
 

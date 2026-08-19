@@ -12,6 +12,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 
 from tai42_agents._internal.recovery import _tool_error_middleware
@@ -222,6 +223,17 @@ def test_build_deep_agent_leads_with_system_purge_middleware(monkeypatch: pytest
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
     asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     assert isinstance(captured["middleware"][0], SystemPurgeMiddleware)
+
+
+def test_build_deep_agent_wires_rolling_cache_mark_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    # deep_agent honors user_content_kwargs (the mark rides its main user turn), so its
+    # main-agent stack carries the rolling-cache-mark middleware too — a per-turn-marked
+    # thread sends one user-side breakpoint at the model call, same as every tools-agent
+    # face.
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    assert any(isinstance(mw, RollingCacheMarkMiddleware) for mw in captured["middleware"])
 
 
 def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypatch: pytest.MonkeyPatch) -> None:

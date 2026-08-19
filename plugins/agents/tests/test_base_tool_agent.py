@@ -123,10 +123,12 @@ class TestBuildAgentAndInput:
         assert captured["create"]["tools"] == [tool]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
         # The system-purge middleware leads (state never carries a system message),
-        # the context-overflow middleware is threaded through, and the tool-error
+        # the context-overflow middleware is threaded through, the rolling-cache-mark
+        # middleware keeps one user-side breakpoint at the call, and the tool-error
         # middleware is appended so a tool-logic failure never aborts the loop.
         assert isinstance(captured["create"]["middleware"][0], bta.SystemPurgeMiddleware)
         assert captured["create"]["middleware"][1] == "mw"
+        assert any(isinstance(mw, bta.RollingCacheMarkMiddleware) for mw in captured["create"]["middleware"])
         assert captured["create"]["middleware"][-1] is bta._tool_error_middleware
         assert captured["create"]["debug"] is True
         # No response_format requested -> the text-behavior default is threaded through.

@@ -127,9 +127,8 @@ class ToolsAgentInput(BaseModel):
         description=(
             "Content-block keys merged into the last user message's text block (e.g. cache_control "
             "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
-            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
-            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
-            "fails the call loudly."
+            "On a checkpointed thread the model call keeps only the newest mark (older marks are "
+            "stripped), so per-turn marking stays within the provider's breakpoint cap (Anthropic: 4)."
         ),
     )
     system_message: str | None = ""
