@@ -99,7 +99,7 @@ def test_wrap_model_call_strips_transiently_leaving_state_untouched():
     mw = RollingCacheMarkMiddleware()
     older = _marked("older", "1")
     newest = _marked("newest", "2")
-    messages = [older, newest]
+    messages: list[AnyMessage] = [older, newest]
     request = _request(messages)
 
     seen: list[list[AnyMessage]] = []
