@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: channel-slack
 package: tai42-channel-slack
-version: 1.0.2
+version: 1.0.3
 description: >-
   Slack channel plugin for the TAI ecosystem — delivers ask_user questions to a
   Slack channel and bridges threaded replies back to the interactions callback

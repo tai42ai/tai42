@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-web"
-version = "1.0.2"
+version = "1.0.3"
 description = "Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat page, delivers ask_user questions into it, and bridges the reply back."
 readme = "README.md"
 requires-python = ">=3.13"
