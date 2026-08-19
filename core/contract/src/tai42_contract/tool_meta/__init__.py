@@ -73,12 +73,13 @@ class ToolMetaStore(Protocol):
         folder_id: str | None,
         tags: list[str],
         hidden: bool | None,
-        badges: list[str],
+        badges: list[str] | None = None,
     ) -> ToolMetaRecord:
         """Write the FULL overlay row for ``tool_name`` (insert or replace). The
         caller passes the already-resolved state — merge-patch against the current
-        row is resolved a layer up. Raise :class:`FolderNotFoundError` when
-        ``folder_id`` names no folder."""
+        row is resolved a layer up. ``badges`` defaults to ``None``, written as the
+        empty set. Raise :class:`FolderNotFoundError` when ``folder_id`` names no
+        folder."""
         ...
 
     async def merge_meta(self, tool_name: str, *, patch: dict[str, Any]) -> ToolMetaRecord:
