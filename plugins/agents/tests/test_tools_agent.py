@@ -972,3 +972,36 @@ def test_astream_never_emits_an_interrupt(monkeypatch: pytest.MonkeyPatch) -> No
     agent = _get_agent()
     events = _collect(agent, user_message="hi")
     assert not any(isinstance(event, InterruptFinal) for event in events)
+
+
+def test_run_threads_content_kwargs_to_the_invoke_seam(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """``run`` forwards ``system_content_kwargs`` / ``user_content_kwargs`` to the
+    invoke seam, where the kit marks the system prompt and last user message."""
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
+        captured.update(kwargs)
+        return AgentInvokeResult(output="ok", usage=CallUsage(0, 0, None))
+
+    monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
+    agent = _get_agent()
+    cache = {"cache_control": {"type": "ephemeral"}}
+    asyncio.run(agent.run(user_message="hi", system_content_kwargs=cache, user_content_kwargs=cache))
+
+    assert captured["system_content_kwargs"] == cache
+    assert captured["user_content_kwargs"] == cache
+
+
+def test_astream_threads_content_kwargs_to_the_event_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``astream`` forwards both content-block kwargs to the event seam, in parity
+    with :meth:`run`."""
+    captured: dict[str, Any] = {}
+    _script_astream(monkeypatch, [MessageFinal(text="hi")], captured)
+    agent = _get_agent()
+    cache = {"cache_control": {"type": "ephemeral"}}
+    _collect(agent, user_message="hi", system_content_kwargs=cache, user_content_kwargs=cache)
+
+    assert captured["system_content_kwargs"] == cache
+    assert captured["user_content_kwargs"] == cache

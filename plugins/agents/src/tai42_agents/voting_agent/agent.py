@@ -146,6 +146,10 @@ _UNHONORED_REASONS: dict[str, str] = {
         "it always produces a VotingOutput and cannot honor a different structured output type; "
         "pass VotingOutput or omit it"
     ),
+    "system_content_kwargs": (
+        "its judge/voter system messages are internal fixed prompts and take no caller system message; "
+        "use user_content_kwargs to mark the judge's last user turn (the final voter verdict when voters are present)"
+    ),
 }
 # The unhonored parameters whose unset default is an empty sequence/string; every
 # other defaults to ``None`` and is set when not ``None``.
@@ -178,6 +182,14 @@ class VotingAgentInput(BaseModel):
     only to trusted callers — an injected parent agent could redirect the model call
     to a hostile endpoint and leak the key/context.
 
+    ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control`` for
+    Anthropic prompt caching) onto the judge's last user message; a provider-unknown
+    key surfaces as a loud provider error. On a checkpointed thread each marked turn
+    persists into history, so marks accumulate across turns and the provider caps
+    breakpoints per request (Anthropic: 4) — exceeding it fails the call loudly. The
+    judge/voter system messages are internal fixed prompts, so ``system_content_kwargs``
+    has no seat and is rejected.
+
     ``extra="forbid"`` rejects any unknown key loudly at validation rather than
     letting a typo at the run door vanish silently."""
 
@@ -197,6 +209,7 @@ class VotingAgentInput(BaseModel):
     voters: list[VoterSpec] | None = None
     judge_langgraph_config: dict[str, Any] | None = None
     voter_langgraph_config: dict[str, Any] | None = None
+    user_content_kwargs: dict[str, Any] | None = None
 
 
 @tai42_app.agents.agent("voting_agent", tags={"agents"})
@@ -237,6 +250,7 @@ class VotingAgent(Agent):
         voters: list[VoterSpec] | None = None,
         judge_langgraph_config: dict[str, Any] | None = None,
         voter_langgraph_config: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         response_format: Any = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
@@ -244,8 +258,12 @@ class VotingAgent(Agent):
         judge's events, then yield a terminal ``StructuredFinal`` carrying the full
         ``VotingOutput``.
 
-        A ``response_format`` other than ``VotingOutput``, or any unhonored ABC
-        parameter, is rejected loudly here in parity with :meth:`run`."""
+        ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
+        onto the judge's last user message (the final voter verdict when voters are
+        present); a provider-unknown key surfaces as a loud provider error. A ``response_format``
+        other than ``VotingOutput``, or any unhonored ABC parameter (including
+        ``system_content_kwargs`` — the system prompts are internal fixed), is
+        rejected loudly here in parity with :meth:`run`."""
         _reject_unhonored("voting_agent.astream", response_format, kwargs)
         resolved_judge_tools: list[StructuredTool] = (
             await tai42_app.tools.get_client_tools(judge_tools) if judge_tools else []
@@ -279,6 +297,7 @@ class VotingAgent(Agent):
             checkpoint_provider=checkpoint_provider,
             llm_kwargs=judge_llm_kwargs,
             config=judge_langgraph_config,
+            user_content_kwargs=user_content_kwargs,
         ):
             if isinstance(event, MessageFinal):
                 judge_verdict = event.text

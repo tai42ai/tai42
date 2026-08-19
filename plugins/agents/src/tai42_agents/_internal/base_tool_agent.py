@@ -95,6 +95,7 @@ async def _build_agent_and_input(
     llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
     system_content_kwargs: dict[str, Any] | None = None,
+    user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     """Compile the tools agent, build its input messages and run config, and ready
@@ -105,7 +106,9 @@ async def _build_agent_and_input(
     dangling tool_calls are repaired here (once the config resolves a ``thread_id``)
     for every face. The system message is compiled into the graph as its per-run
     ``system_prompt`` — the input carries only the user messages, so thread state
-    stays system-free. Returns ``(agent, messages, config)``.
+    stays system-free. ``system_content_kwargs`` / ``user_content_kwargs`` (e.g.
+    ``cache_control``) carry content-block keys onto the system message and the last
+    user message respectively. Returns ``(agent, messages, config)``.
     """
     agent = await _compile_tools_agent(
         tools,
@@ -118,7 +121,7 @@ async def _build_agent_and_input(
     )
 
     config = init_langgraph_config(config)
-    messages = build_agent_input(*user_message)
+    messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
     await _repair_dangling_tool_calls(agent, config)
     return agent, messages, config
 
@@ -155,6 +158,7 @@ async def ainvoke_tools_agent(
     llm_kwargs: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
     system_content_kwargs: dict[str, Any] | None = None,
+    user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> AgentInvokeResult:
     """Invoke the tools agent and return the user output, per-call usage
@@ -173,6 +177,7 @@ async def ainvoke_tools_agent(
         llm_kwargs,
         config,
         system_content_kwargs=system_content_kwargs,
+        user_content_kwargs=user_content_kwargs,
         response_format=response_format,
     )
     state = await agent.ainvoke(messages, config)
@@ -194,6 +199,7 @@ async def astream_tools_agent(
     config: dict[str, Any] | None = None,
     stream_mode: str = "values",
     system_content_kwargs: dict[str, Any] | None = None,
+    user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
 ) -> AsyncIterator[Any]:
     """Run the tools agent and yield the raw LangGraph ``astream`` chunks for the
@@ -209,6 +215,7 @@ async def astream_tools_agent(
         llm_kwargs,
         config,
         system_content_kwargs=system_content_kwargs,
+        user_content_kwargs=user_content_kwargs,
         response_format=response_format,
     )
     async for chunk in agent.astream(messages, config, stream_mode=stream_mode):

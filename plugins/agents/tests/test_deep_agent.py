@@ -510,6 +510,63 @@ def test_run_resume_feeds_a_command(monkeypatch: pytest.MonkeyPatch, app_tools: 
     assert graph.received_input.resume == {"answer": 1}
 
 
+def test_run_threads_user_content_kwargs_into_graph_input(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """``user_content_kwargs`` marks the fresh-turn user message as a content block
+    in the graph input (the deepagents system prompt takes no such keys)."""
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+    agent: Any = DeepAgent()
+    _install_fake_resolve(monkeypatch, agent, graph)
+
+    asyncio.run(agent.run(user_message="go", user_content_kwargs={"cache_control": {"type": "ephemeral"}}))
+
+    assert graph.received_input == {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "go", "cache_control": {"type": "ephemeral"}}]}
+        ]
+    }
+
+
+def test_astream_threads_user_content_kwargs_into_graph_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parity with :func:`test_run_threads_user_content_kwargs_into_graph_input`: the
+    streaming face marks the fresh-turn user message as a content block in the graph
+    input (the deepagents system prompt takes no such keys)."""
+    graph = _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+    agent: Any = DeepAgent()
+    _install_fake_graph(monkeypatch, agent, graph)
+
+    async def collect() -> list[Any]:
+        return [
+            event
+            async for event in agent.astream(
+                user_message="go", user_content_kwargs={"cache_control": {"type": "ephemeral"}}
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert graph.received_input == {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "go", "cache_control": {"type": "ephemeral"}}]}
+        ]
+    }
+
+
+def test_run_rejects_user_content_kwargs_with_resume(app_tools: Any, resource_manager: Any) -> None:
+    """``user_content_kwargs`` has no user message to attach to on a resume, so the
+    combination raises rather than silently dropping the keys."""
+    with pytest.raises(ValueError, match="user_content_kwargs applies to a fresh user_message turn"):
+        asyncio.run(DeepAgent().run(resume={"answer": 1}, user_content_kwargs={"cache_control": {"type": "ephemeral"}}))
+
+
+def test_astream_rejects_user_content_kwargs_with_resume() -> None:
+    """Same resume guard on the streaming face, in parity with :meth:`run`."""
+    cache = {"cache_control": {"type": "ephemeral"}}
+    with pytest.raises(ValueError, match="user_content_kwargs applies to a fresh user_message turn"):
+        _drain_astream(DeepAgent().astream(resume={"answer": 1}, user_content_kwargs=cache))
+
+
 def test_run_rejects_resume_with_user_message(app_tools: Any, resource_manager: Any) -> None:
     """run cannot both answer an interrupt and start a fresh turn — a resume with a
     user message raises loudly rather than silently dropping one."""
@@ -573,6 +630,7 @@ def test_run_names_both_offenders_at_once() -> None:
 _UNHONORED_CASES = [
     ("presets", [PresetSpec(name="p", base_tool="calc")]),
     ("strategy", "vote"),
+    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 

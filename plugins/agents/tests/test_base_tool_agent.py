@@ -150,6 +150,43 @@ class TestBuildAgentAndInput:
         assert isinstance(system_prompt, SystemMessage)
         assert system_prompt.content == [{"type": "text", "text": "sys-prompt", "cache_control": {"type": "ephemeral"}}]
 
+    def test_user_content_kwargs_mark_the_last_input_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_seams(monkeypatch)
+        _, messages, _ = asyncio.run(
+            bta._build_agent_and_input(
+                "sys", ["first", "last"], [], user_content_kwargs={"cache_control": {"type": "ephemeral"}}
+            )
+        )
+        # Only the final user turn carries the content-block form; earlier turns stay plain.
+        assert messages == {
+            "messages": [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "last", "cache_control": {"type": "ephemeral"}}],
+                },
+            ]
+        }
+
+    def test_system_and_user_content_kwargs_apply_together(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_seams(monkeypatch)
+        _, messages, _ = asyncio.run(
+            bta._build_agent_and_input(
+                "sys-prompt",
+                ["hi"],
+                [],
+                system_content_kwargs={"cache_control": {"type": "ephemeral"}},
+                user_content_kwargs={"cache_control": {"type": "ephemeral"}},
+            )
+        )
+        # The system prompt block and the last user message block both carry the keys.
+        system_prompt = captured["create"]["system_prompt"]
+        assert isinstance(system_prompt, SystemMessage)
+        assert system_prompt.content == [{"type": "text", "text": "sys-prompt", "cache_control": {"type": "ephemeral"}}]
+        assert messages["messages"][-1]["content"] == [
+            {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+        ]
+
     def test_response_format_is_threaded_into_create_agent_as_tool_strategy(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

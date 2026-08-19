@@ -141,6 +141,16 @@ class RetrievalToolsAgentInput(BaseModel):
     response_format: dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
+    user_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the user message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
+            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
+            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
+            "fails the call loudly."
+        ),
+    )
     tools_limit: int = 10
     overwrite_store: bool = False
     llm_provider: str | None = None
@@ -183,12 +193,14 @@ class RetrievalToolsAgent(Agent):
         tools_limit: int = 10,
         embedding_kwargs: dict[str, Any] | None = None,
         llm_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any], dict[str, Any], Any]:
         """Resolve providers, embed the tools, compile the graph, and return
         ``(agent, messages, config, llm)``. The ``llm`` is handed back so ``astream``
         can run a structured finalization pass over the terminal result when a
-        ``response_format`` was requested."""
+        ``response_format`` was requested. ``user_content_kwargs`` (e.g.
+        ``cache_control``) carries content-block keys onto the user message."""
         rendered_system = await render_message(system_message, system_message_id, system_message_kwargs)
         rendered_user = await render_message(user_message, user_message_id, user_message_kwargs, allow_empty=False)
 
@@ -231,7 +243,7 @@ class RetrievalToolsAgent(Agent):
         ).abuild()
 
         config = init_langgraph_config(config)
-        messages = build_agent_input(rendered_user)
+        messages = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
         # The single spot both faces (run drains astream) build through, so a thread
         # poisoned by an aborted turn is repaired here before the run.
         await _repair_dangling_tool_calls(agent, config)
@@ -250,9 +262,13 @@ class RetrievalToolsAgent(Agent):
         ``StructuredFinal`` carrying the validated object.
 
         ``thread_id`` / ``resume_checkpoint_id`` map into the run config's
-        ``configurable`` and ``recursion_limit`` onto its top level. The ABC
-        parameters this runtime cannot honor are rejected loudly (see
-        ``_UNHONORED_REASONS``); the same guard runs on ``run``.
+        ``configurable`` and ``recursion_limit`` onto its top level.
+        ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
+        onto the user message's text block; a provider-unknown key surfaces as a loud
+        provider error. The ABC parameters this runtime cannot honor — including
+        ``system_content_kwargs`` (the system prompt is a composed template string,
+        never a content block) — are rejected loudly (see ``_UNHONORED_REASONS``); the
+        same guard runs on ``run``.
         """
         reject_unhonored(
             "retrieval_tools_agent.astream",
@@ -395,6 +411,11 @@ _UNHONORED_REASONS: dict[str, str] = {
     "inline_skills": "it loads no skills backend",
     "interrupt_on": "its graph never pauses for external input, so there is no interrupt to configure",
     "resume": "its graph never interrupts, so there is no paused run to resume",
+    "system_content_kwargs": (
+        "its system prompt is a composed template string prepended inside the graph, never built as a "
+        "content block through build_system_message, so it cannot carry content-block keys; "
+        "use user_content_kwargs instead"
+    ),
 }
 
 # The unhonored parameters whose unset default is an empty collection; every other
@@ -424,5 +445,6 @@ _BUILD_PARAMS = frozenset(
         "tools_limit",
         "embedding_kwargs",
         "llm_kwargs",
+        "user_content_kwargs",
     }
 )

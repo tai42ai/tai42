@@ -61,6 +61,10 @@ _UNHONORED_REASONS: dict[str, str] = {
         "and it will not silently ignore one"
     ),
     "strategy": "the deepagents runtime applies no composition strategy and will not silently ignore one",
+    "system_content_kwargs": (
+        "its system prompt is handed to the deepagents factory, never built as a content block through "
+        "build_system_message, so it cannot carry content-block keys; use user_content_kwargs instead"
+    ),
 }
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})
 
@@ -105,6 +109,16 @@ class DeepAgentInput(BaseModel):
     interrupt_on: dict[str, Any] | None = None
     response_format: dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
+    )
+    user_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the user message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
+            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
+            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
+            "fails the call loudly."
+        ),
     )
     llm_provider: str | None = None
     checkpoint_provider: str | None = None
@@ -183,6 +197,8 @@ class DeepAgent(Agent):
         interrupt_on: dict[str, Any] | None = None,
         response_format: Any = None,
         strategy: str | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         thread_id: str | None = None,
         resume: Any = None,
         resume_checkpoint_id: str | None = None,
@@ -207,11 +223,15 @@ class DeepAgent(Agent):
         (answering a prior interrupt); ``resume_checkpoint_id`` forks past an aborted
         turn. A ``response_format`` must be a JSON Schema with a top-level ``title``.
 
-        ``presets`` and ``strategy`` are not composable inputs here; either raises.
+        ``user_content_kwargs`` merges content-block keys (e.g. ``cache_control``)
+        onto the user message's text block; a provider-unknown key surfaces as a loud
+        provider error. ``presets``, ``strategy`` and ``system_content_kwargs`` are
+        not honored here; each raises (the system prompt never becomes a content
+        block through ``build_system_message``).
         """
         reject_unhonored(
             "deep_agent.run",
-            {"presets": presets, "strategy": strategy},
+            {"presets": presets, "strategy": strategy, "system_content_kwargs": system_content_kwargs},
             _UNHONORED_REASONS,
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
@@ -223,6 +243,10 @@ class DeepAgent(Agent):
         if resume is not None:
             if user_message or user_message_id:
                 raise ValueError("deep_agent.run requires exactly one of user_message or resume, not both.")
+            if user_content_kwargs:
+                raise ValueError(
+                    "deep_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
+                )
             rendered_user: str | None = None
         else:
             rendered_user = await render_message(user_message, user_message_id, user_message_kwargs, allow_empty=False)
@@ -255,7 +279,7 @@ class DeepAgent(Agent):
         else:
             # The resume/user guard above makes rendered_user a str on this branch.
             assert rendered_user is not None
-            agent_input = build_agent_input(rendered_user)
+            agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
         return await self._drain(
             self._astream_built(
@@ -342,6 +366,8 @@ class DeepAgent(Agent):
         user_message: str | None = None,
         response_format: Any = None,
         strategy: str | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         interrupt_on: dict[str, Any] | None = None,
         thread_id: str | None = None,
         resume: Any = None,
@@ -368,12 +394,14 @@ class DeepAgent(Agent):
         ``recursion_limit`` overlay it.
 
         A requested ``response_format`` that produces no structured result raises
-        after the stream drains rather than silently omitting it. ``presets`` and
-        ``strategy`` are not composable inputs here; either raises.
+        after the stream drains rather than silently omitting it. ``user_content_kwargs``
+        merges content-block keys (e.g. ``cache_control``) onto the user message's text
+        block; a provider-unknown key surfaces as a loud provider error. ``presets``,
+        ``strategy`` and ``system_content_kwargs`` are not honored here; each raises.
         """
         reject_unhonored(
             "deep_agent.astream",
-            {"presets": presets, "strategy": strategy},
+            {"presets": presets, "strategy": strategy, "system_content_kwargs": system_content_kwargs},
             _UNHONORED_REASONS,
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
@@ -381,6 +409,10 @@ class DeepAgent(Agent):
         reject_untitled_response_format("deep_agent", response_format)
         if (user_message is None) == (resume is None):
             raise ValueError("deep_agent.astream requires exactly one of user_message or resume")
+        if resume is not None and user_content_kwargs:
+            raise ValueError(
+                "deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
+            )
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
         internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
@@ -410,7 +442,7 @@ class DeepAgent(Agent):
         else:
             # The exactly-one-of guard above makes user_message non-None here.
             assert user_message is not None
-            agent_input = build_agent_input(user_message)
+            agent_input = build_agent_input(user_message, user_content_kwargs=user_content_kwargs)
 
         saw_structured = False
         saw_interrupt = False

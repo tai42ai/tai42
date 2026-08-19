@@ -260,6 +260,30 @@ def test_approval_on_first_iteration_streams_the_final_pass(
     assert any(isinstance(e, MessageFinal) for e in events)
 
 
+def test_user_content_kwargs_mark_the_evaluators_first_user_turn(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """``user_content_kwargs`` makes the evaluator's first user turn a content block
+    (the run's primary caller message); the internal system prompts are untouched."""
+    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
+    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    _patch_loop(monkeypatch, [evaluator, critic])
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    _collect(
+        agent,
+        evaluator_message="write it",
+        critic_message="review it",
+        user_content_kwargs={"cache_control": {"type": "ephemeral"}},
+    )
+
+    assert evaluator.ainvoke_inputs[0] == {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "write it", "cache_control": {"type": "ephemeral"}}]}
+        ]
+    }
+
+
 def test_approval_on_a_later_iteration(monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any) -> None:
     evaluator = FakeAgent(
         invoke_contents=["draft-1", "draft-2", "draft-3"],
@@ -641,6 +665,7 @@ _UNHONORED_CASES = [
     ("llm_provider", "openai"),
     ("store_provider", "redis"),
     ("llm_kwargs", {"model": "x"}),
+    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 

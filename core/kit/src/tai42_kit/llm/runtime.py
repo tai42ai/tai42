@@ -14,17 +14,30 @@ from tai42_kit.utils.data.json_schema_util import (
 )
 
 
-def build_agent_input(*user_messages: str) -> dict[str, Any]:
+def build_agent_input(*user_messages: str, user_content_kwargs: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a LangGraph agent input (``{"messages": [...]}``) from raw text.
 
-    Appends each of *user_messages* as a user turn, coercing each to ``str``.
+    Appends each of *user_messages* as a user turn, coercing each to ``str``. With
+    *user_content_kwargs* (e.g. ``cache_control`` for prompt caching) the LAST user
+    turn becomes a single structured text block carrying those keys, earlier turns
+    staying plain strings — a cache breakpoint marks the end of the stable prefix,
+    so it belongs on the final block; with no messages to carry them it raises.
+    On a checkpointed thread each marked turn persists into history, so marks
+    accumulate across turns and the provider caps breakpoints per request
+    (Anthropic: 4) — exceeding it fails the call loudly.
     The system prompt is deliberately NOT part of the input: agent input becomes
     checkpointed conversation state, and the system prompt is per-run model
     configuration — build it with :func:`build_system_message` and hand it to the
     graph factory (``create_agent(system_prompt=...)``) so it is applied at the
     model-call boundary instead of persisted into thread history.
     """
-    return {"messages": [{"role": "user", "content": str(content)} for content in user_messages]}
+    messages: list[dict[str, Any]] = [{"role": "user", "content": str(content)} for content in user_messages]
+    if user_content_kwargs:
+        if not messages:
+            raise ValueError("build_agent_input got user_content_kwargs but no user messages to carry them on")
+        last = messages[-1]
+        last["content"] = [{"type": "text", "text": last["content"], **user_content_kwargs}]
+    return {"messages": messages}
 
 
 def build_system_message(
@@ -39,9 +52,12 @@ def build_system_message(
     the plain string. Hand the result to the graph factory
     (``create_agent(system_prompt=...)``), never into the input messages — the
     system prompt is per-run configuration and must stay out of checkpointed
-    thread state.
+    thread state. With *system_content_kwargs* but no system message to carry them
+    it raises.
     """
     if not system_message:
+        if system_content_kwargs:
+            raise ValueError("build_system_message got system_content_kwargs but no system message to carry them on")
         return None
     if system_content_kwargs:
         return SystemMessage(content=[{"type": "text", "text": system_message, **system_content_kwargs}])

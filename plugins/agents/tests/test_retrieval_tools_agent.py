@@ -1015,6 +1015,7 @@ _UNHONORED_CASES = [
     ("interrupt_on", {}),
     ("resume", {"answer": "y"}),
     ("resume", False),
+    ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
 ]
 
 # The unhonored params whose ABC ``Agent.run`` default is an empty collection (``()`` /
@@ -1069,6 +1070,17 @@ class TestAstreamAndRun:
             "config": {"configurable": {"thread_id": "keep-me"}},
         }
         assert captured["project"] == ("graph", "messages", "config")
+
+    def test_astream_forwards_user_content_kwargs_to_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # user_content_kwargs is an honored _BUILD_PARAM: it reaches ``_build``, which
+        # hands it to build_agent_input to mark the user message for caching.
+        captured = self._script(monkeypatch, [self._final("done")])
+        agent = RetrievalToolsAgent()
+        cache = {"cache_control": {"type": "ephemeral"}}
+
+        asyncio.run(_collect(agent.astream(user_message="hi", user_content_kwargs=cache)))
+
+        assert captured["build_kwargs"]["user_content_kwargs"] == cache
 
     def test_run_honors_thread_id_and_resume_checkpoint_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The run face drains astream, so both honored memory parameters reach the

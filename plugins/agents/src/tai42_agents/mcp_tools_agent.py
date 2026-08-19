@@ -86,6 +86,23 @@ class McpToolsAgentInput(BaseModel):
     response_format: dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
+    system_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the system message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors."
+        ),
+    )
+    user_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the last user message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
+            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
+            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
+            "fails the call loudly."
+        ),
+    )
     system_message: str = ""
     user_message: str = ""
     system_message_id: str = ""
@@ -139,6 +156,8 @@ class McpToolsAgent(Agent):
         user_message_id: str = "",
         system_message_kwargs: dict[str, Any] | None = None,
         user_message_kwargs: dict[str, Any] | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         inject_env: bool = False,
         env_allowlist: list[str] | None = None,
         thread_id: str | None = None,
@@ -159,8 +178,11 @@ class McpToolsAgent(Agent):
 
         ``response_format`` forces the delegated run's structured output; its
         JSON-Schema dict must carry a top-level ``"title"``, and a run producing none
-        raises loudly. Contract parameters with no seat on this agent are rejected
-        loudly up front, in parity with :meth:`astream`.
+        raises loudly. ``system_content_kwargs`` / ``user_content_kwargs`` merge
+        content-block keys (e.g. ``cache_control``) onto the system message and the
+        last user message; a provider-unknown key surfaces as a loud provider error.
+        Contract parameters with no seat on this agent are rejected loudly up front,
+        in parity with :meth:`astream`.
         """
         reject_unhonored(
             "mcp_tools_agent.run", kwargs, _UNHONORED_REASONS, collection_params=_UNHONORED_COLLECTION_PARAMS
@@ -176,6 +198,8 @@ class McpToolsAgent(Agent):
                 user_message_id=user_message_id,
                 system_message_kwargs=system_message_kwargs,
                 user_message_kwargs=user_message_kwargs,
+                system_content_kwargs=system_content_kwargs,
+                user_content_kwargs=user_content_kwargs,
                 inject_env=inject_env,
                 env_allowlist=env_allowlist,
                 thread_id=thread_id,
@@ -200,6 +224,8 @@ class McpToolsAgent(Agent):
         user_message_id: str = "",
         system_message_kwargs: dict[str, Any] | None = None,
         user_message_kwargs: dict[str, Any] | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         inject_env: bool = False,
         env_allowlist: list[str] | None = None,
         thread_id: str | None = None,
@@ -228,7 +254,10 @@ class McpToolsAgent(Agent):
         ``configurable`` and ``recursion_limit`` its top level. ``response_format``
         forces the delegated run's structured output, surfaced as a terminal
         :class:`StructuredFinal`; a run producing none raises loudly after the stream
-        drains. Contract parameters with no seat here are rejected loudly, in parity
+        drains. ``system_content_kwargs`` / ``user_content_kwargs`` merge
+        content-block keys (e.g. ``cache_control``) onto the system message and the
+        last user message; a provider-unknown key surfaces as a loud provider error.
+        Contract parameters with no seat here are rejected loudly, in parity
         with :meth:`run`.
         """
         reject_unhonored(
@@ -275,6 +304,8 @@ class McpToolsAgent(Agent):
                 checkpoint_provider=checkpoint_provider,
                 llm_kwargs=llm_kwargs,
                 config=config,
+                system_content_kwargs=system_content_kwargs,
+                user_content_kwargs=user_content_kwargs,
                 response_format=response_format,
             ):
                 if isinstance(event, StructuredFinal):

@@ -323,6 +323,49 @@ def test_tools_agent_response_format_streams_structured_through_the_skeleton(
     asyncio.run(run())
 
 
+def test_tools_agent_content_kwargs_reach_astream_through_the_skeleton(
+    skeleton: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``system_content_kwargs`` / ``user_content_kwargs`` supplied on the run request
+    reach the real ``tools_agent`` through the skeleton's authored-run door —
+    advertised on ``ToolsAgentInput`` (so the door accepts them) and threaded to
+    ``astream``."""
+    captured: dict[str, Any] = {}
+    cache = {"cache_control": {"type": "ephemeral"}}
+
+    async def run() -> None:
+        async with instance.app.app_context(Manifest.model_validate(_MANIFEST)):
+            live_module = sys.modules["tai42_agents.tools_agent"]
+
+            async def fake_events(**kwargs: Any) -> Any:
+                captured.update(kwargs)
+                yield MessageFinal(text="ok")
+
+            monkeypatch.setattr(live_module, "astream_tools_agent_events", fake_events)
+
+            await instance.app.preset_manager.register(
+                "cache_bot",
+                "tools_agent",
+                {"system_prompt": _BAKED_SYSTEM_PROMPT},
+                [],
+                "A caching assistant.",
+            )
+
+            run_resp = await skeleton.agents.run_authored_agent(
+                _run_request(
+                    "cache_bot",
+                    {"user_message": "hi", "system_content_kwargs": cache, "user_content_kwargs": cache},
+                )
+            )
+            assert isinstance(run_resp, StreamingResponse)
+            await _collect_frames(run_resp)
+
+            assert captured["system_content_kwargs"] == cache
+            assert captured["user_content_kwargs"] == cache
+
+    asyncio.run(run())
+
+
 def test_an_authored_preset_does_not_reach_a_later_test(skeleton: Any) -> None:
     """The ``skeleton`` fixture registers no teardown for the presets a test authors,
     because it does not need one: nulling ``instance._app`` makes every test that takes

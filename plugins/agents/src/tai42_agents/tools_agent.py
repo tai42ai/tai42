@@ -115,6 +115,23 @@ class ToolsAgentInput(BaseModel):
     response_format: dict[str, Any] | None = Field(
         default=None, description="JSON Schema of the forced structured output (needs a top-level 'title')."
     )
+    system_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the system message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors."
+        ),
+    )
+    user_content_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Content-block keys merged into the last user message's text block (e.g. cache_control "
+            "for Anthropic prompt caching). Provider-unknown keys surface as loud provider errors. "
+            "On a checkpointed thread each marked turn persists into history, so marks accumulate "
+            "across turns and the provider caps breakpoints per request (Anthropic: 4) — exceeding it "
+            "fails the call loudly."
+        ),
+    )
     system_message: str | None = ""
     user_message: str | None = ""
     system_message_id: str | None = ""
@@ -184,6 +201,8 @@ class ToolsAgent(Agent):
         user_message_id: str = "",
         system_message_kwargs: dict[str, Any] | None = None,
         user_message_kwargs: dict[str, Any] | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
@@ -211,13 +230,17 @@ class ToolsAgent(Agent):
 
         ``recursion_limit`` (a standard ``RunnableConfig`` key the compiled graph
         reads) overlays the run config's top level, so a caller's step bound reaches
-        the graph. The ABC ``run`` parameters this agent's runtime cannot honor are
-        rejected loudly rather than silently dropped: ``subagents`` (sub-agent
-        delegation is deep_agent's domain — tools_agent never exposes them as
-        callable tools), ``strategy`` (no composition strategy is applied),
-        ``skills`` / ``inline_skills`` (skill backends are deep_agent's domain),
-        ``interrupt_on`` / ``resume`` (this agent has no interrupt source), and
-        ``store_provider`` (no long-term store is wired).
+        the graph. ``system_content_kwargs`` / ``user_content_kwargs`` merge
+        content-block keys (e.g. ``cache_control``) onto the system message and the
+        last user message; a key the provider does not know surfaces as a loud
+        provider error rather than a silent drop. The ABC ``run`` parameters this
+        agent's runtime cannot honor are rejected loudly rather than silently
+        dropped: ``subagents`` (sub-agent delegation is deep_agent's domain —
+        tools_agent never exposes them as callable tools), ``strategy`` (no
+        composition strategy is applied), ``skills`` / ``inline_skills`` (skill
+        backends are deep_agent's domain), ``interrupt_on`` / ``resume`` (this agent
+        has no interrupt source), and ``store_provider`` (no long-term store is
+        wired).
         """
         reject_unhonored(
             "tools_agent.run",
@@ -255,6 +278,8 @@ class ToolsAgent(Agent):
             checkpoint_provider=checkpoint_provider,
             llm_kwargs=llm_kwargs,
             config=config,
+            system_content_kwargs=system_content_kwargs,
+            user_content_kwargs=user_content_kwargs,
             response_format=response_format,
         )
         if response_format is not None:
@@ -284,6 +309,8 @@ class ToolsAgent(Agent):
         user_message_id: str = "",
         system_message_kwargs: dict[str, Any] | None = None,
         user_message_kwargs: dict[str, Any] | None = None,
+        system_content_kwargs: dict[str, Any] | None = None,
+        user_content_kwargs: dict[str, Any] | None = None,
         llm_provider: str | None = None,
         checkpoint_provider: str | None = None,
         llm_kwargs: dict[str, Any] | None = None,
@@ -318,7 +345,11 @@ class ToolsAgent(Agent):
         the stream drains rather than silently omitting the frame.
         ``recursion_limit`` (a standard ``RunnableConfig`` key the compiled graph
         reads) overlays the run config's top level, in parity with :meth:`run`, so a
-        caller's step bound reaches the graph. The ABC parameters this agent's
+        caller's step bound reaches the graph. ``system_content_kwargs`` /
+        ``user_content_kwargs`` merge content-block keys (e.g. ``cache_control``)
+        onto the system message and the last user message, in parity with
+        :meth:`run`; a key the provider does not know surfaces as a loud provider
+        error rather than a silent drop. The ABC parameters this agent's
         runtime cannot honor are rejected loudly here too — in parity with
         :meth:`run` — rather than silently dropped: ``subagents`` (delegation is
         deep_agent's domain), ``strategy`` (no composition strategy is applied),
@@ -355,6 +386,8 @@ class ToolsAgent(Agent):
             checkpoint_provider=checkpoint_provider,
             llm_kwargs=llm_kwargs,
             config=config,
+            system_content_kwargs=system_content_kwargs,
+            user_content_kwargs=user_content_kwargs,
             response_format=response_format,
         ):
             if isinstance(event, StructuredFinal):
