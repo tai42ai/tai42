@@ -32,7 +32,7 @@ dependencies = [
     # `tai42_kit.fork_gate`, the barrier this worker holds around each fork instant
     # (prefork) or in-process job (solo/gevent), and `tai42_kit.backend`
     # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
-    "tai42-kit[jq]>=3.1,<4",
+    "tai42-kit[jq]>=3.2,<4",
     # The broker stack: RQ workers/queues, the recurring-job scheduler (beat),
     # and the web dashboard.
     "rq~=2.7.0",
