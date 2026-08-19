@@ -1,8 +1,8 @@
 {
-  "core/contract": "2.2.0",
+  "core/contract": "2.2.1",
   "core/kit": "3.1.0",
-  "core/cli": "3.1.0",
-  "core/skeleton": "4.2.0",
+  "core/cli": "3.1.1",
+  "core/skeleton": "4.2.1",
   "plugins/accounts-oidc": "1.0.2",
   "plugins/accounts-postgres": "2.0.2",
   "plugins/agents": "2.1.0",

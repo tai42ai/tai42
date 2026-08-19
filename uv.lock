@@ -5389,7 +5389,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "3.1.0"
+version = "3.1.1"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5535,7 +5535,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "2.2.0"
+version = "2.2.1"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -6002,7 +6002,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "4.2.0"
+version = "4.2.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
