@@ -664,6 +664,19 @@ def test_voting_agent_input_rejects_unknown_key() -> None:
         VotingAgentInput.model_validate({"judge_message": "decide", "totally_unknown_key": 1})
 
 
+def test_voting_agent_input_empty_content_kwargs_normalize_to_none() -> None:
+    """An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
+    builders treat {} as no mark, so the field normalizes to None rather than a
+    set-but-empty value the unhonored-reject face would misread."""
+    validated = VotingAgentInput.model_validate({"judge_message": "decide", "user_content_kwargs": {}})
+    assert validated.user_content_kwargs is None
+    # A non-empty mark is a real value and rides through unchanged.
+    marked = VotingAgentInput.model_validate(
+        {"judge_message": "decide", "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
+    )
+    assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}
+
+
 def test_voter_spec_rejects_unknown_key() -> None:
     """``extra="forbid"`` on the nested ``VoterSpec`` rejects an ``llm_kwargs`` typo
     loudly instead of letting it vanish."""

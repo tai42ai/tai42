@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastmcp import Context
+from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
+from tai42_kit.settings.cache_registry import reset_all_settings
+from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
-
-from tai42_backend_rq.callback import CallbackSchema, callback_execution, prepare_backend_kwargs
 
 
 async def test_rendered_fields_default_to_empty():
@@ -93,6 +96,30 @@ async def test_callback_schema_round_trips_through_validation():
     original = CallbackSchema(tool="t", condition=". > 1", expr="{a: .}")
     restored = CallbackSchema.model_validate(original.model_dump())
     assert restored == original
+
+
+async def test_callback_jq_eval_is_timeout_bounded(app, monkeypatch):
+    # The callback path evaluates jq through ``run_jq_first``, so a slow program
+    # is aborted by JQ_TIMEOUT_SECONDS and the named TimeoutError is raised.
+    class _SlowProgram:
+        def input(self, payload):
+            return self
+
+        def first(self):
+            time.sleep(1)
+            return None
+
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr: _SlowProgram())
+    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
+    reset_all_settings()
+    try:
+        callback = CallbackSchema(tool="t", condition=". > 5")
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
+            await callback_execution(10, callback)
+        assert time.monotonic() - start < 0.5
+    finally:
+        reset_all_settings()
 
 
 def test_bare_condition_syntax_error_propagates():

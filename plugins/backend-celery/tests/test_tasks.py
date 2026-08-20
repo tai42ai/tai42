@@ -116,7 +116,8 @@ def test_tool_execution_retry_policy() -> None:
 
 
 def test_callback_task_runs_callback_execution(stub_app) -> None:
-    from tai42_backend_celery.core.callback import CallbackSchema
+    from tai42_kit.backend import CallbackSchema
+
     from tai42_backend_celery.core.tasks import callback_task
 
     try:

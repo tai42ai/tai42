@@ -7,7 +7,7 @@ from typing import Any
 
 from fastmcp import Context
 
-from tai42_backend_arq.signatures import add_signature_params, exclude_fastmcp_ctx_from_kwargs
+from tai42_backend_arq.signatures import add_signature_params
 
 
 async def _tool_with_ctx(text: str, ctx: Context, **extra: Any) -> str:
@@ -38,10 +38,3 @@ def test_ctx_annotation_kept_without_exclude() -> None:
 def test_added_params_append_without_var_keyword() -> None:
     sig = add_signature_params(_plain_tool, {"expires": str | float | None})
     assert list(sig.parameters) == ["text", "expires"]
-
-
-def test_exclude_fastmcp_ctx_from_kwargs() -> None:
-    assert exclude_fastmcp_ctx_from_kwargs(_tool_with_ctx, {"text": "hi", "ctx": object()}) == {"text": "hi"}
-    # No context parameter / not supplied: kwargs pass through unchanged.
-    assert exclude_fastmcp_ctx_from_kwargs(_plain_tool, {"text": "hi"}) == {"text": "hi"}
-    assert exclude_fastmcp_ctx_from_kwargs(_tool_with_ctx, {"text": "hi"}) == {"text": "hi"}

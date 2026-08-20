@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError
 from tai42_contract.interactions import MediaItem
 
 from tai42_skeleton.app.instance import app
@@ -443,6 +443,79 @@ async def test_channel_form_bad_schema_refused_before_persist(wired, schema, mat
         with pytest.raises(ValueError, match=match):
             await ask_user("q", answer_format="form", schema=schema, channel="form", timeout=5)
         assert _empty(wired.fake)
+    finally:
+        app._channel_registry.reset()
+
+
+class HookFormChannel(DeliverOnlyChannel):
+    """A form channel with a channel-SPECIFIC schema limit — the property name
+    ``reserved`` is unrenderable on this medium. The generic subset accepts it (a
+    scalar string), so only the channel knows it is forbidden: the ask-time
+    ``validate_form_schema`` hook refuses it (``ValueError``) exactly as the
+    delivery path would (``ChannelInputError``)."""
+
+    supports_form_delivery = True
+
+    def __init__(self) -> None:
+        self.deliveries: list[ChannelDelivery] = []
+
+    def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
+        if "reserved" in (schema.get("properties") or {}):
+            raise ValueError("form property 'reserved': reserved on this channel")
+
+    async def deliver(self, delivery: ChannelDelivery) -> None:
+        self.deliveries.append(delivery)
+        if "reserved" in ((delivery.schema or {}).get("properties") or {}):
+            raise ChannelInputError("form property 'reserved': reserved on this channel")
+
+
+class NoHookFormChannel(DeliverOnlyChannel):
+    """The same medium WITHOUT the ask-time hook: only the delivery path refuses
+    the reserved property, so a bad schema passes ask-time, persists, and fails
+    only at delivery — the class of bug the hook closes."""
+
+    supports_form_delivery = True
+
+    def __init__(self) -> None:
+        self.deliveries: list[ChannelDelivery] = []
+
+    async def deliver(self, delivery: ChannelDelivery) -> None:
+        self.deliveries.append(delivery)
+        if "reserved" in ((delivery.schema or {}).get("properties") or {}):
+            raise ChannelInputError("form property 'reserved': reserved on this channel")
+
+
+_RESERVED_SCHEMA = {"type": "object", "properties": {"reserved": {"type": "string"}}}
+
+
+async def test_validate_form_schema_hook_refuses_at_ask_time_before_persist(wired):
+    # WITH the hook: the channel-specific limit is enforced at the chokepoint,
+    # BEFORE any state is written — a ValueError naming the property, deliver never
+    # reached, nothing persisted.
+    app._channel_registry.reset()
+    channel = HookFormChannel()
+    tai42_app.channels.register("capform", channel)
+    try:
+        with pytest.raises(ValueError, match="'reserved'"):
+            await ask_user("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="capform", timeout=5)
+        assert _empty(wired.fake)  # nothing persisted
+        assert channel.deliveries == []  # delivery was never attempted
+    finally:
+        app._channel_registry.reset()
+
+
+async def test_without_the_hook_the_bad_schema_persists_then_fails_at_delivery(wired):
+    # The red baseline the hook fixes: a channel with NO ask-time hook passes the
+    # generic subset check, PERSISTS the question, and only fails when delivery
+    # refuses the reserved property — after which the state is pruned.
+    app._channel_registry.reset()
+    channel = NoHookFormChannel()
+    tai42_app.channels.register("nohookform", channel)
+    try:
+        with pytest.raises(ChannelInputError, match="'reserved'"):
+            await ask_user("q", answer_format="form", schema=_RESERVED_SCHEMA, channel="nohookform", timeout=5)
+        assert channel.deliveries != []  # it reached delivery (persisted first)
+        assert await wired.store.count_open(wired.fake) == 0  # pruned on the delivery failure
     finally:
         app._channel_registry.reset()
 

@@ -1,5 +1,5 @@
-"""The channel-deliverable form-schema subset — the ONE definition of what a
-``form`` question delivered over a channel may declare.
+"""The channel-deliverable form-schema subset — the ONE definition of the SHARED
+subset every ``form`` question delivered over a channel must satisfy.
 
 A channel form is answered on the server-rendered callback page, a flat HTML form
 the human fills and submits. Only a schema that renders into such a form is
@@ -14,7 +14,10 @@ extra constraint keyword riding alongside a scalar ``type`` (``pattern``,
 answer is validated.
 
 The ask-time guard (``ask_user``) and the callback form renderer share this ONE
-walk, so a channel form's schema is judged by a single rule set.
+walk, so the shared subset is judged by a single rule set. Channel-SPECIFIC limits
+beyond this subset (reserved property names, a medium's own Block Kit / Flow caps)
+are NOT defined here — the named channel's ``validate_form_schema`` hook enforces
+them at ask-time on top of this walk.
 """
 
 from __future__ import annotations

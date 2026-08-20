@@ -128,6 +128,10 @@ def test_render_page_escapes_interpolated_values(public_build: Path):
         # The bundle's own webfonts, served by the asset door beside the stylesheet.
         "font-src 'self'",
         "connect-src 'self'",
+        # ``https:`` serves an agent-sent media card's image (http is refused, matching
+        # the contract's https-only rule); ``data:`` serves the schema-form media field's
+        # inline <img> preview of a visitor-picked image, whose source is a data: URL.
+        "img-src 'self' data: https:",
         "frame-ancestors 'none'",
     ],
 )

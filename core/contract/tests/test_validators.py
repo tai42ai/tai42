@@ -755,6 +755,91 @@ def test_media_rejects_malformed_authority_with_rule_message():
         MediaItem(kind=MediaKind.LINK, url="https://[")
 
 
+def test_media_in_range_port_accepted():
+    # The maximum valid port (65535) parses; an explicit in-range port is kept.
+    assert (
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example:65535/p.png").url == "https://cdn.example:65535/p.png"
+    )
+    assert MediaItem(kind=MediaKind.LINK, url="https://cdn.example:65535/p").url == "https://cdn.example:65535/p"
+
+
+def test_media_rejects_out_of_range_port():
+    # A port past 65535 is spec-invalid: ``urlsplit(...).port`` raises ValueError,
+    # so the browser's URL parser would reject the replayed frame and drop the card.
+    # The validator fails closed for both kinds.
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example:65536/p.png")
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example:99999/p.png")
+    with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
+        MediaItem(kind=MediaKind.LINK, url="https://cdn.example:65536/p")
+    with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
+        MediaItem(kind=MediaKind.LINK, url="https://cdn.example:99999/p")
+
+
+def test_media_portless_url_unaffected():
+    # A portless URL still validates for both kinds — the port check only rejects
+    # an explicit out-of-range port, never a URL with no port.
+    assert MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png").url == "https://cdn.example/p.png"
+    assert MediaItem(kind=MediaKind.LINK, url="https://cdn.example/p").url == "https://cdn.example/p"
+
+
+_BAD_HOSTS = [
+    "999.999.999.999",  # IPv4 octet overflow
+    "1.2.3.4.5",  # five-octet IPv4-lookalike
+    "256.1.1.1",  # IPv4 octet out of range
+    "4294967296",  # decimal IPv4 integer overflow
+    "0x100000000",  # hex IPv4 integer overflow
+    "0x",  # bare 0x prefix — the browser reads it as IPv4 zero
+    "example.0x",  # bare 0x final label
+    "ex%zz.example.com",  # percent-encoding in host
+    "%00.com",  # percent-encoded NUL in host
+    "user%40host.com",  # percent-encoded @ in host
+    "host%9f.com",  # percent-encoded control byte in host
+    "[fe80::1%eth0]",  # bracketed IPv6 with a WHATWG-forbidden zone id
+]
+
+
+@pytest.mark.parametrize("host", _BAD_HOSTS)
+def test_media_rejects_ipv4_lookalike_and_percent_hosts(host: str):
+    # Hosts the browser's new URL() rejects: IPv4-shorthand/overflow lookalikes and
+    # any percent-encoding in the authority. A contract-valid media URL that the
+    # widget then drops on replay is the bug; reject at send for both kinds.
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=f"https://{host}/x.png")
+    with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
+        MediaItem(kind=MediaKind.LINK, url=f"https://{host}/p")
+
+
+_GOOD_HOSTS = [
+    "example.com",  # normal domain
+    "cdn.assets.example.com",  # multi-label domain
+    "xn--p1ai",  # punycode single label
+    "foo.xn--80akhbyknj4f",  # punycode final label
+    "host",  # single-label host
+    "example.com.",  # trailing-dot host
+    "192.168.1.1",  # valid dotted-quad IPv4
+    "[2001:db8::1]",  # bracketed IPv6
+    "my-host.example-site.com",  # hyphenated labels
+]
+
+
+@pytest.mark.parametrize("host", _GOOD_HOSTS)
+def test_media_accepts_valid_hosts(host: str):
+    # The pinned accepted set: the grammar must stay wide enough for these.
+    assert MediaItem(kind=MediaKind.IMAGE, url=f"https://{host}/x.png").url == f"https://{host}/x.png"
+    assert MediaItem(kind=MediaKind.LINK, url=f"https://{host}/p").url == f"https://{host}/p"
+
+
+def test_media_rejects_unicode_idn_host():
+    # Unicode/IDN hosts are rejected — the grammar is ASCII-only; IDN callers supply
+    # punycode.
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url="https://münchen.example/x.png")
+    with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
+        MediaItem(kind=MediaKind.LINK, url="https://münchen.example/p")
+
+
 def test_media_rejects_interior_whitespace_and_control_chars():
     # urlsplit strips \t\r\n before parsing, so an embedded newline/tab would let
     # the validated string diverge from the stored one — reject it up front.

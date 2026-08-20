@@ -16,9 +16,9 @@ from typing import Any
 from arq.connections import ArqRedis
 from arq.jobs import Job, JobStatus
 from tai42_contract.app import tai42_app
+from tai42_kit.backend import CallbackSchema, callback_execution
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
-from tai42_backend_arq.callback import CallbackSchema, callback_execution
 from tai42_backend_arq.scheduler import wait_job_result
 from tai42_backend_arq.settings import arq_settings, job_deserializer
 

@@ -11,6 +11,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute
 
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations.managers.base_conversations_manager import (
     BaseConversationsManager,
     DoorFlipRefused,
@@ -120,7 +121,9 @@ def record_redis(monkeypatch) -> FakeRecordRedis:
     """The answer/record store's redis, behind the ops that reach the thread indexes."""
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
-    monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
+    ctx = make_record_client_ctx(fake)
+    monkeypatch.setattr(records_module, "client_ctx", ctx)
+    monkeypatch.setattr(thread_lease_module, "client_ctx", ctx)
     return fake
 
 

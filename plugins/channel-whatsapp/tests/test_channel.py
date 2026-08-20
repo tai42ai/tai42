@@ -9,7 +9,12 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification, ChannelTemplate
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+    ChannelTemplate,
+)
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
@@ -674,7 +679,7 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
 async def test_notify_media_data_image_refused_before_any_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # WhatsApp's link-sourced image send takes a public URL; a data: image is
     # refused loudly BEFORE anything is sent, naming the constraint.
-    with pytest.raises(ChannelDeliveryError, match="data: image URL"):
+    with pytest.raises(ChannelInputError, match="data: image URL"):
         await WhatsAppChannel().notify(
             ChannelNotification(
                 message="Photo.",
@@ -784,6 +789,9 @@ async def test_template_known_contact_keys_on_send_from_number(fake_redis: FakeR
 async def test_channel_advertises_media_and_template_capabilities():
     assert WhatsAppChannel.supports_media_notifications is True
     assert WhatsAppChannel.supports_template_notifications is True
+    # Interactive (tappable options) is not a WhatsApp notify capability here; the
+    # absent flag reads False through the getattr convention.
+    assert getattr(WhatsAppChannel, "supports_interactive_notifications", False) is False
 
 
 # --- Send-failure classification (the caller's retry decision) ----------------
@@ -1059,12 +1067,50 @@ async def test_form_unsupported_schema_raises_before_any_network(
 ):
     bad_schema = {"type": "object", "properties": {"widget": {"type": "object"}}, "required": []}
 
-    with pytest.raises(ChannelDeliveryError, match="'widget'"):
+    with pytest.raises(ChannelInputError, match="'widget'"):
         await WhatsAppChannel().deliver(_form_delivery(schema=bad_schema))
 
     assert not fake_httpx.calls  # no create/publish/send
     assert not fake_redis.store  # no reservation, no flow cache
     assert not fake_redis.events  # not a single Redis write either
+
+
+async def test_validate_form_schema_hook_mirrors_delivery_refusal(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The ask-time hook refuses the reserved ``flow_token`` property (ValueError)
+    # for the same schema the delivery path refuses (ChannelInputError): one rule,
+    # two doors, so a schema the Flow could never carry is rejected before any
+    # state is written rather than persisted and failed at delivery.
+    schema = {"type": "object", "properties": {"flow_token": {"type": "string"}}, "required": []}
+    channel = WhatsAppChannel()
+
+    with pytest.raises(ValueError, match=r"'flow_token'.*reserved"):
+        channel.validate_form_schema(schema, "q")
+
+    with pytest.raises(ChannelInputError, match=r"'flow_token'.*reserved"):
+        await channel.deliver(_form_delivery(schema=schema))
+
+    assert not fake_httpx.calls  # no create/publish/send
+    assert not fake_redis.store  # no reservation, no flow cache
+
+
+async def test_validate_form_schema_hook_refuses_over_long_question(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The Flow body is ``interactive.body.text``, capped by Meta at 1024 chars, so an
+    # over-long question is knowable at ask-time: the hook refuses it (ValueError) up
+    # front — nothing sent, nothing persisted — rather than the delivery path pruning
+    # it after Meta rejects the send.
+    channel = WhatsAppChannel()
+
+    with pytest.raises(ValueError, match="question exceeds"):
+        channel.validate_form_schema(_FORM_SCHEMA, "x" * 1025)
+
+    assert not fake_httpx.calls  # no create/publish/send
+    assert not fake_redis.store  # no reservation, no flow cache
+
+    channel.validate_form_schema(_FORM_SCHEMA, "x" * 1024)  # at the cap: passes the hook
 
 
 async def test_form_create_without_id_raises_and_releases(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):

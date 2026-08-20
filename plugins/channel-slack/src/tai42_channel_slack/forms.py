@@ -14,13 +14,18 @@ a modal answer validates there): ``string`` → ``plain_text_input``,
 ``string``+``enum`` → ``static_select``, ``boolean`` → ``radio_buttons`` (Yes/No →
 ``true``/``false``), ``integer``/``number`` → ``number_input``. Anything else, or a
 value past a Slack cap, raises :class:`FormSchemaError` naming the property — never
-a silently dropped or truncated field.
+a silently dropped or truncated field. A schema/cap violation is a permanent input
+refusal (the medium cannot render it BY NATURE), so :class:`FormSchemaError` is a
+:class:`~tai42_contract.channels.ChannelInputError`, never a retryable delivery
+failure.
 """
 
 from __future__ import annotations
 
 import math
 from typing import Any
+
+from tai42_contract.channels import ChannelInputError
 
 # The message button and the modal it opens.
 FORM_OPEN_ACTION_ID = "tai42_form_open"
@@ -43,8 +48,9 @@ _MAX_STATIC_SELECT_OPTIONS = 100
 _MAX_BUTTON_VALUE_LEN = 2000
 
 
-class FormSchemaError(ValueError):
-    """A form schema (or a submitted value) cannot be mapped to Block Kit."""
+class FormSchemaError(ChannelInputError):
+    """A form schema (or a submitted value) cannot be mapped to Block Kit — a
+    permanent refusal, never a retryable delivery failure."""
 
 
 def _properties(schema: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +170,24 @@ def build_modal_view(interaction_id: str, question: str, schema: dict[str, Any])
         "close": {"type": "plain_text", "text": _CLOSE_LABEL},
         "blocks": blocks,
     }
+
+
+def validate_form_schema(schema: dict[str, Any], question: str) -> None:
+    """Enforce the ask-time-knowable Block Kit caps at ask-time; raise
+    :class:`FormSchemaError` naming the offending property/limit on any violation.
+
+    Covers every limit knowable before delivery: the question-text section cap,
+    the supported property subset, the per-label cap, the static-select option
+    count and per-option text caps, and the modal's 100-block cap (one question
+    section plus one input block per property). The button-value cap depends on
+    the per-send interaction id, not the schema or question, so it stays at
+    delivery."""
+    if len(question) > _MAX_SECTION_TEXT_LEN:
+        raise FormSchemaError(f"form question exceeds {_MAX_SECTION_TEXT_LEN} characters")
+    blocks = build_modal_blocks(schema)
+    # +1 for the question section the modal view prepends before the input blocks.
+    if len(blocks) + 1 > _MAX_MODAL_BLOCKS:
+        raise FormSchemaError(f"form modal exceeds {_MAX_MODAL_BLOCKS} blocks")
 
 
 def build_message_blocks(question: str, interaction_id: str) -> list[dict[str, Any]]:

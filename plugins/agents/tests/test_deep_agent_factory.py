@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, PrivateAttr, TypeAdapter, ValidationError
+from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
+from tai42_kit.llm.runtime import build_agent_input
 
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents.deep_agent import factory
@@ -228,12 +233,27 @@ def test_build_deep_agent_leads_with_system_purge_middleware(monkeypatch: pytest
 def test_build_deep_agent_wires_rolling_cache_mark_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
     # deep_agent honors user_content_kwargs (the mark rides its main user turn), so its
     # main-agent stack carries the rolling-cache-mark middleware too — a per-turn-marked
-    # thread sends one user-side breakpoint at the model call, same as every tools-agent
-    # face.
+    # thread sends one breakpoint at the model call, same as every tools-agent face.
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
     asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     assert any(isinstance(mw, RollingCacheMarkMiddleware) for mw in captured["middleware"])
+
+
+def test_build_deep_agent_pins_main_middleware_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The main agent's stack is order-pinned: system purge clears a stored system message
+    # first, leading-user keeps the thread user-first, rolling-cache-mark rolls the
+    # breakpoint at the call, and the shared tool-error middleware trails last (mirroring
+    # every subagent stack's tool-error tail).
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
+    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    stack = captured["middleware"]
+    assert len(stack) == 4
+    assert isinstance(stack[0], SystemPurgeMiddleware)
+    assert isinstance(stack[1], LeadingUserMiddleware)
+    assert isinstance(stack[2], RollingCacheMarkMiddleware)
+    assert stack[3] is _tool_error_middleware
 
 
 def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -645,3 +665,83 @@ def test_build_deep_agent_no_inline_skills_keeps_skills_none(monkeypatch: pytest
         )
     )
     assert captured["skills"] is None
+
+
+# --- rolling cache mark: two-turn wire proof ---------------------------------
+
+
+class _RecordingChatModel(BaseChatModel):
+    """Returns a fixed message per call and records the exact message list each model
+    call received; ``bind_tools`` is a no-op so deepagents can bind its built-ins."""
+
+    _responses: list[BaseMessage] = PrivateAttr(default_factory=list)
+    _index: int = PrivateAttr(default=0)
+    _seen: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
+
+    def __init__(self, responses: Sequence[BaseMessage], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._responses = list(responses)
+
+    @property
+    def _llm_type(self) -> str:
+        return "recording"
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        self._seen.append(list(messages))
+        message = self._responses[min(self._index, len(self._responses) - 1)]
+        self._index += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Any:
+        return self
+
+
+def _mark_count(messages: list[BaseMessage]) -> int:
+    """Number of messages carrying a ``cache_control`` block (a cache breakpoint)."""
+    return sum(
+        isinstance(m.content, list) and any(isinstance(b, dict) and "cache_control" in b for b in m.content)
+        for m in messages
+    )
+
+
+def test_deep_agent_per_turn_marking_sends_one_breakpoint_on_a_reused_thread() -> None:
+    # Two turns on one thread through the REAL deepagents factory graph (a scripted
+    # fake chat model + in-memory checkpointer/store, no LLM or network): every turn
+    # marks its user message and the marks persist into the reused thread's history.
+    # Without rolling, the second turn's model call would carry two breakpoints (turn-1
+    # and turn-2) and grow unbounded; the rolling-cache-mark middleware on the main
+    # agent's stack strips every older mark at the model call, so each call sends
+    # exactly one — the newest.
+    model = _RecordingChatModel([AIMessage(content="first"), AIMessage(content="second")])
+    kwargs = {"cache_control": {"type": "ephemeral"}}
+    config = {"configurable": {"thread_id": "t-deep-roll"}}
+
+    async def run_two_turns() -> list[BaseMessage]:
+        agent = await build_deep_agent(
+            llm=model,
+            store=InMemoryStore(),
+            checkpointer=InMemorySaver(),
+            tools=[],
+        )
+        await agent.ainvoke(build_agent_input("hi", user_content_kwargs=kwargs), config)
+        await agent.ainvoke(build_agent_input("again", user_content_kwargs=kwargs), config)
+        snapshot = await agent.aget_state(config)
+        return snapshot.values.get("messages", [])
+
+    stored = asyncio.run(run_two_turns())
+
+    # First model call: only the turn-1 user mark exists — inert, one breakpoint.
+    assert _mark_count(model._seen[0]) == 1
+    # Second model call: history holds turn-1 + turn-2 user marks; the older one is
+    # stripped, so the outgoing request carries exactly one breakpoint.
+    second_call = model._seen[1]
+    assert _mark_count(second_call) == 1
+    # The surviving mark is the newest turn's user message, not the older one.
+    user_turns = [m for m in second_call if isinstance(m, HumanMessage)]
+    assert user_turns[-1].content == [{"type": "text", "text": "again", "cache_control": {"type": "ephemeral"}}]
+    assert user_turns[0].content == "hi"
+    # The rewrite is request-scoped: the checkpointed thread still holds both marks,
+    # so the next turn re-rolls from the same history rather than losing the record.
+    assert _mark_count(stored) == 2

@@ -15,7 +15,13 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import ValidationError
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification, ChannelTemplate
+from tai42_contract.channels import (
+    NOTIFICATION_ADDRESS_MAX_CHARS,
+    NOTIFICATION_MESSAGE_MAX_CHARS,
+    ChannelDeliveryError,
+    ChannelNotification,
+    ChannelTemplate,
+)
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_skeleton.app.instance import app
@@ -48,11 +54,12 @@ class IdReturningChannel:
 
 
 class RichChannel:
-    """A channel advertising BOTH richer-notify capabilities via the OPTIONAL
+    """A channel advertising ALL richer-notify capabilities via the OPTIONAL
     class-attribute convention; records every notification it receives."""
 
     supports_media_notifications = True
     supports_template_notifications = True
+    supports_interactive_notifications = True
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
@@ -176,6 +183,62 @@ async def test_template_to_channel_without_capability_is_not_implemented(registe
     assert channel.notifications == []
 
 
+async def test_notify_threads_options_to_a_capable_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("pick one", channel="rich", options=["Item A", "Item B"])
+
+    assert channel.notifications == [ChannelNotification(message="pick one", options=["Item A", "Item B"])]
+
+
+async def test_notify_threads_options_with_media_to_a_capable_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("a card with a list", channel="rich", media=[_IMAGE], options=["Item A"])
+
+    assert channel.notifications == [
+        ChannelNotification(message="a card with a list", media=[_IMAGE], options=["Item A"])
+    ]
+
+
+async def test_options_to_channel_without_capability_is_not_implemented(register_channel):
+    # A channel that does not advertise supports_interactive_notifications refuses the
+    # options send loudly (NotImplementedError → 501) — never a silent text downgrade.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support interactive notifications"):
+        await notify_user("pick one", channel="plain", options=["Item A", "Item B"])
+    assert channel.notifications == []
+
+
+async def test_options_capability_guard_fires_before_the_feed_record(register_channel, sink_redis):
+    # A refused options send leaves NO phantom feed entry: the guard precedes the audience
+    # in-app record, so an audience-addressed options send to an incapable channel writes
+    # nothing.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support interactive notifications"):
+        await notify_user("pick one", channel="plain", options=["Item A"], audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_options_and_template_mutual_exclusion_leaves_no_phantom_feed_entry(register_channel, sink_redis):
+    # options + template both set is refused by the contract's exclusion validator (a
+    # pydantic ValidationError → 400), BEFORE the audience feed record — even on a channel
+    # that advertises both capabilities (so the capability guards pass).
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        await notify_user("x", channel="rich", options=["Item A"], template=_TEMPLATE, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
 async def test_capability_guard_fires_before_the_feed_record(register_channel, sink_redis):
     # A refused rich send must leave NO phantom feed entry: the guard precedes the
     # audience in-app record, so an audience-addressed media send to an incapable
@@ -220,7 +283,7 @@ async def test_mutual_exclusion_refusal_leaves_no_phantom_feed_entry(register_ch
 
 
 async def test_empty_media_list_refusal_leaves_no_phantom_feed_entry(register_channel, sink_redis):
-    # A present-but-empty media list is refused by the contract's _media_non_empty validator
+    # A present-but-empty media list is refused by the contract's _check_media validator
     # (a pydantic ValidationError → 400). Validation precedes the audience feed record, so an
     # audience-addressed refusal writes no phantom entry. The channel advertises media, so the
     # capability guard passes and the empty-list validator is the refusal reached.
@@ -237,14 +300,20 @@ async def test_empty_media_list_refusal_leaves_no_phantom_feed_entry(register_ch
 async def test_media_with_channel_none_rejected(sink_redis):
     # The internal sink stores no rich content, so media with no named channel is a
     # loud client error (→ 400), never a silent drop.
-    with pytest.raises(ValueError, match="media and template require a named channel"):
+    with pytest.raises(ValueError, match="media, template and options require a named channel"):
         await notify_user("photo", media=[_IMAGE])
     assert await notifications_sink.read_notifications() == []
 
 
 async def test_template_with_channel_none_rejected(sink_redis):
-    with pytest.raises(ValueError, match="media and template require a named channel"):
+    with pytest.raises(ValueError, match="media, template and options require a named channel"):
         await notify_user("hi", template=_TEMPLATE)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_options_with_channel_none_rejected(sink_redis):
+    with pytest.raises(ValueError, match="media, template and options require a named channel"):
+        await notify_user("pick one", options=["Item A", "Item B"])
     assert await notifications_sink.read_notifications() == []
 
 
@@ -319,6 +388,116 @@ async def test_channel_none_returns_empty_id_list(sink_redis):
 async def test_channel_none_blank_recipient_rejected(sink_redis, bad_recipient):
     with pytest.raises(ValueError, match="recipient must be a non-empty address"):
         await notify_user("hello", recipient=bad_recipient)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_channel_none_message_at_cap_records(sink_redis):
+    # The sink stores the raw message, so the notification's message cap is enforced on
+    # this path too: a message exactly at the cap is accepted and recorded.
+    at_cap = "x" * NOTIFICATION_MESSAGE_MAX_CHARS
+
+    await notify_user(at_cap)
+
+    records = await notifications_sink.read_notifications()
+    assert len(records) == 1
+    assert records[0]["message"] == at_cap
+
+
+async def test_channel_none_over_cap_message_rejected(sink_redis):
+    # One character past the cap is refused loudly before the write — nothing is recorded,
+    # never an unbounded message in the replayed feed.
+    over_cap = "x" * (NOTIFICATION_MESSAGE_MAX_CHARS + 1)
+
+    with pytest.raises(ValueError, match="message must be at most"):
+        await notify_user(over_cap)
+    assert await notifications_sink.read_notifications() == []
+
+
+# -- recipient & audience length caps: bounded on both paths, both fields --------
+
+
+async def test_channel_none_recipient_at_cap_records(sink_redis):
+    # The sink stores the recipient verbatim, so its address cap is enforced on this
+    # path too: an address exactly at the cap is accepted and recorded.
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+
+    await notify_user("hi", recipient=at_cap)
+
+    records = await notifications_sink.read_notifications()
+    assert records[0]["recipient"] == at_cap
+
+
+async def test_channel_none_over_cap_recipient_rejected(sink_redis):
+    # One character past the cap is refused before the write — never an unbounded
+    # address in the replayed feed record.
+    over_cap = "x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1)
+
+    with pytest.raises(ValueError, match="recipient must be at most"):
+        await notify_user("hi", recipient=over_cap)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_channel_none_audience_at_cap_records(sink_redis):
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+
+    await notify_user("hi", audience=at_cap)
+
+    own = await notifications_sink.read_notifications(audience=at_cap)
+    assert len(own) == 1
+    assert own[0]["audience"] == at_cap
+
+
+async def test_channel_none_over_cap_audience_rejected(sink_redis):
+    # An over-cap audience is refused before the write — never an oversized per-identity
+    # Redis key.
+    over_cap = "x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1)
+
+    with pytest.raises(ValueError, match="audience must be at most"):
+        await notify_user("hi", audience=over_cap)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_channel_recipient_at_cap_forwarded(register_channel):
+    channel = register_channel("fake", RecordingChannel())
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+
+    await notify_user("hi", channel="fake", recipient=at_cap)
+
+    assert channel.notifications == [ChannelNotification(message="hi", recipient=at_cap)]
+
+
+async def test_channel_over_cap_recipient_rejected(register_channel):
+    # On the channel path the recipient rides the ChannelNotification, so the contract's
+    # address cap refuses it (a ValidationError → 400) before the channel is touched.
+    channel = register_channel("fake", RecordingChannel())
+    over_cap = "x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1)
+
+    with pytest.raises(ValidationError, match="address must be at most"):
+        await notify_user("hi", channel="fake", recipient=over_cap)
+    assert channel.notifications == []
+
+
+async def test_channel_audience_at_cap_records_and_sends(register_channel, sink_redis):
+    channel = register_channel("fake", RecordingChannel())
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+
+    await notify_user("hi", channel="fake", audience=at_cap)
+
+    assert channel.notifications == [ChannelNotification(message="hi", recipient=None)]
+    own = await notifications_sink.read_notifications(audience=at_cap)
+    assert len(own) == 1
+    assert own[0]["audience"] == at_cap
+
+
+async def test_channel_over_cap_audience_rejected(register_channel, sink_redis):
+    # The audience cap fires at the top, before the channel is resolved: an over-cap
+    # audience touches neither the channel nor the feed.
+    channel = register_channel("fake", RecordingChannel())
+    over_cap = "x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1)
+
+    with pytest.raises(ValueError, match="audience must be at most"):
+        await notify_user("hi", channel="fake", audience=over_cap)
+    assert channel.notifications == []
     assert await notifications_sink.read_notifications() == []
 
 

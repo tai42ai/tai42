@@ -10,7 +10,13 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification, ChannelTemplate
+from pydantic import ValidationError
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+    ChannelTemplate,
+)
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_web import channel as channel_module
@@ -286,15 +292,127 @@ async def test_notify_without_sender_identity_requires_recipient(fake_redis: Fak
         await WebChannel().notify(make_notification(sender_identity=None, recipient=None))
 
 
-async def test_notify_refuses_media(fake_redis: FakeRedis):
+def _only_media_entry(fake: FakeRedis) -> dict:
+    entries = fake.streams[_TRANSCRIPT_KEY]
+    assert len(entries) == 1
+    assert entries[0][1]["event"] == "chat.media"
+    return json.loads(entries[0][1]["data"])
+
+
+async def test_notify_media_appends_one_media_card(fake_redis: FakeRedis):
+    # A media notification lands as ONE chat.media card carrying the message text, the
+    # image items, and its minted id — no separate chat.message entry.
+    ids = await WebChannel().notify(
+        ChannelNotification(
+            message="see this",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png", caption="a pattern")],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["id"] == ids[0]
+    assert payload["direction"] == "out"
+    assert payload["text"] == "see this"
+    assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
+    assert "options" not in payload
+
+
+async def test_notify_links_only_rides_the_media_array_as_a_card_attachment(fake_redis: FakeRedis):
+    # A link item rides the frame's media array as a card link element (the page renders
+    # it as a safe anchor); the body is the message unchanged — no appended link lines.
+    # A links-only notification therefore still lands as a chat.media frame WITH media
+    # present, so the widget's at-least-one-of media/options contract holds.
+    await WebChannel().notify(
+        ChannelNotification(
+            message="see this",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[MediaItem(kind=MediaKind.LINK, url="https://example.com/a", caption="Item A")],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["text"] == "see this"
+    assert payload["media"] == [{"kind": "link", "url": "https://example.com/a", "caption": "Item A"}]
+
+
+async def test_notify_mixed_media_rides_the_array_in_order(fake_redis: FakeRedis):
+    # Every media item rides the frame's array in the order it was given — an image as
+    # an inline picture, a link as a card link element.
+    await WebChannel().notify(
+        ChannelNotification(
+            message="see this",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[
+                MediaItem(kind=MediaKind.LINK, url="https://example.com/a", caption="Item A"),
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png"),
+            ],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["media"] == [
+        {"kind": "link", "url": "https://example.com/a", "caption": "Item A"},
+        {"kind": "image", "url": "https://cdn.example/p.png"},
+    ]
+
+
+async def test_notify_refuses_a_data_image(fake_redis: FakeRedis):
+    # The page renders an image only from an absolute https source; a data: URI is
+    # refused loudly and nothing is written.
     notification = ChannelNotification(
         message="see this",
         recipient=VISITOR_ID,
         sender_identity=IDENTITY,
-        media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png")],
+        media=[MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA")],
     )
-    with pytest.raises(ChannelDeliveryError, match="plain text only"):
+    with pytest.raises(ChannelInputError, match="data: image"):
         await WebChannel().notify(notification)
+    assert _TRANSCRIPT_KEY not in fake_redis.streams
+
+
+async def test_notify_options_appends_a_card_with_options(fake_redis: FakeRedis):
+    # A text-only-with-options notification also lands as ONE chat.media card.
+    ids = await WebChannel().notify(
+        ChannelNotification(
+            message="pick one",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            options=["Item A", "Item B"],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["id"] == ids[0]
+    assert payload["text"] == "pick one"
+    assert payload["options"] == ["Item A", "Item B"]
+    assert "media" not in payload
+
+
+async def test_notify_options_and_media_appends_a_card_with_both(fake_redis: FakeRedis):
+    await WebChannel().notify(
+        ChannelNotification(
+            message="a card with a list",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png")],
+            options=["Item A"],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png"}]
+    assert payload["options"] == ["Item A"]
+
+
+async def test_notify_options_and_template_rejected_at_contract(fake_redis: FakeRedis):
+    # The contract refuses options+template BEFORE the channel is reached.
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ChannelNotification(
+            message="x",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            options=["Item A"],
+            template=ChannelTemplate(name="welcome", language="en"),
+        )
 
 
 async def test_notify_refuses_template(fake_redis: FakeRedis):
@@ -304,5 +422,5 @@ async def test_notify_refuses_template(fake_redis: FakeRedis):
         sender_identity=IDENTITY,
         template=ChannelTemplate(name="welcome", language="en"),
     )
-    with pytest.raises(ChannelDeliveryError, match="plain text only"):
+    with pytest.raises(NotImplementedError, match="no vendor templates"):
         await WebChannel().notify(notification)

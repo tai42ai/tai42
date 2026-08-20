@@ -1,5 +1,5 @@
-"""RollingCacheMarkMiddleware: keep only the newest user-side ``cache_control``
-breakpoint at the model call, stripping every older mark from replayed history.
+"""RollingCacheMarkMiddleware: keep only the newest ``cache_control`` breakpoint
+at the model call, stripping every older mark from replayed history.
 
 The transform is pinned directly and through the ``wrap_model_call`` /
 ``awrap_model_call`` hooks, which prove the rewrite is request-scoped: the handler
@@ -75,6 +75,27 @@ def test_non_text_blocks_are_untouched():
     assert rolled is not None
     # The image block is not a bare text block, so it stays a dict, mark removed.
     assert rolled[0].content == [{"type": "image", "source": {"url": "x"}}]
+    assert rolled[1] is newest
+
+
+def test_multi_block_marked_message_collapses_only_the_bare_text_block():
+    # An earlier marked message whose content holds a marked text block ALONGSIDE a
+    # sibling block: stripping drops the mark per block, the bare text block collapses
+    # to its plain string, the sibling is left verbatim, and the multi-block content
+    # stays a list — only a lone surviving string collapses to a bare string.
+    older = HumanMessage(
+        content=[
+            {"type": "text", "text": "lead", "cache_control": _EPHEMERAL},
+            {"type": "text", "text": "tail"},
+        ],
+        id="1",
+    )
+    newest = _marked("newest", "2")
+
+    rolled = roll_cache_marks([older, newest])
+
+    assert rolled is not None
+    assert rolled[0].content == ["lead", {"type": "text", "text": "tail"}]
     assert rolled[1] is newest
 
 

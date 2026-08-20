@@ -25,6 +25,7 @@ from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import target_config as target_config_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -186,6 +187,7 @@ def env(monkeypatch):
     monkeypatch.setattr(ledger_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(target_config_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
     # Stub the execution-identity authorization seam so the bridge is tested in isolation.
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
 

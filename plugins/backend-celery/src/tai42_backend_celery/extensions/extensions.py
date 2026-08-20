@@ -26,11 +26,11 @@ from pydantic_core import to_jsonable_python
 from redbeat import RedBeatSchedulerEntry
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.backend import CallbackSchema, prepare_backend_kwargs
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_celery.core.app import celery_app
-from tai42_backend_celery.core.callback import CallbackSchema, prepare_backend_kwargs
 from tai42_backend_celery.core.settings import celery_settings
 from tai42_backend_celery.core.signatures import add_signature_params
 from tai42_backend_celery.core.tasks import CELERY_SCHEDULE_OPTS, CELERY_TASK_OPTS, callback_task, tool_execution

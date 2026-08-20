@@ -148,12 +148,16 @@ class FakeRecordRedis:
         await asyncio.sleep(0)
         return value
 
-    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False) -> bool | None:
+    async def set(
+        self, key: str, value: str, ex: int | None = None, px: int | None = None, nx: bool = False
+    ) -> bool | None:
         if nx and key in self._strings:
             return None
         self._strings[key] = value
         if ex is not None:
             self.ttl_ms[key] = ex * 1000
+        if px is not None:
+            self.ttl_ms[key] = px
         return True
 
     async def getdel(self, key: str) -> str | None:
@@ -383,6 +387,17 @@ class FakeRecordRedis:
             self._strings[open_key] = new_hash
             self.ttl_ms[open_key] = ttl * 1000
             return 1
+        if "conversations:thread_lease:refresh" in script:
+            token, lease_ms = argv[0], int(argv[1])
+            if self._strings.get(key) == token:
+                self.ttl_ms[key] = lease_ms
+                return 1
+            return 0
+        if "conversations:thread_lease:release" in script:
+            token = argv[0]
+            if self._strings.get(key) == token:
+                return await self.delete(key)
+            return 0
         h = self._hashes.get(key)
         status = h.get("delivery_status") if h else None
         if "conversations:record:create" in script:

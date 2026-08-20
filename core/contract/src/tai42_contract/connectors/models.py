@@ -45,7 +45,8 @@ UUID_RE = re.compile(
 ALIAS_MAX_LEN = 32
 # Alias is user-typed and baked into manifest titles + tool prefixes:
 # tighter than a slug (must start alphanumeric, hyphens allowed inside).
-# The UI Zod schema mirrors this regex.
+# The server is the sole authority on this shape: an out-of-shape alias is
+# refused here (422).
 ALIAS_RE = re.compile(rf"^[a-z0-9][a-z0-9_-]{{0,{ALIAS_MAX_LEN - 1}}}$")
 
 

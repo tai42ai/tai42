@@ -124,8 +124,8 @@ class TestBuildAgentAndInput:
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
         # The system-purge middleware leads (state never carries a system message),
         # the context-overflow middleware is threaded through, the rolling-cache-mark
-        # middleware keeps one user-side breakpoint at the call, and the tool-error
-        # middleware is appended so a tool-logic failure never aborts the loop.
+        # middleware keeps one breakpoint at the call, and the tool-error middleware is
+        # appended so a tool-logic failure never aborts the loop.
         assert isinstance(captured["create"]["middleware"][0], bta.SystemPurgeMiddleware)
         assert captured["create"]["middleware"][1] == "mw"
         assert any(isinstance(mw, bta.RollingCacheMarkMiddleware) for mw in captured["create"]["middleware"])
@@ -270,6 +270,57 @@ class TestAinvoke:
         }
         with pytest.raises(JsonSchemaValidationError):
             asyncio.run(bta.ainvoke_tools_agent("sys", ["hi"], [_tool("t")], response_format=schema))
+
+
+class TestUserContentKwargsReachTheInvokeCall:
+    def test_wrapper_forwards_user_content_kwargs_onto_the_last_invoke_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fake only the compile — the real ``_build_agent_and_input`` build and message
+        # forwarding run — and capture the messages the wrapper hands to agent.ainvoke.
+        # This crosses the ainvoke_tools_agent -> _build_agent_and_input ->
+        # build_agent_input hop end to end, proving the mark reaches the model call and
+        # not just the builder the other tests stop at.
+        captured: dict[str, Any] = {}
+
+        fake_agent = MagicMock()
+
+        async def fake_ainvoke(messages: Any, config: Any) -> Any:
+            captured["messages"] = messages
+            return {"messages": []}
+
+        fake_agent.ainvoke = fake_ainvoke
+        # A fresh thread reports empty state, so the turn-start repair is a no-op.
+        fake_agent.aget_state = AsyncMock(return_value=SimpleNamespace(values={}))
+
+        async def fake_compile(*args: Any, **kwargs: Any) -> Any:
+            return fake_agent
+
+        monkeypatch.setattr(bta, "_compile_tools_agent", fake_compile)
+        monkeypatch.setattr(bta, "build_user_output", lambda s: "")
+        monkeypatch.setattr(bta, "aggregate_usage", lambda s: CallUsage(0, 0, None))
+
+        asyncio.run(
+            bta.ainvoke_tools_agent(
+                "sys",
+                ["first", "last"],
+                [],
+                config={"configurable": {"thread_id": "t-hop"}},
+                user_content_kwargs={"cache_control": {"type": "ephemeral"}},
+            )
+        )
+
+        # The final user turn reaching the invoke carries the content-block mark; the
+        # earlier turn stays a plain string.
+        assert captured["messages"] == {
+            "messages": [
+                {"role": "user", "content": "first"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "last", "cache_control": {"type": "ephemeral"}}],
+                },
+            ]
+        }
 
 
 class TestAstream:

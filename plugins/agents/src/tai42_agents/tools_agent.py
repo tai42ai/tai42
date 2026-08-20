@@ -30,7 +30,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.agent.events import StreamEvent, StructuredFinal
@@ -141,6 +141,13 @@ class ToolsAgentInput(BaseModel):
     checkpoint_provider: str | None = None
     llm_kwargs: dict[str, Any] | None = None
     langgraph_config: dict[str, Any] | None = None
+
+    @field_validator("system_content_kwargs", "user_content_kwargs")
+    @classmethod
+    def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """An empty dict carries no content-block keys — normalize {} to None so it
+        reads as unset, matching the builders that treat {} as no mark."""
+        return value or None
 
 
 @tai42_app.agents.agent("tools_agent", tags={"agents"})

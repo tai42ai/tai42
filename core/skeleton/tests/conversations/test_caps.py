@@ -9,8 +9,11 @@ import asyncio
 import pytest
 
 from tai42_skeleton.conversations import caps as caps_module
-from tai42_skeleton.conversations.caps import AddressAdmission, ThreadQueueOverflowError, TurnCaps
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
+from tai42_skeleton.conversations.caps import AddressAdmission, ThreadBusyError, ThreadQueueOverflowError, TurnCaps
 from tai42_skeleton.conversations.settings import ConversationsSettings
+
+from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
 @pytest.fixture
@@ -287,6 +290,128 @@ async def test_a_reload_that_lowers_the_ceiling_counts_the_turns_already_running
     let_finish.set()
     await asyncio.gather(*first, third)
     assert peak == 2
+
+
+# -- the sync-door acquisition bound ------------------------------------------------------
+#
+# A live-caller sync door bounds the WHOLE acquisition (local FIFO lock + cross-worker lease +
+# global gate); a background turn passes no bound and waits unbounded.
+
+
+async def test_sync_door_bound_refuses_a_held_local_lock_promptly():
+    # In-memory (the lease is a no-op), so the ONLY thing holding a second caller is this
+    # worker's FIFO lock. Red half: an UNBOUNDED waiter hangs behind the held lock. Green half:
+    # a bounded waiter refuses PROMPTLY with ThreadBusyError, its FIFO reservation given back.
+    caps = TurnCaps(ConversationsSettings())
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        caps.reserve_thread_slot("T")
+        async with caps.run_reserved("T"):
+            held.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await held.wait()
+
+    # Red half: with no bound the second caller never resolves while the lock is held.
+    async def unbounded_waiter() -> None:
+        caps.reserve_thread_slot("T")
+        async with caps.run_reserved("T"):
+            pass
+
+    waiter_task = asyncio.create_task(unbounded_waiter())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter_task), timeout=0.1)
+
+    # Green half: the bound turns that same wait into a prompt, loud refusal.
+    before = caps._thread_waiters.get("T", 0)
+    caps.reserve_thread_slot("T")
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        async with caps.run_reserved("T", acquire_timeout_seconds=0.05):
+            pass
+    # The loser's FIFO reservation was released exactly once — back to the pre-attempt count.
+    assert caps._thread_waiters.get("T", 0) == before
+
+    # The holder was undisturbed; once it releases, a bounded caller succeeds.
+    waiter_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_task
+    release.set()
+    await holder_task
+    caps.reserve_thread_slot("T")
+    async with caps.run_reserved("T", acquire_timeout_seconds=0.05):
+        pass
+
+
+@pytest.fixture
+def fake_lease(monkeypatch) -> tuple[FakeRecordRedis, ConversationsSettings]:
+    """A shared fake redis wired as the conversations store, so a lease key can be pre-set
+    under a FOREIGN token to stand in for a sibling worker holding the thread."""
+    monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
+    fake = FakeRecordRedis()
+    monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
+    return fake, ConversationsSettings()
+
+
+async def test_sync_door_bound_refuses_a_foreign_cross_worker_lease(fake_lease):
+    # A sibling worker holds the thread's Redis lease under its own token. A bounded acquisition
+    # refuses with ThreadBusyError WITHIN the bound, and the foreign lease key is left untouched.
+    fake, settings = fake_lease
+    key = settings.thread_lease_key("T")
+    await fake.set(key, "foreign-token", px=120_000, nx=True)
+
+    caps = TurnCaps(settings)
+    caps.reserve_thread_slot("T")
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        async with caps.run_reserved("T", acquire_timeout_seconds=0.1):
+            pass
+    assert loop.time() - started < 1.0
+    # The foreign lease is untouched (its token never matched), and the reservation is released.
+    assert fake._strings.get(key) == "foreign-token"
+    assert caps._thread_waiters.get("T", 0) == 0
+
+
+async def test_sync_door_bound_never_arms_the_turn_body():
+    # The bound covers ACQUISITION only: on a free thread a tiny bound must not fire even when
+    # the body runs far longer than it — a HITL pause inside the turn is never cut short.
+    caps = TurnCaps(ConversationsSettings())
+    caps.reserve_thread_slot("T")
+    async with caps.run_reserved("T", acquire_timeout_seconds=0.05):
+        await asyncio.sleep(0.2)
+
+
+async def test_background_turn_waits_unbounded_behind_a_held_lock():
+    # The background turn caller passes no bound: it waits behind an in-flight turn and completes
+    # when the holder releases — never a ThreadBusyError.
+    caps = TurnCaps(ConversationsSettings())
+    held = asyncio.Event()
+    release = asyncio.Event()
+    done = asyncio.Event()
+
+    async def holder() -> None:
+        caps.reserve_thread_slot("T")
+        async with caps.run_reserved("T"):
+            held.set()
+            await release.wait()
+
+    async def waiter() -> None:
+        caps.reserve_thread_slot("T")
+        async with caps.run_reserved("T"):
+            done.set()
+
+    holder_task = asyncio.create_task(holder())
+    await held.wait()
+    waiter_task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.1)
+    assert not done.is_set()  # still waiting, unbounded, no raise
+    release.set()
+    await asyncio.gather(holder_task, waiter_task)
+    assert done.is_set()
 
 
 def test_reconfigure_re_rates_a_live_bucket(monkeypatch):

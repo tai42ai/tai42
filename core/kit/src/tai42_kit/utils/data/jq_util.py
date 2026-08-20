@@ -8,6 +8,20 @@ from pydantic_settings import SettingsConfigDict
 
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
+# Guard wrapper that seals the process environment out of every compiled
+# expression: ``env`` is shadowed by a builtin that raises when called (it cannot
+# be substring-scanned — ``.env`` and ``{env: …}`` are legitimate), and ``$ENV``
+# is bound to an empty object as the defense-in-depth floor. ``$ENV`` itself is a
+# literal 4-char token with no splicing, so the caller rejects it up front with
+# zero false negatives. The substring reject over-rejects (false positive) an
+# expression that merely contains ``$ENV`` inside a string literal, key, or
+# comment — a loud refusal, the correct bias for a security gate.
+_GUARD_PREAMBLE = (
+    'def env: error("jq: the env builtin is disabled '
+    '(process environment is not readable from expressions)"); '
+    "{} as $ENV | ("
+)
+
 
 @lru_cache(maxsize=512)
 def get_compiled_jq(expression: str):
@@ -15,7 +29,12 @@ def get_compiled_jq(expression: str):
     # (and the utils.data namespace re-exporting it) stays importable without it.
     import jq
 
-    return jq.compile(expression)
+    if "$ENV" in expression:
+        raise ValueError("jq: $ENV is disabled (process environment is not readable from expressions)")
+    # Raw compile first so a syntax error reports the author's own line/column;
+    # the ``\n)`` closes the preamble paren past any trailing line comment.
+    jq.compile(expression)
+    return jq.compile(_GUARD_PREAMBLE + expression + "\n)")
 
 
 class JqSettings(TaiBaseSettings):
@@ -31,9 +50,20 @@ def jq_settings() -> JqSettings:
     return JqSettings()
 
 
-async def run_jq_first(expression: str, payload: Any) -> Any:
+# Sentinel distinguishing "no default supplied" from a caller passing ``None`` as
+# the default (``None`` is a legitimate empty-pipeline substitute).
+_NO_DEFAULT = object()
+
+
+async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFAULT) -> Any:
     """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
     thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
+
+    On an empty pipeline (``.first()`` raises ``StopIteration``, which cannot cross
+    the ``to_thread`` future boundary so it is converted in the worker thread):
+    returns ``default`` when one was supplied, else raises ``ValueError`` — never
+    the opaque ``RuntimeError``, and never silently ``None`` (an empty pipeline is
+    distinct from a real ``None`` result).
 
     Honest limitation: ``asyncio.to_thread`` cannot kill the C evaluation. On
     timeout the worker thread is abandoned and keeps burning CPU until it
@@ -42,8 +72,17 @@ async def run_jq_first(expression: str, payload: Any) -> Any:
     """
     program = get_compiled_jq(expression)
     timeout = jq_settings().timeout_seconds
+
+    def _run() -> Any:
+        try:
+            return program.input(payload).first()
+        except StopIteration:
+            if default is _NO_DEFAULT:
+                raise ValueError(f"jq expression produced no output (empty pipeline): {expression!r}") from None
+            return default
+
     try:
-        return await asyncio.wait_for(asyncio.to_thread(lambda: program.input(payload).first()), timeout)
+        return await asyncio.wait_for(asyncio.to_thread(_run), timeout)
     except TimeoutError as exc:
         raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
 

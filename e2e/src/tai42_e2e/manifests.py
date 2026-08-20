@@ -806,6 +806,12 @@ BRIDGE_WHATSAPP_WABA_ID = "waba000111000111"
 BRIDGE_MAX_CONCURRENT_TURNS = 4
 BRIDGE_PER_ADDRESS_TURNS_PER_HOUR = 5
 
+# Live-caller sync-door acquire bound, pinned LOW: a bounded door contending for a thread an
+# in-flight turn on the sibling worker still holds refuses with a fast, deterministic
+# ThreadBusyError (503) instead of waiting out the 30s default. Only fires under contention —
+# an uncontended door acquires immediately regardless of this value.
+BRIDGE_SYNC_DOOR_WAIT_SECONDS = 2
+
 
 def _bridge_twilio_env(res: StackResources, *, real: bool) -> dict[str, str]:
     if real:
@@ -936,6 +942,8 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     # Cost caps pinned low: global in-flight-turn ceiling and per-address per-hour turn rate.
     env["CONVERSATIONS_MAX_CONCURRENT_TURNS"] = str(BRIDGE_MAX_CONCURRENT_TURNS)
     env["CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR"] = str(BRIDGE_PER_ADDRESS_TURNS_PER_HOUR)
+    # Sync-door acquire bound pinned low so a cross-worker contended door refuses fast.
+    env["CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS"] = str(BRIDGE_SYNC_DOOR_WAIT_SECONDS)
     # Loopback callbacks share one 127.0.0.1 bucket; pin the limiter windows high so test
     # volume never trips it.
     env["TAI_RATE_LIMIT_FAMILIES__INTERACTIONS_CALLBACK__LIMIT"] = "100000"

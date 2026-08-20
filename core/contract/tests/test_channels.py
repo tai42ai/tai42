@@ -41,6 +41,18 @@ def test_delivery_error_is_a_distinct_exception_type():
         raise ChannelDeliveryError("send rejected")
 
 
+def test_input_error_is_distinct_from_delivery_error():
+    from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
+
+    assert issubclass(ChannelInputError, Exception)
+    # NOT a ChannelDeliveryError: a permanent input refusal must never be caught by a
+    # delivery-failure handler and mapped to a retryable 502.
+    assert not issubclass(ChannelInputError, ChannelDeliveryError)
+    assert not issubclass(ChannelDeliveryError, ChannelInputError)
+    with pytest.raises(ChannelInputError):
+        raise ChannelInputError("cannot render a data: image URL")
+
+
 def test_delivery_error_defaults_to_non_retryable():
     from tai42_contract.channels import ChannelDeliveryError
 
@@ -144,6 +156,17 @@ def test_notification_rejects_blank_message(blank: str):
         ChannelNotification(message=blank)
 
 
+def test_notification_message_capped():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import NOTIFICATION_MESSAGE_MAX_CHARS, ChannelNotification
+
+    at_cap = "x" * NOTIFICATION_MESSAGE_MAX_CHARS
+    assert ChannelNotification(message=at_cap).message == at_cap
+    with pytest.raises(ValidationError, match="at most"):
+        ChannelNotification(message="x" * (NOTIFICATION_MESSAGE_MAX_CHARS + 1))
+
+
 def test_notification_recipient_defaults_to_none_and_accepts_an_address():
     from tai42_contract.channels import ChannelNotification
 
@@ -176,6 +199,30 @@ def test_notification_sender_identity_rejects_empty_when_present(empty: str):
 
     with pytest.raises(ValidationError, match="non-empty address"):
         ChannelNotification(message="hi", sender_identity=empty)
+
+
+def test_notification_recipient_capped():
+    # recipient is a short routing value that persists into the replayed record, so it
+    # is length-capped just as the message is.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import NOTIFICATION_ADDRESS_MAX_CHARS, ChannelNotification
+
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+    assert ChannelNotification(message="hi", recipient=at_cap).recipient == at_cap
+    with pytest.raises(ValidationError, match="address must be at most"):
+        ChannelNotification(message="hi", recipient="x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1))
+
+
+def test_notification_sender_identity_capped():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import NOTIFICATION_ADDRESS_MAX_CHARS, ChannelNotification
+
+    at_cap = "x" * NOTIFICATION_ADDRESS_MAX_CHARS
+    assert ChannelNotification(message="hi", sender_identity=at_cap).sender_identity == at_cap
+    with pytest.raises(ValidationError, match="address must be at most"):
+        ChannelNotification(message="hi", sender_identity="x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1))
 
 
 def test_delivery_model_is_frozen():
@@ -301,6 +348,62 @@ def test_notification_media_rejects_present_but_empty_list():
         ChannelNotification(message="hi", media=[])
 
 
+def test_notification_media_over_max_items_raises():
+    # The item-count cap mirrors InteractionRequest — one notification cannot fan out an
+    # unbounded media list into the durable record and the frame it replays in.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import MEDIA_MAX_ITEMS, MediaItem, MediaKind
+
+    items = [MediaItem(kind=MediaKind.IMAGE, url=f"https://host/{i}.png") for i in range(MEDIA_MAX_ITEMS + 1)]
+    with pytest.raises(ValidationError, match=f"at most {MEDIA_MAX_ITEMS} items"):
+        ChannelNotification(message="hi", media=items)
+
+
+def test_notification_media_at_max_items_accepted():
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import MEDIA_MAX_ITEMS, MediaItem, MediaKind
+
+    items = [MediaItem(kind=MediaKind.IMAGE, url=f"https://host/{i}.png") for i in range(MEDIA_MAX_ITEMS)]
+    notification = ChannelNotification(message="hi", media=items)
+    assert notification.media is not None
+    assert len(notification.media) == MEDIA_MAX_ITEMS
+
+
+def test_notification_media_total_uri_budget_raises():
+    # Each item is within the per-item data: cap, but the summed url text exceeds the
+    # per-notification MEDIA_TOTAL_URI_CHARS budget.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import MEDIA_DATA_URI_MAX_CHARS, MEDIA_TOTAL_URI_CHARS, MediaItem, MediaKind
+
+    per_item = "data:image/png;base64," + "A" * 400_000
+    assert len(per_item) <= MEDIA_DATA_URI_MAX_CHARS
+    items = [MediaItem(kind=MediaKind.IMAGE, url=per_item) for _ in range(3)]
+    assert sum(len(item.url) for item in items) > MEDIA_TOTAL_URI_CHARS
+    with pytest.raises(ValidationError, match=f"total url length must be at most {MEDIA_TOTAL_URI_CHARS}"):
+        ChannelNotification(message="hi", media=items)
+
+
+def test_notification_media_total_uri_budget_at_cap_accepted():
+    # The total budget is a strict ``>``; a list summing to EXACTLY MEDIA_TOTAL_URI_CHARS
+    # is accepted (guards a ``>`` -> ``>=`` regression).
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.interactions.models import MEDIA_TOTAL_URI_CHARS, MediaItem, MediaKind
+
+    prefix = "data:image/png;base64,"
+    half = MEDIA_TOTAL_URI_CHARS // 2
+    url_a = prefix + "A" * (half - len(prefix))
+    url_b = prefix + "B" * (MEDIA_TOTAL_URI_CHARS - half - len(prefix))
+    items = [MediaItem(kind=MediaKind.IMAGE, url=url_a), MediaItem(kind=MediaKind.IMAGE, url=url_b)]
+    assert sum(len(item.url) for item in items) == MEDIA_TOTAL_URI_CHARS
+    notification = ChannelNotification(message="hi", media=items)
+    assert notification.media is not None
+    assert len(notification.media) == 2
+
+
 def test_template_roundtrips_on_a_notification():
     from tai42_contract.channels import ChannelNotification, ChannelTemplate
 
@@ -358,6 +461,77 @@ def test_notification_media_and_template_are_mutually_exclusive():
         )
 
 
+def test_notification_accepts_options():
+    from tai42_contract.channels import ChannelNotification
+
+    notification = ChannelNotification(message="pick one", options=["Item A", "Item B"])
+    assert notification.options == ["Item A", "Item B"]
+    # Absent by default; freeform text needs no options.
+    assert ChannelNotification(message="hi").options is None
+
+
+def test_notification_options_rejects_present_but_empty_list():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="non-empty list"):
+        ChannelNotification(message="hi", options=[])
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_notification_options_rejects_a_blank_option(blank: str):
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="each option must be a non-blank string"):
+        ChannelNotification(message="hi", options=["Item A", blank])
+
+
+def test_notification_options_capped():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import NOTIFICATION_OPTIONS_MAX, ChannelNotification
+
+    ok = [f"Item {n}" for n in range(NOTIFICATION_OPTIONS_MAX)]
+    assert ChannelNotification(message="hi", options=ok).options == ok
+    with pytest.raises(ValidationError, match=f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries"):
+        ChannelNotification(message="hi", options=[*ok, "one too many"])
+
+
+def test_notification_option_length_capped():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import NOTIFICATION_OPTION_MAX_CHARS, ChannelNotification
+
+    at_cap = "x" * NOTIFICATION_OPTION_MAX_CHARS
+    assert ChannelNotification(message="hi", options=[at_cap]).options == [at_cap]
+    with pytest.raises(ValidationError, match="at most"):
+        ChannelNotification(message="hi", options=["x" * (NOTIFICATION_OPTION_MAX_CHARS + 1)])
+
+
+def test_notification_options_and_template_are_mutually_exclusive():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification, ChannelTemplate
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ChannelNotification(
+            message="both set",
+            options=["Item A"],
+            template=ChannelTemplate(name="status_update", language="en_US"),
+        )
+
+
+def test_notification_options_may_combine_with_media():
+    from tai42_contract.channels import ChannelNotification
+
+    notification = ChannelNotification(message="a card with a list", media=[_image_item()], options=["Item A"])
+    assert notification.media == [_image_item()]
+    assert notification.options == ["Item A"]
+
+
 def test_channel_capability_flags_are_an_optional_getattr_convention():
     from tai42_contract.channels import Channel
 
@@ -365,6 +539,7 @@ def test_channel_capability_flags_are_an_optional_getattr_convention():
     # class-level default, so a channel that sets them opts in explicitly.
     assert not hasattr(Channel, "supports_media_notifications")
     assert not hasattr(Channel, "supports_template_notifications")
+    assert not hasattr(Channel, "supports_interactive_notifications")
 
     class _Rich(Channel):
         supports_media_notifications = True
@@ -400,6 +575,33 @@ def test_capability_flags_do_not_tighten_structural_channel_check():
     assert not hasattr(text_only, "supports_media_notifications")
     assert getattr(text_only, "supports_media_notifications", False) is False
     assert getattr(text_only, "supports_template_notifications", False) is False
+
+
+def test_validate_form_schema_hook_is_optional_and_does_not_tighten_the_check():
+    from tai42_contract.channels import Channel, ChannelDelivery, ChannelNotification
+
+    # ``validate_form_schema`` follows the capability-flag convention: an optional
+    # member, NOT a Protocol method, so a channel that omits it is still a Channel
+    # and getattr yields None; a channel that declares it is read the same way.
+    class _NoHook:
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            return None
+
+        async def notify(self, notification: ChannelNotification) -> list[str]:
+            return []
+
+    class _WithHook(_NoHook):
+        def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
+            raise ValueError("nope")
+
+    no_hook = _NoHook()
+    with_hook = _WithHook()
+    assert isinstance(no_hook, Channel)
+    assert isinstance(with_hook, Channel)
+    assert getattr(no_hook, "validate_form_schema", None) is None
+    assert getattr(with_hook, "validate_form_schema", None) is not None
+    with pytest.raises(ValueError, match="nope"):
+        with_hook.validate_form_schema({"type": "object"}, "q")
 
 
 def test_channel_delivery_shape_is_unchanged():

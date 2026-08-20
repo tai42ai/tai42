@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
@@ -210,6 +210,13 @@ class VotingAgentInput(BaseModel):
     judge_langgraph_config: dict[str, Any] | None = None
     voter_langgraph_config: dict[str, Any] | None = None
     user_content_kwargs: dict[str, Any] | None = None
+
+    @field_validator("user_content_kwargs")
+    @classmethod
+    def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """An empty dict carries no content-block keys — normalize {} to None so it
+        reads as unset, matching the builders that treat {} as no mark."""
+        return value or None
 
 
 @tai42_app.agents.agent("voting_agent", tags={"agents"})

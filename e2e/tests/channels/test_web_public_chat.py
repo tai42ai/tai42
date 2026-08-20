@@ -36,6 +36,7 @@ from ._support import (
     find_pending,
     is_pending,
     post_callback,
+    tool_content_text,
 )
 
 pytestmark = pytest.mark.backendless
@@ -286,6 +287,108 @@ async def test_form_over_web_delivers_the_schema_and_answers_with_a_typed_dict(
     settled = await case.web.frames()
     assert any(event == "chat.answered" and data["answer"] == good_answer for event, data in settled)
     assert count_correlation_keys(stack, case.correlation_prefix) == baseline_keys
+
+
+async def _notify_over_web(case: WebChannelCase, message: str, **extra: object) -> str:
+    """Drive ``notify_user`` over the web channel on replica A, addressed at this case's
+    visitor pair, and return the tool's confirmation text. Fire-and-forget: it returns as
+    soon as the transcript entry is written, no interaction and no reply."""
+    async with case.stack.mcp(port=case.stack.port_a) as mcp:
+        result = await mcp.call_tool(
+            "notify_user",
+            {"message": message, "channel": case.name, "recipient": case.default_recipient, **extra},
+        )
+    return tool_content_text(result)
+
+
+async def test_notify_media_card_over_web_replays_on_the_stream(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    message = uniq("web_card")
+    image_url = "https://example.com/a.png"
+
+    confirmation = await _notify_over_web(
+        case, message, media=[{"kind": "image", "url": image_url, "caption": "a pattern"}]
+    )
+    assert "notification sent via 'web'" in confirmation
+
+    def _is_card(event: str, data: dict) -> bool:
+        return event == "chat.media" and data.get("text") == message
+
+    frames = await case.web.frames(until=_is_card)
+    card = next(data for event, data in frames if _is_card(event, data))
+    # The card is an agent turn (``out``) carrying the text and the https image item; a
+    # media notification never leaves a separate chat.message entry behind.
+    assert card["direction"] == "out"
+    assert card["media"] == [{"kind": "image", "url": image_url, "caption": "a pattern"}]
+    assert "options" not in card
+
+    # Replay after reconnect: a fresh stream open replays the same card verbatim off the
+    # durable transcript backlog — the new message shape survives reconnect/replay.
+    replayed = await case.web.frames()
+    assert any(
+        event == "chat.media" and data["text"] == message and data["media"] == card["media"] for event, data in replayed
+    )
+
+
+async def test_notify_link_only_over_web_replays_on_the_stream(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    message = uniq("web_link_card")
+    link_url = "https://example.com/a"
+
+    confirmation = await _notify_over_web(case, message, media=[{"kind": "link", "url": link_url, "caption": "Item A"}])
+    assert "notification sent via 'web'" in confirmation
+
+    def _is_card(event: str, data: dict) -> bool:
+        return event == "chat.media" and data.get("text") == message
+
+    frames = await case.web.frames(until=_is_card)
+    card = next(data for event, data in frames if _is_card(event, data))
+    # A links-only notification lands as a chat.media card carrying the link item on its
+    # media array (a safe outbound link element the page renders as an anchor) — never
+    # folded into the body text, so the card holds media and the reducer's
+    # at-least-one-of media/options contract holds.
+    assert card["direction"] == "out"
+    assert card["media"] == [{"kind": "link", "url": link_url, "caption": "Item A"}]
+    assert "options" not in card
+
+    # Replay after reconnect: a fresh stream open replays the same card verbatim off the
+    # durable transcript backlog — the links-only card shape survives reconnect/replay.
+    replayed = await case.web.frames()
+    assert any(
+        event == "chat.media" and data["text"] == message and data["media"] == card["media"] for event, data in replayed
+    )
+
+
+async def test_notify_list_over_web_carries_tappable_options_on_the_card(
+    web_case: WebChannelCase, uniq: Callable[[str], str]
+) -> None:
+    case = web_case
+    message = uniq("web_list")
+    option = uniq("web_item")
+
+    confirmation = await _notify_over_web(case, message, options=[option, "Item B"])
+    assert "notification sent via 'web'" in confirmation
+
+    def _is_card(event: str, data: dict) -> bool:
+        return event == "chat.media" and data.get("text") == message
+
+    frames = await case.web.frames(until=_is_card)
+    card = next(data for event, data in frames if _is_card(event, data))
+    assert card["options"] == [option, "Item B"]
+    assert "media" not in card
+
+    # The tappable option list is durable: a reconnect replay carries it unchanged (a tap
+    # sends the option text through the message door — the cross-worker round trip of that
+    # send is the bridge suite's ``test_l25_web_notify_options``).
+    replayed = await case.web.frames()
+    assert any(
+        event == "chat.media" and data["text"] == message and data["options"] == [option, "Item B"]
+        for event, data in replayed
+    )
 
 
 async def test_stream_door_refuses_over_the_per_visitor_cap(web_case: WebChannelCase) -> None:

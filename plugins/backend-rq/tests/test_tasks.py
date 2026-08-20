@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 from rq.exceptions import NoSuchJobError
+from tai42_kit.backend import CallbackSchema
 from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_rq import tasks
-from tai42_backend_rq.callback import CallbackSchema
 from tai42_backend_rq.settings import rq_settings
 
 from .conftest import make_client_ctx

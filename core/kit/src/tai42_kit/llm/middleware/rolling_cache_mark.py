@@ -65,13 +65,13 @@ def roll_cache_marks(messages: list[AnyMessage]) -> list[AnyMessage] | None:
 
 
 class RollingCacheMarkMiddleware(AgentMiddleware):
-    """Keep exactly one rolling user-side ``cache_control`` breakpoint at the model call.
+    """Keep only the newest ``cache_control`` breakpoint at the model call.
 
     Per-turn marking on a checkpointed thread persists a ``cache_control`` block into
     history on every turn, and the provider caps breakpoints per request (Anthropic:
     4), so an unbounded thread would exceed the cap. This strips every ``cache_control``
-    key but the newest before the provider call, so a growing history always sends one
-    user-side breakpoint and the whole stable prefix stays cacheable.
+    key but the newest before the provider call, so a growing history always sends a
+    single breakpoint and the whole stable prefix stays cacheable.
 
     The rewrite is request-scoped through ``wrap_model_call`` — it never persists into
     checkpoint state, so history keeps its per-turn marks and each turn re-rolls them.

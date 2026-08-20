@@ -23,7 +23,7 @@ from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
@@ -124,6 +124,13 @@ class DeepAgentInput(BaseModel):
     store_provider: str | None = None
     llm_kwargs: dict[str, Any] | None = None
     langgraph_config: dict[str, Any] | None = None
+
+    @field_validator("user_content_kwargs")
+    @classmethod
+    def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """An empty dict carries no content-block keys — normalize {} to None so it
+        reads as unset, matching the builders that treat {} as no mark."""
+        return value or None
 
 
 async def _to_internal(spec: NeutralSubAgentSpec | DeepSubAgentSpec) -> ResolvedSubAgentSpec:

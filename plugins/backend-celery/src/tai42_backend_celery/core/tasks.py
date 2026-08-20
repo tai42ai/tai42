@@ -18,10 +18,10 @@ from typing import Any
 from celery import Task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from tai42_contract.app import tai42_app
+from tai42_kit.backend import CallbackSchema, callback_execution
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_backend_celery.core.app import celery_app
-from tai42_backend_celery.core.callback import CallbackSchema, callback_execution
 from tai42_backend_celery.core.settings import celery_settings
 
 # Task options every dispatching extension exposes; ``callback_kwargs`` chains a

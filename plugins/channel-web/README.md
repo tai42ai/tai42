@@ -412,8 +412,14 @@ composite a delivery uses. A composite that is not of that shape raises
 the `form` entry carries the interaction's answer schema, which the page renders as a
 schema-driven form widget (the visitor's answer posts back as a JSON object through
 this plugin's own answer door), and only the `external` entry carries the
-interaction's `callback_url`, because only its widget opens one. The channel sends
-plain text only (no media, no templates).
+interaction's `callback_url`, because only its widget opens one. A `notify` also carries
+media cards (text + media items — absolute-`https` images and outbound links, each
+optionally captioned) and interactive option lists (at most 10 options), appended as one `chat.media`
+entry the page renders as a card; a link item rides the card as a safe outbound link
+element, never folded into the body text, and a tap on an option sends the option's own text
+through the message door as an ordinary visitor message. A `data:` image is refused loudly
+(the page renders an image only from an absolute `https` source), and a template
+notification is refused loudly — a template is a vendor construct this channel does not send.
 
 ## Security
 
@@ -453,9 +459,15 @@ plain text only (no media, no templates).
   for the `external` widget that must open it.
 - The page's CSP admits scripts, stylesheets, fonts, and connections from its own
   origin only, forbids framing, and the assets door serves only integrity-listed
-  files with an explicit content-type (never `text/html`). Inline STYLE is admitted
+  files with an explicit content-type (never `text/html`). Its `img-src` admits `https:`
+  so a media card renders an agent-sent image from an absolute https source; an `http:`
+  image is refused, matching the contract's https-only rule, and a `data:` image is
+  refused by the channel too (the `data:` the CSP admits is the bundled design system's,
+  not a card image). Inline STYLE is admitted
   (the bundled overlays inject one `<style>` element for their scroll lock); inline
   script is not, so an injected string still has no way to run.
+- Rendering a remote card image makes the visitor's browser fetch it, which reveals the
+  visitor's IP address and request timing to the image host (the page sends no `Referer`).
 - The transcript is a plugin-owned Redis stream with a bounded `MAXLEN` and a
   refreshed TTL; the durable record of a turn lives in the conversation bridge.
 - Every transcript frame is `json.dumps`'d, so a newline or `data:` sequence in a
@@ -483,7 +495,7 @@ plain text only (no media, no templates).
 | Limit | Consequence |
 |---|---|
 | No default recipient | A web ask must name its target; a recipientless `deliver`/`notify` raises `ChannelDeliveryError` |
-| Plain text only | A media or template notification is refused loudly — this channel advertises no media/template capability |
+| Media cards + option lists | A `notify` carries text + media items (absolute-`https` images and outbound links, each optionally captioned) and a tappable option list (at most 10 options), as one `chat.media` card; a link item is a safe card link element, not folded body text; a `data:` image or a template notification is refused loudly (an image is https-only; a template is a vendor construct this channel does not send) |
 | Bounded replay | The transcript keeps the newest `TRANSCRIPT_MAX_ENTRIES` entries; older ones are trimmed (the bridge holds the durable record) |
 | Single forward attempt | A failed answer forward restores the pending question so the visitor can retry; the door never blind-retries the callback |
 | Bounded re-answering | One question is restored at most `MAX_ANSWER_RESTORES` times; after that it is left dropped and resolves by its own timeout |

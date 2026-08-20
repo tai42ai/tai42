@@ -20,6 +20,7 @@ from tai42_channel_web.store import (
     SessionRecordError,
     SessionRegistration,
     append_answered,
+    append_media,
     append_message,
     append_question,
     capture_cursor,
@@ -243,6 +244,39 @@ async def test_append_answered_carries_answer(fake_redis: FakeRedis):
     payload = _data(entry)
     assert payload["interaction_id"] == "int-1"
     assert payload["answer"] == {"choice": "staging"}
+
+
+async def test_append_media_carries_card_fields(fake_redis: FakeRedis):
+    media = [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
+    entry_id = await append_media(IDENTITY, VISITOR_ID, "see this", media, ["Item A", "Item B"])
+    entry = _entries(fake_redis)[0]
+    assert entry[1]["event"] == "chat.media"
+    payload = _data(entry)
+    assert payload["id"] == entry_id
+    assert payload["direction"] == "out"
+    assert payload["text"] == "see this"
+    assert payload["media"] == media
+    assert payload["options"] == ["Item A", "Item B"]
+
+
+async def test_append_media_omits_absent_fields(fake_redis: FakeRedis):
+    # No media and no options: the keys are omitted, never emitted empty.
+    await append_media(IDENTITY, VISITOR_ID, "text only", None, None)
+    payload = _data(_entries(fake_redis)[0])
+    assert payload["text"] == "text only"
+    assert "media" not in payload
+    assert "options" not in payload
+
+
+async def test_append_media_replays_through_the_backlog_pager(fake_redis: FakeRedis):
+    # A chat.media entry is re-emitted verbatim by the backlog reader — the replay path
+    # filters no entry by event type.
+    await append_media(IDENTITY, VISITOR_ID, "see this", [{"kind": "image", "url": "https://cdn.example/p.png"}], None)
+    async with store.pooled_redis_ctx() as redis:
+        _start, frames = await read_backlog_batch(redis, IDENTITY, VISITOR_ID, "-", "+", 100)
+    assert len(frames) == 1
+    assert frames[0].startswith("event: chat.media\ndata: ")
+    assert '"url": "https://cdn.example/p.png"' in frames[0]
 
 
 async def test_append_trims_to_max_entries(fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch):
@@ -536,6 +570,7 @@ async def test_every_store_op_raises_when_redis_url_unset(fake_redis: FakeRedis,
         resolve_session(SESSION_TOKEN),
         drop_session(SESSION_TOKEN),
         append_message(IDENTITY, VISITOR_ID, "in", "x"),
+        append_media(IDENTITY, VISITOR_ID, "x", None, None),
         append_question(IDENTITY, VISITOR_ID, "int-1", "q", "text", None, _deadline()),
         append_answered(IDENTITY, VISITOR_ID, "int-1", "a"),
         reserve_question("int-1", record),

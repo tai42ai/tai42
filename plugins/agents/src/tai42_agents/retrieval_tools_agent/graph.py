@@ -193,7 +193,7 @@ class RetrievalToolsGraph:
                 messages = [SystemMessage(content=self.system_prompt), *messages]
             # Raw graph node: wrap_model_call middleware never runs here, so the
             # rolling cache-mark strip is applied request-scoped before the call —
-            # keeping only the newest user-side cache breakpoint, never written back
+            # keeping only the newest cache_control breakpoint, never written back
             # into state.
             rolled = roll_cache_marks(messages)
             messages = rolled if rolled is not None else messages

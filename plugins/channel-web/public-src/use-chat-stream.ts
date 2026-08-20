@@ -2,10 +2,10 @@
  * The transcript stream: the SSE feed of one visitor's conversation, folded into
  * the ordered items the page renders.
  *
- * The wire carries four events. `chat.message` and `chat.question` are transcript
- * ENTRIES and become items in arrival order; `chat.answered` is not an entry of
- * its own — it settles the question it names, so it only records an interaction
- * id; `chat.backlog_done` marks the replayed backlog as complete.
+ * The wire carries five events. `chat.message`, `chat.question` and `chat.media`
+ * are transcript ENTRIES and become items in arrival order; `chat.answered` is not
+ * an entry of its own — it settles the question it names, so it only records an
+ * interaction id; `chat.backlog_done` marks the replayed backlog as complete.
  *
  * Entries are at-least-once (a reconnect replays the whole backlog), so items are
  * de-duplicated by entry id and a redelivered entry replaces its twin in place
@@ -53,6 +53,15 @@ export type QuestionFacet =
       readonly schema: null;
     };
 
+/** One attachment on a media card: an inline image or a safe outbound link. The
+ * url is already proven absolute — `https:` for an image, `http(s):` for a link —
+ * by the reducer, so a renderer sets it as an attribute without re-checking. */
+export interface MediaItem {
+  readonly kind: 'image' | 'link';
+  readonly url: string;
+  readonly caption: string | null;
+}
+
 /** Everything a question row carries apart from its ticket. */
 interface QuestionBase {
   readonly kind: 'question';
@@ -79,6 +88,16 @@ export type ChatItem =
        * without the id that answer would have carried. `null` on anything sent
        * without a key — the agent's own messages included. */
       readonly clientMessageId: string | null;
+    }
+  | {
+      /** An agent-sent card: markdown text with any images/links and any tappable
+       * option chips. Always the agent's turn, so it carries no direction. */
+      readonly kind: 'media';
+      readonly id: string;
+      readonly text: string;
+      readonly media: readonly MediaItem[] | null;
+      readonly options: readonly string[] | null;
+      readonly ts: string;
     }
   | (QuestionBase & QuestionFacet);
 
@@ -128,6 +147,69 @@ function optionsOf(raw: unknown): readonly string[] | null | undefined {
   if (raw === null || raw === undefined) return null;
   if (!Array.isArray(raw) || !raw.every((option) => typeof option === 'string')) return undefined;
   return raw;
+}
+
+/** The tappable chips on a media card: absent, or a NON-EMPTY list of non-blank
+ * labels. A blank chip has no text to feed back, and an empty list is a control
+ * row with no controls — both are frames this page will not render: `undefined`
+ * says malformed. */
+function chipOptionsOf(raw: unknown): readonly string[] | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  if (!raw.every((option) => typeof option === 'string' && option.trim() !== '')) return undefined;
+  return raw;
+}
+
+/** An absolute URL whose scheme is one of `protocols` (each spelled WITH its
+ * trailing colon, as `URL.protocol` returns it). A relative or wrong-scheme value
+ * is refused — an image source is constrained to `https:`, a link to `http(s):` —
+ * and a URL carrying a `user@` authority (userinfo) is refused too, so nothing but
+ * a vetted absolute URL ever reaches an `src` or `href`. */
+function isAbsoluteUrl(value: unknown, protocols: readonly string[]): value is string {
+  if (typeof value !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.username !== '' || parsed.password !== '') return false;
+  return protocols.includes(parsed.protocol);
+}
+
+/** A card attachment's caption: the wire carries a string or omits it. Any other
+ * spelling (a non-string, an explicit null) is a frame this page will not render:
+ * `undefined` says malformed, `null` says the caption is absent. */
+function captionOf(raw: unknown): string | null | undefined {
+  if (raw === undefined) return null;
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/** One media attachment, validated: a known kind, a scheme-appropriate absolute
+ * URL, and an optional string caption. `undefined` on anything off-shape. */
+function mediaItemOf(raw: unknown): MediaItem | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { kind, url } = raw;
+  if (kind !== 'image' && kind !== 'link') return undefined;
+  const protocols = kind === 'image' ? ['https:'] : ['http:', 'https:'];
+  if (!isAbsoluteUrl(url, protocols)) return undefined;
+  const caption = captionOf(raw.caption);
+  if (caption === undefined) return undefined;
+  return { kind, url, caption };
+}
+
+/** The card's attachments: absent, or a list whose every item validates. One
+ * off-shape item taints the whole list — `undefined` says malformed. */
+function mediaOf(raw: unknown): readonly MediaItem[] | null | undefined {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) return undefined;
+  const items: MediaItem[] = [];
+  for (const one of raw) {
+    const item = mediaItemOf(one);
+    if (item === undefined) return undefined;
+    items.push(item);
+  }
+  return items;
 }
 
 /** The sender's own idempotency key, echoed onto their message. The wire carries
@@ -202,6 +284,26 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     return {
       kind: 'model',
       model: withItem(model, { kind: 'message', id, direction, text, ts, clientMessageId }),
+    };
+  }
+
+  if (frame.event === 'chat.media') {
+    const { direction, text, ts } = payload;
+    // The card is always the agent's turn; the wire fixes its direction to `out`.
+    if (direction !== 'out') return { kind: 'malformed', event: frame.event };
+    if (typeof text !== 'string' || !isTimestamp(ts)) {
+      return { kind: 'malformed', event: frame.event };
+    }
+    const media = mediaOf(payload.media);
+    if (media === undefined) return { kind: 'malformed', event: frame.event };
+    const options = chipOptionsOf(payload.options);
+    if (options === undefined) return { kind: 'malformed', event: frame.event };
+    // A card with neither attachments nor chips is a plain notify, which the wire
+    // sends as `chat.message` — here it is a frame off its own contract.
+    if (media === null && options === null) return { kind: 'malformed', event: frame.event };
+    return {
+      kind: 'model',
+      model: withItem(model, { kind: 'media', id, text, media, options, ts }),
     };
   }
 

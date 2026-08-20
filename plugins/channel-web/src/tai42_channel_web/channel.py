@@ -14,9 +14,11 @@ the conversation bridge sets ``sender_identity`` and a bare visitor-id
 ``recipient``; the ``notify_user`` door sets no ``sender_identity``, so its
 ``recipient`` carries the same composite encoding as a delivery.
 
-This channel advertises no media/template capability: every notification is plain
-text, and the central ``notify_user`` guard refuses a media/template send before it
-reaches here; the defensive guard below refuses one loudly if it ever arrives.
+This channel advertises media and interactive (options) notification support but no
+template capability: a template is a vendor construct, so the central ``notify_user``
+guard refuses a template send before it reaches here and the defensive guard below
+refuses one loudly if it ever arrives. A media or options notification lands as one
+durable ``chat.media`` transcript entry the page renders as a card.
 """
 
 from __future__ import annotations
@@ -27,10 +29,12 @@ import math
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, ChannelNotification
+from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_web.store import (
     QuestionRecord,
+    append_media,
     append_message,
     append_question,
     release_question,
@@ -56,6 +60,15 @@ _pending_releases: set[asyncio.Task[None]] = set()
 # answered by interaction id through this plugin's own door, so the ticket stays
 # server-side.
 _EXTERNAL_FORMAT = "external"
+
+
+def _media_frame_item(item: MediaItem) -> dict[str, str]:
+    """One media item as its transcript-frame shape — ``caption`` omitted when
+    absent, so there is no empty-value key."""
+    entry = {"kind": item.kind.value, "url": item.url}
+    if item.caption is not None:
+        entry["caption"] = item.caption
+    return entry
 
 
 def _require_recipient(requested: str | None, message: str) -> str:
@@ -114,13 +127,18 @@ class WebChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol.
 
     Advertises ``supports_form_delivery`` — the chat page renders a schema-driven
-    form widget, so a ``form`` question is delivered here. It advertises no
-    notification capability: ``notify`` sends plain text only (no media, no
-    templates)."""
+    form widget, so a ``form`` question is delivered here. ``notify`` also carries
+    media cards and tappable option lists (``supports_media_notifications`` /
+    ``supports_interactive_notifications``); it advertises NO template capability
+    (``supports_template_notifications`` absent) — a template is a vendor construct."""
 
     # The page renders a schema-driven form widget, so the ask_user helper may route
     # a ``form`` delivery here; absent this flag it never would.
     supports_form_delivery: ClassVar[bool] = True
+    # notify carries an image card and a tappable option list; the central notify_user
+    # capability guard reads these before dispatching either. Templates stay unsupported.
+    supports_media_notifications: ClassVar[bool] = True
+    supports_interactive_notifications: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Reserve the pending-question record, then append the question to the
@@ -184,8 +202,7 @@ class WebChannel:
                     )
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Append one ``chat.message`` agent entry to the recipient's transcript and
-        return its minted id.
+        """Append one agent entry to the recipient's transcript and return its minted id.
 
         The transcript pair comes from whichever addressing the caller used. With
         ``sender_identity`` set (the conversation bridge) it IS the web route identity
@@ -193,16 +210,37 @@ class WebChannel:
         door, which never sets that bridge-owned field) the identity rides in
         ``recipient`` as the composite ``"<identity>:<visitor-id>"``, exactly as a
         delivery addresses one. Both require a recipient — this channel has no
-        default. A media or template notification is refused loudly — this channel
-        sends plain text only.
+        default.
+
+        A plain text-only notification lands as a ``chat.message`` entry. A notification
+        carrying ``media`` and/or ``options`` lands as ONE ``chat.media`` card entry: the
+        message is its text, every media item rides the frame's media list in order (an
+        ``image`` as an inline picture, a ``link`` as a card link element the page renders
+        as a safe anchor), and the options ride its option list. A ``data:`` image is
+        refused loudly — the page renders an image only from an absolute ``https`` source.
+        A template notification is refused loudly — this channel sends no vendor templates.
         """
-        if notification.media is not None or notification.template is not None:
-            raise ChannelDeliveryError("web channel sends plain text only; media and template are not supported")
+        if notification.template is not None:
+            raise NotImplementedError("web channel sends no vendor templates; template notifications are not supported")
         if notification.sender_identity is None:
             identity, address = _split_recipient(notification.recipient)
         else:
             identity = _canonical_identity(notification.sender_identity)
             address = _require_recipient(notification.recipient, _NO_RECIPIENT)
+
+        if notification.media is None and notification.options is None:
+            async with transcript_order(identity, address):
+                entry_id = await append_message(identity, address, "out", notification.message)
+            return [entry_id]
+
+        media = notification.media or []
+        for item in media:
+            if item.kind is MediaKind.IMAGE and item.url.startswith("data:"):
+                raise ChannelInputError(
+                    f"web channel cannot render a data: image URL ({item.url[:32]}...); the page renders an "
+                    "image only from an absolute https source"
+                )
+        frame_media = [_media_frame_item(item) for item in media]
         async with transcript_order(identity, address):
-            entry_id = await append_message(identity, address, "out", notification.message)
+            entry_id = await append_media(identity, address, notification.message, frame_media, notification.options)
         return [entry_id]

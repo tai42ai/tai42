@@ -2,8 +2,6 @@
 
 ``add_signature_params`` extends a tool's signature with keyword-only option
 parameters, keeping any trailing ``**kwargs`` last.
-``exclude_fastmcp_ctx_from_kwargs`` drops the request-scoped FastMCP ``Context``
-argument, which cannot cross the queue.
 """
 
 from __future__ import annotations
@@ -60,11 +58,3 @@ def add_signature_params(
     else:
         new_params = params + additional_params
     return original_sig.replace(parameters=new_params)
-
-
-def exclude_fastmcp_ctx_from_kwargs(func: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
-    """Return ``arguments`` without ``func``'s FastMCP ``Context`` kwarg (if any)."""
-    context_kwarg = _context_param_name(func)
-    if context_kwarg and context_kwarg in arguments:
-        arguments = {k: v for k, v in arguments.items() if k != context_kwarg}
-    return arguments

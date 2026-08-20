@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import reset_all_settings
 
@@ -293,7 +293,7 @@ async def test_deliver_form_releases_record_on_send_failure(http_script, fake_re
 async def test_deliver_form_unmappable_schema_raises_before_any_io(http_script, fake_redis):
     bad = {"type": "object", "properties": {"blob": {"type": "array"}}}
 
-    with pytest.raises(ChannelDeliveryError, match=r"blob.*unsupported type"):
+    with pytest.raises(ChannelInputError, match=r"blob.*unsupported type"):
         await SlackChannel().deliver(make_delivery(answer_format="form", schema=bad))
 
     assert http_script.requests == []
@@ -308,7 +308,7 @@ async def test_deliver_form_over_cap_modal_raises_before_any_io(http_script, fak
     props = {f"f{i}": {"type": "string"} for i in range(100)}
     over_cap = {"type": "object", "properties": props}
 
-    with pytest.raises(ChannelDeliveryError, match="modal exceeds 100 blocks"):
+    with pytest.raises(ChannelInputError, match="modal exceeds 100 blocks"):
         await SlackChannel().deliver(make_delivery(answer_format="form", schema=over_cap))
 
     assert http_script.requests == []
@@ -320,6 +320,39 @@ async def test_deliver_form_without_schema_raises_before_any_io(http_script, fak
     # schema-less form outright rather than fall back to a plain-text send.
     with pytest.raises(ChannelDeliveryError, match="requires a non-empty schema"):
         await _deliver_form("xoxb-tok", TEST_DEFAULT_RECIPIENT, make_delivery(answer_format="text"))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_validate_form_schema_hook_mirrors_delivery_refusal(http_script, fake_redis):
+    # 150 enum options exceed Slack's 100 static-select cap. The ask-time hook
+    # refuses the schema (ValueError) for the same limit the delivery path refuses
+    # (ChannelInputError): one rule, two doors — so a schema Block Kit could never
+    # render is rejected before any state is written rather than persisted and
+    # failed at delivery.
+    schema = {"type": "object", "properties": {"pick": {"type": "string", "enum": [str(i) for i in range(150)]}}}
+    channel = SlackChannel()
+
+    with pytest.raises(ValueError, match="enum exceeds 100 options"):
+        channel.validate_form_schema(schema, "q")
+
+    with pytest.raises(ChannelInputError, match="enum exceeds 100 options"):
+        await channel.deliver(make_delivery(answer_format="form", schema=schema))
+
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
+async def test_validate_form_schema_hook_refuses_over_long_question(http_script, fake_redis):
+    # The 3000-char section cap on the question is knowable at ask-time, so the hook
+    # refuses an over-long question (ValueError) up front — nothing is sent, nothing
+    # is persisted — rather than the delivery path pruning it after the fact.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    channel = SlackChannel()
+
+    with pytest.raises(ValueError, match="question exceeds"):
+        channel.validate_form_schema(schema, "x" * 3001)
 
     assert http_script.requests == []
     assert fake_redis.store == {}

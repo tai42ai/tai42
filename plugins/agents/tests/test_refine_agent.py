@@ -812,6 +812,19 @@ def test_tool_input_rejects_unknown_key() -> None:
         RefineAgentInput.model_validate({"evaluator_message": "hi", "max_iteration": 5})
 
 
+def test_empty_content_kwargs_normalize_to_none() -> None:
+    """An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
+    builders treat {} as no mark, so the field normalizes to None rather than a
+    set-but-empty value the unhonored-reject face would misread."""
+    validated = RefineAgentInput.model_validate({"evaluator_message": "hi", "user_content_kwargs": {}})
+    assert validated.user_content_kwargs is None
+    # A non-empty mark is a real value and rides through unchanged.
+    marked = RefineAgentInput.model_validate(
+        {"evaluator_message": "hi", "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
+    )
+    assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}
+
+
 # ---------------------------------------------------------------------------
 # Rolling cache mark: the evaluator graph strips accumulated marks at the model call
 # ---------------------------------------------------------------------------

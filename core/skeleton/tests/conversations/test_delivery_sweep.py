@@ -22,7 +22,7 @@ import time
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
 from tai42_contract.conversations import ConversationRoute, DeliveryReceipt
 
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -48,8 +48,9 @@ class WorkerDied(RuntimeError):
 
 class FakeChannel:
     """Records every chunk it is asked to send. ``crash_on`` abandons the send on the nth
-    chunk (a dead worker), ``fail_on`` refuses it the way a provider does, and ``hang_on``
-    never returns from it (a send still in flight)."""
+    chunk (a dead worker), ``fail_on`` refuses it the way a provider does, ``input_fail_on``
+    permanently refuses its shape (a ``ChannelInputError``), and ``hang_on`` never returns
+    from it (a send still in flight)."""
 
     def __init__(
         self,
@@ -57,6 +58,7 @@ class FakeChannel:
         *,
         crash_on: int | None = None,
         fail_on: int | None = None,
+        input_fail_on: int | None = None,
         hang_on: int | None = None,
         watch=None,
     ) -> None:
@@ -64,6 +66,7 @@ class FakeChannel:
         self._prefix = prefix
         self._crash_on = crash_on
         self._fail_on = fail_on
+        self._input_fail_on = input_fail_on
         self._hang_on = hang_on
         self._watch = watch
 
@@ -77,6 +80,8 @@ class FakeChannel:
             raise WorkerDied("the worker died mid-send")
         if self._fail_on is not None and len(self.sends) == self._fail_on:
             raise ChannelDeliveryError("the provider refused the chunk")
+        if self._input_fail_on is not None and len(self.sends) == self._input_fail_on:
+            raise ChannelInputError("the provider cannot render the chunk")
         if self._hang_on is not None and len(self.sends) == self._hang_on:
             await asyncio.Event().wait()
         return [f"{self._prefix}-{len(self.sends)}"]
@@ -349,6 +354,19 @@ async def test_a_provider_refusal_is_terminal_and_clears_the_ledger(monkeypatch,
     assert (await _get(store, "m-refused")).delivery_status is DeliveryStatus.FAILED
     assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-refused") == []
     assert await store.resolve_outbound("twilio", "w1-1") == "m-refused"
+
+
+async def test_a_permanent_input_refusal_is_terminal_and_not_re_driven(monkeypatch, fake, store):
+    """A ``ChannelInputError`` is a permanent refusal of the input's shape — retrying cannot
+    succeed, so the record fails terminally (never re-driven), exactly as a delivery refusal
+    is, and keeps the ids of the chunks the provider did take."""
+    await store.create_record(_record("m-input", "aaaaaaaaaabbbbbbbbbbcccccccccc"))
+    _wire_channel(monkeypatch, FakeChannel("w1", input_fail_on=2))
+    await delivery_module._deliver_channel(store, await _get(store, "m-input"), "worker-1")
+
+    assert (await _get(store, "m-input")).delivery_status is DeliveryStatus.FAILED
+    assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-input") == []
+    assert await store.resolve_outbound("twilio", "w1-1") == "m-input"
 
 
 async def test_a_ledger_claiming_more_than_the_answer_refuses_loudly(monkeypatch, fake, store):

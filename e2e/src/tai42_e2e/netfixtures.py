@@ -461,7 +461,7 @@ async def _form_or_json(request: Request) -> dict[str, Any]:
 
 # ---- channel provider stubs ---------------------------------------------
 #
-# Recording in-process stubs of the three channel providers' APIs, each a thread-hosted
+# Recording in-process stubs of the four channel providers' APIs, each a thread-hosted
 # FastAPI on an allocated loopback port (like ``TargetServer``). Each records the plugin's
 # outbound calls, mints the id the real provider would, and carries a helper that builds a
 # genuinely signed inbound request so the plugin's REAL signature-verification runs against

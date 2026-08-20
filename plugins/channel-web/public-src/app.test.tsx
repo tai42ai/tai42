@@ -65,6 +65,17 @@ function visitorSaid(id: string, text: string, clientMessageId: string | null = 
   return { kind: 'message', id, direction: 'in', text, ts: TS, clientMessageId };
 }
 
+function agentSentMedia(id: string, options: readonly string[]): ChatItem {
+  return {
+    kind: 'media',
+    id,
+    text: 'Here you go',
+    media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
+    options,
+    ts: TS,
+  };
+}
+
 function pendingQuestion(): ChatItem {
   return {
     kind: 'question',
@@ -402,6 +413,19 @@ describe('typing indicator', () => {
     await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
   });
 
+  it('clears when the agent turn is a media card', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(app());
+
+    await send(user, 'hello');
+    expect(await screen.findByLabelText('Typing a reply')).toBeInTheDocument();
+
+    stream.state = streamState({ items: [agentSentMedia('md1', ['See all'])] });
+    rerender(app());
+
+    await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
+  });
+
   it('never starts when the send was refused', async () => {
     const user = userEvent.setup();
     api.sendMessage.mockRejectedValueOnce(new ChatApiError('nope', 500, null));
@@ -709,6 +733,53 @@ describe('questions', () => {
     expect(screen.getByText('Session ended')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Message')).toBeDisabled();
+  });
+});
+
+describe('media cards', () => {
+  it('renders an agent media card and feeds a chip tap back as a visitor message', async () => {
+    const user = userEvent.setup();
+    stream.state = streamState({ items: [agentSentMedia('md1', ['See all'])] });
+    render(app());
+
+    expect(screen.getByRole('img', { name: 'Item A' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'See all' }));
+
+    // The chip rides the composer's own send door: an optimistic bubble appears
+    // beside the still-tappable chip, and the message goes out exactly as a typed
+    // one would.
+    expect(screen.getAllByText('See all')).toHaveLength(2);
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        'site-alpha',
+        'See all',
+        expect.stringMatching(CLIENT_MESSAGE_ID),
+      ),
+    );
+  });
+
+  it('sends the chip without disturbing a typed-but-unsent draft', async () => {
+    const user = userEvent.setup();
+    stream.state = streamState({ items: [agentSentMedia('md1', ['See all'])] });
+    render(app());
+
+    const field = screen.getByLabelText('Message');
+    await user.type(field, 'half a thought');
+    expect(field).toHaveValue('half a thought');
+
+    await user.click(screen.getByRole('button', { name: 'See all' }));
+
+    // The chip's own text goes out, and the visitor's unsent draft is left in the
+    // composer untouched — only the composer's own submission clears it.
+    await waitFor(() =>
+      expect(api.sendMessage).toHaveBeenCalledWith(
+        'site-alpha',
+        'See all',
+        expect.stringMatching(CLIENT_MESSAGE_ID),
+      ),
+    );
+    expect(field).toHaveValue('half a thought');
   });
 });
 

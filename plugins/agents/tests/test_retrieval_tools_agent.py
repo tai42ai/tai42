@@ -1366,3 +1366,15 @@ class TestInputModel:
         assert "response_format" in RetrievalToolsAgentInput.model_json_schema()["properties"]
         parsed = RetrievalToolsAgentInput.model_validate({"user_message": "hi", "response_format": _RETRIEVAL_SCHEMA})
         assert parsed.response_format == _RETRIEVAL_SCHEMA
+
+    def test_empty_content_kwargs_normalize_to_none(self) -> None:
+        # An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
+        # builders treat {} as no mark, so the field normalizes to None rather than a
+        # set-but-empty value the unhonored-reject face would misread.
+        validated = RetrievalToolsAgentInput.model_validate({"user_message": "hi", "user_content_kwargs": {}})
+        assert validated.user_content_kwargs is None
+        # A non-empty mark is a real value and rides through unchanged.
+        marked = RetrievalToolsAgentInput.model_validate(
+            {"user_message": "hi", "user_content_kwargs": {"cache_control": {"type": "ephemeral"}}}
+        )
+        assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}

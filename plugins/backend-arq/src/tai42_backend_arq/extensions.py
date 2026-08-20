@@ -19,10 +19,10 @@ from makefun import create_function
 from pydantic_core import to_jsonable_python
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.backend import prepare_backend_kwargs
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
-from tai42_backend_arq.callback import prepare_backend_kwargs
 from tai42_backend_arq.pool import RedisPoolManager
 from tai42_backend_arq.records import derive_cron_or_interval, next_run_after
 from tai42_backend_arq.scheduler import safe_schedule_transition, wait_job_result
