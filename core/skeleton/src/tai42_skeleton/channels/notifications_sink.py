@@ -16,7 +16,11 @@ The feed is a bounded newest-first ring buffer: every write caps it (LTRIM) at
 ``interactions_settings().notifications_feed_max`` entries, keeping the newest N
 and evicting older ones by design, so the feed key cannot grow without limit.
 This is a deliberate, documented retention policy — an explicit product bound,
-not a silent truncation of an error.
+not a silent truncation of an error. Every write also refreshes a rolling TTL
+(``interactions_settings().notifications_feed_ttl_seconds``) on the key in the
+same pipeline, so an idle feed — and every distinct ``audience`` feed key, which
+would otherwise be a permanent per-identity list — is reclaimed rather than
+minting keys that never expire.
 
 ``audience`` is the IDENTITY (a user_id) whose in-app inbox shows a record,
 distinct from ``recipient`` (a channel delivery ADDRESS). When set, the record is
@@ -73,23 +77,31 @@ class NotificationSink:
 
     ``max_feed_length`` is the ring-buffer bound: each :meth:`record` write LTRIMs
     the feed to this many newest entries. It is supplied at construction from
-    ``interactions_settings().notifications_feed_max``."""
+    ``interactions_settings().notifications_feed_max``.
 
-    def __init__(self, key_prefix: str, max_feed_length: int) -> None:
+    ``feed_ttl_seconds`` is the rolling key TTL every write refreshes (from
+    ``interactions_settings().notifications_feed_ttl_seconds``), so an idle feed key
+    — the shared one and every per-identity ``audience`` one — is reclaimed rather
+    than living forever."""
+
+    def __init__(self, key_prefix: str, max_feed_length: int, feed_ttl_seconds: int) -> None:
         self._prefix = key_prefix
         self._feed_key = f"{key_prefix}{_FEED_SUFFIX}"
         self._max_feed_length = max_feed_length
+        self._feed_ttl_seconds = feed_ttl_seconds
 
     def _audience_feed_key(self, audience: str) -> str:
         return f"{self._prefix}{_AUDIENCE_FEED_SUFFIX}{audience}"
 
     def _queue_push_bounded(self, pipe: Any, feed_key: str, payload: str) -> None:
-        """Queue an LPUSH of ``payload`` onto ``feed_key`` plus an LTRIM to the newest
-        ``max_feed_length`` entries — the bounded newest-first ring buffer — onto
-        ``pipe``. The eviction is the intended retention cap, NOT a silent truncation
-        of an error."""
+        """Queue an LPUSH of ``payload`` onto ``feed_key``, an LTRIM to the newest
+        ``max_feed_length`` entries — the bounded newest-first ring buffer — and an
+        EXPIRE refreshing the rolling key TTL, all onto ``pipe``. The eviction is the
+        intended retention cap, NOT a silent truncation of an error; the TTL keeps a
+        distinct-``audience`` key set from minting permanent lists."""
         pipe.lpush(feed_key, payload)
         pipe.ltrim(feed_key, 0, self._max_feed_length - 1)
+        pipe.expire(feed_key, self._feed_ttl_seconds)
 
     async def record(self, r: Redis, message: str, recipient: str | None, audience: str | None = None) -> dict:
         """Append one notification and return the stored record. The id and the
@@ -160,7 +172,9 @@ async def record_notification(message: str, recipient: str | None = None, audien
     if not interactions_store_configured():
         raise NotSupportedError(INTERACTIONS_NOT_CONFIGURED_MESSAGE, extra={"code": INTERACTIONS_NOT_CONFIGURED_CODE})
     settings = interactions_settings()
-    sink = NotificationSink(settings.key_prefix, settings.notifications_feed_max)
+    sink = NotificationSink(
+        settings.key_prefix, settings.notifications_feed_max, settings.notifications_feed_ttl_seconds
+    )
     async with client_ctx(RedisClient, settings.redis) as r:
         return await sink.record(r, message, recipient, audience=audience)
 
@@ -174,7 +188,9 @@ async def read_notifications(audience: str | None = None) -> list[dict]:
     Redis or serialization failure propagates loudly.
     """
     settings = interactions_settings()
-    sink = NotificationSink(settings.key_prefix, settings.notifications_feed_max)
+    sink = NotificationSink(
+        settings.key_prefix, settings.notifications_feed_max, settings.notifications_feed_ttl_seconds
+    )
     async with client_ctx(RedisClient, settings.redis) as r:
         if audience is not None:
             return await sink.read_for(r, audience)

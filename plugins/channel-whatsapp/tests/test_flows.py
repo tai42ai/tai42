@@ -7,7 +7,7 @@ import hashlib
 import json
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelInputError
 
 from tai42_channel_whatsapp.flows import build_flow
 
@@ -149,31 +149,31 @@ def test_hash_changes_with_schema_content():
     ],
 )
 def test_unsupported_schema_raises_naming_the_property(schema: dict):
-    with pytest.raises(ChannelDeliveryError):
+    with pytest.raises(ChannelInputError):
         build_flow(schema)
 
 
 def test_unsupported_property_error_names_the_property():
     schema = {"type": "object", "properties": {"widget": {"type": "object"}}, "required": []}
-    with pytest.raises(ChannelDeliveryError, match="'widget'"):
+    with pytest.raises(ChannelInputError, match="'widget'"):
         build_flow(schema)
 
 
 def test_string_enum_must_be_non_empty_list_of_strings():
     schema = {"type": "object", "properties": {"pick": {"type": "string", "enum": []}}, "required": []}
-    with pytest.raises(ChannelDeliveryError, match="'pick'"):
+    with pytest.raises(ChannelInputError, match="'pick'"):
         build_flow(schema)
 
 
 def test_required_must_be_a_list_of_strings():
     schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": "note"}
-    with pytest.raises(ChannelDeliveryError, match="'required'"):
+    with pytest.raises(ChannelInputError, match="'required'"):
         build_flow(schema)
 
 
 def test_property_value_must_be_an_object():
     schema = {"type": "object", "properties": {"note": "string"}, "required": []}
-    with pytest.raises(ChannelDeliveryError, match="'note'"):
+    with pytest.raises(ChannelInputError, match="'note'"):
         build_flow(schema)
 
 
@@ -182,5 +182,5 @@ def test_reserved_flow_token_property_is_refused():
     # it, so a field of that name is unanswerable. The mapper refuses it up front —
     # ``build_flow`` is pure and runs before any HTTP, so delivery never reaches the wire.
     schema = {"type": "object", "properties": {"flow_token": {"type": "string"}}, "required": []}
-    with pytest.raises(ChannelDeliveryError, match=r"'flow_token'.*reserved"):
+    with pytest.raises(ChannelInputError, match=r"'flow_token'.*reserved"):
         build_flow(schema)

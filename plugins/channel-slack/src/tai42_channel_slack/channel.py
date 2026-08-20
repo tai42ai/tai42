@@ -39,7 +39,12 @@ from tai42_channel_slack.correlation import (
     store_correlation,
     store_form_record,
 )
-from tai42_channel_slack.forms import FormSchemaError, build_message_blocks, build_modal_view
+from tai42_channel_slack.forms import (
+    FormSchemaError,
+    build_message_blocks,
+    build_modal_view,
+)
+from tai42_channel_slack.forms import validate_form_schema as _validate_form_schema
 from tai42_channel_slack.settings import SlackSettings, slack_settings
 
 # Answered through the callback door directly (tappable plain link), never a typed
@@ -180,13 +185,13 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
         # The contract guarantees a non-empty schema for a form; a gap here is a
         # delivery failure, not a silent plain-text send.
         raise ChannelDeliveryError("form answer_format requires a non-empty schema")
-    try:
-        # Compose the exact modal the click will build, discarding it — same
-        # single source of truth, so every cap it enforces is enforced here.
-        build_modal_view(delivery.interaction_id, delivery.question, schema)
-        message_blocks = build_message_blocks(delivery.question, delivery.interaction_id)
-    except FormSchemaError as exc:
-        raise ChannelDeliveryError(str(exc)) from exc
+    # Compose the exact modal the click will build, discarding it — same single
+    # source of truth, so every cap it enforces is enforced here. An unmappable
+    # schema or a modal past a Slack cap is a permanent input refusal
+    # (:class:`FormSchemaError`, a ``ChannelInputError``), raised before any store
+    # or send — never a retryable delivery failure.
+    build_modal_view(delivery.interaction_id, delivery.question, schema)
+    message_blocks = build_message_blocks(delivery.question, delivery.interaction_id)
     await store_form_record(
         delivery.interaction_id, delivery.callback_url, schema, delivery.question, delivery.timeout_at
     )
@@ -203,6 +208,20 @@ class SlackChannel:
     """Registered under ``"slack"``; satisfies ``tai42_contract.channels.Channel``."""
 
     supports_form_delivery: ClassVar[bool] = True
+
+    def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
+        """Enforce this channel's ask-time-knowable Block Kit caps at ask-time,
+        before any state is written — the question-text section cap, the supported
+        property subset, the label cap, the static-select option-count and
+        per-option text caps, and the modal 100-block cap. A violation is refused
+        here as a ``ValueError`` so a question or schema the delivery path could
+        never render is rejected up front instead of persisting a question that
+        only fails at delivery; ``forms`` is the single mapping definition, its
+        delivery-time ``FormSchemaError`` becoming the ask-time ``ValueError``."""
+        try:
+            _validate_form_schema(schema, question)
+        except FormSchemaError as exc:
+            raise ValueError(str(exc)) from exc
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         # Settings read fresh each call so a rotated token or changed recipient

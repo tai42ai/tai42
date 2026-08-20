@@ -20,7 +20,9 @@ from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
+from tai42_skeleton.conversations.caps import ThreadBusyError
 from tai42_skeleton.conversations.models import DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -124,7 +126,7 @@ def env(monkeypatch):
     monkeypatch.setenv("CONVERSATIONS_DELIVERY_GRACE_SECONDS", "1")
     caps_module._CAPS_CACHE.clear()
     fake = FakeRecordRedis()
-    for module in (records_module, ledger_module, mode_module):
+    for module in (records_module, ledger_module, mode_module, thread_lease_module):
         monkeypatch.setattr(module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)
     fake.seed_route("line")
@@ -326,3 +328,35 @@ async def test_operator_send_waits_behind_an_in_flight_turn(env, monkeypatch):
     assert record is not None
     assert record.origin == "operator"
     assert channel.sends[0].message == "on it"
+
+
+async def test_operator_send_refuses_503_when_a_foreign_worker_holds_the_lease(env, monkeypatch):
+    # A sibling worker holds the thread's cross-worker lease. Operator send is a live-caller sync
+    # door, so its bounded acquisition refuses with the loud, retriable ThreadBusyError (a 503)
+    # rather than blocking the caller unbounded behind the other worker's — possibly HITL-paused —
+    # turn. Nothing is written and the foreign lease is untouched.
+    monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
+    caps_module._CAPS_CACHE.clear()
+    agent = RecordingAgent()
+    channel = FakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+    thread_id = "bridge:line:+15550002222"
+
+    key = ConversationsSettings().thread_lease_key(thread_id)
+    await env.set(key, "foreign-token", px=120_000, nx=True)
+
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        await operator_send(
+            route=route,
+            thread_id=thread_id,
+            client_address="+15550002222",
+            text="on it",
+            operator_principal="op-1",
+        )
+    await _settle()
+
+    assert agent.appended == []
+    assert channel.sends == []
+    assert env._strings.get(key) == "foreign-token"

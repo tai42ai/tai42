@@ -127,6 +127,7 @@ function transcript(
       onAnswer={answer}
       onAnswered={noop}
       onRetry={noop}
+      onSend={noop}
       pinToken={0}
       {...overrides}
     />
@@ -256,5 +257,48 @@ describe('Transcript', () => {
     await user.click(screen.getByRole('button', { name: 'Retry' }));
 
     expect(onRetry).toHaveBeenCalledWith('local-1');
+  });
+
+  it('renders a media card entry in order and wires the send door to its chips', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    const media: TranscriptEntry = {
+      kind: 'media',
+      key: 'md1',
+      ts: new Date(NOW).toISOString(),
+      item: {
+        kind: 'media',
+        id: 'md1',
+        text: 'Here you go',
+        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
+        options: ['See all'],
+        ts: new Date(NOW).toISOString(),
+      },
+    };
+    renderTranscript([media], { onSend });
+
+    expect(screen.getByRole('img', { name: 'Item A' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'See all' }));
+    expect(onSend).toHaveBeenCalledWith('See all');
+  });
+
+  it('renders a media card chip disabled once the session is locked', () => {
+    const media: TranscriptEntry = {
+      kind: 'media',
+      key: 'md1',
+      ts: new Date(NOW).toISOString(),
+      item: {
+        kind: 'media',
+        id: 'md1',
+        text: 'Here you go',
+        media: null,
+        options: ['See all'],
+        ts: new Date(NOW).toISOString(),
+      },
+    };
+    renderTranscript([media], { locked: true });
+
+    expect(screen.getByRole('button', { name: 'See all' })).toBeDisabled();
   });
 });

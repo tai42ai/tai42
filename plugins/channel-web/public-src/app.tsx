@@ -191,9 +191,9 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     itemCountRef.current = items.length;
   }, [items.length]);
 
-  // The typing bubble clears on the agent's next word — a message of theirs or a
-  // question — and on anything that ends the wait: a dead session, or a stream
-  // that can no longer carry the reply.
+  // The typing bubble clears on the agent's next turn — a message of theirs, a
+  // question, or a media card — and on anything that ends the wait: a dead
+  // session, or a stream that can no longer carry the reply.
   const streamHealthy = stream.connected && stream.error === null;
   useEffect(() => {
     if (typingFrom === null) return;
@@ -203,7 +203,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     }
     const replied = items
       .slice(typingFrom)
-      .some((item) => item.kind === 'question' || item.direction === 'out');
+      .some((item) => item.kind !== 'message' || item.direction === 'out');
     if (replied) setTypingFrom(null);
   }, [items, typingFrom, ended, streamHealthy]);
 
@@ -243,10 +243,14 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     [identity],
   );
 
-  const submit = useCallback(
-    (raw: string) => {
+  // The one send door. Validates the text, records the optimistic bubble and hands
+  // it to `deliver`; it never touches the composer draft, so a chip tap can send its
+  // own text while the visitor's typed-but-unsent draft stays put. Reports whether a
+  // message actually went out, which is what lets the composer clear its own draft.
+  const send = useCallback(
+    (raw: string): boolean => {
       const text = raw.trim();
-      if (text === '' || ended) return;
+      if (text === '' || ended) return false;
       const localId = nextLocalId();
       const clientMessageId = nextClientMessageId();
       setOutbox((prev) => [
@@ -261,14 +265,17 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
           clientMessageId,
         },
       ]);
-      setDraft('');
       composerRef.current?.focus();
       deliver(localId, text, clientMessageId);
+      return true;
     },
     [ended, deliver],
   );
 
-  const onSend = useCallback(() => submit(draft), [draft, submit]);
+  // The composer's own submission: send the draft and, only if it went out, clear it.
+  const onSend = useCallback(() => {
+    if (send(draft)) setDraft('');
+  }, [draft, send]);
 
   // A pair code carried in the page URL (`?tai_pair=…`) is submitted ONCE as the visitor's
   // first message and then stripped from the URL, so a reload or a shared link cannot
@@ -281,7 +288,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     pairConsumedRef.current = true;
     const pair = new URLSearchParams(window.location.search).get('tai_pair');
     if (pair === null || !PAIR_CODE_RE.test(pair)) return;
-    submit(pair);
+    send(pair);
     const url = new URL(window.location.href);
     url.searchParams.delete('tai_pair');
     window.history.replaceState(
@@ -289,7 +296,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
       '',
       `${url.pathname}${url.search}${url.hash}`,
     );
-  }, [submit]);
+  }, [send]);
 
   const onRetry = useCallback(
     (localId: string) => {
@@ -351,20 +358,24 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   }, [identity, entryCode]);
 
   const entries = useMemo<readonly TranscriptEntry[]>(() => {
-    const fromStream: TranscriptEntry[] = items.map((item) =>
-      item.kind === 'message'
-        ? {
-            kind: 'message',
-            key: item.id,
-            direction: item.direction,
-            text: item.text,
-            ts: item.ts,
-            status: null,
-            error: null,
-            retryId: null,
-          }
-        : { kind: 'question', key: item.id, ts: item.ts, question: item },
-    );
+    const fromStream: TranscriptEntry[] = items.map((item) => {
+      if (item.kind === 'message') {
+        return {
+          kind: 'message',
+          key: item.id,
+          direction: item.direction,
+          text: item.text,
+          ts: item.ts,
+          status: null,
+          error: null,
+          retryId: null,
+        };
+      }
+      if (item.kind === 'media') {
+        return { kind: 'media', key: item.id, ts: item.ts, item };
+      }
+      return { kind: 'question', key: item.id, ts: item.ts, question: item };
+    });
     const unconfirmed: TranscriptEntry[] = pending.map((item) => ({
       kind: 'message',
       key: item.localId,
@@ -431,6 +442,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
           onAnswer={onAnswer}
           onAnswered={focusComposer}
           onRetry={onRetry}
+          onSend={send}
           pinToken={pinToken}
         />
       )}

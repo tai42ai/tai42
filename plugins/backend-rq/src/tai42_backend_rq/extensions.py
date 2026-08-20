@@ -21,12 +21,12 @@ from rq.job import JobStatus
 from rq_scheduler import Scheduler
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_kit.backend import prepare_backend_kwargs
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
-from tai42_backend_rq.callback import prepare_backend_kwargs
 from tai42_backend_rq.schedules import apply_normalized_schedule
 from tai42_backend_rq.settings import rq_settings
 from tai42_backend_rq.signatures import add_signature_params

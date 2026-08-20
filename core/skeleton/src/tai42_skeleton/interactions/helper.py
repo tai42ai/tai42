@@ -220,10 +220,15 @@ async def ask_user(
     ``properties`` map; every property a scalar
     ``string``/``boolean``/``integer``/``number``; ``enum`` only on a ``string``
     property, a non-empty list of strings; a ``required`` list naming only
-    declared properties. A schema outside the subset raises ``ValueError`` naming
-    the offending property, before any state is written (a non-channel form keeps
-    full schema freedom). An unknown name raises ``ValueError`` before any state
-    is written. The timeout budget bounds
+    declared properties. A schema outside that shared subset raises ``ValueError``
+    naming the offending property, before any state is written (a non-channel form
+    keeps full schema freedom). On TOP of the shared subset, the named channel's
+    OPTIONAL ``validate_form_schema`` hook enforces its own ask-time-knowable
+    limits (reserved property names, per-medium caps, question-text caps) over the
+    schema AND the question text, also raising ``ValueError`` before any state is
+    written — so a question or schema the channel could never render is refused up
+    front, never persisted only to fail at delivery. An unknown name raises ``ValueError``
+    before any state is written. The timeout budget bounds
     the WHOLE ask — the delivery attempts, their backoff sleeps, AND the answer
     wait together — so delivery time shrinks the answer wait, and a delivery phase
     that consumes the whole budget leaves no wait and times out. A delivery failure
@@ -306,6 +311,16 @@ async def ask_user(
                 # nothing re-normalizes it.
                 schema = _normalize_schema(schema)
                 validate_channel_form_schema(schema)
+                # Channel-specific form limits (reserved names, per-medium Block
+                # Kit / Flow caps, question-text caps) the generic subset does not
+                # know: the channel's OPTIONAL ``validate_form_schema`` hook enforces
+                # them at the chokepoint — before any state is written — raising
+                # ``ValueError`` on a violation, so a question or schema the channel
+                # could never render is refused up front rather than persisted and
+                # failed at delivery.
+                validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
+                if validate_form_schema is not None:
+                    validate_form_schema(schema, question)
         if options is not None and fmt is not AnswerFormat.SELECT:
             raise ValueError("options are only valid with answer_format 'select'")
         if recipient is not None and (not isinstance(recipient, str) or not recipient.strip()):
@@ -482,12 +497,12 @@ async def ask_user(
             try:
                 if retry_in is not None:
                     await asyncio.sleep(retry_in)
+                # Each attempt is bounded by what is left of the budget: a
+                # plugin that consumes it is hung, and an unbounded await here
+                # would block the caller forever with the question persisted —
+                # so a timeout is a typed, retryable delivery failure.
+                attempt_timeout = deadline - loop.time()
                 try:
-                    # Each attempt is bounded by what is left of the budget: a
-                    # plugin that consumes it is hung, and an unbounded await here
-                    # would block the caller forever with the question persisted —
-                    # so a timeout is a typed, retryable delivery failure.
-                    attempt_timeout = deadline - loop.time()
                     await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
                 except TimeoutError as exc:
                     raise ChannelDeliveryError(

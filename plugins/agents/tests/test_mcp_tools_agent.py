@@ -694,6 +694,17 @@ def test_tool_input_rejects_unknown_key() -> None:
         mcp_mod.McpToolsAgentInput.model_validate({"mcp_config": {}, "inject_envv": True})
 
 
+def test_empty_content_kwargs_normalize_to_none() -> None:
+    """An empty content-kwargs dict from the JSON door reads as absent — the builders
+    treat {} as no mark, so the field normalizes to None rather than a set-but-empty
+    value the unhonored-reject face would misread."""
+    validated = mcp_mod.McpToolsAgentInput.model_validate(
+        {"mcp_config": {}, "system_content_kwargs": {}, "user_content_kwargs": {}}
+    )
+    assert validated.system_content_kwargs is None
+    assert validated.user_content_kwargs is None
+
+
 def test_astream_threads_content_kwargs_to_the_delegated_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     """``system_content_kwargs`` / ``user_content_kwargs`` reach the delegated event
     stream, where the kit marks the system prompt and last user message for caching."""

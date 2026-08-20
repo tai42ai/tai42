@@ -21,6 +21,7 @@ from tai42_contract.interactions.models import MediaItem
 from tai42_cli.commands._common import app_context, covers, emit_records, emit_result, parse_json_value
 
 _MEDIA_ADAPTER = TypeAdapter(list[MediaItem])
+_OPTIONS_ADAPTER = TypeAdapter(list[str])
 
 app = typer.Typer(
     name="notifications",
@@ -71,12 +72,21 @@ def notify(
             ),
         ),
     ] = None,
+    options: Annotated[
+        str | None,
+        typer.Option(
+            "--options",
+            help='JSON array of tappable options, e.g. \'["Item A","Item B"]\'.',
+        ),
+    ] = None,
 ) -> None:
     """Send a human a one-way, fire-and-forget notification.
 
-    ``--media`` and ``--template`` are JSON strings (the nested shapes have no flat-flag
-    form); each is validated into its contract model before the request, so a malformed
-    value raises loudly here rather than at the server.
+    ``--media``, ``--template`` and ``--options`` are JSON strings (the nested shapes have
+    no flat-flag form). The CLI checks only their shape before the request — a list of
+    ``MediaItem`` for ``--media``, ``list[str]`` for ``--options``, a ``ChannelTemplate`` for
+    ``--template`` — so a mis-shaped value raises loudly here; the contract's richer rules
+    (caps, non-blank, exclusivity) are enforced by the server.
 
     Example: ``tai notifications notify "Deploy finished" --channel telegram``
     """
@@ -100,6 +110,13 @@ def notify(
         except ValidationError as exc:
             raise typer.BadParameter(f"invalid template: {exc}", param_hint="--template") from exc
         body["template"] = model.model_dump(mode="json")
+    if options is not None:
+        parsed_options = parse_json_value(options, param_hint="--options")
+        try:
+            option_list = _OPTIONS_ADAPTER.validate_python(parsed_options)
+        except ValidationError as exc:
+            raise typer.BadParameter(f"invalid options: {exc}", param_hint="--options") from exc
+        body["options"] = list(option_list)
     with ctx_obj.client() as client:
         data = client.post("/api/notifications", json=body)
     emit_result(ctx_obj, data)

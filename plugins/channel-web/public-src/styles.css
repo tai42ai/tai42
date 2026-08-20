@@ -385,6 +385,58 @@
   font-size: var(--tai-text-sm);
 }
 
+/* -- Media cards ----------------------------------------------------------- */
+
+.tcw-media {
+  max-width: min(95%, 40rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  border: 1px solid var(--tai-color-border);
+  background: var(--tai-color-surface);
+  color: var(--tai-color-text);
+}
+
+.tcw-media-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+}
+
+.tcw-media-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-1);
+}
+
+.tcw-media-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--tai-radius-md);
+  border: 1px solid var(--tai-color-border);
+}
+
+.tcw-media-caption {
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+}
+
+.tcw-media-link {
+  color: var(--tai-color-prose-link);
+  overflow-wrap: anywhere;
+}
+
+.tcw-media-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--tai-space-2);
+}
+
 /* -- Floating affordances -------------------------------------------------- */
 
 /* Clicks fall through the wrapper to the transcript behind it; only the button

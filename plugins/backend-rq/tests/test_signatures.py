@@ -7,7 +7,7 @@ from typing import Any
 
 from fastmcp import Context
 
-from tai42_backend_rq.signatures import add_signature_params, exclude_fastmcp_ctx_from_kwargs
+from tai42_backend_rq.signatures import add_signature_params
 
 
 async def plain(x: int, note: str = "hi") -> str:
@@ -40,13 +40,3 @@ def test_add_params_keeps_var_keyword_last():
     sig = add_signature_params(with_var_keyword, {"countdown": int | None})
     assert list(sig.parameters) == ["x", "countdown", "extra"]
     assert sig.parameters["extra"].kind is inspect.Parameter.VAR_KEYWORD
-
-
-def test_exclude_ctx_strips_only_the_context_kwarg():
-    kwargs = exclude_fastmcp_ctx_from_kwargs(with_ctx, {"x": 1, "ctx": object()})
-    assert kwargs == {"x": 1}
-
-
-def test_exclude_ctx_no_context_is_a_no_op():
-    kwargs = exclude_fastmcp_ctx_from_kwargs(plain, {"x": 1})
-    assert kwargs == {"x": 1}

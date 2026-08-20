@@ -38,7 +38,10 @@ _BUILD_STEP = "`pnpm install && pnpm build` in plugins/channel-web"
 # ``style-src`` admits ``'unsafe-inline'``: the design-system overlays compiled into
 # this bundle inject a ``<style>`` element at runtime for their scroll lock, which
 # ``'self'`` alone refuses. ``script-src`` stays strict. ``font-src 'self'`` is the
-# bundle's own webfonts, served by the asset door.
+# bundle's own webfonts, served by the asset door. ``img-src`` admits ``https:`` for an
+# agent-sent media card (the contract constrains a media-card image to an absolute https
+# source, never http) and ``data:`` for the bundled schema-form media field's inline
+# ``<img>`` preview of a visitor-picked image, whose source is a ``data:`` URL.
 PAGE_CSP = "; ".join(
     [
         "default-src 'none'",
@@ -46,7 +49,7 @@ PAGE_CSP = "; ".join(
         "style-src 'self' 'unsafe-inline'",
         "font-src 'self'",
         "connect-src 'self'",
-        "img-src 'self' data:",
+        "img-src 'self' data: https:",
         "base-uri 'none'",
         "frame-ancestors 'none'",
         "form-action 'self'",

@@ -13,8 +13,9 @@ properties map one-to-one onto Flow field components:
 Each property's ``title`` (else the property name) is the field label; the
 ``required`` list flags the components. Anything outside the subset — a nested
 object, an array, a ``oneOf``/``anyOf``, an unknown type, or the reserved
-``flow_token`` property name — raises ``ChannelDeliveryError`` naming the property
-and why, before any network work.
+``flow_token`` property name — is a permanent input refusal (the medium cannot
+render it BY NATURE): it raises ``ChannelInputError`` naming the property and why,
+before any network work, and is never retried.
 
 The emitted Flow is one terminal screen ``"FORM"`` with a ``SingleColumnLayout``
 holding one ``Form`` named ``"form"``; its ``Footer`` completes the flow with a
@@ -29,7 +30,7 @@ import hashlib
 import json
 from typing import Any
 
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelInputError
 
 # Flow JSON version pinned to a Cloud-API-valid release. This is a static
 # (endpoint-less) navigate flow whose single terminal screen completes with the
@@ -53,14 +54,14 @@ _RESERVED_PROPERTY = "flow_token"
 
 def _field_component(name: str, prop: dict[str, Any], required: bool) -> dict[str, Any]:
     """One Flow field component for a single top-level schema property, or raise
-    ``ChannelDeliveryError`` naming the property when it is outside the subset."""
+    ``ChannelInputError`` naming the property when it is outside the subset."""
     label = prop.get("title") if isinstance(prop.get("title"), str) else name
     prop_type = prop.get("type")
     enum = prop.get("enum")
 
     if prop_type == "string" and enum is not None:
         if not isinstance(enum, list) or not enum or not all(isinstance(item, str) for item in enum):
-            raise ChannelDeliveryError(f"form property {name!r}: a string enum must be a non-empty list of strings")
+            raise ChannelInputError(f"form property {name!r}: a string enum must be a non-empty list of strings")
         return {
             "type": "Dropdown",
             "name": name,
@@ -80,7 +81,7 @@ def _field_component(name: str, prop: dict[str, Any], required: bool) -> dict[st
             "required": required,
             "input-type": "number",
         }
-    raise ChannelDeliveryError(
+    raise ChannelInputError(
         f"form property {name!r}: unsupported schema type {prop_type!r} — a form field must be "
         "string, string+enum, boolean, integer, or number (no nested objects, arrays, or unions)"
     )
@@ -96,33 +97,33 @@ def build_flow(schema: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """The ``(flow_json, schema_hash)`` for a form answer schema.
 
     Validates the schema is the supported ``object`` subset and maps each property
-    to a field component; raises ``ChannelDeliveryError`` (naming the offending
+    to a field component; raises ``ChannelInputError`` (naming the offending
     property or shape) on anything outside it. Pure — no I/O.
     """
     if not isinstance(schema, dict) or schema.get("type") != "object":
-        raise ChannelDeliveryError(
+        raise ChannelInputError(
             f"form schema must be a top-level object schema, got type={schema.get('type')!r}"
             if isinstance(schema, dict)
             else "form schema must be a JSON object"
         )
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not properties:
-        raise ChannelDeliveryError("form schema must carry a non-empty 'properties' object")
+        raise ChannelInputError("form schema must carry a non-empty 'properties' object")
     required_raw = schema.get("required", [])
     if not isinstance(required_raw, list) or not all(isinstance(item, str) for item in required_raw):
-        raise ChannelDeliveryError("form schema 'required' must be a list of property-name strings")
+        raise ChannelInputError("form schema 'required' must be a list of property-name strings")
     required = set(required_raw)
 
     components: list[dict[str, Any]] = []
     payload: dict[str, str] = {}
     for name, prop in properties.items():
         if name == _RESERVED_PROPERTY:
-            raise ChannelDeliveryError(
+            raise ChannelInputError(
                 f"form property {name!r}: reserved on this channel — Meta injects {name!r} into the "
                 "Flow response to correlate the reply, so a field of that name is unanswerable"
             )
         if not isinstance(prop, dict):
-            raise ChannelDeliveryError(f"form property {name!r}: schema must be an object")
+            raise ChannelInputError(f"form property {name!r}: schema must be an object")
         components.append(_field_component(name, prop, name in required))
         payload[name] = f"${{form.{name}}}"
 

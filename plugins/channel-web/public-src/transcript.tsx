@@ -18,6 +18,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ArrowDownIcon, Button, EmptyState, Spinner } from '@tai42/studio-sdk';
 
 import { Bubble, type SendStatus } from '@/bubble';
+import { MediaCard, type MediaCardItem } from '@/media-card';
 import { QuestionCard, type QuestionItem } from '@/question-card';
 
 /** How close to the bottom edge (px) still counts as "pinned to the tail". */
@@ -53,6 +54,12 @@ export type TranscriptEntry =
       readonly key: string;
       readonly ts: string;
       readonly question: QuestionItem;
+    }
+  | {
+      readonly kind: 'media';
+      readonly key: string;
+      readonly ts: string;
+      readonly item: MediaCardItem;
     };
 
 /** A rendered row: a day divider, or one entry with its grouping decisions. */
@@ -100,9 +107,10 @@ function timeLabel(at: number): string {
   return new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-/** Who is speaking — a question is the agent's turn, like an outbound message. */
+/** Who is speaking — a question or a media card is the agent's turn, like an
+ * outbound message. */
 function speakerOf(entry: TranscriptEntry): 'in' | 'out' {
-  return entry.kind === 'question' ? 'out' : entry.direction;
+  return entry.kind === 'message' ? entry.direction : 'out';
 }
 
 /**
@@ -150,6 +158,9 @@ export interface TranscriptProps {
   readonly onAnswer: (interactionId: string, answer: unknown) => Promise<void>;
   readonly onAnswered: () => void;
   readonly onRetry: (retryId: string) => void;
+  /** Sends a media card chip's label as a regular visitor message — the same send
+   * door the composer uses. */
+  readonly onSend: (text: string) => void;
   /** Bumped on every send from this page. The visitor's own message always
    * returns them to the tail and never counts as something they missed. */
   readonly pinToken: number;
@@ -164,6 +175,7 @@ export function Transcript({
   onAnswer,
   onAnswered,
   onRetry,
+  onSend,
   pinToken,
 }: TranscriptProps): ReactElement {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -271,6 +283,7 @@ export function Transcript({
               onAnswer={onAnswer}
               onAnswered={onAnswered}
               onRetry={onRetry}
+              onSend={onSend}
             />
           ),
         )}
@@ -301,6 +314,7 @@ interface EntryRowProps {
   readonly onAnswer: (interactionId: string, answer: unknown) => Promise<void>;
   readonly onAnswered: () => void;
   readonly onRetry: (retryId: string) => void;
+  readonly onSend: (text: string) => void;
 }
 
 function EntryRow({
@@ -310,6 +324,7 @@ function EntryRow({
   onAnswer,
   onAnswered,
   onRetry,
+  onSend,
 }: EntryRowProps): ReactElement {
   const { entry, time } = row;
   const retryId = entry.kind === 'message' ? entry.retryId : null;
@@ -334,6 +349,8 @@ function EntryRow({
           onAnswered={onAnswered}
           locked={locked}
         />
+      ) : entry.kind === 'media' ? (
+        <MediaCard item={entry.item} onSend={onSend} locked={locked} />
       ) : (
         <Bubble
           direction={entry.direction}

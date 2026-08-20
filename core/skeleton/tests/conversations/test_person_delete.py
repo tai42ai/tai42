@@ -15,8 +15,11 @@ from datetime import UTC, datetime
 import pytest
 from tai42_contract.conversations import Person, PersonAddress
 
+from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
+from tai42_skeleton.conversations.caps import ThreadBusyError
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.persons import ConversationPersonStore, _address_key_of
 from tai42_skeleton.conversations.records import ConversationRecordStore
@@ -65,6 +68,7 @@ def fake(monkeypatch) -> FakeRecordRedis:
     ctx = make_record_client_ctx(fake)
     monkeypatch.setattr(records_module, "client_ctx", ctx)
     monkeypatch.setattr(persons_module, "client_ctx", ctx)
+    monkeypatch.setattr(thread_lease_module, "client_ctx", ctx)
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: _DictManager())
     return fake
 
@@ -250,6 +254,51 @@ async def test_delete_person_with_a_turn_in_flight_is_a_409(fake, checkpoint_sav
     assert checkpoint_saver.deleted == []
     assert settings.record_key("live") in fake._hashes
     assert settings.person_key(_PERSON_ID) in fake._strings
+
+
+async def test_delete_person_linked_refuses_503_when_a_foreign_worker_holds_the_lease(
+    fake, checkpoint_saver, monkeypatch
+):
+    # The LINKED branch: a sibling worker holds the aggregated thread's cross-worker lease. As a
+    # live-caller sync door the erase bounds its acquisition and refuses with the loud, retriable
+    # ThreadBusyError (a 503) rather than blocking past the proxy timeout; nothing is torn down.
+    monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
+    caps_module._CAPS_CACHE.clear()
+    person = _person()
+    _seed_person(fake, person)
+    fake.seed_route("chat-a")
+    fake.seed_route("chat-b")
+    settings = ConversationsSettings()
+    key = settings.thread_lease_key(_PERSON_THREAD)
+    await fake.set(key, "foreign-token", px=120_000, nx=True)
+
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        await ops.delete_conversation_person(_PERSON_ID)
+
+    assert checkpoint_saver.deleted == []
+    assert settings.person_key(_PERSON_ID) in fake._strings
+    assert fake._strings.get(key) == "foreign-token"
+
+
+async def test_delete_person_gone_branch_refuses_503_when_a_foreign_worker_holds_the_lease(
+    fake, checkpoint_saver, monkeypatch
+):
+    # The ALREADY-GONE branch (no person row) takes the same bounded acquisition on the
+    # aggregated thread, so a foreign worker's lease refuses it with a clean 503 before the
+    # checkpoint delete.
+    monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
+    caps_module._CAPS_CACHE.clear()
+    settings = ConversationsSettings()
+    key = settings.thread_lease_key("bridge:@person:never-seen")
+    await fake.set(key, "foreign-token", px=120_000, nx=True)
+
+    with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
+        await ops.delete_conversation_person("never-seen")
+
+    assert checkpoint_saver.deleted == []
+    assert fake._strings.get(key) == "foreign-token"
 
 
 async def test_delete_person_blank_id_is_a_400(fake):

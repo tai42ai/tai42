@@ -9,11 +9,15 @@
   ``notify_user`` helper, mapping the helper's loud
   failures to the operation's typed errors: a blank message / unknown channel /
   blank recipient/audience — or a caller-supplied ``sender_identity`` (an
-  internal-only control) — is a :class:`BadRequestError` (400), a restricted caller
+  internal-only control) — or a channel's permanent refusal of the input's shape
+  (a :class:`ChannelInputError`, retrying cannot succeed) — is a
+  :class:`BadRequestError` (400), a restricted caller
   addressing another identity is a cross-identity authorization denial mapped to a
   :class:`ForbiddenError` (403) — the same 403 the read-side answer door raises for the
   symmetric read denial — a channel that cannot notify
-  is a :class:`NotSupportedError` (501), and a channel delivery failure is an
+  is a :class:`NotSupportedError` (501), and a channel delivery failure splits on the
+  raised error's ``retryable``: a transient one is a :class:`UnavailableError` (503)
+  carrying the medium's ``retry_after`` when present, a permanent refusal is an
   :class:`UpstreamError` (502) — a failure is never swallowed.
 
 ``notify_user`` causes an external side-effect (a message leaves the deployment),
@@ -24,7 +28,7 @@ so it is NOT authority-changing and stays a plain (includable) projected tool.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-from tai42_contract.channels import ChannelDeliveryError, ChannelTemplate
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate
 from tai42_contract.interactions.models import MediaItem
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
@@ -32,7 +36,14 @@ from tai42_skeleton.channels.notifications_sink import read_notifications
 from tai42_skeleton.channels.notify import SenderIdentityNotAllowedError
 from tai42_skeleton.channels.notify import notify_user as _notify_user
 from tai42_skeleton.interactions.settings import interactions_store_configured
-from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotSupportedError, UpstreamError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ForbiddenError,
+    NotSupportedError,
+    UnavailableError,
+    UpstreamError,
+    operation,
+)
 
 
 class NotifyUser(BaseModel):
@@ -73,7 +84,16 @@ class NotifyUser(BaseModel):
         description=(
             "Optional pre-approved template for an out-of-window send on the named channel. Requires a "
             "channel that advertises template support (else a 501) and a named channel at all (else a "
-            "400); mutually exclusive with media."
+            "400); mutually exclusive with media and options."
+        ),
+    )
+    options: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional tappable options sent WITH the message on the named channel; a tap enters the "
+            "conversation as a visitor message on channels that support it. Requires a channel that "
+            "advertises interactive support (else a 501) and a named channel at all (else a 400); "
+            "mutually exclusive with template, may combine with media."
         ),
     )
 
@@ -97,7 +117,7 @@ async def list_notifications() -> dict:
     summary="Send a human a one-way notification",
     tags=["notifications"],
     destructive=True,
-    errors=[BadRequestError, ForbiddenError, NotSupportedError, UpstreamError],
+    errors=[BadRequestError, ForbiddenError, NotSupportedError, UnavailableError, UpstreamError],
     request_model=NotifyUser,
 )
 async def notify_user(
@@ -108,6 +128,7 @@ async def notify_user(
     sender_identity: str | None = None,
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
+    options: list[str] | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -118,18 +139,22 @@ async def notify_user(
     failure raises loudly, never a silent no-op:
 
     * a blank message, an unknown channel name, a blank recipient/audience, a
-      caller-supplied ``sender_identity``, or ``media``/``template`` with no named
-      channel → 400;
+      caller-supplied ``sender_identity``, ``media``/``template``/``options`` with no
+      named channel, or a channel's permanent refusal of the input's shape (retrying
+      cannot succeed) → 400;
     * a restricted caller addressing another identity (cross-identity denial) → 403;
-    * a channel that cannot notify, or does not advertise the ``media``/``template``
-      capability the send needs → 501;
-    * a channel delivery failure → 502.
+    * a channel that cannot notify, or does not advertise the
+      ``media``/``template``/``options`` capability the send needs → 501;
+    * a transient channel delivery failure (the raised error's ``retryable``) → 503,
+      carrying the medium's ``retry_after`` when it named one;
+    * a permanent channel delivery refusal → 502.
 
-    ``media`` (display media sent with the message) and ``template`` (a pre-approved
-    out-of-window send) are OPTIONAL richer-send forms carried to the channel; the
-    contract enforces they are mutually exclusive. Each needs a channel that advertises
-    the matching capability — otherwise the send is refused as a 501, never downgraded
-    to a silent freeform send.
+    ``media`` (display media sent with the message), ``template`` (a pre-approved
+    out-of-window send) and ``options`` (tappable options a tap of which enters the
+    conversation) are OPTIONAL richer-send forms carried to the channel; the contract
+    enforces media/template and options/template are each mutually exclusive (options may
+    combine with media). Each needs a channel that advertises the matching capability —
+    otherwise the send is refused as a 501, never downgraded to a silent freeform send.
 
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).
@@ -154,6 +179,7 @@ async def notify_user(
             audience=audience,
             media=media,
             template=template,
+            options=options,
         )
     except SenderIdentityNotAllowedError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -165,9 +191,21 @@ async def notify_user(
         raise ForbiddenError(str(exc)) from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
+    except ChannelInputError as exc:
+        # A permanent refusal of the input's shape/content — retrying cannot succeed, so it
+        # is a client error (400), never a retryable 502 like a delivery failure.
+        raise BadRequestError(str(exc)) from exc
     except NotImplementedError as exc:
         raise NotSupportedError(str(exc)) from exc
     except ChannelDeliveryError as exc:
+        if exc.retryable:
+            # A transient delivery failure (a medium 5xx, a rate limit, a transport fault) may
+            # land on a retry: a 503, distinct from the permanent 502 below, carrying the
+            # medium's own retry_after when it named one so the caller can honor the wait.
+            extra: dict[str, object] | None = {"retry_after": exc.retry_after} if exc.retry_after is not None else None
+            raise UnavailableError(str(exc), extra=extra) from exc
+        # A permanent delivery refusal (a rejected recipient, a bad credential) cannot be
+        # retried — a 502, the non-retryable upstream surface.
         raise UpstreamError(str(exc)) from exc
     if channel is None:
         return "notification recorded to the internal sink"

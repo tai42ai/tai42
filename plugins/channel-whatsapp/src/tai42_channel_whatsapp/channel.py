@@ -33,6 +33,7 @@ from typing import Any, ClassVar
 from tai42_contract.channels import (
     ChannelDelivery,
     ChannelDeliveryError,
+    ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
 )
@@ -272,7 +273,7 @@ async def _send_body_and_media(phone_number_id: str, target: str, notification: 
 
     for image in images:
         if image.url.startswith("data:"):
-            raise ChannelDeliveryError(
+            raise ChannelInputError(
                 f"WhatsApp cannot send a data: image URL ({image.url[:32]}...); a link-sourced image "
                 "requires a public https URL"
             )
@@ -310,6 +311,23 @@ class WhatsAppChannel:
     # This channel renders a form ask as a WhatsApp Flow; the ask_user helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
+
+    def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
+        """Enforce this channel's form-schema limits at ask-time, before any state
+        is written. The reserved ``flow_token`` property (Meta's own correlation
+        key) — and every subset rule the Flow mapping enforces — is refused here as
+        a ``ValueError``, so a schema the delivery path could never render is
+        rejected up front instead of persisting a question that only fails at
+        delivery. ``build_flow`` is the single mapping definition; a delivery-time
+        ``ChannelInputError`` becomes the ask-time ``ValueError``. The Flow body is
+        ``interactive.body.text``, capped by Meta at ``_INTERACTIVE_BODY_MAX_CHARS``,
+        so an over-long ``question`` is refused here too."""
+        if len(question) > _INTERACTIVE_BODY_MAX_CHARS:
+            raise ValueError(f"form question exceeds {_INTERACTIVE_BODY_MAX_CHARS} characters")
+        try:
+            build_flow(schema)
+        except ChannelInputError as exc:
+            raise ValueError(str(exc)) from exc
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Resolve the destination ``wa_id``, then push the question to it.

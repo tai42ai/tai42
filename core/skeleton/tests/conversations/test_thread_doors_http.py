@@ -18,6 +18,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from tai42_skeleton.conversations import caps as caps_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -248,11 +249,9 @@ def delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     fake = FakeRecordRedis()
     fake.seed_route("chat")
-    monkeypatch.setattr(
-        importlib.import_module("tai42_skeleton.conversations.records"),
-        "client_ctx",
-        make_record_client_ctx(fake),
-    )
+    ctx = make_record_client_ctx(fake)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.records"), "client_ctx", ctx)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.thread_lease"), "client_ctx", ctx)
     router = _router()
 
     op_globals = router._delete_conversation_thread_op.__globals__
@@ -384,6 +383,27 @@ async def test_delete_thread_door_answers_409_for_a_turn_in_flight(delete_client
     assert saver.deleted == []
 
 
+async def test_delete_thread_door_answers_503_when_a_foreign_worker_holds_the_lease(delete_client, monkeypatch):
+    # A sibling worker holds the thread's cross-worker lease. As a live-caller sync door the
+    # delete bounds its acquisition, so it answers a clean, retriable 503 rather than blocking
+    # past the proxy timeout; nothing is torn down while it waits.
+    client, saver = delete_client
+    monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
+    monkeypatch.setenv("CONVERSATIONS_THREAD_LEASE_POLL_SECONDS", "0.02")
+    caps_module._CAPS_CACHE.clear()
+
+    key = ConversationsSettings().thread_lease_key(_DELETE_THREAD)
+    tl = importlib.import_module("tai42_skeleton.conversations.thread_lease")
+    async with tl.client_ctx(object, None) as r:
+        await r.set(key, "foreign-token", px=120_000, nx=True)
+
+    response = client.delete("/api/conversations/chat/thread", params={"thread_id": _DELETE_THREAD})
+
+    assert response.status_code == 503
+    assert "busy with an in-flight turn" in response.json()["error"]
+    assert saver.deleted == []
+
+
 # -- the person-erase door ------------------------------------------------------------------
 
 
@@ -398,6 +418,7 @@ def person_delete_client(monkeypatch) -> tuple[TestClient, _RecordingSaver]:
     ctx = make_record_client_ctx(fake)
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.records"), "client_ctx", ctx)
     monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.persons"), "client_ctx", ctx)
+    monkeypatch.setattr(importlib.import_module("tai42_skeleton.conversations.thread_lease"), "client_ctx", ctx)
     router = _router()
 
     op_globals = router._delete_conversation_person_op.__globals__

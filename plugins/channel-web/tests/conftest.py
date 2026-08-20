@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -144,6 +144,17 @@ class _StubApp:
 
 
 _stub_app = _StubApp()
+
+# Whatever the shared handle held before this conftest imported (nothing in an isolated
+# run; the real app when another package's suite bound it first). Captured BEFORE the
+# module-level bind below so the session finalizer can hand it back — the stub never
+# leaks onto the shared handle into a cross-package run.
+_pre_import_impl = cast("Any", tai42_app)._impl
+
+# ``register``/``routes`` register on ``tai42_app`` at import time and test_routes
+# collects handlers off the stub, both BEFORE any test runs — so the stub is bound at
+# import here, not merely in a fixture. Per-test rebinding and the suite-end restore are
+# the fixtures below.
 tai42_app.bind(_stub_app)
 
 
@@ -472,6 +483,30 @@ def register(fake: FakeRedis, token: str, visitor_id: str, identity: str, params
             "params": params or {},
         }
     )
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Hand the shared handle back to its pre-import impl once collection is done.
+
+    The module-level ``tai42_app.bind(_stub_app)`` must stand through collection so
+    test_routes's import-time route registration lands on the stub. It is undone here —
+    before the run phase — but ONLY when the stub is still the active binding: a
+    cross-package run whose other package bound the real app AFTER this conftest imported
+    (its conftest collected later) leaves that binding untouched, so its tests, which may
+    run first, see the real app rather than the leaked stub. Each of this package's own
+    tests rebinds the stub through ``_bound_stub_app``."""
+    if cast("Any", tai42_app)._impl is _stub_app:
+        tai42_app.bind(_pre_import_impl)
+
+
+@pytest.fixture(autouse=True)
+def _bound_stub_app() -> Iterator[None]:
+    """Bind the stub app for the duration of each test through the handle's own restoring
+    context manager, so the test runs against the stub and whatever was bound going in is
+    handed back on teardown. Collection-time binding and its pre-run restore are
+    ``pytest_collection_finish``'s job."""
+    with tai42_app.bound(_stub_app):
+        yield
 
 
 @pytest.fixture(autouse=True)

@@ -835,7 +835,10 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
     The whole teardown runs under the thread's per-thread FIFO (the lock an operator send and
     an in-flight turn take), so an operator send already in flight on the thread within this
     worker drains BEFORE the delete rather than half-behind it; a full queue is the loud,
-    retriable 503 that FIFO raises before anything is torn down.
+    retriable 503 that FIFO raises before anything is torn down. As a live-caller sync door the
+    acquisition is bounded by ``sync_door_wait_seconds``: a wait past it — behind a turn possibly
+    HITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a
+    block past the proxy timeout.
 
     Returns ``{"removed", "route_name", "thread_id"}``, where ``removed`` counts the answer
     records this call deleted (0 when a prior run already cleared them, when their rows had
@@ -855,7 +858,7 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         raise ConflictError(in_flight_409)
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
-    async with caps.run_reserved(thread_id):
+    async with caps.run_reserved(thread_id, acquire_timeout_seconds=caps.settings.sync_door_wait_seconds):
         # Re-check UNDER the FIFO: an intake admitted between the outer check and taking the
         # lock is durably visible here, so its turn — queued behind this lock — is refused
         # before any teardown, never left to run after the delete and re-create the checkpoint.
@@ -891,7 +894,10 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
     the call answers ``erased=false``. A turn IN FLIGHT on the aggregated thread is a 409
     (retry once it drains), re-checked under the per-thread FIFO before any teardown so an
     admitted turn cannot re-create memory behind the erase; a full queue is the retriable 503.
-    A blank ``person_id`` is a 400; no backend is a loud 501.
+    As a live-caller sync door the acquisition is bounded by ``sync_door_wait_seconds`` (both the
+    linked and the already-gone branch): a wait past it — behind a turn possibly HITL-paused on
+    another worker — is the loud, retriable 503 ``ThreadBusyError`` rather than a block past the
+    proxy timeout. A blank ``person_id`` is a 400; no backend is a loud 501.
 
     Returns ``{"person_id", "removed", "erased"}``, where ``removed`` counts the answer records
     this call deleted across the person's routes and ``erased`` says whether THIS call removed
@@ -907,19 +913,23 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
     person_store = _person_store()
     thread_id = f"{PERSON_THREAD_PREFIX}{person_id}"
     person = await person_store.get_by_id(person_id)
+    caps = get_turn_caps()
     if person is None:
         # Already erased (a retry) or never a person: reachable from the id alone, its
         # aggregated checkpoint is forgotten regardless — keep-forever memory left behind
-        # otherwise — and nothing route-scoped remains to reclaim.
-        await _delete_thread_checkpoint(thread_id)
+        # otherwise — and nothing route-scoped remains to reclaim. The checkpoint delete runs
+        # under the per-thread FIFO and cross-worker lease, exactly as the linked branch does,
+        # so an in-flight turn on the aggregated thread cannot re-fork the memory behind it.
+        caps.reserve_thread_slot(thread_id)
+        async with caps.run_reserved(thread_id, acquire_timeout_seconds=caps.settings.sync_door_wait_seconds):
+            await _delete_thread_checkpoint(thread_id)
         return {"person_id": person_id, "removed": 0, "erased": False}
     route_names = sorted(_person_routes(person))
     in_flight_409 = f"conversation person {person_id!r} has a turn in flight; retry once it drains"
     if await store.thread_has_live_intake(thread_id):
         raise ConflictError(in_flight_409)
-    caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
-    async with caps.run_reserved(thread_id):
+    async with caps.run_reserved(thread_id, acquire_timeout_seconds=caps.settings.sync_door_wait_seconds):
         # Re-check UNDER the FIFO, exactly as the thread delete does: an intake admitted while
         # the lock was being taken is refused before any teardown, never left to re-stamp a
         # route index behind the erase.
@@ -1063,7 +1073,10 @@ async def send_conversation_thread_message(
     thread memory the message is appended to the thread's checkpoint as an ``assistant`` reply
     BEFORE the record is created; an append that fails is a loud 500 and no record is created.
     The send takes the thread's per-thread FIFO, so it waits behind an in-flight turn and
-    never interleaves it; a full queue is a loud, retriable 503.
+    never interleaves it; a full queue is a loud, retriable 503. As a live-caller sync door the
+    wait to acquire the slot is bounded by ``sync_door_wait_seconds``: a wait past it — behind a
+    turn possibly HITL-paused on another worker — is the loud, retriable 503 ``ThreadBusyError``
+    rather than a block past the proxy timeout.
 
     Caller authority is the door's grantable ``write`` action — the same write grant that
     forgets threads — and the record names the calling operator. An unauthenticated caller

@@ -26,6 +26,7 @@ from tai42_skeleton.conversations import persons as persons_module
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations import redeem_throttle as throttle_module
 from tai42_skeleton.conversations import target_config as target_config_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.mode import ConversationModeStore
 from tai42_skeleton.conversations.models import DeliveryStatus
@@ -174,6 +175,7 @@ def env(monkeypatch):
         pair_codes_module,
         target_config_module,
         throttle_module,
+        thread_lease_module,
     ):
         monkeypatch.setattr(module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(turn_module, "bind_execution_identity", _fake_bind)

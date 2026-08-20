@@ -68,6 +68,28 @@ Send visitors to the chat page for that identity:
 https://<your deployment>/api/channels/web/chat/desk
 ```
 
+## Agent-sent cards and lists
+
+A `notify_user` addressed at a web visitor carries richer content than plain text. A
+notification's `media` renders as a **media card**: the message text and the media items,
+each optionally captioned — absolute-`https` images (an `http:` or `data:` image is refused loudly
+— the page renders an image only from an https source) and outbound links, which ride the
+card as safe link elements rather than folded into the body text. A notification's `options`
+renders a **tappable option list** (at most 10 options); a tap sends the option's own text
+through the message door as an ordinary visitor message, so it enters the conversation
+exactly as if the visitor had typed it. `options` may combine with `media` (a card with a
+list). Templates are **not** supported — a template is a vendor construct, refused loudly on
+this channel.
+
+![A media card: an image with a caption and tappable option chips](images/media-card.png)
+
+<Warning>
+Rendering a remote card image makes the visitor's browser fetch it from the image
+host, which reveals the visitor's IP address and request timing to that host (the
+page sends no `Referer`). Point card images only at a host the visitor may reveal
+themselves to.
+</Warning>
+
 ## Link parameters
 
 Query parameters on the chat page URL are **captured with the visitor's session**

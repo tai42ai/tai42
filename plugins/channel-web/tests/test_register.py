@@ -93,9 +93,11 @@ def test_channel_satisfies_the_channel_protocol():
     assert isinstance(WebChannel(), Channel)
 
 
-def test_channel_advertises_no_capability_flags():
+def test_channel_advertises_media_and_interactive_but_not_template():
     channel = WebChannel()
-    assert getattr(channel, "supports_media_notifications", False) is False
+    assert getattr(channel, "supports_media_notifications", False) is True
+    assert getattr(channel, "supports_interactive_notifications", False) is True
+    # A template is a vendor construct; the web channel advertises none.
     assert getattr(channel, "supports_template_notifications", False) is False
 
 

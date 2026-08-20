@@ -161,6 +161,18 @@ def test_tool_input_rejects_unknown_key() -> None:
         ToolsAgentInput.model_validate({"totally_unknown_key": 1})
 
 
+def test_empty_content_kwargs_normalize_to_none() -> None:
+    """An empty content-kwargs dict from the JSON door reads as absent — the builders
+    treat {} as no mark, so the field normalizes to None rather than a set-but-empty
+    value the unhonored-reject face would misread."""
+    validated = ToolsAgentInput.model_validate({"system_content_kwargs": {}, "user_content_kwargs": {}})
+    assert validated.system_content_kwargs is None
+    assert validated.user_content_kwargs is None
+    # A non-empty mark is a real value and rides through unchanged.
+    marked = ToolsAgentInput.model_validate({"user_content_kwargs": {"cache_control": {"type": "ephemeral"}}})
+    assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}
+
+
 def test_from_tool_input_maps_system_prompt_to_system_message() -> None:
     """The ``from_tool_input`` override renames the composable ``system_prompt`` field
     to the ``system_message`` run/astream kwarg (the mapping lives ONLY here), and

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from tai42_kit.utils.detached_util import in_detached_run
+import time
 
-from tai42_backend_celery.core.callback import CallbackSchema, callback_execution, prepare_backend_kwargs
+import pytest
+from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
+from tai42_kit.settings.cache_registry import reset_all_settings
+from tai42_kit.utils.data import jq_util
+from tai42_kit.utils.detached_util import in_detached_run
 
 
 async def test_prepare_backend_kwargs_injects_tool_name() -> None:
@@ -60,3 +64,27 @@ async def test_empty_expr_yields_empty_mapping(stub_app) -> None:
     result = await callback_execution(3, callback)
     assert result == "done"
     assert stub_app.tools.run_tool_calls == [("follow_up", {})]
+
+
+async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> None:
+    # The callback path evaluates jq through ``run_jq_first``, so a slow program
+    # is aborted by JQ_TIMEOUT_SECONDS and the named TimeoutError is raised.
+    class _SlowProgram:
+        def input(self, payload):
+            return self
+
+        def first(self):
+            time.sleep(1)
+            return None
+
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr: _SlowProgram())
+    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
+    reset_all_settings()
+    try:
+        callback = CallbackSchema(condition=". > 1", expr=". * 2")
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
+            await callback_execution(3, callback)
+        assert time.monotonic() - start < 0.5
+    finally:
+        reset_all_settings()

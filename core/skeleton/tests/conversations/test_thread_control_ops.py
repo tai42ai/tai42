@@ -15,6 +15,7 @@ from tai42_contract.conversations import ConversationRoute, Person, PersonAddres
 
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
+from tai42_skeleton.conversations import thread_lease as thread_lease_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations.mode import ConversationModeStore
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -89,6 +90,7 @@ def wired(monkeypatch):
     fake = FakeRecordRedis()
     monkeypatch.setattr(records_module, "client_ctx", make_record_client_ctx(fake))
     monkeypatch.setattr(mode_module, "client_ctx", make_record_client_ctx(fake))
+    monkeypatch.setattr(thread_lease_module, "client_ctx", make_record_client_ctx(fake))
     manager = FakeManager(_channel_route())
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: manager)
     # The route's ``relay`` agent holds thread memory by default, so manual mode is permitted.

@@ -1000,6 +1000,127 @@ def test_notifications_notify_invalid_media_shape_raises_before_request(monkeypa
     assert "media" in result.output.lower()
 
 
+def test_notifications_notify_options_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The --options JSON array is validated into a list of strings and posted on the body.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "pick one",
+            "channel": "whatsapp",
+            "options": ["Item A", "Item B"],
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "pick one",
+            "--channel",
+            "whatsapp",
+            "--options",
+            '["Item A", "Item B"]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_options_and_media_ride_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --options combines with --media on one notification.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "photo",
+            "channel": "whatsapp",
+            "media": [{"kind": "image", "url": "https://example.com/a.png", "caption": None}],
+            "options": ["Yes", "No"],
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "photo",
+            "--channel",
+            "whatsapp",
+            "--media",
+            '[{"kind": "image", "url": "https://example.com/a.png"}]',
+            "--options",
+            '["Yes", "No"]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_options_and_template_still_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The CLI validates each field independently and posts both; the server enforces
+    # options/template exclusivity.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "shipped",
+            "channel": "whatsapp",
+            "template": {"name": "status_update", "language": "en_US", "parameters": []},
+            "options": ["Yes", "No"],
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "shipped",
+            "--channel",
+            "whatsapp",
+            "--template",
+            '{"name": "status_update", "language": "en_US"}',
+            "--options",
+            '["Yes", "No"]',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_malformed_options_json_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Malformed --options never reaches the server: it is a loud usage error.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for malformed --options")
+
+    result = run_cli(
+        monkeypatch, handler, ["notifications", "notify", "hi", "--channel", "whatsapp", "--options", "{not json"]
+    )
+    assert result.exit_code != 0
+    assert "options" in result.output.lower()
+
+
+def test_notifications_notify_non_array_options_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Well-formed JSON that is not an array is rejected before any request leaves.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for non-array --options")
+
+    result = run_cli(
+        monkeypatch, handler, ["notifications", "notify", "hi", "--channel", "whatsapp", "--options", '"Item A"']
+    )
+    assert result.exit_code != 0
+    assert "options" in result.output.lower()
+
+
+def test_notifications_notify_non_string_option_entry_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An array with a non-string entry is rejected by the list[str] shape before any request.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for a non-string option entry")
+
+    result = run_cli(
+        monkeypatch, handler, ["notifications", "notify", "hi", "--channel", "whatsapp", "--options", '["Item A", 3]']
+    )
+    assert result.exit_code != 0
+    assert "options" in result.output.lower()
+
+
 # -- auth whoami -------------------------------------------------------------
 
 

@@ -1275,14 +1275,17 @@ async def operator_send(
     The whole append → create → spawn runs under the thread's per-thread FIFO
     (:meth:`TurnCaps.run_reserved`), the same lock in-flight turns take, so the operator's
     write never interleaves a turn's checkpoint and record writes; the HTTP call waits behind
-    an in-flight turn. Serialization is guaranteed WITHIN a worker; across workers concurrent
-    operator sends and turns interleave at the checkpointer's own read-modify-write, as the
-    rest of the bridge tolerates. A full FIFO raises the loud, retriable
+    an in-flight turn. ``run_reserved`` holds the cross-worker thread lease for its span, so an
+    operator send and an in-flight turn on the same thread serialize across workers too and
+    never fork its checkpoint. As a live-caller sync door the acquisition is bounded by
+    ``sync_door_wait_seconds``: a wait past it — behind a turn possibly HITL-paused on another
+    worker — raises the loud, retriable :class:`ThreadBusyError` (503) rather than blocking the
+    caller past the proxy timeout. A full FIFO raises the loud, retriable
     :class:`ThreadQueueOverflowError` (503) before anything is written."""
     message_id = str(uuid4())
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
-    async with caps.run_reserved(thread_id):
+    async with caps.run_reserved(thread_id, acquire_timeout_seconds=caps.settings.sync_door_wait_seconds):
         if route.target_kind == "agent":
             agent = _agent_registry().get(route.target_name)
             if agent is not None and supports_thread_append(agent):

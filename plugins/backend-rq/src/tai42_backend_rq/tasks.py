@@ -15,11 +15,11 @@ from typing import Any
 from rq import Queue
 from rq.job import Job
 from tai42_contract.app import tai42_app
+from tai42_kit.backend import CallbackSchema, callback_execution
 from tai42_kit.clients import client_ctx, shutdown_all_clients
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
-from tai42_backend_rq.callback import CallbackSchema, callback_execution
 from tai42_backend_rq.settings import rq_settings
 
 # Task options every backend extension appends to its branch tool's signature.

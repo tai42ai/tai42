@@ -27,10 +27,78 @@ class TestGetCompiledJq:
             get_compiled_jq("this is (not valid")
 
 
+class TestEnvGuard:
+    # jq's ``env``/``$ENV`` read the whole process environment; the guard seals
+    # both without breaking any legitimate ``.env``/``{env: …}`` usage.
+
+    @pytest.fixture(autouse=True)
+    def _canary(self, monkeypatch):
+        monkeypatch.setenv("CANARY", "s3cr3t-should-never-surface")
+        get_compiled_jq.cache_clear()
+        yield
+        get_compiled_jq.cache_clear()
+
+    async def test_env_builtin_disabled_and_secret_absent(self):
+        with pytest.raises(ValueError, match="env builtin is disabled") as exc:
+            await run_jq_first("env.CANARY", {})
+        assert "s3cr3t-should-never-surface" not in str(exc.value)
+
+    def test_env_variable_rejected_at_compile(self):
+        for expr in ("$ENV.CANARY", '"\\($ENV.CANARY)"', ". as $ENV | ."):
+            with pytest.raises(ValueError, match=r"\$ENV is disabled"):
+                get_compiled_jq(expr)
+
+    async def test_user_env_definition_shadows_and_runs(self):
+        assert await run_jq_first("def env: 1; env", {}) == 1
+
+    def test_user_def_referencing_env_variable_rejected(self):
+        with pytest.raises(ValueError, match=r"\$ENV is disabled"):
+            get_compiled_jq("def env: $ENV; env")
+
+    async def test_dot_env_key_access_is_legitimate(self):
+        assert await run_jq_first(".env", {"env": "x"}) == "x"
+
+    async def test_object_with_env_key_is_legitimate(self):
+        assert await run_jq_first("{env: .a}", {"a": 7}) == {"env": 7}
+
+    async def test_user_function_is_legitimate(self):
+        assert await run_jq_first("def f(x): x*2; f(.a)", {"a": 3}) == 6
+
+    async def test_trailing_comment_does_not_swallow_guard_paren(self):
+        assert await run_jq_first(".a\n# trailing comment", {"a": 11}) == 11
+
+    def test_syntax_error_reports_author_position(self):
+        # The raw pre-compile runs first, so the reported error names the
+        # author's own position, not an offset shifted by the preamble.
+        with pytest.raises(ValueError, match="syntax error"):
+            get_compiled_jq("this is (not valid")
+
+    def test_empty_expression_still_raises(self):
+        with pytest.raises(ValueError, match="compile error"):
+            get_compiled_jq("")
+
+
 class TestRunJqFirst:
     async def test_returns_evaluated_value(self):
         # Evaluates off-loop and returns .first() over a plain python payload.
         assert await run_jq_first(".a", {"a": 42}) == 42
+
+    async def test_empty_pipeline_without_default_raises_valueerror(self):
+        # An empty pipeline (``.first()`` raises ``StopIteration``) surfaces as a
+        # loud ``ValueError`` — NOT the opaque ``RuntimeError: StopIteration
+        # interacts badly with generators ...`` the raw future boundary produced.
+        with pytest.raises(ValueError, match="empty pipeline"):
+            await run_jq_first(".[] | select(.x)", [])
+
+    async def test_empty_pipeline_returns_default_when_supplied(self):
+        # A supplied default substitutes for the empty pipeline; ``None`` and ``{}``
+        # are both honoured (the sentinel distinguishes them from "no default").
+        assert await run_jq_first(".[] | select(.x)", [], default=None) is None
+        assert await run_jq_first(".[] | select(.x)", [], default={}) == {}
+
+    async def test_non_empty_pipeline_returns_first_unchanged_with_default(self):
+        # A default never shadows a real first value.
+        assert await run_jq_first(".a", {"a": 42}, default=None) == 42
 
     async def test_timeout_raises_named_promptly(self, monkeypatch):
         # A slow evaluation is bounded by JQ_TIMEOUT_SECONDS; the raised

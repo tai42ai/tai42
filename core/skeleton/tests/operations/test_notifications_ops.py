@@ -2,8 +2,9 @@
 
 ``notify_user`` forwards every argument verbatim to the channels helper, returns the
 bare confirmation string, and NEVER swallows a failure — mapping the helper's loud
-errors to the operation's typed errors (ValueError→400, NotImplementedError→501,
-ChannelDeliveryError→502). ``list_notifications`` reads the sink, and the destructive
+errors to the operation's typed errors (ValueError→400, ChannelInputError→400,
+NotImplementedError→501, ChannelDeliveryError→502/503 (retryable→503)). ``list_notifications`` reads the
+sink, and the destructive
 projection carries ``destructiveHint``.
 """
 
@@ -16,7 +17,12 @@ import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification, ChannelTemplate
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+    ChannelTemplate,
+)
 from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_contract.manifest import ApiToolsConfig
 
@@ -31,6 +37,7 @@ from tai42_skeleton.operations import (
     ForbiddenError,
     NotSupportedError,
     OperationRegistry,
+    UnavailableError,
     UpstreamError,
     operation_metadata_of,
 )
@@ -99,7 +106,14 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
     assert helper.calls == [
         (
             ("Deploy finished",),
-            {"channel": "telegram", "recipient": "@ops", "audience": None, "media": None, "template": None},
+            {
+                "channel": "telegram",
+                "recipient": "@ops",
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+            },
         )
     ]
 
@@ -115,7 +129,10 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
         await notifications_ops.notify_user("hello")
 
     assert helper.calls == [
-        (("hello",), {"channel": None, "recipient": None, "audience": None, "media": None, "template": None})
+        (
+            ("hello",),
+            {"channel": None, "recipient": None, "audience": None, "media": None, "template": None, "options": None},
+        )
     ]
 
 
@@ -141,11 +158,49 @@ async def test_notify_user_channel_omitted_records_to_sink(monkeypatch: pytest.M
 
 
 async def test_notify_user_propagates_delivery_failure_as_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A permanent delivery refusal (retryable defaults False) is the non-retryable 502.
     helper = _RecordingHelper(raise_exc=ChannelDeliveryError("provider unreachable"))
     monkeypatch.setattr(notifications_ops, "_notify_user", helper)
 
     with pytest.raises(UpstreamError, match="provider unreachable"):
         await notifications_ops.notify_user("hello", channel="telegram")
+
+
+async def test_notify_user_retryable_delivery_failure_maps_to_503_with_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A transient delivery failure the medium said to retry after N seconds is a 503,
+    # distinct from the permanent 502, and the wait is propagated in the error's extra so
+    # a caller can honor it.
+    helper = _RecordingHelper(raise_exc=ChannelDeliveryError("rate limited", retryable=True, retry_after=12.0))
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+
+    with pytest.raises(UnavailableError, match="rate limited") as exc_info:
+        await notifications_ops.notify_user("hello", channel="telegram")
+    assert exc_info.value.extra == {"retry_after": 12.0}
+
+
+async def test_notify_user_retryable_delivery_failure_without_retry_after_maps_to_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A transient failure with no medium-supplied retry_after is still a 503, carrying no
+    # retry_after key — nothing to propagate.
+    helper = _RecordingHelper(raise_exc=ChannelDeliveryError("transient blip", retryable=True))
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+
+    with pytest.raises(UnavailableError, match="transient blip") as exc_info:
+        await notifications_ops.notify_user("hello", channel="telegram")
+    assert exc_info.value.extra == {}
+
+
+async def test_notify_user_permanent_input_refusal_maps_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A channel's permanent refusal of the input's shape (retrying cannot succeed) is a
+    # client error (400), never the 502 a permanent delivery failure maps to.
+    helper = _RecordingHelper(raise_exc=ChannelInputError("cannot render a data: image URL"))
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+
+    with pytest.raises(BadRequestError, match="data: image URL"):
+        await notifications_ops.notify_user("hello", channel="web")
 
 
 async def test_notify_user_channel_cannot_notify_is_501(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,11 +222,50 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
     await notifications_ops.notify_user("done", channel="whatsapp", template=template)
 
     assert helper.calls == [
-        (("hi",), {"channel": "whatsapp", "recipient": None, "audience": None, "media": media, "template": None}),
+        (
+            ("hi",),
+            {
+                "channel": "whatsapp",
+                "recipient": None,
+                "audience": None,
+                "media": media,
+                "template": None,
+                "options": None,
+            },
+        ),
         (
             ("done",),
-            {"channel": "whatsapp", "recipient": None, "audience": None, "media": None, "template": template},
+            {
+                "channel": "whatsapp",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": template,
+                "options": None,
+            },
         ),
+    ]
+
+
+async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The options field is forwarded verbatim to the channels helper.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+
+    await notifications_ops.notify_user("pick one", channel="web", options=["Item A", "Item B"])
+
+    assert helper.calls == [
+        (
+            ("pick one",),
+            {
+                "channel": "web",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": ["Item A", "Item B"],
+            },
+        )
     ]
 
 

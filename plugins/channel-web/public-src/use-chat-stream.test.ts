@@ -35,6 +35,18 @@ function questionFrame(format: string, extra: Record<string, unknown> = {}) {
   });
 }
 
+/** A `chat.media` frame spelled as the wire spells it: `direction` fixed to `out`,
+ * `media` and `options` each present only when the case is about them. */
+function mediaFrame(extra: Record<string, unknown> = {}) {
+  return frame('chat.media', {
+    id: 'md1',
+    direction: 'out',
+    text: 'Here you go',
+    ts: TS,
+    ...extra,
+  });
+}
+
 const message = frame('chat.message', { id: 'm1', direction: 'out', text: 'hi', ts: TS });
 const question = questionFrame('confirm');
 
@@ -83,6 +95,72 @@ describe('applyFrame', () => {
     const model = fold(EMPTY_MODEL, questionFrame('form', { schema }));
 
     expect(model.items[0]).toMatchObject({ answerFormat: 'form', schema, callbackUrl: null });
+  });
+
+  it('folds a media card with an image and its caption', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
+      }),
+    );
+
+    expect(model.items[0]).toEqual({
+      kind: 'media',
+      id: 'md1',
+      text: 'Here you go',
+      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'Item A' }],
+      options: null,
+      ts: TS,
+    });
+  });
+
+  it('folds a media card that is text and tappable options only', () => {
+    const model = fold(EMPTY_MODEL, mediaFrame({ options: ['Item A', 'Item B'] }));
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      media: null,
+      options: ['Item A', 'Item B'],
+    });
+  });
+
+  it('folds a media card carrying an image and options together', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({
+        media: [{ kind: 'image', url: 'https://example.com/a.png' }],
+        options: ['See all'],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'media',
+      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }],
+      options: ['See all'],
+    });
+  });
+
+  it('carries a link attachment as a validated http(s) url', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({ media: [{ kind: 'link', url: 'http://example.com/a', caption: 'Open A' }] }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      media: [{ kind: 'link', url: 'http://example.com/a', caption: 'Open A' }],
+    });
+  });
+
+  it('de-duplicates a redelivered media card on backlog replay', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      mediaFrame({ options: ['Item A'] }),
+      mediaFrame({ options: ['Item A'] }),
+    );
+
+    expect(model.items).toHaveLength(1);
+    expect(model.items[0]).toMatchObject({ kind: 'media', options: ['Item A'] });
   });
 
   it('records an answered frame against the interaction, not as a row of its own', () => {
@@ -202,6 +280,55 @@ describe('applyFrame', () => {
       questionFrame('form', { schema: { type: 'object' }, callback_url: CALLBACK }),
     ],
     ['an answered frame with no interaction id', frame('chat.answered', { id: 'a' })],
+    [
+      'a media card with an unknown attachment kind',
+      mediaFrame({ media: [{ kind: 'video', url: 'https://example.com/a.mp4' }] }),
+    ],
+    [
+      'a media image whose url carries a user@ authority',
+      mediaFrame({ media: [{ kind: 'image', url: 'https://user:pass@example.com/a.png' }] }),
+    ],
+    [
+      'a media link whose url carries a user@ authority',
+      mediaFrame({ media: [{ kind: 'link', url: 'https://user:pass@example.com/x' }] }),
+    ],
+    [
+      'a media image whose url is not https',
+      mediaFrame({ media: [{ kind: 'image', url: 'http://example.com/a.png' }] }),
+    ],
+    [
+      'a media image whose url is relative rather than absolute',
+      mediaFrame({ media: [{ kind: 'image', url: '/a.png' }] }),
+    ],
+    [
+      'a media link whose url is neither http nor https',
+      mediaFrame({ media: [{ kind: 'link', url: 'ftp://example.com/a' }] }),
+    ],
+    [
+      'a media attachment whose caption is not a string',
+      mediaFrame({ media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 7 }] }),
+    ],
+    [
+      'a media attachment whose caption is explicitly null',
+      mediaFrame({ media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }] }),
+    ],
+    ['a media card with a blank option chip', mediaFrame({ options: ['Item A', '  '] })],
+    ['a media card with an empty options array', mediaFrame({ options: [] })],
+    ['a media card with a non-string option', mediaFrame({ options: [1] })],
+    ['a media card whose options is a non-array object', mediaFrame({ options: { a: 1 } })],
+    [
+      'a media card missing its text',
+      frame('chat.media', { id: 'md1', direction: 'out', ts: TS, options: ['Item A'] }),
+    ],
+    [
+      'a media card whose direction is not out',
+      mediaFrame({ direction: 'in', options: ['Item A'] }),
+    ],
+    ['a media card with neither attachments nor options', mediaFrame({})],
+    [
+      'a media card whose media is not an array',
+      mediaFrame({ media: { kind: 'image', url: 'https://example.com/a.png' } }),
+    ],
     ['an unknown event', frame('chat.something', { id: 'x' })],
   ])('surfaces %s as malformed rather than dropping it', (_label, bad) => {
     expect(applyFrame(EMPTY_MODEL, bad).kind).toBe('malformed');

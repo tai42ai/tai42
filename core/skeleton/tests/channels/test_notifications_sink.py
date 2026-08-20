@@ -23,6 +23,10 @@ _DEFAULT_PREFIX = "interactions:"
 # so their assertions see every record; the retention test sets its own small cap.
 _TEST_FEED_MAX = 1000
 
+# The rolling feed-key TTL the sink refreshes on every write; a fixed value the TTL
+# tests advance the fake clock against.
+_TEST_FEED_TTL = 3600
+
 
 @pytest.fixture(autouse=True)
 def _interactions_store_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,7 +37,7 @@ def _interactions_store_configured(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_record_returns_the_stored_record(fake_redis) -> None:
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
 
     record = await sink.record(fake_redis, "deploy started", "ops")
 
@@ -44,7 +48,7 @@ async def test_record_returns_the_stored_record(fake_redis) -> None:
 
 
 async def test_read_returns_records_newest_first(fake_redis) -> None:
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
 
     first = await sink.record(fake_redis, "first", None)
     second = await sink.record(fake_redis, "second", "user-9")
@@ -57,7 +61,7 @@ async def test_read_returns_records_newest_first(fake_redis) -> None:
 
 
 async def test_read_empty_sink_returns_empty_list(fake_redis) -> None:
-    assert await NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX).read(fake_redis) == []
+    assert await NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL).read(fake_redis) == []
 
 
 async def test_record_evicts_oldest_beyond_the_feed_cap(fake_redis) -> None:
@@ -65,7 +69,7 @@ async def test_record_evicts_oldest_beyond_the_feed_cap(fake_redis) -> None:
     # keeps the newest ``cap`` records and evicts the oldest by design (LTRIM), so
     # the feed never grows past the cap.
     cap = 3
-    sink = NotificationSink(_DEFAULT_PREFIX, cap)
+    sink = NotificationSink(_DEFAULT_PREFIX, cap, _TEST_FEED_TTL)
 
     written = [await sink.record(fake_redis, f"msg-{i}", None) for i in range(cap + 2)]
 
@@ -79,13 +83,45 @@ async def test_record_evicts_oldest_beyond_the_feed_cap(fake_redis) -> None:
 
 
 async def test_read_raises_on_a_malformed_record(fake_redis) -> None:
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
     # A non-JSON member is corrupt state, not an empty result: it must surface
     # loudly on read rather than being silently dropped.
     await fake_redis.lpush(f"{_DEFAULT_PREFIX}notifications:feed", "not-json")
 
     with pytest.raises(json.JSONDecodeError):
         await sink.read(fake_redis)
+
+
+# -- rolling feed-key TTL ----------------------------------------------------
+
+
+async def test_record_sets_a_rolling_ttl_on_both_feeds(fake_redis) -> None:
+    # Every write puts a TTL on the feed key, so an idle feed — and every distinct
+    # audience key, which would otherwise be a permanent per-identity list — is
+    # reclaimed rather than living forever.
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
+    await sink.record(fake_redis, "for-alice", None, audience="alice")
+
+    feed_key = f"{_DEFAULT_PREFIX}notifications:feed"
+    audience_key = f"{_DEFAULT_PREFIX}notifications:audience:alice"
+    assert fake_redis._ttls[feed_key] == fake_redis.time + _TEST_FEED_TTL
+    assert fake_redis._ttls[audience_key] == fake_redis.time + _TEST_FEED_TTL
+
+
+async def test_a_re_write_refreshes_the_feed_ttl(fake_redis) -> None:
+    # The TTL is rolling: a later write pushes the expiry the full window forward, so
+    # an actively-written feed never ages out mid-use.
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
+    feed_key = f"{_DEFAULT_PREFIX}notifications:feed"
+
+    await sink.record(fake_redis, "first", None)
+    first_expiry = fake_redis._ttls[feed_key]
+
+    fake_redis.advance(100)
+    await sink.record(fake_redis, "second", None)
+
+    assert fake_redis._ttls[feed_key] == fake_redis.time + _TEST_FEED_TTL
+    assert fake_redis._ttls[feed_key] > first_expiry
 
 
 @pytest.fixture
@@ -119,7 +155,7 @@ async def test_record_notification_defaults_recipient_to_none(sink_redis) -> Non
 
 
 async def test_record_with_audience_writes_both_feeds(fake_redis) -> None:
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
     record = await sink.record(fake_redis, "for-alice", None, audience="alice")
     assert record["audience"] == "alice"
     # On the shared feed AND alice's own per-identity feed; a different identity's
@@ -130,7 +166,7 @@ async def test_record_with_audience_writes_both_feeds(fake_redis) -> None:
 
 
 async def test_broadcast_touches_only_the_shared_feed(fake_redis) -> None:
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
     rec = await sink.record(fake_redis, "broadcast", None)
     assert rec["audience"] is None
     assert await sink.read(fake_redis) == [rec]
@@ -140,7 +176,7 @@ async def test_broadcast_touches_only_the_shared_feed(fake_redis) -> None:
 async def test_recipient_and_audience_are_independent(fake_redis) -> None:
     # recipient (a channel delivery ADDRESS) and audience (an IDENTITY) coexist on
     # one record — the address is never reused as the feed key.
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX)
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
     rec = await sink.record(fake_redis, "hi", "+15550000000", audience="alice")
     assert rec["recipient"] == "+15550000000"
     assert rec["audience"] == "alice"
@@ -151,7 +187,7 @@ async def test_recipient_and_audience_are_independent(fake_redis) -> None:
 
 
 async def test_audience_feed_key_is_scoped_by_prefix(fake_redis) -> None:
-    sink = NotificationSink("tenant-b:", _TEST_FEED_MAX)
+    sink = NotificationSink("tenant-b:", _TEST_FEED_MAX, _TEST_FEED_TTL)
     await sink.record(fake_redis, "scoped", None, audience="alice")
     assert "tenant-b:notifications:audience:alice" in fake_redis._lists
 
@@ -159,7 +195,7 @@ async def test_audience_feed_key_is_scoped_by_prefix(fake_redis) -> None:
 async def test_audience_feed_evicts_beyond_the_cap(fake_redis) -> None:
     # The per-identity feed is its own bounded ring, mirroring the shared feed.
     cap = 3
-    sink = NotificationSink(_DEFAULT_PREFIX, cap)
+    sink = NotificationSink(_DEFAULT_PREFIX, cap, _TEST_FEED_TTL)
     written = [await sink.record(fake_redis, f"m-{i}", None, audience="alice") for i in range(cap + 2)]
     assert await sink.read_for(fake_redis, "alice") == list(reversed(written[-cap:]))
 

@@ -102,9 +102,9 @@ def test_k8s_secret_env_is_bridged_at_boot(monkeypatch):
     pytest.importorskip("kubernetes")
     from pathlib import Path
 
-    from kubernetes import client
-    from tai42_config_k8s import settings as settings_mod
-    from tai42_config_k8s.manager import K8sConfigManager
+    from kubernetes import client  # pyright: ignore[reportMissingImports]
+    from tai42_config_k8s import settings as settings_mod  # pyright: ignore[reportMissingImports]
+    from tai42_config_k8s.manager import K8sConfigManager  # pyright: ignore[reportMissingImports]
 
     monkeypatch.delenv("MYTOKEN", raising=False)
     # No service-account file -> the settings resolve the default namespace.

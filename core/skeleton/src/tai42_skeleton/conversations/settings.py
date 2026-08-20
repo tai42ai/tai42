@@ -86,6 +86,20 @@ class ConversationsSettings(TaiBaseSettings):
     # Seconds between intake-lease refreshes; must stay under the lease.
     intake_claim_refresh_seconds: int = Field(default=30, gt=0)
 
+    # Seconds a running turn's cross-worker thread lease stays live. The turn refreshes it as
+    # it runs; only on expiry (a crashed holder) may another worker take the thread.
+    thread_lease_seconds: int = Field(default=120, gt=0)
+
+    # Seconds between thread-lease refreshes; must stay under the lease.
+    thread_lease_refresh_seconds: int = Field(default=30, gt=0)
+
+    # Seconds a waiter sleeps between thread-lease acquisition attempts.
+    thread_lease_poll_seconds: float = Field(default=0.5, gt=0)
+
+    # Seconds a LIVE-CALLER sync door (operator send, thread/person delete) waits to acquire a
+    # thread's turn slot before refusing with a loud 503; a background turn stays unbounded.
+    sync_door_wait_seconds: float = Field(default=30, gt=0)
+
     # -- Delivery bounds -----------------------------------------------------
 
     # Delivery attempts before an undelivered answer is marked ``failed`` (loud, retained).
@@ -172,6 +186,17 @@ class ConversationsSettings(TaiBaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _refresh_stays_under_the_thread_lease(self) -> "ConversationsSettings":
+        """Refuse a refresh interval at or above the lease: a live turn's lease would lapse
+        between heartbeats and another worker would fork its checkpoint."""
+        if self.thread_lease_refresh_seconds >= self.thread_lease_seconds:
+            raise ValueError(
+                f"CONVERSATIONS_THREAD_LEASE_REFRESH_SECONDS ({self.thread_lease_refresh_seconds}) must be below "
+                f"CONVERSATIONS_THREAD_LEASE_SECONDS ({self.thread_lease_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _send_timeout_stays_under_the_delivery_lease(self) -> "ConversationsSettings":
         """Refuse a send timeout at or above the lease: a chunk could then still be in
         flight after the sweep re-claimed the record, and both workers would send it."""
@@ -199,7 +224,7 @@ class ConversationsSettings(TaiBaseSettings):
 
     # -- Keyspace helpers ----------------------------------------------------
     #
-    # The eighteen conversation keyspaces. Every literal key string lives ONLY here. A
+    # The nineteen conversation keyspaces. Every literal key string lives ONLY here. A
     # provider-supplied id sits LAST in its key and the segment before it is checked
     # ``:``-free, so no provider value can bleed across a segment boundary — the sole
     # exceptions are ``open_code_key`` and the two redeem-throttle keys, whose variable
@@ -260,6 +285,13 @@ class ConversationsSettings(TaiBaseSettings):
         sits LAST."""
         _require_key_segment("thread_id", thread_id)
         return f"{self.prefix}:mode:{thread_id}"
+
+    def thread_lease_key(self, thread_id: str) -> str:
+        """Per-thread cross-worker turn-lease key → the worker token holding it. The mutex a
+        turn holds for its whole run so two workers never fork one thread's checkpoint. The
+        ``thread_id`` carries ``:`` of its own and so sits LAST."""
+        _require_key_segment("thread_id", thread_id)
+        return f"{self.prefix}:thread_lease:{thread_id}"
 
     @property
     def route_key_prefix(self) -> str:

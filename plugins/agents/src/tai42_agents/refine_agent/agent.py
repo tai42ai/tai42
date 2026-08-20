@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from langchain.agents import create_agent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
@@ -295,6 +295,13 @@ class RefineAgentInput(BaseModel):
     critic_llm_kwargs: dict[str, Any] | None = None
     evaluator_langgraph_config: dict[str, Any] | None = None
     critic_langgraph_config: dict[str, Any] | None = None
+
+    @field_validator("user_content_kwargs")
+    @classmethod
+    def _empty_content_kwargs_is_unset(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """An empty dict carries no content-block keys — normalize {} to None so it
+        reads as unset, matching the builders that treat {} as no mark."""
+        return value or None
 
 
 @tai42_app.agents.agent("refine_agent", tags={"agents"})

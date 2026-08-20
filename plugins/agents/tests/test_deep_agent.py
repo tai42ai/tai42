@@ -368,6 +368,17 @@ def test_deep_agent_input_rejects_unknown_key() -> None:
         DeepAgentInput.model_validate({"strategy": "vote"})
 
 
+def test_deep_agent_input_empty_content_kwargs_normalize_to_none() -> None:
+    """An empty ``user_content_kwargs`` dict from the JSON door reads as absent — the
+    builders treat {} as no mark, so the field normalizes to None rather than a
+    set-but-empty value the unhonored-reject face would misread."""
+    validated = DeepAgentInput.model_validate({"user_content_kwargs": {}})
+    assert validated.user_content_kwargs is None
+    # A non-empty mark is a real value and rides through unchanged.
+    marked = DeepAgentInput.model_validate({"user_content_kwargs": {"cache_control": {"type": "ephemeral"}}})
+    assert marked.user_content_kwargs == {"cache_control": {"type": "ephemeral"}}
+
+
 def test_deep_agent_astream_rejects_response_format_without_title() -> None:
     """The streaming face — the one the public run door drives — rejects an untitled
     ``response_format`` up front, exactly as the invoke face does."""

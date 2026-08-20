@@ -8,6 +8,8 @@ against a duplicate answer and to validate the submitted value.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -46,19 +48,74 @@ MEDIA_TOTAL_URI_CHARS = 1_048_576
 
 _DATA_IMAGE_PREFIX = "data:image/"
 
+_DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
+
+
+def _label_is_numberish(label: str) -> bool:
+    # A label the browser's host parser would read as a trailing number: all ASCII
+    # digits (decimal/octal), or a ``0x``/``0X`` hex literal — the bare prefix included,
+    # which the parser reads as IPv4 zero. Reaching here means it is not a valid
+    # dotted-quad IPv4, so a numberish final label is an IPv4-lookalike
+    # (``999.999.999.999``, ``4294967296``, ``0x100000000``, ``0x``) — reject.
+    if label.isdigit():
+        return True
+    low = label.lower()
+    return low.startswith("0x") and all(c in "0123456789abcdef" for c in low[2:])
+
+
+def _is_valid_host(host: str, *, bracketed: bool) -> bool:
+    # Host must be ASCII and one of: a bracketed IPv6 literal, a dotted-quad IPv4,
+    # or ASCII DNS labels (1-63 of [A-Za-z0-9-], no leading/trailing hyphen,
+    # total <=253, one trailing dot allowed, final label not numberish). Any ``%``
+    # is rejected. Deliberately stricter than the WHATWG parser so a divergence
+    # fails loud at send, never silently at render.
+    if "%" in host:
+        # Rejected universally, before either literal parse: a bracketed zone-id
+        # (``[fe80::1%eth0]``) is forbidden by WHATWG, and ``ipaddress.IPv6Address``
+        # would otherwise accept it.
+        return False
+    if bracketed:
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return False
+        return True
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        pass
+    name = host[:-1] if host.endswith(".") else host
+    if not name or len(name) > 253:
+        return False
+    labels = name.split(".")
+    for label in labels:
+        if not _DNS_LABEL.fullmatch(label) or label.startswith("-") or label.endswith("-"):
+            return False
+    return not _label_is_numberish(labels[-1])
+
 
 def _is_absolute_web_url(value: str, *, schemes: tuple[str, ...]) -> bool:
-    # An absolute URL parses to a scheme in ``schemes``, a real host, and NO
-    # embedded userinfo. A bare ``"https://"`` (no host), a scheme-only/relative
-    # string, a ``"https://user@host"`` credential form (the ``trusted.com@evil.com``
-    # authority-spoofing vector), or a malformed authority (an unterminated IPv6
-    # literal makes ``urlsplit`` raise) is all False. Parsing (not ``startswith``)
-    # is what rejects these.
+    # An absolute URL parses to a scheme in ``schemes``, a valid ASCII host, an
+    # in-range port, and NO embedded userinfo. A bare ``"https://"`` (no host), a
+    # scheme-only/relative string, a ``"https://user@host"`` credential form (the
+    # ``trusted.com@evil.com`` authority-spoofing vector), an out-of-range port
+    # (``.port`` raises ValueError past 65535 — a spec-invalid URL the browser's
+    # parser would reject on replay), or a malformed authority (an unterminated
+    # IPv6 literal makes ``urlsplit`` raise) is all False. Host validity is decided
+    # by ``_is_valid_host`` (IDN callers supply punycode; Unicode hosts are False).
+    # Parsing (not ``startswith``) is what rejects these.
     try:
         split = urlsplit(value)
+        _ = split.port
     except ValueError:
         return False
-    return split.scheme in schemes and bool(split.hostname) and "@" not in split.netloc
+    if split.scheme not in schemes or "@" in split.netloc:
+        return False
+    host = split.hostname
+    if not host:
+        return False
+    return _is_valid_host(host, bracketed="[" in split.netloc)
 
 
 class MediaItem(BaseModel):
@@ -69,10 +126,11 @@ class MediaItem(BaseModel):
     ``data:image/*`` URI (remote images are https-only: the inbox CSP ``img-src`` admits
     ``https:``/``data:`` but not ``http:``, so an ``http:`` image would be an unrenderable
     record), while a ``link`` must be an absolute ``http(s)`` URL (anchors are not governed
-    by ``img-src``; the human clicks through). A remote url names a host directly
-    (an embedded ``user@`` credential form is rejected — it spoofs the authority) and
-    is always a single line — raw whitespace and control/format characters are
-    rejected. ``caption`` is the accessibility text — the image's alt text or the
+    by ``img-src``; the human clicks through). A remote url names a host directly —
+    an ASCII DNS name, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply
+    punycode); an embedded ``user@`` credential form is rejected as it spoofs the
+    authority — and is always a single line — raw whitespace and control/format
+    characters are rejected. ``caption`` is the accessibility text — the image's alt text or the
     link's display label.
     """
 

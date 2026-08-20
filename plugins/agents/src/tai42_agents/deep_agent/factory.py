@@ -360,16 +360,16 @@ async def build_deep_agent(
         interrupt_on=interrupt_on,
         response_format=as_tool_strategy(response_format),
         # The system purge leads so a stored system message never reaches the model
-        # alongside the per-run prompt (state never carries one). A tool-logic
-        # failure surfaces to the model as an error ToolMessage rather than
-        # aborting the run; every other exception stays a loud abort. The
-        # leading-user middleware keeps a thread that opens with an assistant message
-        # user-first for strict-ordering providers. The rolling-cache-mark middleware
-        # keeps a per-turn-marked thread to one user-side cache breakpoint at the call.
+        # alongside the per-run prompt (state never carries one). The leading-user
+        # middleware keeps a thread that opens with an assistant message user-first
+        # for strict-ordering providers. The rolling-cache-mark middleware keeps a
+        # per-turn-marked thread to one cache breakpoint at the call. A tool-logic
+        # failure surfaces to the model as an error ToolMessage rather than aborting
+        # the run; every other exception stays a loud abort.
         middleware=[
             SystemPurgeMiddleware(),
-            _tool_error_middleware,
             LeadingUserMiddleware(),
             RollingCacheMarkMiddleware(),
+            _tool_error_middleware,
         ],
     )

@@ -58,6 +58,13 @@ class InteractionsSettings(TaiBaseSettings):
     # retention cap — not a silent truncation. Must be positive.
     notifications_feed_max: int = Field(default=1000, gt=0)
 
+    # Rolling TTL (30d) on each notifications sink feed key, refreshed on every
+    # write. Each distinct ``audience`` mints its own per-identity feed key; without
+    # a TTL that set of keys grows without limit and no key is ever reclaimed. The
+    # LTRIM cap above bounds a key's LENGTH; this bounds its LIFETIME. Must be
+    # positive — a non-positive TTL would delete the key on write.
+    notifications_feed_ttl_seconds: int = Field(default=30 * 86400, gt=0)
+
     # Default wait budget for a blocked ask_user before it raises (1h); a caller
     # may override per call. Must be positive.
     answer_timeout_seconds: int = Field(default=3600, gt=0)

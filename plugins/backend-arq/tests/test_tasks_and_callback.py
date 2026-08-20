@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from arq.jobs import JobStatus
+from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
+from tai42_kit.settings.cache_registry import reset_all_settings
+from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
 
-from tai42_backend_arq import callback as callback_module
 from tai42_backend_arq import tasks
-from tai42_backend_arq.callback import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_backend_arq.settings import ArqSettings
 
 
@@ -169,6 +171,25 @@ async def test_callback_condition_fail_returns_none(stub_app) -> None:
     stub_app.tools.run_tool_mock.assert_not_called()
 
 
+async def test_callback_condition_empty_pipeline_skips(stub_app) -> None:
+    # A condition that evaluates to an EMPTY pipeline (emits nothing) must skip the
+    # callback (return None) rather than crash with the opaque RuntimeError.
+    cb = CallbackSchema(condition=".errors[] | select(.fatal)", expr="{x: .value}", tool="next")
+    out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, cb)
+    assert out is None
+    stub_app.tools.run_tool_mock.assert_not_called()
+
+
+async def test_callback_expr_empty_pipeline_yields_empty_mapping(stub_app) -> None:
+    # An expr that evaluates to an EMPTY pipeline yields {} (default), passed to the
+    # tool as {} — never the opaque RuntimeError.
+    stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
+    cb = CallbackSchema(condition=".ok", expr=".errors[] | select(.fatal)", tool="next")
+    out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, cb)
+    assert out == "ran"
+    stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
+
+
 async def test_callback_without_tool_returns_expr_output() -> None:
     cb = CallbackSchema(expr="{doubled: (.value * 2)}")
     out = await callback_execution({"value": 4}, cb)
@@ -181,6 +202,30 @@ async def test_callback_without_expr_yields_empty_kwargs(stub_app) -> None:
     out = await callback_execution({"value": 4}, cb)
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
+
+
+async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> None:
+    # The callback path evaluates jq through ``run_jq_first``, so a slow program
+    # is aborted by JQ_TIMEOUT_SECONDS and the named TimeoutError is raised.
+    class _SlowProgram:
+        def input(self, payload):
+            return self
+
+        def first(self):
+            time.sleep(1)
+            return None
+
+    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr: _SlowProgram())
+    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
+    reset_all_settings()
+    try:
+        cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
+            await callback_execution({"ok": True, "value": 5}, cb)
+        assert time.monotonic() - start < 0.5
+    finally:
+        reset_all_settings()
 
 
 # -- prepare_backend_kwargs / render methods -----------------------------------------------
@@ -201,7 +246,3 @@ async def test_rendered_fields_resolve_through_resource_manager() -> None:
     empty = CallbackSchema()
     assert await empty.rendered_condition() == ""
     assert await empty.rendered_expr() == ""
-
-
-def test_callback_module_exports() -> None:
-    assert callback_module.CallbackSchema is CallbackSchema

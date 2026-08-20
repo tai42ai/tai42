@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelInputError, ChannelNotification
 from tai42_contract.conversations import DeliveryReceipt
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
@@ -298,6 +298,23 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
             "conversations: channel delivery of record %s on %r failed after %d/%d chunk(s) (failed write returned %d)",
             record.message_id,
             channel_name,
+            accepted_chunks,
+            total_chunks,
+            failed,
+            exc_info=True,
+        )
+        return
+    except ChannelInputError:
+        # A permanent refusal of the input's shape — retrying cannot succeed, so the record
+        # is terminal ``failed`` at once, never re-driven, exactly as a delivery failure is.
+        failed = await store.mark_failed(record.message_id, attempts, time.time(), token)
+        if failed == 1:
+            await ledger.clear(record.message_id)
+        logger.error(
+            "conversations: channel %r permanently refused the input for record %s after %d/%d chunk(s) "
+            "(failed write returned %d)",
+            channel_name,
+            record.message_id,
             accepted_chunks,
             total_chunks,
             failed,

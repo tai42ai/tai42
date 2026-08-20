@@ -141,6 +141,12 @@ dev = [
     # reference-plugin Requires-Dist.
     "reference-plugin",
 ]
+# The docs media-card recapture workflow's capture toolchain, locked so a
+# floating install can never break capture: Playwright (the Python package
+# only — its Chromium binary stays a separate ``playwright install`` step) and
+# trustme for the capture's local self-signed https image server. Synced with
+# ``--group capture`` on top of the scoped e2e venv; never in the wheel.
+capture = ["playwright>=1.40", "trustme>=1.1"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

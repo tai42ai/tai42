@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 MESSAGE_EVENT = "chat.message"
 QUESTION_EVENT = "chat.question"
 ANSWERED_EVENT = "chat.answered"
+MEDIA_EVENT = "chat.media"
 
 
 class SessionRecordError(RuntimeError):
@@ -449,6 +450,28 @@ async def append_message(
         data["client_message_id"] = client_message_id
     await _append(identity, address, MESSAGE_EVENT, data)
     return message_id
+
+
+async def append_media(
+    identity: str,
+    address: str,
+    text: str,
+    media: list[dict[str, Any]] | None = None,
+    options: list[str] | None = None,
+) -> str:
+    """Append one ``chat.media`` agent entry (a media card) and return its id.
+
+    ``media`` is the display items — each ``{"kind", "url", "caption"?}`` — carried in
+    the frame ONLY when non-empty; ``options`` is the tappable option list, carried ONLY
+    when present. Both keys are omitted when absent — there is no empty-value shape."""
+    entry_id = _mint_id()
+    data: dict[str, Any] = {"id": entry_id, "direction": "out", "text": text, "ts": _now_iso()}
+    if media:
+        data["media"] = media
+    if options is not None:
+        data["options"] = options
+    await _append(identity, address, MEDIA_EVENT, data)
+    return entry_id
 
 
 async def append_question(

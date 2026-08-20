@@ -11,6 +11,18 @@
 The caps are a per-worker singleton. A settings reload is applied to that ONE instance, so
 a turn in flight and one accepted after the reload always meet in the same FIFO and under
 the same ceiling.
+
+``run_reserved`` additionally holds the cross-worker per-thread mutex
+(:class:`~tai42_skeleton.conversations.thread_lease.ThreadTurnLease`) for the turn's span, so
+the FIFO's within-worker serialization extends across workers and two of them never fork one
+thread's checkpoint.
+
+``run_reserved`` acquires in two modes. A background turn waits UNBOUNDED for the whole
+acquisition (``acquire_timeout_seconds=None``), behind an in-flight — possibly HITL-paused —
+turn on this or a sibling worker. A live-caller sync door passes a bound over the ENTIRE
+acquisition (local FIFO lock + cross-worker lease + global gate); a wait past it raises
+:class:`ThreadBusyError` rather than blocking the caller past the proxy timeout. The bound is
+disarmed before the turn body runs, so it never cuts a running turn short.
 """
 
 from __future__ import annotations
@@ -21,7 +33,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from enum import Enum, auto
 from threading import RLock
 
@@ -29,6 +41,7 @@ from cachetools import LRUCache, TTLCache, cached
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.conversations.thread_lease import ThreadTurnLease
 from tai42_skeleton.operations.errors import UnavailableError
 
 logger = logging.getLogger(__name__)
@@ -47,6 +60,13 @@ def _now() -> float:
 class ThreadQueueOverflowError(UnavailableError):
     """The per-thread FIFO is full — a loud, retriable 503 rather than an unbounded
     backlog."""
+
+
+class ThreadBusyError(UnavailableError):
+    """A live-caller sync door's bounded wait to acquire the per-thread turn slot elapsed
+    while an in-flight — possibly HITL-paused on another worker — turn still held it: a loud,
+    retriable 503 rather than blocking the caller past the proxy timeout. The background turn
+    caller waits unbounded and never raises this."""
 
 
 class AddressRateLimitedError(UnavailableError):
@@ -143,6 +163,7 @@ class TurnCaps:
     def __init__(self, settings: ConversationsSettings) -> None:
         self.settings = settings
         self._gate = _ConcurrencyGate(settings.max_concurrent_turns)
+        self._lease = ThreadTurnLease(settings)
         self._thread_locks: dict[str, asyncio.Lock] = {}
         self._thread_waiters: dict[str, int] = {}
         # Bounded on both axes: idle expiry drops a bucket indistinguishable from a fresh
@@ -172,6 +193,7 @@ class TurnCaps:
                 bucket.tokens = min(bucket.tokens, float(new_rate))
         self.settings = settings
         self._gate.set_limit(settings.max_concurrent_turns)
+        self._lease.reconfigure(settings)
 
     # -- the per-key token bucket --------------------------------------------
 
@@ -212,14 +234,36 @@ class TurnCaps:
         self._thread_waiters[thread_id] = waiting + 1
 
     @asynccontextmanager
-    async def run_reserved(self, thread_id: str):
-        """Run a turn holding ``thread_id``'s FIFO lock and a global concurrency slot,
-        releasing the reservation :meth:`reserve_thread_slot` took when the body exits."""
+    async def run_reserved(self, thread_id: str, *, acquire_timeout_seconds: float | None = None):
+        """Run a turn holding ``thread_id``'s FIFO lock, its cross-worker lease and a global
+        concurrency slot, releasing the reservation :meth:`reserve_thread_slot` took when the
+        body exits.
+
+        ``acquire_timeout_seconds=None`` (the background turn caller) waits UNBOUNDED for the
+        whole acquisition. A value bounds the ENTIRE acquisition — local FIFO lock, cross-worker
+        lease and global gate — for a live-caller sync door: a wait past the bound raises
+        :class:`ThreadBusyError` (503) instead of blocking the caller past the proxy timeout. The
+        bound is disarmed before ``yield``, so it never fires once the turn body is running."""
         lock = self._thread_locks.setdefault(thread_id, asyncio.Lock())
         try:
-            # Per-thread lock FIRST (arrival order), global ceiling SECOND and inside it,
-            # so a turn queued behind a busy thread holds no global slot while it waits.
-            async with lock, self._gate.held():
+            async with AsyncExitStack() as stack:
+                # Local lock FIRST preserves this worker's arrival order; the cross-worker lease
+                # SECOND, so a turn waiting on a sibling worker holds no global gate slot while it
+                # waits; the global ceiling LAST (its waits are short and the heartbeat covers the
+                # lease across them). The bound wraps ALL THREE, then exits before the body: a
+                # TimeoutError mid-acquire unwinds the stack (each entered context's own cancel-safe
+                # release runs) and surfaces the loud 503.
+                try:
+                    async with asyncio.timeout(acquire_timeout_seconds):
+                        await stack.enter_async_context(lock)
+                        await stack.enter_async_context(self._lease.held(thread_id))
+                        await stack.enter_async_context(self._gate.held())
+                except TimeoutError as exc:
+                    raise ThreadBusyError(
+                        f"conversation thread {thread_id!r} is busy with an in-flight turn; the sync "
+                        f"door's {acquire_timeout_seconds}s wait to acquire its turn slot elapsed; "
+                        f"retry once it drains"
+                    ) from exc
                 yield
         finally:
             self.release_thread_slot(thread_id)
@@ -275,6 +319,7 @@ def _reset_turn_caps() -> None:
 __all__ = [
     "AddressAdmission",
     "AddressRateLimitedError",
+    "ThreadBusyError",
     "ThreadQueueOverflowError",
     "TurnCaps",
     "get_turn_caps",

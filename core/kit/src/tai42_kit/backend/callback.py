@@ -14,10 +14,10 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import CallbackSchema as CallbackFields
-from tai42_kit.utils.data.jq_util import get_compiled_jq
-from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
-from tai42_backend_rq.signatures import exclude_fastmcp_ctx_from_kwargs
+from tai42_kit.utils.data import run_jq_first
+from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
+from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
 
 
 class CallbackSchema(CallbackFields):
@@ -53,13 +53,16 @@ async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
     the expression, then run the follow-up tool (when one is named)."""
     cond = await callback.rendered_condition()
     if cond:
-        cond_output = get_compiled_jq(cond).input(result).first()
+        # An empty pipeline is falsy → skip, matching the ``if not cond_output`` gate.
+        cond_output = await run_jq_first(cond, result, default=None)
         if not cond_output:
             return None
 
     expr = await callback.rendered_expr()
     # Empty expr is not an error: ``get_compiled_jq("")`` raises, so it yields {}.
-    expr_output = get_compiled_jq(expr).input(result).first() if expr else {}
+    # An empty PIPELINE from a non-empty expr also yields {} (default). Evaluated
+    # through ``run_jq_first`` so the JQ_TIMEOUT_SECONDS budget holds.
+    expr_output = (await run_jq_first(expr, result, default={})) if expr else {}
 
     if callback.tool:
         # A worker executes a dequeued callback with no live caller holding a
