@@ -1,11 +1,11 @@
 {
   "core/contract": "2.2.2",
-  "core/kit": "3.2.0",
+  "core/kit": "3.3.0",
   "core/cli": "3.1.2",
   "core/skeleton": "4.2.3",
   "plugins/accounts-oidc": "1.0.3",
   "plugins/accounts-postgres": "2.0.3",
-  "plugins/agents": "2.2.0",
+  "plugins/agents": "2.3.0",
   "plugins/backend-arq": "1.0.3",
   "plugins/backend-celery": "1.0.3",
   "plugins/backend-rq": "1.0.3",
