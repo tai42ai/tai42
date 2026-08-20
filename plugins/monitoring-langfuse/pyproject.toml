@@ -27,7 +27,7 @@ dependencies = [
     # protocols, the neutral data models, and the tai42_app handle.
     "tai42-contract>=2.2,<3",
     # TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=3.2,<4",
+    "tai42-kit>=3.3,<4",
     # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private
     # SDK members that have no public equivalent, verified against this version.
     "langfuse~=4.0.6",

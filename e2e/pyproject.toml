@@ -29,13 +29,13 @@ dependencies = [
     # harness unresolvable.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=2.2,<3",
-    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.2,<4",
+    "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.3,<4",
     "tai42-skeleton[toolbox,files]>=4.2,<5",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=1.0,<2",
-    "tai42-agents>=2.2,<3",
+    "tai42-agents>=2.3,<3",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=1.0,<2",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
