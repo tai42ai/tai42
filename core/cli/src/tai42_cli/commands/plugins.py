@@ -264,6 +264,13 @@ def install(
         bool,
         typer.Option("--accept-public-routes", help="Acknowledge routes that answer without authentication."),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show the resolved routes, delivery, and required env without installing."),
+    ] = False,
+    # New in 3.3.0: appended after ``dry_run`` so every pre-existing parameter keeps
+    # its original positional index — a typer option binds by its annotation, not by
+    # call order, so this is a purely additive (minor) surface change.
     env: Annotated[
         list[str] | None,
         typer.Option("--env", help="Supply an install-time env value as KEY=VALUE (repeatable)."),
@@ -272,10 +279,6 @@ def install(
         list[str] | None,
         typer.Option("--secret", help="Mark an env KEY secret (repeatable); the server auto-marks schema-known ones."),
     ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="Show the resolved routes, delivery, and required env without installing."),
-    ] = False,
 ) -> None:
     """Install a marketplace plugin by ref, optionally pinning a version.
 
