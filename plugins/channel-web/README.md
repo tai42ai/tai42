@@ -309,7 +309,8 @@ unknown token.
   the mint additionally requires a live entry code (see [Entry gate](#entry-gate)),
   and the query string's [link parameters](#link-parameters) are captured with the
   session. Carries a strict CSP (`default-src 'none'`,
-  `script-src 'self'`, `connect-src 'self'`, `font-src 'self'`, no framing, no
+  `script-src 'self'`, `connect-src 'self'`, `font-src 'self'`,
+  `img-src 'self' data: https:` for agent-sent media cards, no framing, no
   inline script; `style-src` admits `'unsafe-inline'` because the bundled
   design-system overlays inject a `<style>` element for their scroll lock).
 
