@@ -15,7 +15,7 @@ imports the skeleton — tai42-agents is contract-facing.
 ## The TAI ecosystem
 
 TAI is an open-source runtime for MCP tools, agents, and workflows. An agent is a
-capability the runtime hosts and exposes as a tool; the seven here are the
+capability the runtime hosts and exposes as a tool; the six here are the
 platform's ready-made, batteries-included set. This repo is their per-agent
 reference doc home; the documentation site covers using them and the
 platform-level story:
@@ -43,7 +43,7 @@ uv add --editable ../tai42/plugins/agents
 ```
 
 The agent runtime (`deepagents`, `langgraph`, `langchain-core`, `langchain`,
-`pydantic`, `pydantic-settings`, `fastmcp`, `opentelemetry-api`, `wcmatch`) is a
+`pydantic`, `pydantic-settings`, `opentelemetry-api`, `wcmatch`) is a
 base dependency — agents are this package's purpose, so there is no runtime extra
 to opt into. Model-provider SDKs are **never** direct dependencies here: model
 access goes through tai42-kit's llm factories, configured per deployment.
@@ -88,12 +88,12 @@ Registration gives each agent two faces, both derived from the one class:
   `StreamEvent` taxonomy (`ReasoningStep`, `ToolCallStep`/`ToolResultStep`,
   `MessageDelta`, `MessageFinal`, `RunUsage`, `StructuredFinal`,
   `InterruptFinal`);
-- an auto-generated JSON `run` tool (LLM / MCP / flow-engine facing) whose
+- an auto-generated JSON `run` tool (LLM / MCP / programmatic callers facing) whose
   signature is the agent's `ToolInput` model.
 
 ## Agents
 
-The package ships seven agents, each in its own module so a manifest can load
+The package ships six agents, each in its own module so a manifest can load
 exactly the ones a deployment wants:
 
 - **`tools_agent`** (`tai42_agents.tools_agent`) — the plain/advanced LangGraph
@@ -112,16 +112,6 @@ exactly the ones a deployment wants:
   tool's description into a vector store and exposes a `retrieve_tools`
   semantic-search tool, binding matches on demand until the model emits a
   terminal `{"status": ...}` object. Useful when the tool set is large.
-- **`mcp_tools_agent`** (`tai42_agents.mcp_tools_agent`) — a tools agent whose
-  tools come from an MCP server: it opens a `fastmcp` client from a caller's
-  `mcpServers` config, converts those tools to LangChain tools, and runs with the
-  client held open. With `inject_env=True`, only the environment variable names
-  listed in `env_allowlist` are copied from `os.environ` into each server's `env`
-  (the server's own `env` wins on conflict); `inject_env=True` with an empty or
-  missing `env_allowlist` is a malformed request and raises `ValueError` rather
-  than silently injecting nothing. `mcp_tools_agent` is admin-curated — expose it
-  ONLY to trusted, access-controlled callers/agents, NEVER to an agent that
-  processes untrusted content.
 - **`voting_agent`** (`tai42_agents.voting_agent`) — runs N voter LLMs in parallel
   over one prompt, then a judge LLM decides by majority vote (breaking ties with
   its own reasoning). Returns a `VotingOutput`; only the judge streams.
@@ -149,8 +139,6 @@ agents:
     module: tai42_agents.deep_agent
   - title: retrieval-tools-agent
     module: tai42_agents.retrieval_tools_agent
-  - title: mcp-tools-agent
-    module: tai42_agents.mcp_tools_agent
   - title: voting-agent
     module: tai42_agents.voting_agent
   - title: refine-agent
@@ -163,7 +151,7 @@ agents:
 
 The shipped `tai42_agents` package imports `tai42-contract`, `tai42-kit`, and the
 agent runtime (`deepagents` / `langgraph` / `langchain-core` / `langchain` /
-`pydantic` / `fastmcp` / `opentelemetry` / `wcmatch`) — the declared
+`pydantic` / `opentelemetry` / `wcmatch`) — the declared
 dependencies **and their resolved dependency closure** — plus the standard
 library. It never imports `tai42-skeleton`, which sits a layer above, and never
 reaches for a package that is not a dependency of the shipped wheel. The rule is
@@ -186,8 +174,8 @@ uv run --no-sync pytest --cov --cov-report=term-missing
 ```
 
 **Dependency install is plain.** The deepagents/LangGraph stack (`deepagents`,
-`langgraph`, `langchain-core`, `langchain`, `pydantic`, `opentelemetry-api`,
-`fastmcp`) resolves as ordinary wheels from the index — no vendor directory and
+`langgraph`, `langchain-core`, `langchain`, `pydantic`, `opentelemetry-api`)
+resolves as ordinary wheels from the index — no vendor directory and
 no `PYTHONPATH` bridge.
 
 ## License

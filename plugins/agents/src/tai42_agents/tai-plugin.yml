@@ -66,16 +66,6 @@ provides:
       - tools
     group: tools-agents
   - kind: agent
-    name: mcp_tools_agent
-    module: tai42_agents.mcp_tools_agent
-    description: >-
-      Run a LangGraph tools agent whose tools are loaded from an MCP
-      configuration.
-    tags:
-      - mcp
-      - tools
-    group: tools-agents
-  - kind: agent
     name: vqa_agent
     module: tai42_agents.vqa_agent
     description: Analyze an image and answer a query about it using a multimodal LLM.

@@ -1,9 +1,9 @@
 ---
 title: "Ready-made agents"
-description: "The seven agents this package provides and the shared TAI_AGENTS limits that bound them."
+description: "The six agents this package provides and the shared TAI_AGENTS limits that bound them."
 ---
 
-Seven ready-made agent workflows, each loaded by name into a manifest's
+Six ready-made agent workflows, each loaded by name into a manifest's
 `agents_modules`. The model behind them, how to run one, and how to compose them
 live in the central docs linked below; this page is the per-agent index and the
 shared limits.
@@ -19,9 +19,19 @@ Limits shared by every agent in this package:
 | `TAI_AGENTS_EMBEDDING_DIMS_CACHE_SIZE` | `64` | Bound on the retrieval agent's embedding-dims probe cache (an LRU). |
 | `TAI_AGENTS_DEFAULT_RECURSION_LIMIT` | `50` | Default LangGraph `recursion_limit` when a run pins none; a caller-supplied limit wins. |
 
-The MCP-backed agents copy named variables from the process environment into each
-MCP server's environment through an `env_allowlist` — a per-manifest list, not a
-fixed variable of this package.
+### Async-park index
+
+A park-capable run whose tool async-parks (`ask_user(mode="async")`) writes a durable
+index that reverses a parked interaction id back to its parked run, so a later worker
+can resume it. This needs the `[park]` extra (`pip install tai42-agents[park]`) and a
+Redis URL:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TAI_AGENTS_REDIS_URL` | falls back to `TAI_DEFAULT_REDIS_URL` | The park index store. With neither set there is no durable park index, so a park-capable run refuses the async ask loudly rather than parking where it cannot be resumed. |
+
+The park index is the agents plugin's own Redis, independent of the checkpoint provider
+and the interactions store.
 
 ## Tool-error resilience
 
@@ -56,11 +66,10 @@ A tools agent that retrieves its tools on demand from a vector store.
 
 ## tools_agent
 
-Runs a LangGraph tools agent over tools loaded by name (and optional presets).
-
-## mcp_tools_agent
-
-Runs a LangGraph tools agent whose tools are loaded from an MCP configuration.
+Runs a LangGraph tools agent over tools loaded by name (and optional presets). A tool
+that async-parks (`ask_user(mode="async")`) suspends the run instead of blocking; it
+resumes on a later worker when the ask is answered or expires. This needs the `[park]`
+extra and `TAI_AGENTS_REDIS_URL` (see [Async-park index](#async-park-index)).
 
 ## vqa_agent
 
