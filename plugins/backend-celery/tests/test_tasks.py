@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from tai42_contract.access_control import caller_may_read_secrets
 from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_backend_celery.core import tasks as tasks_module
@@ -76,7 +77,32 @@ async def test_run_tool_runs_the_tool_detached(stub_app) -> None:
     # flag set; the flag never leaks past the run.
     await run_tool(backend_tool_name="my_tool", a=1)
     assert stub_app.tools.detached_seen == [True]
+    assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
+
+
+@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
+async def test_run_tool_binds_the_worker_secret_capability(
+    stub_app, access_control, gate_enabled: bool, capable: bool
+) -> None:
+    # No HTTP request bound the capability, so the worker binds it to the gate
+    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed), reset after.
+    access_control(gate_enabled)
+    await run_tool(backend_tool_name="my_tool", a=1)
+    assert stub_app.tools.secret_capability_seen == [capable]
+    assert caller_may_read_secrets() is False
+
+
+async def test_run_tool_binds_the_propagated_submitter_capability(stub_app, access_control) -> None:
+    # An admin submitter's capability rides with the job as True; the worker binds it
+    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
+    access_control(True)
+    stub_app.tools.run_tool_result = "result"
+    out = await run_tool(backend_tool_name="my_tool", backend_secret_capability=True, a=1)
+    assert out == "result"
+    assert stub_app.tools.secret_capability_seen == [True]
+    assert stub_app.tools.run_tool_calls == [("my_tool", {"a": 1})]
+    assert caller_may_read_secrets() is False
 
 
 def test_tool_execution_runs_tool_through_app(stub_app) -> None:

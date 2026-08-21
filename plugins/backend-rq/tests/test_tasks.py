@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from rq.exceptions import NoSuchJobError
+from tai42_contract.access_control import caller_may_read_secrets
 from tai42_kit.backend import CallbackSchema
 from tai42_kit.utils.detached_util import in_detached_run
 
@@ -60,7 +61,44 @@ async def test_tool_execution_runs_the_tool_detached(app, monkeypatch):
     await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
 
     assert app.tools.detached_seen == [True]
+    assert app.tools.offloads == [True]
     assert in_detached_run() is False
+
+
+@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
+async def test_tool_execution_binds_the_worker_secret_capability(
+    app, access_control, monkeypatch, gate_enabled: bool, capable: bool
+):
+    # No HTTP request bound the capability, so the worker binds it to the gate
+    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed), reset after.
+    async def fake_shutdown() -> None:
+        pass
+
+    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+    access_control(gate_enabled)
+
+    arg_name = rq_settings().tool_name_arg
+    await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
+
+    assert app.tools.secret_capability_seen == [capable]
+    assert caller_may_read_secrets() is False
+
+
+async def test_tool_execution_binds_the_propagated_submitter_capability(app, access_control, monkeypatch):
+    # An admin submitter's capability rides with the job as True; the worker binds it
+    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
+    async def fake_shutdown() -> None:
+        pass
+
+    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+    access_control(True)
+
+    arg_name = rq_settings().tool_name_arg
+    await tasks.tool_execution(**{arg_name: "my_tool", "backend_secret_capability": True, "x": 5})
+
+    assert app.tools.secret_capability_seen == [True]
+    assert app.tools.run_calls == [("my_tool", {"x": 5})]
+    assert caller_may_read_secrets() is False
 
 
 async def test_tool_execution_missing_tool_name_raises_but_still_cleans_up(app, monkeypatch):

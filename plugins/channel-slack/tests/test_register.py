@@ -18,6 +18,7 @@ def _import_register_module(stub_app) -> None:
     """(Re-)import the register module so its side-effects fire freshly."""
     stub_app.channels.registered.clear()
     stub_app.http.routes.clear()
+    stub_app.lifecycle.startup_hooks.clear()
     sys.modules.pop("tai42_channel_slack.register", None)
     sys.modules.pop("tai42_channel_slack.inbound", None)
     importlib.import_module("tai42_channel_slack.register")
@@ -42,6 +43,27 @@ def test_import_registers_the_interactivity_route(stub_app):
     assert route.authed is None
     assert route.summary
     assert route.tags == ["channels"]
+
+
+def test_import_registers_the_bot_user_id_boot_guard(stub_app):
+    _import_register_module(stub_app)
+
+    # Exactly one startup hook: the bot_user_id config guard (no webhook to set).
+    assert len(stub_app.lifecycle.startup_hooks) == 1
+
+
+async def test_boot_guard_raises_when_bot_user_id_unset(stub_app, no_slack_env):
+    _import_register_module(stub_app)
+
+    with pytest.raises(ValueError, match="CHANNEL_SLACK_BOT_USER_ID"):
+        await stub_app.lifecycle.startup_hooks[0]()
+
+
+async def test_boot_guard_passes_when_bot_user_id_set(stub_app, slack_env):
+    _import_register_module(stub_app)
+
+    # A fully configured channel boots clean — the guard returns without raising.
+    await stub_app.lifecycle.startup_hooks[0]()
 
 
 def test_slack_channel_advertises_form_delivery():

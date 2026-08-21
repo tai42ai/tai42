@@ -11,12 +11,16 @@ import re
 import pytest
 from fastmcp.server.auth import AccessToken
 from starlette.authentication import AuthCredentials, AuthenticationError, UnauthenticatedUser
-from tai42_contract.access_control.context import get_current_user_id
+from starlette.types import ASGIApp
+from tai42_contract.access_control.context import caller_may_read_secrets, get_current_user_id
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
-from tai42_skeleton.access_control.middleware import ResourceGuardMiddleware
+from tai42_skeleton.access_control.middleware import (
+    DisabledAccessControlSecretCapabilityMiddleware,
+    ResourceGuardMiddleware,
+)
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.roles import EDITOR_JQ
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -111,7 +115,7 @@ def _ws_scope(path="/x", user=None, auth=None) -> dict:
     return scope
 
 
-async def _drive(mw: ResourceGuardMiddleware, scope, app_probe=None):
+async def _drive(mw: ASGIApp, scope, app_probe=None):
     sent: list[dict] = []
 
     async def receive():
@@ -136,6 +140,7 @@ def _make_app(captured):
     async def app(scope, receive, send):
         captured["called"] = True
         captured["user_id_in_ctx"] = get_current_user_id()
+        captured["secret_capable_in_ctx"] = caller_may_read_secrets()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
@@ -250,6 +255,77 @@ async def test_protected_route_with_matching_scope_runs_app_and_sets_context():
     assert captured["user_id_in_ctx"] == "u7"
     # Context is reset after the downstream call returns.
     assert get_current_user_id() is None
+
+
+async def test_admin_caller_is_secret_capable_mid_request_and_reset_after():
+    """The guard binds the caller's secret-read capability from the admin discriminator
+    the auth backend stamped: an admin reads secret-capable mid-request, and the flag is
+    reset to fail-closed once the request unwinds."""
+    captured: dict = {}
+    mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier(["res-a"]), PUBLIC_ID)
+    admin = TaiUser(AccessToken(token="t", client_id="root", scopes=["*"], claims={}), is_admin=True)
+    sent = await _drive(mw, _http_scope(user=admin, auth=AuthCredentials(["res-a"])))
+    assert _status(sent) == 200
+    assert captured["secret_capable_in_ctx"] is True
+    # Fail-closed default is restored after the downstream call returns.
+    assert caller_may_read_secrets() is False
+
+
+async def test_non_admin_caller_is_not_secret_capable():
+    """A non-admin caller (a condition-bearing role-holder or an owned key) is bound
+    NOT secret-capable, so the plugin secret fence refuses the host-env primitive for
+    exactly the callers the ``action=secret`` route fence denies."""
+    captured: dict = {}
+    mw = ResourceGuardMiddleware(_make_app(captured), _FakeVerifier(["res-a"]), PUBLIC_ID)
+    editor = TaiUser(AccessToken(token="t", client_id="editor", scopes=["*"], claims={}), is_admin=False)
+    sent = await _drive(mw, _http_scope(user=editor, auth=AuthCredentials(["res-a"])))
+    assert _status(sent) == 200
+    assert captured["secret_capable_in_ctx"] is False
+
+
+async def test_gate_off_middleware_binds_secret_capable_mid_request_and_resets_after():
+    """With access control disabled no ResourceGuard runs, so the gate-off middleware
+    binds the secret-read capability TRUE for the request — matching gate-off's synthetic
+    admin — and restores the fail-closed default once the request unwinds."""
+    captured: dict = {}
+    mw = DisabledAccessControlSecretCapabilityMiddleware(_make_app(captured))
+    sent = await _drive(mw, _http_scope())
+    assert _status(sent) == 200
+    assert captured["secret_capable_in_ctx"] is True
+    # Fail-closed default is restored after the downstream call returns.
+    assert caller_may_read_secrets() is False
+
+
+async def test_gate_off_middleware_resets_secret_capable_when_downstream_raises():
+    async def raising_app(scope, receive, send):
+        raise RuntimeError("downstream boom")
+
+    mw = DisabledAccessControlSecretCapabilityMiddleware(raising_app)
+    with pytest.raises(RuntimeError, match="downstream boom"):
+        await _drive(mw, _http_scope())
+    # The finally-reset ran on the exception path.
+    assert caller_may_read_secrets() is False
+
+
+async def test_gate_off_middleware_passes_non_http_scope_without_binding():
+    seen: dict = {}
+
+    async def probe(scope, receive, send):
+        seen["called"] = True
+        seen["secret_capable_in_ctx"] = caller_may_read_secrets()
+
+    mw = DisabledAccessControlSecretCapabilityMiddleware(probe)
+
+    async def receive():
+        return {}
+
+    async def send(_m):
+        pass
+
+    await mw({"type": "lifespan"}, receive, send)
+    assert seen["called"] is True
+    # A non-http scope is untouched — no capability is bound for it.
+    assert seen["secret_capable_in_ctx"] is False
 
 
 async def test_plugin_visible_read_sees_caller_mid_request_and_none_after():

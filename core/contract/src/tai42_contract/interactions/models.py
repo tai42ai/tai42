@@ -46,6 +46,12 @@ MEDIA_DATA_URI_MAX_CHARS = 524_288
 MEDIA_CAPTION_MAX_CHARS = 1000
 MEDIA_TOTAL_URI_CHARS = 1_048_576
 
+# Cap on the question text stored verbatim into the interaction state hash and the
+# per-group stream — a prompt authored by a server tool, so a few KB is generous.
+# Bounds the durable record and its replay, a wire-contract property, so it is a
+# constant, never a setting; an over-cap question is refused loudly.
+QUESTION_MAX_CHARS = 8192
+
 _DATA_IMAGE_PREFIX = "data:image/"
 
 _DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
@@ -230,6 +236,13 @@ class InteractionRequest(BaseModel):
     # None means no media; a present list is non-empty (a present-but-empty list is
     # a caller bug). Set per question by the tool author.
     media: list[MediaItem] | None = None
+
+    @field_validator("question")
+    @classmethod
+    def _check_question(cls, value: str) -> str:
+        if len(value) > QUESTION_MAX_CHARS:
+            raise ValueError(f"question must be at most {QUESTION_MAX_CHARS} characters, got {len(value)}")
+        return value
 
     @field_validator("media")
     @classmethod

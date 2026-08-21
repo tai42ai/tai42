@@ -32,6 +32,7 @@ from tai42_e2e.manifests import (
     POSTGRES_MCP_PROBE_SCHEMA,
     POSTGRES_MCP_PROBE_TABLE,
     build_accounts_stack,
+    build_agents_authz_stack,
     build_agents_redis_stack,
     build_agents_stack,
     build_api_router_stack,
@@ -269,6 +270,24 @@ def accounts_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
     ``tai-sess-`` sessions and ``sk-`` keys against one deployment. Seeded with a
     root key like ``auth_stack``."""
     yield from _boot(infra, tmp_path_factory.mktemp("accounts"), build_accounts_stack, seed_auth=True)
+
+
+@pytest.fixture(scope="module")
+def agents_authz_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
+    """The accounts access-control stack with the agents surface added (the
+    ``mcp_tools_agent`` on the scripted LLM stub). Seeded with a root key like
+    ``accounts_stack``; a per-role editor/admin session invokes the agent over
+    ``POST /api/agents/{name}/runs`` so the middleware's secret-capability stamp is
+    exercised per role. The LLM points at the session stub, so the module skips on the
+    real-``llm`` seam exactly as the agents suite does."""
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("agents-authz"),
+        build_agents_authz_stack,
+        resource_kwargs=resource_kwargs,
+        seed_auth=True,
+    )
 
 
 @pytest.fixture(scope="module")

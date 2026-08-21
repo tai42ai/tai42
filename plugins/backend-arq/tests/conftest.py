@@ -12,12 +12,13 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import itertools
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.utils.detached_util import in_detached_run
@@ -33,6 +34,12 @@ class StubTools:
         # The detached flag observed inside each call — a worker execution has no
         # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
+        # The ``offload_sync`` value each call received — a worker execution runs a
+        # blocking sync tool off the shared event loop.
+        self.offloads: list[bool] = []
+        # The secret-read capability observed inside each call — a worker binds it to
+        # the gate state (OFF -> True, ON -> False) since no HTTP request does.
+        self.secret_capability_seen: list[bool] = []
 
     def tool(self, *args: Any, force: bool = False, **kwargs: Any) -> Any:
         tags = kwargs.get("tags", set())
@@ -46,8 +53,10 @@ class StubTools:
             return register(args[0])
         return register
 
-    async def run_tool(self, key: str, arguments: dict[str, Any], **kwargs: Any) -> Any:
+    async def run_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False) -> Any:
         self.detached_seen.append(in_detached_run())
+        self.offloads.append(offload_sync)
+        self.secret_capability_seen.append(caller_may_read_secrets())
         return await self.run_tool_mock(key, arguments)
 
 
@@ -165,10 +174,26 @@ def stub_app() -> StubApp:
     return _stub_app
 
 
+@pytest.fixture
+def access_control(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[bool], None]]:
+    """Set the ``ACCESS_CONTROL_ENABLE`` gate for a test and restore it after — the
+    worker's own read of the operator env the skeleton gate reads."""
+    from tai42_kit.settings import reset_all_settings
+
+    def _set(enabled: bool) -> None:
+        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true" if enabled else "false")
+        reset_all_settings()
+
+    yield _set
+    reset_all_settings()
+
+
 @pytest.fixture(autouse=True)
 def _reset_stub_run_tool() -> None:
     _stub_app.tools.run_tool_mock = AsyncMock(return_value=None)
     _stub_app.tools.detached_seen.clear()
+    _stub_app.tools.offloads.clear()
+    _stub_app.tools.secret_capability_seen.clear()
     _stub_app.admin.calls.clear()
     # A fresh, pre-set boot-ready latch per test: the stub app is process-global,
     # so a reused Event would stay bound to a prior test's (closed) loop.

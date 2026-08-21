@@ -9,11 +9,15 @@ the whole run. :meth:`astream` streams the contract ``StreamEvent`` taxonomy;
 server's own ``env`` wins on conflict) on a fresh copy of the config.
 
 Security / trust model: ``mcp_config`` can define stdio servers (local command
-execution), and ``env_allowlist`` is caller-supplied so it limits accidental
-exposure, NOT a malicious caller. `mcp_tools_agent` is admin-curated — expose it
-ONLY to trusted, access-controlled callers, NEVER to an agent processing untrusted
-content. ``base_url``/``api_key`` in ``llm_kwargs`` route to a caller-chosen model
-endpoint — same trust caveat.
+execution) and is caller-supplied — a caller may point it at any server using its
+OWN credentials, which is open to any caller. The HOST-secret-exposing primitives
+are fenced instead: ``inject_env``/``env_allowlist`` copy values out of the tai42
+server's OWN process environment, and ``base_url``/``api_key`` in ``llm_kwargs``
+route the model call to a caller-chosen endpoint that would capture whatever key is
+in scope. Both are refused unless the caller is authorized to read the platform's
+secrets (the ``action=secret`` admin fence, read back through
+:func:`caller_may_read_secrets`), so the reach of each is identical to the reach of
+the secret fence — fail-closed when no such caller is bound.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from typing import Any, ClassVar
 
 from fastmcp import Client
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from tai42_contract.access_control.context import caller_may_read_secrets
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
@@ -123,6 +128,27 @@ class McpToolsAgentInput(BaseModel):
         return value or None
 
 
+# ``llm_kwargs`` keys that route the model call to a caller-chosen endpoint (which
+# would capture the conversation and whatever key is in scope) — fenced identically
+# to the host-env-injection primitive.
+_SECRET_CAPABLE_LLM_KWARGS: frozenset[str] = frozenset({"base_url", "api_key"})
+
+
+def _require_secret_capability(what: str) -> None:
+    """Refuse ``what`` unless the current caller is authorized to read the platform's
+    secrets (the ``action=secret`` admin fence).
+
+    Fail-closed: with no secret-capable caller bound (an anonymous request, a
+    background fire whose capability is not carried, or code outside a bound request)
+    the primitive is refused loudly rather than silently dropped, so a caller the
+    secret fence denies can never lift host secrets through this side channel."""
+    if not caller_may_read_secrets():
+        raise PermissionError(
+            f"mcp_tools_agent: {what} is restricted to a caller authorized to read secrets "
+            "(the action=secret admin fence); the current caller is not — refused."
+        )
+
+
 def _inject_env(mcp_config: dict[str, Any], env_allowlist: list[str]) -> dict[str, Any]:
     """Return a copy of ``mcp_config`` with the allow-listed ``os.environ`` values
     merged into each server's ``env``.
@@ -147,8 +173,9 @@ class McpToolsAgent(Agent):
     tool_name: ClassVar[str] = "mcp_tools_agent"
     tool_description: ClassVar[str] = (
         "Create and run a LangGraph tools agent whose tools are loaded from an MCP configuration. "
-        "Security: `mcp_tools_agent` is admin-curated — expose it ONLY to trusted, access-controlled "
-        "callers/agents, NEVER to an agent that processes untrusted content."
+        "Security: `inject_env` (host env into an MCP server) and a caller-chosen model endpoint "
+        "(`llm_kwargs.base_url`/`api_key`) are refused unless the caller is authorized to read secrets; "
+        "`mcp_config` runs with the caller's own credentials and is open."
     )
     ToolInput: ClassVar[type[BaseModel]] = McpToolsAgentInput
 
@@ -273,7 +300,14 @@ class McpToolsAgent(Agent):
             "mcp_tools_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id
         )
         reject_untitled_response_format("mcp_tools_agent", response_format)
+        # A caller-chosen model endpoint captures the conversation and whatever key is in
+        # scope, so ``base_url``/``api_key`` are fenced identically to host-env injection —
+        # refused before the model is resolved.
+        captured_endpoint_kwargs = _SECRET_CAPABLE_LLM_KWARGS & set(llm_kwargs or {})
+        if captured_endpoint_kwargs:
+            _require_secret_capability(f"llm_kwargs {sorted(captured_endpoint_kwargs)}")
         if inject_env:
+            _require_secret_capability("inject_env")
             if not env_allowlist:
                 raise ValueError(
                     "mcp_tools_agent: inject_env=True requires a non-empty env_allowlist "
@@ -344,6 +378,13 @@ class McpToolsAgent(Agent):
         checkpointer a run does, landing on the SAME checkpointed thread a run reads.
         """
         converted = to_thread_messages(messages)
+        # A caller-chosen model endpoint is fenced identically on every face that
+        # accepts ``llm_kwargs`` — this face writes only the checkpoint, so the keys
+        # capture nothing today, but the fence holds uniformly rather than depending
+        # on that.
+        captured_endpoint_kwargs = _SECRET_CAPABLE_LLM_KWARGS & set(llm_kwargs or {})
+        if captured_endpoint_kwargs:
+            _require_secret_capability(f"llm_kwargs {sorted(captured_endpoint_kwargs)}")
         reject_blank_memory_keys(
             "mcp_tools_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None
         )

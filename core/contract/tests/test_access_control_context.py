@@ -1,6 +1,6 @@
 """Tests for the request-scoped caller-identity context: the default anonymous
 value, the set/get/reset round-trip, nested restore, and isolation across
-concurrent asyncio tasks.
+concurrent asyncio tasks — and the parallel secret-read capability.
 """
 
 from __future__ import annotations
@@ -8,8 +8,11 @@ from __future__ import annotations
 import asyncio
 
 from tai42_contract.access_control.context import (
+    caller_may_read_secrets,
     get_current_user_id,
+    reset_request_secret_capability,
     reset_request_user_id,
+    set_request_secret_capability,
     set_request_user_id,
 )
 
@@ -67,3 +70,27 @@ def test_isolation_across_tasks():
         assert get_current_user_id() == "parent"
 
     asyncio.run(scenario())
+
+
+def test_secret_capability_default_is_false():
+    # No caller bound: fail-closed — the caller is never treated as secret-capable.
+    assert caller_may_read_secrets() is False
+
+
+def test_secret_capability_set_get_reset_round_trip():
+    token = set_request_secret_capability(True)
+    assert caller_may_read_secrets() is True
+    reset_request_secret_capability(token)
+    # Reset restores the fail-closed default, not a lingering True.
+    assert caller_may_read_secrets() is False
+
+
+def test_secret_capability_reset_restores_previous_value():
+    outer = set_request_secret_capability(True)
+    inner = set_request_secret_capability(False)
+    assert caller_may_read_secrets() is False
+    reset_request_secret_capability(inner)
+    # Resetting the inner token restores the outer True binding.
+    assert caller_may_read_secrets() is True
+    reset_request_secret_capability(outer)
+    assert caller_may_read_secrets() is False

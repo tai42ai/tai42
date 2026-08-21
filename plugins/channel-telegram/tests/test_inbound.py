@@ -379,13 +379,34 @@ async def test_malformed_bot_token_bridge_misconfigures(http_recorder, fake_redi
     assert conversations.accept_calls == []
 
 
-async def test_callback_404_is_terminal_mapping_dropped(http_recorder, fake_redis):
+async def test_callback_404_terminal_bridges_the_reply(http_recorder, fake_redis, conversations):
+    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
+    # reply: the mapping is cleared and the reply is bridged into the conversation
+    # carrying its text, under the update id so a Telegram redelivery dedupes
+    # downstream at the conversation seam.
     fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
     http_recorder.responder = lambda request: httpx.Response(404)
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
-    assert _body(response) == {"data": {"status": "stale"}}
-    assert fake_redis.data == {}
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert fake_redis.data == {}  # mapping cleared — no re-forward of later chatter
+    assert len(conversations.accept_calls) == 1
+    call = conversations.accept_calls[0]
+    assert call.text == "the blue one"
+    assert call.client_address == "777"
+    assert call.provider_message_id == "5"  # the update id — dedupes a redelivery
+
+
+async def test_callback_500_does_not_bridge_only_terminal_404_bridges(http_recorder, fake_redis, conversations):
+    # A retryable (5xx) failure must NOT be converted into a bridge — only the
+    # terminal 404 bridges. The 5xx keeps the mapping and raises so Telegram
+    # redelivers.
+    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
+    http_recorder.responder = lambda request: httpx.Response(500)
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
+    assert conversations.accept_calls == []  # never bridged
+    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}  # mapping kept
 
 
 async def test_callback_400_keeps_mapping_for_a_retyped_answer(http_recorder, fake_redis):

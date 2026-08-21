@@ -27,10 +27,15 @@ distinct from ``recipient`` (a channel delivery ADDRESS). When set, the record i
 ALSO pushed onto a PER-IDENTITY feed ``{key_prefix}notifications:audience:{audience}``
 (its own bounded LTRIM, mirroring the shared feed) so a restricted caller reads a
 COMPLETE window of its own records that other identities' volume can never trim
-out — the notifications analog of the tool-runs per-identity index. A broadcast
-(no audience) touches only the shared feed. Post-filtering the shared bounded feed
-by ``audience`` is forbidden: it would silently truncate a restricted caller's own
-record out of the LTRIM window before the filter ran.
+out — the notifications analog of the tool-runs per-identity index. That
+per-identity key also carries a rolling EXPIRE (``notifications_feed_ttl_seconds``)
+refreshed on every push, so a key minted one-per-distinct-identity and read
+non-destructively cannot accumulate forever — exactly as the tool-runs per-identity
+index expires. The shared feed key is deliberately NOT expired: a TTL there could
+drop the operator inbox after a quiet period. A broadcast (no audience) touches only
+the shared feed. Post-filtering the shared bounded feed by ``audience`` is forbidden:
+it would silently truncate a restricted caller's own record out of the LTRIM window
+before the filter ran.
 
 Loud by contract: a Redis failure or a malformed stored record propagates — no
 swallowed error, no silent fallback. The retention cap above is the one bound the
@@ -79,29 +84,33 @@ class NotificationSink:
     the feed to this many newest entries. It is supplied at construction from
     ``interactions_settings().notifications_feed_max``.
 
-    ``feed_ttl_seconds`` is the rolling key TTL every write refreshes (from
-    ``interactions_settings().notifications_feed_ttl_seconds``), so an idle feed key
-    — the shared one and every per-identity ``audience`` one — is reclaimed rather
-    than living forever."""
+    ``audience_feed_ttl_seconds`` is the idle TTL refreshed on the PER-AUDIENCE feed
+    key on every push (from ``interactions_settings().notifications_feed_ttl_seconds``),
+    so a per-identity key minted one-per-distinct-audience cannot accumulate forever.
+    The shared feed key is deliberately NOT expired — a TTL there could drop the
+    operator inbox after a quiet period."""
 
-    def __init__(self, key_prefix: str, max_feed_length: int, feed_ttl_seconds: int) -> None:
+    def __init__(self, key_prefix: str, max_feed_length: int, audience_feed_ttl_seconds: int) -> None:
         self._prefix = key_prefix
         self._feed_key = f"{key_prefix}{_FEED_SUFFIX}"
         self._max_feed_length = max_feed_length
-        self._feed_ttl_seconds = feed_ttl_seconds
+        self._audience_feed_ttl_seconds = audience_feed_ttl_seconds
 
     def _audience_feed_key(self, audience: str) -> str:
         return f"{self._prefix}{_AUDIENCE_FEED_SUFFIX}{audience}"
 
-    def _queue_push_bounded(self, pipe: Any, feed_key: str, payload: str) -> None:
-        """Queue an LPUSH of ``payload`` onto ``feed_key``, an LTRIM to the newest
-        ``max_feed_length`` entries — the bounded newest-first ring buffer — and an
-        EXPIRE refreshing the rolling key TTL, all onto ``pipe``. The eviction is the
-        intended retention cap, NOT a silent truncation of an error; the TTL keeps a
-        distinct-``audience`` key set from minting permanent lists."""
+    def _queue_push_bounded(self, pipe: Any, feed_key: str, payload: str, ttl_seconds: int | None = None) -> None:
+        """Queue an LPUSH of ``payload`` onto ``feed_key`` plus an LTRIM to the newest
+        ``max_feed_length`` entries — the bounded newest-first ring buffer — onto
+        ``pipe``. When ``ttl_seconds`` is set, a rolling EXPIRE is queued too, so a
+        per-audience feed key (minted one-per-distinct-identity, read
+        non-destructively) cannot accumulate forever; the shared feed passes no TTL.
+        The eviction is the intended retention cap, NOT a silent truncation of an
+        error."""
         pipe.lpush(feed_key, payload)
         pipe.ltrim(feed_key, 0, self._max_feed_length - 1)
-        pipe.expire(feed_key, self._feed_ttl_seconds)
+        if ttl_seconds is not None:
+            pipe.expire(feed_key, ttl_seconds)
 
     async def record(self, r: Redis, message: str, recipient: str | None, audience: str | None = None) -> dict:
         """Append one notification and return the stored record. The id and the
@@ -129,8 +138,9 @@ class NotificationSink:
         if audience is not None:
             # Operators still see everything on the shared feed; this extra push is
             # what makes the record complete on the addressed identity's own feed
-            # regardless of others' volume.
-            self._queue_push_bounded(pipe, self._audience_feed_key(audience), payload)
+            # regardless of others' volume. The per-identity key carries a rolling TTL
+            # (the shared feed does not) so an idle identity's key cannot leak forever.
+            self._queue_push_bounded(pipe, self._audience_feed_key(audience), payload, self._audience_feed_ttl_seconds)
         await pipe.execute()
         return record
 

@@ -61,7 +61,7 @@ async def test_sync_task_runs_and_returns_result(bind_pool) -> None:
     assert out == {"ok": True}
     ((args, kwargs),) = fake.calls
     assert args == ("tool_execution",)
-    assert kwargs == {"text": "hi", "count": 2, "backend_tool_name": "sample_tool"}
+    assert kwargs == {"text": "hi", "count": 2, "backend_tool_name": "sample_tool", "backend_secret_capability": False}
 
 
 async def test_sync_task_timeout_raises_clear_error(bind_pool) -> None:
@@ -179,7 +179,12 @@ async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, b
     assert orjson.loads(stored[b"schedule"]) == {"__type__": "interval", "every": 60.0, "relative": False}
     # ``count`` appears with its default: the branch presents the tool's real
     # signature, so bound defaults materialize in the stored kwargs.
-    assert orjson.loads(stored[b"kwargs"]) == {"text": "hi", "count": 1, "backend_tool_name": "sample_tool"}
+    assert orjson.loads(stored[b"kwargs"]) == {
+        "text": "hi",
+        "count": 1,
+        "backend_tool_name": "sample_tool",
+        "backend_secret_capability": False,
+    }
 
 
 async def test_schedule_task_requires_name_and_schedule(fake_redis, bind_pool) -> None:

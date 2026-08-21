@@ -23,9 +23,9 @@ _DEFAULT_PREFIX = "interactions:"
 # so their assertions see every record; the retention test sets its own small cap.
 _TEST_FEED_MAX = 1000
 
-# The rolling feed-key TTL the sink refreshes on every write; a fixed value the TTL
-# tests advance the fake clock against.
-_TEST_FEED_TTL = 3600
+# The per-audience feed idle TTL (seconds) the direct-sink tests build a sink with;
+# the TTL test drives the fake clock past it.
+_TEST_FEED_TTL = 30 * 86400
 
 
 @pytest.fixture(autouse=True)
@@ -90,38 +90,6 @@ async def test_read_raises_on_a_malformed_record(fake_redis) -> None:
 
     with pytest.raises(json.JSONDecodeError):
         await sink.read(fake_redis)
-
-
-# -- rolling feed-key TTL ----------------------------------------------------
-
-
-async def test_record_sets_a_rolling_ttl_on_both_feeds(fake_redis) -> None:
-    # Every write puts a TTL on the feed key, so an idle feed — and every distinct
-    # audience key, which would otherwise be a permanent per-identity list — is
-    # reclaimed rather than living forever.
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
-    await sink.record(fake_redis, "for-alice", None, audience="alice")
-
-    feed_key = f"{_DEFAULT_PREFIX}notifications:feed"
-    audience_key = f"{_DEFAULT_PREFIX}notifications:audience:alice"
-    assert fake_redis._ttls[feed_key] == fake_redis.time + _TEST_FEED_TTL
-    assert fake_redis._ttls[audience_key] == fake_redis.time + _TEST_FEED_TTL
-
-
-async def test_a_re_write_refreshes_the_feed_ttl(fake_redis) -> None:
-    # The TTL is rolling: a later write pushes the expiry the full window forward, so
-    # an actively-written feed never ages out mid-use.
-    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, _TEST_FEED_TTL)
-    feed_key = f"{_DEFAULT_PREFIX}notifications:feed"
-
-    await sink.record(fake_redis, "first", None)
-    first_expiry = fake_redis._ttls[feed_key]
-
-    fake_redis.advance(100)
-    await sink.record(fake_redis, "second", None)
-
-    assert fake_redis._ttls[feed_key] == fake_redis.time + _TEST_FEED_TTL
-    assert fake_redis._ttls[feed_key] > first_expiry
 
 
 @pytest.fixture
@@ -198,6 +166,60 @@ async def test_audience_feed_evicts_beyond_the_cap(fake_redis) -> None:
     sink = NotificationSink(_DEFAULT_PREFIX, cap, _TEST_FEED_TTL)
     written = [await sink.record(fake_redis, f"m-{i}", None, audience="alice") for i in range(cap + 2)]
     assert await sink.read_for(fake_redis, "alice") == list(reversed(written[-cap:]))
+
+
+async def test_audience_feed_key_expires_but_shared_feed_does_not(fake_redis) -> None:
+    # The per-identity feed key is minted one-per-distinct-identity and read
+    # non-destructively, so it carries a rolling TTL to keep it from accumulating
+    # forever; the shared feed carries NONE (a TTL there could drop the operator
+    # inbox after a quiet period).
+    ttl = 100
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, ttl)
+    await sink.record(fake_redis, "for-alice", None, audience="alice")
+
+    audience_key = f"{_DEFAULT_PREFIX}notifications:audience:alice"
+    shared_key = f"{_DEFAULT_PREFIX}notifications:feed"
+    # The push set an expiry on the per-identity key, none on the shared feed.
+    assert audience_key in fake_redis._ttls
+    assert shared_key not in fake_redis._ttls
+
+    # Past the TTL the per-identity key is reclaimed; the shared feed still stands.
+    fake_redis.advance(ttl + 1)
+    assert await sink.read_for(fake_redis, "alice") == []
+    assert len(await sink.read(fake_redis)) == 1
+
+
+async def test_audience_feed_ttl_rolls_forward_on_each_push(fake_redis) -> None:
+    # Each push refreshes the per-identity key's expiry, so a steadily-addressed
+    # identity's feed never expires out from under it.
+    ttl = 100
+    sink = NotificationSink(_DEFAULT_PREFIX, _TEST_FEED_MAX, ttl)
+    await sink.record(fake_redis, "first", None, audience="alice")
+    fake_redis.advance(ttl - 1)
+    await sink.record(fake_redis, "second", None, audience="alice")
+    # Past the FIRST push's expiry but within the refreshed one: both records stand.
+    fake_redis.advance(2)
+    assert len(await sink.read_for(fake_redis, "alice")) == 2
+
+
+async def test_module_writer_sets_the_audience_ttl(monkeypatch, fake_redis) -> None:
+    # The module writer builds the sink with the configured TTL, so a real
+    # ``record_notification`` push sets the per-identity key's expiry.
+    settings = InteractionsSettings(notifications_feed_ttl_seconds=123)
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notifications_sink, "client_ctx", _ctx)
+    monkeypatch.setattr(notifications_sink, "interactions_settings", lambda: settings)
+
+    await notifications_sink.record_notification("for-alice", audience="alice")
+
+    audience_key = f"{settings.key_prefix}notifications:audience:alice"
+    shared_key = f"{settings.key_prefix}notifications:feed"
+    assert fake_redis._ttls[audience_key] == fake_redis.time + 123
+    assert shared_key not in fake_redis._ttls
 
 
 async def test_read_notifications_audience_routes_to_per_identity_feed(sink_redis) -> None:

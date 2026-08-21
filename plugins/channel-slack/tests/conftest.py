@@ -162,12 +162,27 @@ class _StubConversations:
         )
 
 
+class _StubLifecycle:
+    """Records ``on_startup`` hooks so a test can drive the boot config guard."""
+
+    def __init__(self) -> None:
+        self.startup_hooks: list[Any] = []
+
+    def on_startup(self, func: Any) -> Any:
+        self.startup_hooks.append(func)
+        return func
+
+    def on_shutdown(self, func: Any) -> Any:
+        return func
+
+
 class _StubApp:
     def __init__(self) -> None:
         self.channels = _StubChannels()
         self.http = _StubHttp()
         self.clients = _StubClients()
         self.conversations = _StubConversations()
+        self.lifecycle = _StubLifecycle()
 
 
 _stub_app = _StubApp()

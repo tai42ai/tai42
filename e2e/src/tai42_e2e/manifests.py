@@ -1259,6 +1259,30 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     )
 
 
+def build_agents_authz_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The accounts access-control stack PLUS the agents surface — the profile where a
+    per-ROLE identity invokes an agent over the ``POST /api/agents/{name}/runs`` door.
+
+    Reuses ``build_accounts_stack`` (access control ON, the postgres accounts provider,
+    roles/sessions/invites, a seeded root key) and adds the agents router + the
+    ``mcp_tools_agent`` on the scripted LLM stub with the in-process ``memory``
+    checkpoint/store provider. The agents router makes ``agents`` a grantable feature
+    tag, so an ``editor`` role can hold ``agents:write`` and reach the run door — where
+    the middleware's per-role secret-capability stamp (admin vs non-admin) governs the
+    agent's ``inject_env`` / caller-endpoint fence end to end, the wiring a unit test
+    that sets the contextvar directly cannot exercise."""
+    from dataclasses import replace
+
+    base = build_accounts_stack(res, variants)
+    manifest = {**base.manifest}
+    manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_skeleton.routers.agents"]
+    manifest["agents"] = [
+        {"title": "tai-agents-mcp-tools", "module": "tai42_agents.mcp_tools_agent", "include": ["mcp_tools_agent"]}
+    ]
+    env = {**base.env, **_llm_env(res), **_memory_agent_state_env()}
+    return replace(base, name="agents-authz", manifest=manifest, env=env)
+
+
 def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The accounts stack plus the two OIDC members, both pointed at the in-process
     signing issuer (``netfixtures.OAuthIdp``).

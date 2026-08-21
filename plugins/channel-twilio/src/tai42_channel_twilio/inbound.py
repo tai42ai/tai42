@@ -178,9 +178,10 @@ async def twilio_inbound(request: Request) -> Response:
     Order is load-bearing: bounded body read (413) → signature (nothing trusted
     before it) → MessageSid dedupe → atomic pending claim → forward. A correlated
     reply forwards to the callback door; a correlation MISS goes to the bridge.
-    Forward status policy: 2xx answered; 404 terminal (drop correlation + ack);
-    400 rejected (restore so the human can re-reply); anything else restores and
-    raises so Twilio's retry re-resolves — the answer is never silently lost.
+    Forward status policy: 2xx answered; 404 terminal — the interaction is gone, so
+    the reply is bridged as a conversation message (never lost); 400 rejected
+    (restore so the human can re-reply); anything else restores and raises so
+    Twilio's retry re-resolves — the answer is never silently lost.
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
@@ -215,11 +216,17 @@ async def twilio_inbound(request: Request) -> Response:
         await mark_seen(message_sid)
         return Response(status_code=204)
     if forwarded.status_code == 404:
-        # Terminal: the ticket is gone; retrying can't succeed, so stay dropped
-        # and ack (no redelivery storm on a dead ticket).
-        logger.warning("callback door returned terminal HTTP 404 for %s; dropping the correlation", message_sid)
-        await mark_seen(message_sid)
-        return Response(status_code=204)
+        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
+        # ticket can't accept the answer, but the human's SMS must NEVER be lost —
+        # bridge it as an ordinary conversation message (its Body verbatim).
+        # _bridge_inbound sets provider_message_id=message_sid, so a Twilio
+        # redelivery of the same inbound dedupes at the conversation seam.
+        logger.warning(
+            "callback door returned terminal HTTP 404 for %s; the interaction is gone — "
+            "bridging the reply into the conversation instead of dropping it",
+            message_sid,
+        )
+        return await _bridge_inbound(form, message_sid)
     if forwarded.status_code == 400:
         # The door rejected THIS answer; keep the correlation so the human can
         # re-reply, and ack (the same body would be rejected again).

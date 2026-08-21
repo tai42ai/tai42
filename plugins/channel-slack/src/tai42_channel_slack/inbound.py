@@ -252,7 +252,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     if isinstance(thread_ts, str) and thread_ts and channel in recipients:
         callback_url = await get_callback_url(thread_ts)
         if callback_url is not None:
-            return await _forward_answer(callback_url, thread_ts, text)
+            return await _forward_answer(callback_url, thread_ts, text, settings.bot_user_id, channel, event_id)
 
     return await _bridge(settings.bot_user_id, channel, text, event_id)
 
@@ -289,8 +289,15 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
     return JSONResponse({"status": "accepted"})
 
 
-async def _forward_answer(callback_url: str, thread_ts: str, text: object) -> Response:
-    """Forward a correlated pending-question reply to its callback door."""
+async def _forward_answer(
+    callback_url: str, thread_ts: str, text: object, our_identity: str | None, channel: object, event_id: str
+) -> Response:
+    """Forward a correlated pending-question reply to its callback door.
+
+    ``our_identity``/``channel``/``event_id`` are the bridge context so a terminal
+    404 (the interaction is gone) bridges the reply into the conversation rather than
+    dropping it — ``_bridge`` sets ``provider_message_id`` = the event id, so a Slack
+    redelivery of the same inbound dedupes at the conversation seam."""
     if not isinstance(text, str) or not text:
         # A CORRELATED reply with no text is an error, not chatter: raise (-> 500,
         # Slack retries then logs) rather than resolve the ask with None.
@@ -302,14 +309,16 @@ async def _forward_answer(callback_url: str, thread_ts: str, text: object) -> Re
         await delete_correlation(thread_ts)
         return JSONResponse({"status": "forwarded"})
     if response.status_code == 404:
-        # The ticket is terminally gone — retrying the same answer can't succeed.
-        # Drop the correlation and ack 200 so Slack stops hammering a dead ticket.
+        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
+        # ticket can't accept the answer, but the human's reply must NEVER be lost —
+        # drop the correlation and bridge the reply into the conversation instead.
         logger.warning(
-            "slack inbound: callback door returned terminal HTTP 404 for thread_ts=%s; dropping correlation",
+            "slack inbound: callback door returned terminal HTTP 404 for thread_ts=%s; the interaction "
+            "is gone — bridging the reply into the conversation instead of dropping it",
             thread_ts,
         )
         await delete_correlation(thread_ts)
-        return JSONResponse({"status": "stale"})
+        return await _bridge(our_identity, channel, text, event_id)
     if response.status_code == 400:
         # The door rejected THIS answer; keep the correlation so the human can
         # reply again, and ack 200 (redelivering the same text is pointless).

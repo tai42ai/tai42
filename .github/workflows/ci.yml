@@ -302,8 +302,20 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: pnpm run build
       - name: Dist freshness
+        # The freshly built bundle must equal what is checked in. Staging into a
+        # scratch index catches an emitted-but-uncommitted asset that a plain
+        # working-tree diff misses; --force so an ignore rule can never hide one.
+        # The scratch index is confined to the subshell so this never touches the
+        # real index.
         working-directory: ${{ matrix.dir }}
-        run: git diff --exit-code ${{ matrix.dist }}/
+        run: |
+          scratch="$(mktemp -d)"
+          (
+            export GIT_INDEX_FILE="$scratch/index"
+            git read-tree HEAD
+            git add --all --force -- ${{ matrix.dist }}/
+            git diff --cached --exit-code -- ${{ matrix.dist }}/
+          )
 
   fleet:
     runs-on: ubuntu-latest
@@ -319,6 +331,11 @@ jobs:
         run: uv run --no-sync ruff check scripts tests
       - name: Ruff format
         run: uv run --no-sync ruff format --check scripts tests
+      - name: Range sync check
+        # Catch cross-package first-party range / contract-pin drift on the PR.
+        # Release then only re-derives; it never silently rewrites a drift the PR
+        # slipped past.
+        run: uv run --no-sync python scripts/range_sync.py --check
       - name: Fleet consistency
         run: uv run pytest tests/
       - name: Plugin docs gate
@@ -484,7 +501,7 @@ jobs:
         run: uv run --no-sync pytest -x -q --timeout=120 tests/storage
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-diagnostics-${{ matrix.backend }}-s${{ matrix.shard }}
           path: |
@@ -592,7 +609,7 @@ jobs:
         run: pnpm exec playwright test --project=chromium
       - name: Upload browser diagnostics
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-e2e-diagnostics
           path: |
@@ -640,7 +657,7 @@ jobs:
       - name: Upload firefox diagnostics
         # Retain firefox's result tree + html report whether it passed or failed.
         if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-e2e-browser-diagnostics-firefox
           path: |
@@ -650,7 +667,7 @@ jobs:
       - name: Upload webkit diagnostics
         # Retain webkit's result tree + html report whether it passed or failed.
         if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-e2e-browser-diagnostics-webkit
           path: |
@@ -662,7 +679,7 @@ jobs:
         # process logs; their tmp-dir names are engine-agnostic, so capture them
         # once as a combined artifact rather than duplicating into each engine's.
         if: ${{ always() && needs.changes.outputs.run_browsers == 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-e2e-browser-stacks
           path: |

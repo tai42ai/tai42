@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
-from tai42_channel_whatsapp.correlation import reserve_pending
+from tai42_channel_whatsapp.correlation import PendingQuestion, reserve_pending
 from tai42_channel_whatsapp.flows import build_flow
 from tai42_channel_whatsapp.inbound import (
     _CALLBACK_REJECTION_OPAQUE,
@@ -23,6 +24,7 @@ from tai42_channel_whatsapp.inbound import (
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
     AnswerForwardError,
+    _render_answer_for_bridge,
 )
 
 from .conftest import (
@@ -602,23 +604,115 @@ async def test_door_5xx_restores_pending_and_raises_so_meta_retries(
     assert not await _pending_intact(fake_redis)
 
 
-async def test_door_404_is_terminal_drop(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+async def test_door_404_terminal_bridges_the_text_reply(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
+    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
+    # reply: it is bridged into the conversation carrying the reply's text, under the
+    # same wamid so a Meta redelivery dedupes rather than double-dispatching.
     await _seed_pending()
     fake_httpx.responses.append(response(404))
 
     with caplog.at_level("WARNING"):
-        result = await handler(signed_request(message_payload()))
+        result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
-    assert not await _pending_intact(fake_redis)  # correlation stays dropped
+    assert not await _pending_intact(fake_redis)  # correlation consumed
     assert _SEEN_KEY in fake_redis.store
-    assert any("terminal HTTP 404" in record.message for record in caplog.records)
+    assert any("bridging the reply" in record.message for record in caplog.records)
+    assert stub_app.conversations.accept_calls == [
+        {
+            "channel": "whatsapp",
+            "our_identity": PHONE_NUMBER_ID,
+            "client_address": WA_ID,
+            "cap_key": WA_ID,
+            "text": "yes please",
+            "provider_message_id": _WAMID,
+        }
+    ]
 
-    redelivery = await handler(signed_request(message_payload()))
+    # Meta redelivers the same wamid: dedupe short-circuits — no second bridge, no
+    # second forward to the dead ticket.
+    redelivery = await handler(signed_request(message_payload(text="yes please")))
     assert redelivery.status_code == 200
-    assert len(fake_httpx.calls) == 1  # dedupe — no retry storm on a dead ticket
+    assert len(stub_app.conversations.accept_calls) == 1  # still once
+    assert len(fake_httpx.calls) == 1
+
+
+async def test_door_404_terminal_bridges_the_select_tap_label(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A select tap whose interaction is terminally gone bridges the option's
+    # human-readable label (the tap IS the person's answer), never a silent drop.
+    await _seed_pending_select(options=["staging", "production"])
+    fake_httpx.responses.append(response(404))
+
+    result = await handler(signed_request(interactive_payload(reply_id="int-1:1", title="production")))
+
+    assert result.status_code == 200
+    assert not await _pending_intact(fake_redis)  # consumed
+    assert stub_app.conversations.accept_calls[0]["text"] == "production"
+    assert stub_app.conversations.accept_calls[0]["provider_message_id"] == _WAMID
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_door_404_terminal_bridges_form_as_readable_fields(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A completed Flow form whose interaction is terminally gone bridges a readable
+    # rendering of the submitted field/value pairs (never a raw JSON dump, never a
+    # silent drop).
+    await _seed_pending_form()
+    fake_httpx.responses.append(response(404))
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "ship it", "qty": "7"})))
+
+    assert result.status_code == 200
+    assert not await _pending_intact(fake_redis)  # consumed
+    bridged = stub_app.conversations.accept_calls[0]["text"]
+    assert "note: ship it" in bridged
+    assert "qty: 7" in bridged  # coerced to int, rendered as a labelled field line
+    assert "{" not in bridged  # not a raw JSON dump
+    assert stub_app.conversations.accept_calls[0]["provider_message_id"] == _WAMID
+
+
+def test_render_empty_form_answer_bridges_a_non_empty_string():
+    # A completed-but-empty Flow form renders no field lines; the fallback is a faithful
+    # compact dump so the bridge is handed a non-blank string (the accept door rejects
+    # blank text) and the reply is never dropped.
+    pending = PendingQuestion(callback_url=_CALLBACK, timeout_at=datetime.now(UTC), schema={"properties": {}})
+    rendered = _render_answer_for_bridge({}, pending)
+    assert rendered != ""
+    assert rendered == "{}"
+
+
+def test_render_form_answer_with_a_nested_value_uses_json_not_repr():
+    # A non-scalar field value renders as compact JSON, not a Python ``repr``; a scalar
+    # field is unchanged.
+    pending = PendingQuestion(
+        callback_url=_CALLBACK,
+        timeout_at=datetime.now(UTC),
+        schema={"properties": {"tags": {"title": "Tags"}, "note": {"title": "Note"}}},
+    )
+    rendered = _render_answer_for_bridge({"tags": ["a", "b"], "note": "ship it"}, pending)
+    assert 'Tags: ["a", "b"]' in rendered
+    assert "['a', 'b']" not in rendered  # never a Python repr
+    assert "Note: ship it" in rendered  # scalar rendering unchanged
+
+
+async def test_door_5xx_does_not_bridge_only_terminal_404_bridges(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A retryable (5xx) failure must NOT be converted into a bridge — only the
+    # terminal 404 bridges. The 5xx restores the correlation and raises.
+    await _seed_pending()
+    fake_httpx.responses.append(response(500, text="oops"))
+
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
+        await handler(signed_request(message_payload()))
+
+    assert stub_app.conversations.accept_calls == []  # never bridged
+    assert await _pending_intact(fake_redis)  # restored for the retry
 
 
 async def test_door_400_keeps_correlation_for_a_re_reply(

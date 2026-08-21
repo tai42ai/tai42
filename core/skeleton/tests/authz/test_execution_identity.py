@@ -12,7 +12,12 @@ import asyncio
 
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
-from tai42_contract.access_control.context import get_current_user_id
+from tai42_contract.access_control.context import (
+    caller_may_read_secrets,
+    get_current_user_id,
+    reset_request_secret_capability,
+    set_request_secret_capability,
+)
 
 from tai42_skeleton.access_control.request_scopes import get_request_effective_scopes, get_request_identity_claims
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -244,6 +249,103 @@ def test_an_inner_binding_shadows_an_outer_one_for_its_task_only(ac_env, bound_a
             outer = get_execution_identity()
             assert outer is not None
             assert outer.user_id == "k-link"
+
+    asyncio.run(run())
+
+
+# -- the secret-read capability follows the firing KEY, never the triggerer -----
+
+
+def test_a_non_admin_key_fire_is_refused_the_secret_capability_even_when_the_triggerer_was_admin(
+    ac_env, bound_app
+) -> None:
+    # An admin request that triggers a fire must NOT lend the fire its secret capability:
+    # a hook running under a NON-admin execution key would otherwise lift host env through
+    # ``mcp_tools_agent``'s ``inject_env``. Gate on, the capability is the firing key's OWN
+    # admin status — this key is scoped (not the admin discriminator), so it reads False
+    # inside the bind regardless of the admin triggerer (the escalation guard), and the
+    # triggerer's own capability is restored after the fire.
+    ac_env.add_policy("k-fire", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+
+    async def run() -> None:
+        # The triggering request is an admin — secret-capable.
+        outer = set_request_secret_capability(True)
+        try:
+            assert caller_may_read_secrets() is True
+            async with bind_execution_identity("k-fire", bound_fingerprint="fp-k-fire"):
+                # The fire never reads the triggerer's True — a non-admin key stays fenced.
+                assert caller_may_read_secrets() is False
+            # The outer request's own capability is unchanged after the fire.
+            assert caller_may_read_secrets() is True
+        finally:
+            reset_request_secret_capability(outer)
+
+    asyncio.run(run())
+
+
+def test_an_admin_key_fire_reads_secret_capable(ac_env, bound_app) -> None:
+    # The firing KEY is itself the admin discriminator (a condition-free ``"*"`` policy that
+    # is not an owned key), so an admin who configured this schedule/hook may use
+    # ``inject_env`` on the fire — the capability equals the running key's admin status.
+    ac_env.add_policy("k-admin", scopes=["*"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-admin"})
+
+    async def run() -> None:
+        assert caller_may_read_secrets() is False
+        async with bind_execution_identity("k-admin", bound_fingerprint="fp-k-admin"):
+            assert caller_may_read_secrets() is True
+        # Restored to the fail-closed default after the fire.
+        assert caller_may_read_secrets() is False
+
+    asyncio.run(run())
+
+
+def test_an_owned_condition_free_star_key_fire_is_not_admin_capable(ac_env, bound_app) -> None:
+    # An OWNED condition-free ``"*"`` key is NOT the admin discriminator (an editor-minted
+    # you-plus escalation), so its fire reads False even though its raw scopes are ``"*"``.
+    ac_env.add_policy(
+        "k-owned",
+        scopes=["*"],
+        policy_data={OWNER_USER_ID_CLAIM: "alice", KEY_FINGERPRINT_CLAIM: "fp-k-owned"},
+    )
+    ac_env.add_policy("alice", scopes=["*"])
+
+    async def run() -> None:
+        async with bind_execution_identity("k-owned", bound_fingerprint="fp-k-owned"):
+            assert caller_may_read_secrets() is False
+
+    asyncio.run(run())
+
+
+def test_a_fire_resets_the_secret_capability_even_when_the_body_raises(ac_env, bound_app) -> None:
+    ac_env.add_policy("k-fire", scopes=["hooks"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"})
+
+    async def run() -> None:
+        outer = set_request_secret_capability(True)
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                async with bind_execution_identity("k-fire", bound_fingerprint="fp-k-fire"):
+                    raise RuntimeError("boom")
+            # The finally-reset restored the triggerer's capability on the exception path.
+            assert caller_may_read_secrets() is True
+        finally:
+            reset_request_secret_capability(outer)
+
+    asyncio.run(run())
+
+
+def test_a_gate_off_fire_reads_secret_capable_like_the_synthetic_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Gate off, every principal is the synthetic admin, so a fire reads secret-capable too
+    # (no fence to fail closed on). The build reads no store when access control is off.
+    from tai42_skeleton.authz import execution as execution_module
+
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+
+    async def run() -> None:
+        assert caller_may_read_secrets() is False
+        async with bind_execution_identity("k-fire", bound_fingerprint="fp-k-fire"):
+            assert caller_may_read_secrets() is True
+        # Restored to the fail-closed default after the fire.
+        assert caller_may_read_secrets() is False
 
     asyncio.run(run())
 

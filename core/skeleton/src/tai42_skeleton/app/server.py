@@ -486,9 +486,23 @@ class TaiMCP(TaiMCPLifecycleMixin):
         BodyLimitMiddleware and become a 413 before any error handler commits a 500.
         RateLimitMiddleware, by contrast, rejects before the app is entered, so it
         stays an outer finalize wrapper.
+
+        With access control DISABLED no ResourceGuard runs to bind the secret-read
+        capability, yet gate-off makes every caller the synthetic admin; the outermost
+        entry here binds that capability TRUE for the request so a gate-off caller reaches
+        an admin-fenced primitive exactly as ``resolve_caller`` admits it. Gate ON, the
+        adapter's ResourceGuard owns the bind and this entry is absent.
         """
+        # Local import mirrors ``_build_serving_core``: access_control -> ... -> app.server
+        # is a cycle, so the adapter surface is reached lazily here too.
+        from tai42_skeleton.access_control.middleware import DisabledAccessControlSecretCapabilityMiddleware
+        from tai42_skeleton.access_control.settings import access_control_settings
+
+        gate_off_secret_capability = (
+            [] if access_control_settings().enable else [Middleware(DisabledAccessControlSecretCapabilityMiddleware)]
+        )
         audit = [Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []
-        return [*audit, Middleware(BodyLimitMiddleware), *(middleware or [])]
+        return [*gate_off_secret_capability, *audit, Middleware(BodyLimitMiddleware), *(middleware or [])]
 
     def sse_app(
         self,

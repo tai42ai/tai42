@@ -377,6 +377,10 @@ async def _supervise(
         origin_token = set_interaction_origin(run_id)
         # Detached: this run has no live caller holding a connection, so the turn budget
         # does not apply — covers a background submit AND a store-ON hook fire.
+        # The secret-read capability is deliberately NOT rebound here: an in-process
+        # submit inherits the submitting request's own bound capability, which is the
+        # same identity-following model the detached-worker leg carries the submitter's
+        # capability to — the capability follows the identity the run acts as.
         detached_token = mark_detached_run()
         tool_error: Exception | None = None
         try:
