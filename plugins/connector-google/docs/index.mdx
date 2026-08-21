@@ -1,0 +1,123 @@
+---
+title: "Google connector"
+description: "Set up the Google Workspace OAuth app, scopes, and credentials for the Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People connector."
+---
+
+Registers the `google` connector: one OAuth connection per alias, each unlocking
+Google Workspace MCP sub-services — Gmail, Calendar, Drive, Docs, Sheets, Slides,
+Chat, and People. The plugin is pure descriptor data; the runtime's connector
+engine runs the OAuth flow, seals the tokens, and reaches Google's hosted MCP
+servers with the connection's own token.
+
+<Note>
+Google's hosted Workspace MCP servers are in **Developer Preview**. The operator
+must enroll the Cloud project in Google's Workspace Developer Preview Program and
+use their own OAuth client before these endpoints answer.
+</Note>
+
+## Install
+
+```bash
+tai plugins install tai42/connector-google \
+  --env CONNECTORS_GOOGLE_CLIENT_ID=...apps.googleusercontent.com \
+  --secret CONNECTORS_GOOGLE_CLIENT_SECRET
+```
+
+Or add it by hand to the manifest under `connectors:` (the descriptor block the
+plugin provides):
+
+```yaml manifest.yml
+connectors:
+  - id: google
+    kind: oauth
+    origin: system
+    category: communication
+    display_name: Google
+    description: Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People.
+    icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-google/icon.png
+    oauth:
+      authorize: https://accounts.google.com/o/oauth2/v2/auth
+      token: https://oauth2.googleapis.com/token
+      revoke: https://oauth2.googleapis.com/revoke
+    client_id_env: CONNECTORS_GOOGLE_CLIENT_ID
+    client_secret_env: CONNECTORS_GOOGLE_CLIENT_SECRET
+    sub_services:
+      gmail:
+        id: gmail
+        display_name: Gmail
+        scopes: [openid, email, https://www.googleapis.com/auth/gmail.readonly, https://www.googleapis.com/auth/gmail.compose]
+        mcp_server: {type: http, url: https://gmailmcp.googleapis.com/mcp/v1}
+    extra_authorize_params: {access_type: offline, prompt: consent, include_granted_scopes: "true"}
+```
+
+The manifest block above is trimmed to one sub-service for brevity; the plugin's
+`tai-plugin.yml` carries the full set.
+
+## Create the Google OAuth client
+
+Create a **Web application** OAuth 2.0 client in the Google Cloud console and enable
+the APIs behind the services you intend to offer (Gmail, Calendar, Drive, Docs,
+Sheets, Slides, Chat, People). Enroll the Cloud project in Google's Workspace
+Developer Preview Program so the hosted MCP servers accept the token.
+
+Add this exact redirect URI, where `{origin}` is your deployment's public origin (or
+`CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared bridge):
+
+```
+{origin}/oauth-bridge.html
+```
+
+Then set the client credentials on the API process:
+
+```bash
+CONNECTORS_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+CONNECTORS_GOOGLE_CLIENT_SECRET=...
+```
+
+The engine-wide `CONNECTORS_*` settings — the key-encryption key
+(`CONNECTORS_KEK`), the state HMAC key (`CONNECTORS_STATE_HMAC_KEY`), and the
+redirect-URI allowlist (or `CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared
+bridge) — are shared by every connector and are described in
+[Connectors](/concepts/connectors). The origin you registered with Google must
+appear in the redirect-URI allowlist, and it must be https for anything but a
+local host.
+
+## Services and scopes
+
+Each service requests its own scope set, so a user consents only to what the service
+they connect actually needs. Drive stays scoped to `drive.readonly` + `drive.file` —
+never the full `drive` scope, which would expose the user's entire Drive.
+
+| Service | MCP server | Scopes |
+| --- | --- | --- |
+| `gmail` | `https://gmailmcp.googleapis.com/mcp/v1` | `openid`, `email`, `gmail.readonly`, `gmail.compose` |
+| `calendar` | `https://calendarmcp.googleapis.com/mcp/v1` | `openid`, `email`, `calendar.calendarlist.readonly`, `calendar.events.freebusy`, `calendar.events.readonly` |
+| `drive` | `https://drivemcp.googleapis.com/mcp/v1` | `openid`, `email`, `drive.readonly`, `drive.file` |
+| `docs` | `https://docsmcp.googleapis.com/mcp/v1` | `openid`, `email`, `drive.readonly`, `drive.file`, `documents.readonly`, `documents` |
+| `sheets` | `https://sheetsmcp.googleapis.com/mcp/v1` | `openid`, `email`, `drive.readonly`, `drive.file`, `spreadsheets.readonly`, `spreadsheets` |
+| `slides` | `https://slidesmcp.googleapis.com/mcp/v1` | `openid`, `email`, `drive.readonly`, `drive.file`, `presentations.readonly`, `presentations` |
+| `chat` | `https://chatmcp.googleapis.com/mcp/v1` | `openid`, `email`, `chat.spaces.readonly`, `chat.memberships.readonly`, `chat.messages.readonly`, `chat.messages.create`, `chat.users.readstate` |
+| `people` | `https://people.googleapis.com/mcp/v1` | `openid`, `email`, `directory.readonly`, `userinfo.profile`, `contacts.readonly` |
+
+All scopes above are `https://www.googleapis.com/auth/<suffix>` except `openid` and
+`email`. The authorize request adds `access_type=offline`, `prompt=consent`, and
+`include_granted_scopes=true`, so a refresh token comes back and previously granted
+scopes are carried forward.
+
+<Warning>
+Several of these scopes are Google **restricted** or **sensitive** scopes
+(`gmail.readonly`, `drive.readonly`) — app verification, and for restricted scopes
+an annual third-party security assessment, are required before external users may
+consent.
+</Warning>
+
+## Connect an account
+
+Each service resolves to Google's hosted Workspace MCP server, authorised with the
+connection's own token. Disconnecting revokes the token at Google's revocation
+endpoint.
+
+## See also
+
+- [Connectors](/concepts/connectors) — the model, the token lifecycle, and the shared engine settings.
+- [Connect an OAuth provider](/guides/connect-an-oauth-provider) — the end-to-end walkthrough.
