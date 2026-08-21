@@ -54,7 +54,7 @@ dependencies = [
     # Glob matching for the deep-agent skills backends (``wcmatch.glob.globmatch``
     # with ``BRACE | GLOBSTAR``). Imported directly, so declared here rather than
     # leaned on as a transitive of the runtime.
-    "wcmatch>=10.1",
+    "wcmatch>=11.0.1",
 ]
 
 [project.urls]
