@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-agents"
-version = "2.3.0"
+version = "3.0.0"
 description = "Reference agents package for the TAI ecosystem: opt-in, manifest-loaded generic agents built on the deepagents/LangGraph runtime."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,10 +25,10 @@ classifiers = [
 dependencies = [
     # The pure interface contract the agents register through — the tai42_app
     # handle, the Agent ABC, and the StreamEvent taxonomy.
-    "tai42-contract>=2.2,<3",
+    "tai42-contract>=2.3,<3",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
-    "tai42-kit>=3.3,<4",
+    "tai42-kit>=3.4,<4",
     # The agent runtime. Agents are this repo's purpose, so the runtime is a
     # BASE dependency, not an extra. Floors track the versions the agents are
     # developed against.
@@ -89,7 +89,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=4.2,<5",
+    "tai42-skeleton>=5.0,<6",
 ]
 
 [tool.setuptools]
