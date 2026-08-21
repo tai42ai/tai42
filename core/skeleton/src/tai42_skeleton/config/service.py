@@ -711,9 +711,16 @@ class ConfigService:
         refuse_key_material(profile_env, self._read_stored_env())
         effective = self._effective_replace_env(profile_env)
         refuse_incomplete_admin_pair(effective)
+        # A connector reads its client-credential env STRAIGHT from ``os.environ`` at connect
+        # time, so it resolves against the FULL process env (current ``os.environ`` overlaid
+        # with the replace band), NOT the narrowed replace band: a deployment-supplied cred a
+        # SPARSE profile omits stays live in the process env, so its connector must not read as
+        # unset. Markers keep the narrowed ``effective`` band — a dropped stored key still
+        # dangles. Captured BEFORE ``_environ`` swaps ``os.environ`` to the modeled band.
+        connector_env = {**os.environ, **effective}
         with _environ(effective):
             preserved = self._read_preserved_manifest()
-            refuse_unresolved_env(preserved, effective)
+            refuse_unresolved_env(preserved, effective, connector_env=connector_env)
             manifest = self._validated_projection(preserved)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)

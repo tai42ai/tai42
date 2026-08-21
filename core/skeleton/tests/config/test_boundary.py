@@ -60,7 +60,7 @@ from tai42_skeleton.config.boundary import (
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 from tai42_skeleton.config.service import ConfigService
 
-from .test_service import FakeConfigStore, FakeReloadAdmin, RecordingBus
+from .test_service import FakeConfigStore, FakeReloadAdmin, RecordingBus, _oauth_descriptor
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -471,6 +471,65 @@ def test_refuse_unresolved_env_passes_a_clean_manifest() -> None:
     refuse_unresolved_env(
         manifest, {"SECRET_TOKEN": "x", "ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"}
     )  # no raise
+
+
+def test_refuse_unresolved_env_resolves_connectors_against_the_wider_connector_env() -> None:
+    # A whole-env REPLACE models a NARROWED marker band (a dropped stored key must still
+    # dangle) but the connector reads the live process env a profile does not own. Passing the
+    # narrowed band for markers AND the wider connector_env for creds keeps a deployment-supplied
+    # cred (present in connector_env, absent from the marker band) from reading as unset.
+    manifest = {"connectors": [_oauth_connector("acme")]}
+    refuse_unresolved_env(manifest, {}, connector_env={"ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"})  # no raise
+    # Absent from the wider connector_env too: still refused (the guard is not defanged).
+    with pytest.raises(ValueError, match="ACME_CLIENT_SECRET"):
+        refuse_unresolved_env(manifest, {"ACME_CLIENT_ID": "id"}, connector_env={"ACME_CLIENT_ID": "id"})
+
+
+# ---------------------------------------------------------------------------
+# Unset connector-env refusal — the REPLACE path resolves creds against the FULL
+# process env the connector reads at connect time, never the narrowed profile band
+# ---------------------------------------------------------------------------
+
+
+def test_validate_replace_allows_omitting_a_connector_cred_live_in_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An oauth connector's client-credential env is deployment-supplied: it is live in the
+    # process env (and mirrored into the stored env at boot) but a SPARSE settings profile does
+    # not carry it. A whole-env replace DROPS the stored band, so the modeled replace env omits
+    # the cred — yet the connector reads ``os.environ`` at connect time, where it stays live.
+    # The replace must NOT be refused.
+    monkeypatch.setenv("ACME_CLIENT_ID", "id")
+    monkeypatch.setenv("ACME_CLIENT_SECRET", "sec")
+    store = FakeConfigStore(
+        manifest={"connectors": [_oauth_descriptor("acme")]},
+        env={"ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"},
+    )
+    service, _admin, _bus = _service(store)
+
+    service._validate_replace({"APP_FLAG": "v"})  # no raise
+
+
+def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guard is not defanged: with the client secret absent from the process env, the stored
+    # band, AND the profile — unset in EVERY source the connector could read at connect time —
+    # the replace is still refused, naming the var and its json-pointer.
+    monkeypatch.setenv("ACME_CLIENT_ID", "id")
+    monkeypatch.delenv("ACME_CLIENT_SECRET", raising=False)
+    store = FakeConfigStore(
+        manifest={"connectors": [_oauth_descriptor("acme")]},
+        env={"ACME_CLIENT_ID": "id"},
+    )
+    service, _admin, _bus = _service(store)
+
+    with pytest.raises(ValueError, match="ACME_CLIENT_SECRET") as exc:
+        service._validate_replace({"APP_FLAG": "v"})
+    message = str(exc.value)
+    assert "/connectors/0/client_secret_env" in message
+    # The set credential is not named.
+    assert "/connectors/0/client_id_env" not in message
 
 
 # ---------------------------------------------------------------------------
