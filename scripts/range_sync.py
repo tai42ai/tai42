@@ -8,8 +8,12 @@ Two surfaces are kept in lockstep with the released versions:
       ``pyproject.toml`` (``[project].dependencies`` +
       ``[project.optional-dependencies]``);
   (B) the ``contract:`` pin in every ``tai-plugin.yml`` (both the root copy and
-      the packaged ``src/.../tai-plugin.yml`` copy of each plugin), which tracks
-      ``tai42-contract``.
+      the packaged ``src/.../tai-plugin.yml`` copy of each plugin, plus the root
+      copy of every DESCRIPTOR-ONLY component — a workspace-glob dir carrying a
+      ``tai-plugin.yml`` but no ``pyproject.toml``, so it ships no package and is
+      never a member), which tracks ``tai42-contract``. A descriptor-only
+      component carries no pyproject pin to preserve, so its descriptor follows
+      the GLOBAL derived contract range exactly like an unpinned member's.
 
 The version source of truth is each member's ``[project].version``. The range
 for a released version ``V`` is derived by a single rule (patch is ignored):
@@ -472,6 +476,22 @@ def plugin_descriptor_files(members: list[Path], root: Path) -> list[tuple[Path,
     return files
 
 
+def descriptor_only_contract_files(root: Path) -> list[Path]:
+    """Every descriptor-only component's root ``tai-plugin.yml``: a workspace-glob
+    dir that carries a ``tai-plugin.yml`` but NO ``pyproject.toml`` (the connector
+    dirs the root pyproject lists under ``[tool.uv.workspace].exclude`` — they
+    ship no package, so ``discover_members`` never sees them). Discovery mirrors
+    the packaged split: same globs, partitioned on the presence of a pyproject.
+    Each such component carries no pyproject pin to preserve, so its descriptor
+    follows the GLOBAL derived contract range exactly like an unpinned member."""
+    files: list[Path] = []
+    for pattern in workspace_globs(root):
+        for hit in sorted(root.glob(pattern)):
+            if hit.is_dir() and (hit / "tai-plugin.yml").is_file() and not (hit / "pyproject.toml").is_file():
+                files.append(hit / "tai-plugin.yml")
+    return sorted(set(files))
+
+
 # --------------------------------------------------------------------------- #
 # Apply / check                                                               #
 # --------------------------------------------------------------------------- #
@@ -594,6 +614,15 @@ def apply(root: Path) -> SyncReport:
             yml.write_text(new_text)
             report.contract_changes.append((yaml_path, old or "", target))
 
+    for yml in descriptor_only_contract_files(root):
+        yaml_path = yml.relative_to(root).as_posix()
+        text = yml.read_text()
+        old = contract_yaml_value(text)
+        new_text, changed = rewrite_contract_yaml(text, contract_range)
+        if changed:
+            yml.write_text(new_text)
+            report.contract_changes.append((yaml_path, old or "", contract_range))
+
     _self_assert(root)
     return report
 
@@ -644,6 +673,12 @@ def check(root: Path) -> SyncReport:
             target = contract_range
         if current is not None and current != target:
             report.contract_changes.append((yaml_path, current, target))
+
+    for yml in descriptor_only_contract_files(root):
+        yaml_path = yml.relative_to(root).as_posix()
+        current = contract_yaml_value(yml.read_text())
+        if current is not None and current != contract_range:
+            report.contract_changes.append((yaml_path, current, contract_range))
 
     return report
 
