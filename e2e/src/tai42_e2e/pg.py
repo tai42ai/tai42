@@ -51,6 +51,11 @@ def _accounts_plugin_entry(settings: PostgresConnectionSettings) -> MigrationEnt
             "tai42-accounts-postgres declares no 'migrations' chain in its tai-plugin.yml; "
             "the e2e template cannot be built from the product chains"
         )
+    if spec.package is None:
+        raise RuntimeError(
+            "tai42-accounts-postgres declares 'migrations' but no 'package' in its tai-plugin.yml; "
+            "a migration chain requires a package to import"
+        )
     migrations_dir = package.joinpath(*spec.migrations.split("/"))
     return MigrationEntry(component=spec.package, migrations_dir=migrations_dir, settings=settings)
 

@@ -286,6 +286,10 @@ class FixturePackageIndex:
         self._wheel_by_filename: dict[str, BuiltWheel] = {}
         # Staged github releases keyed by tag; each serves its own stamped spec.
         self._gh_releases: dict[str, _GithubRelease] = {}
+        # The repo's default-branch ``tai-plugin.yml`` (served for a ref-less contents
+        # request), staged only when a descriptor listing's seed confirms the file's
+        # existence at the repo (a subdir monorepo listing) before a tag exists.
+        self._gh_default_contents: bytes | None = None
         # Staged git-data trees keyed by sha (and, for a tag's root, by the tag
         # itself so the docs fetch can resolve the tag's root tree in one hop);
         # docs blobs keyed by their git blob sha.
@@ -319,21 +323,34 @@ class FixturePackageIndex:
         self._wheels.setdefault(key, []).append(wheel)
         self._wheel_by_filename[wheel.path.name] = wheel
 
-    def register_github_release(self, tag: str, plugin_yml: str) -> None:
-        """Stage a github release: its tag and the stamped root ``tai-plugin.yml``
-        the contents API serves for that tag (honouring ``?ref=<tag>``)."""
-        self._gh_releases[tag] = _GithubRelease(tag=tag, plugin_yaml=plugin_yml.encode("utf-8"))
+    def register_github_release(self, tag: str, plugin_yml: str, *, default_branch: bool = False) -> None:
+        """Stage a github release: its tag and the root ``tai-plugin.yml`` the contents
+        API serves for that tag (honouring ``?ref=<tag>``).
 
-    def register_github_docs_tree(self, tag: str, docs_files: dict[str, str]) -> None:
+        ``plugin_yml`` is the exact text served (a stamped wheel/tarball spec, or a
+        descriptor-only spec rendered per stack by
+        :func:`~tai42_e2e.marketplace.render_descriptor_fixture`). With
+        ``default_branch=True`` the same text is ALSO served for a ref-less contents
+        request — the shape a descriptor-only monorepo listing's seed makes when it
+        confirms the ``tai-plugin.yml`` exists under the repo subpath before any tag is
+        pushed (the standalone ``v<version>`` seeds fetch per-tag and never need it)."""
+        self._gh_releases[tag] = _GithubRelease(tag=tag, plugin_yaml=plugin_yml.encode("utf-8"))
+        if default_branch:
+            self._gh_default_contents = plugin_yml.encode("utf-8")
+
+    def register_github_docs_tree(self, tag: str, docs_files: dict[str, str], *, subpath: str = "") -> None:
         """Stage a tag's ``docs/`` tree on the git-data surfaces (``/git/trees`` +
         ``/git/blobs``), the shape the registry's github docs ingest fetches.
 
         ``docs_files`` maps docs-relative posix paths (e.g. ``"index.mdx"``) to
-        their text. Mirrors the pinned fetch shape: the
-        tag's root tree carries a single ``docs`` subtree entry; the docs subtree
-        lists each file as a ``100644`` blob; each blob is served base64-encoded by
-        its git object id. The root tree is addressable by BOTH the tag and its own
-        sha, so a fetch resolving the tag's root tree in one hop and one walking a
+        their text. Mirrors the pinned fetch shape: the docs subtree lists each file as
+        a ``100644`` blob; each blob is served base64-encoded by its git object id. The
+        tag's root tree carries the ``docs`` subtree — directly at the root for a
+        standalone repo (``subpath=""``), or nested under each ``subpath`` segment for a
+        monorepo subdir listing (``plugins/connector-iota`` → root → ``plugins`` →
+        ``connector-iota`` → ``docs``), the exact segment-by-segment walk the docs ingest
+        makes to the docs subtree SHA. The root tree is addressable by BOTH the tag and
+        its own sha, so a fetch resolving the tag's root tree in one hop and one walking a
         ref → root-sha first both land."""
         blobs: dict[str, bytes] = {name: text.encode("utf-8") for name, text in docs_files.items()}
         docs_entries = [
@@ -349,14 +366,23 @@ class FixturePackageIndex:
         docs_sha = hashlib.sha1(
             ("docs-tree:" + tag + ":" + ",".join(f"{e['path']}:{e['sha']}" for e in docs_entries)).encode()
         ).hexdigest()
-        root_entries = [{"path": _DOCS_DIRNAME, "mode": _GIT_TREE_MODE, "type": "tree", "sha": docs_sha}]
-        root_sha = hashlib.sha1(("root-tree:" + tag + ":" + docs_sha).encode()).hexdigest()
-        root_tree = {"sha": root_sha, "truncated": False, "tree": root_entries}
-        self._gh_trees[tag] = root_tree
-        self._gh_trees[root_sha] = root_tree
         self._gh_trees[docs_sha] = {"sha": docs_sha, "truncated": False, "tree": docs_entries}
         for entry in docs_entries:
             self._gh_blobs[str(entry["sha"])] = blobs[str(entry["path"])]
+
+        # Wrap the docs subtree under ``docs``, then, innermost segment first, each
+        # subpath component, so the root tree carries the full walk to the docs SHA.
+        child_name, child_sha = _DOCS_DIRNAME, docs_sha
+        for segment in reversed([s for s in subpath.split("/") if s]):
+            entries = [{"path": child_name, "mode": _GIT_TREE_MODE, "type": "tree", "sha": child_sha}]
+            wrap_sha = hashlib.sha1(f"tree:{tag}:{segment}:{child_sha}".encode()).hexdigest()
+            self._gh_trees[wrap_sha] = {"sha": wrap_sha, "truncated": False, "tree": entries}
+            child_name, child_sha = segment, wrap_sha
+        root_entries = [{"path": child_name, "mode": _GIT_TREE_MODE, "type": "tree", "sha": child_sha}]
+        root_sha = hashlib.sha1(("root-tree:" + tag + ":" + child_sha).encode()).hexdigest()
+        root_tree = {"sha": root_sha, "truncated": False, "tree": root_entries}
+        self._gh_trees[tag] = root_tree
+        self._gh_trees[root_sha] = root_tree
 
     def _pypi_json(self, project: str) -> dict[str, object]:
         wheels = self._wheels[_normalize_project(project)]
@@ -429,10 +455,15 @@ class FixturePackageIndex:
             # declared version does not normalize from that tag, so each tag must
             # serve its own stamped spec.
             self.requests.append(f"/gh-api/repos/{owner}/{repo}/contents/{path}")
-            if path.rsplit("/", 1)[-1] == _PLUGIN_SPEC_FILENAME and ref is not None:
-                release = self._gh_releases.get(ref)
-                if release is not None:
-                    content = base64.b64encode(release.plugin_yaml).decode("ascii")
+            if path.rsplit("/", 1)[-1] == _PLUGIN_SPEC_FILENAME:
+                # A tagged fetch serves that tag's stamped/rendered spec; a ref-less
+                # fetch (a monorepo descriptor listing's seed-time existence probe)
+                # serves the staged default-branch spec when one was registered.
+                payload = self._gh_releases[ref].plugin_yaml if ref is not None and ref in self._gh_releases else None
+                if payload is None and ref is None:
+                    payload = self._gh_default_contents
+                if payload is not None:
+                    content = base64.b64encode(payload).decode("ascii")
                     return JSONResponse({"encoding": "base64", "content": content, "path": path})
             return JSONResponse({"error": f"not found: {path} at ref {ref!r}"}, status_code=404)
 

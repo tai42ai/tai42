@@ -460,7 +460,8 @@ def connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, oau
 
 @pytest.fixture(scope="module")
 def shipped_connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    """The stack loading the shipped OAuth connector plugins (google + atlassian).
+    """The stack registering the four shipped OAuth connector descriptors (google,
+    atlassian, slack, github) from the manifest ``connectors`` field.
     Its connector crypto reads the KEK and state-HMAC key as STANDARD base64
     (``b64decode(validate=True)``, KEK to exactly 32 bytes), so mint padded
     standard-base64 keys, not ``token_urlsafe`` which fails that strict decode."""

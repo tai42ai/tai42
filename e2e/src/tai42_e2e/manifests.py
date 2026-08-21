@@ -10,8 +10,18 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from tai42_contract.connectors.providers import (
+    ConfigFieldSpec,
+    McpServerDescriptor,
+    OAuthEndpoints,
+    ProviderDescriptor,
+    SubServiceDescriptor,
+)
+from tai42_kit.plugins import load_plugin_spec
 
 from tai42_e2e.harness import STUDIO_PATH_PATTERNS
 from tai42_e2e.settings import HarnessSettings, real_embedding_provider, real_llm_provider
@@ -1569,8 +1579,10 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
             # Its accounts_* tables ride the per-stack clone of the e2e template DB.
             "tai42_accounts_postgres",
             "tai42_webhook_verifier_github",
-            "tai42_e2e_fixtures.connector_provider",
         ],
+        # The fixture OAuth connector provider rides the manifest ``connectors`` field —
+        # registered SUT-side through the ``tai42_app.connectors.register_connector`` facet.
+        "connectors": _fixture_connector_descriptors(res.idp_base_url or _FIXTURE_IDP_BASE_FALLBACK),
         # The ``"all"`` default set already mounts every core + feature router; the only
         # routers NOT in it are the accounts plugin's own routes, so they are the sole
         # extras named here. The SPA catch-all is force-appended last by the loader.
@@ -1647,14 +1659,14 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     # The connectors surface: the connector store binds to the ``default`` database
     # (skeleton component) _base_env already declares, so it is live (store-configured);
     # its Redis cache rides the shared ``_redis_feature_env``. Wire the fixture provider's
-    # crypto keys + stub-IdP endpoints when the runner supplied them — mirroring
-    # build_connectors_stack.
+    # crypto keys + stub-IdP client credentials when the runner supplied them — mirroring
+    # build_connectors_stack. The fixture OAuth endpoints are stamped into the manifest
+    # ``connectors`` descriptor above.
     if res.connectors_kek is not None:
         env["CONNECTORS_KEK"] = res.connectors_kek
     if res.connectors_state_hmac_key is not None:
         env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
     if res.idp_base_url is not None:
-        env["E2E_IDP_BASE_URL"] = res.idp_base_url
         env["E2E_IDP_CLIENT_ID"] = "e2e-client"
         env["E2E_IDP_CLIENT_SECRET"] = "e2e-secret"
     # Optional marketplace wiring for the browser leg. The marketplace router is always
@@ -1685,12 +1697,157 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
+# ---- fixture connector descriptors --------------------------------------
+#
+# The connector/fleet suites drive four fixture providers, all riding the one
+# launchable managed MCP server (``tai42_e2e_fixtures.managed_mcp_server``, spawned
+# self-contained via ``sys.executable -m`` — no network, no package index, no ``uvx``).
+# They ride the manifest ``connectors`` field: each descriptor is registered SUT-side
+# through the ``tai42_app.connectors.register_connector`` facet at boot/reload. The stub
+# IdP origin is only known once the stack allocates it, so the OAuth endpoints are stamped
+# per stack from ``res.idp_base_url``.
+
+# The stub IdP base used when a stack allocates no IdP — a syntactically valid but inert
+# origin (no IdP answers it), matching the value the connect flow never reaches.
+_FIXTURE_IDP_BASE_FALLBACK = "http://127.0.0.1:0"
+
+# The launch spec every fixture sub-service shares: spawn the managed MCP server module
+# with the SUT's own interpreter (``sys.executable``, which already has
+# ``tai42_e2e_fixtures``) — so the child launches with no network, no package index.
+_FIXTURE_MANAGED_SERVER = McpServerDescriptor(
+    type="stdio",
+    command=sys.executable,
+    args=["-m", "tai42_e2e_fixtures.managed_mcp_server"],
+)
+
+
+def _fixture_connector_descriptors(idp_base: str) -> list[dict[str, object]]:
+    """The four fixture provider descriptors serialized for the manifest ``connectors``
+    field. ``idp_base`` stamps the OAuth provider's authorize/token endpoints at the
+    stub IdP the stack allocated.
+
+    * ``e2e_idp`` — an OAuth provider whose authorize/token endpoints resolve to the stub
+      IdP. Its ``default`` sub-service launches the managed server, so an OAuth-convergence
+      scenario can call a managed tool over it; the refresh-lock test drives only token
+      resolution and never launches the sub-service.
+    * ``e2e_noauth_alpha`` / ``e2e_noauth_beta`` — two DISTINCT ``kind="none"`` no-auth
+      providers, each launching the same managed server. Being distinct providers they
+      connect as two separate manifest records, so a concurrency scenario can connect both
+      at once without a conflicting double-connect of one provider. ``beta`` also declares
+      an optional ``config_fields`` env field, exercising the no-auth config-injection
+      channel (``reflect_env`` reads it back).
+    * ``e2e_noauth_multi`` — a ``kind="none"`` no-auth provider with TWO distinct
+      sub-services (``alpha`` / ``beta``), each launching the same managed server, so each
+      binds its own manifest entry and its own tool-prefix surface. Two enabled
+      sub-services is the shape a sub-service-toggle scenario needs: one can be toggled OFF
+      while the other stays enabled (satisfying the ``min_length=1`` floor on the patch
+      request), and toggled back ON."""
+    oauth_descriptor = ProviderDescriptor(
+        id="e2e_idp",
+        display_name="E2E Stub IdP",
+        description="Deterministic in-memory OAuth2 provider for the e2e connector tests.",
+        icon_url="https://tai42.ai/e2e.png",
+        kind="oauth",
+        origin="community",
+        category="dev-tools",
+        oauth=OAuthEndpoints(authorize=f"{idp_base}/authorize", token=f"{idp_base}/token"),
+        client_id_env="E2E_IDP_CLIENT_ID",
+        client_secret_env="E2E_IDP_CLIENT_SECRET",
+        sub_services={
+            "default": SubServiceDescriptor(
+                id="default",
+                display_name="Default",
+                description="The single scope the refresh-lock test resolves tokens for.",
+                scopes=["read"],
+                # Launches the managed MCP server directly, so an OAuth-convergence
+                # scenario can call a managed tool over this connection. The refresh-lock
+                # test drives only token resolution and never launches the sub-service.
+                mcp_server=_FIXTURE_MANAGED_SERVER,
+            )
+        },
+        # An oauth provider must NOT declare config_fields (the contract forbids it),
+        # so none are set here — the connect flow needs only the OAuth endpoints.
+    )
+    noauth_alpha = ProviderDescriptor(
+        id="e2e_noauth_alpha",
+        display_name="E2E No-Auth Alpha",
+        description="A no-auth managed-MCP provider (no client config) for the fleet connect tests.",
+        icon_url="https://tai42.ai/e2e.png",
+        kind="none",
+        origin="community",
+        category="dev-tools",
+        sub_services={
+            "default": SubServiceDescriptor(
+                id="default",
+                display_name="Default",
+                description="Launches the managed MCP server; no client config is required.",
+                mcp_server=_FIXTURE_MANAGED_SERVER,
+            )
+        },
+    )
+    noauth_beta = ProviderDescriptor(
+        id="e2e_noauth_beta",
+        display_name="E2E No-Auth Beta",
+        description="A second, distinct no-auth managed-MCP provider with one optional env config field.",
+        icon_url="https://tai42.ai/e2e.png",
+        kind="none",
+        origin="community",
+        category="dev-tools",
+        sub_services={
+            "default": SubServiceDescriptor(
+                id="default",
+                display_name="Default",
+                description="Launches the managed MCP server; ``e2e_beta_tag`` is injected into its env.",
+                mcp_server=_FIXTURE_MANAGED_SERVER,
+            )
+        },
+        # One optional client value injected on the stdio transport's env channel
+        # (target must match the sub-service transport). ``reflect_env`` reads it back,
+        # so a scenario can prove the no-auth config-injection path end to end.
+        config_fields=[
+            ConfigFieldSpec(key="e2e_beta_tag", label="Beta tag", target="env", required=False),
+        ],
+    )
+    noauth_multi = ProviderDescriptor(
+        id="e2e_noauth_multi",
+        display_name="E2E No-Auth Multi",
+        description="A no-auth managed-MCP provider with two sub-services, for the sub-service-toggle scenario.",
+        icon_url="https://tai42.ai/e2e.png",
+        kind="none",
+        origin="community",
+        category="dev-tools",
+        # Two distinct sub-services, each launching the same managed server. Each enabled
+        # sub-service binds its own manifest entry (titled per sub-service) with its own
+        # tool prefix, so one can be toggled off while the other stays enabled — the >=2
+        # surface a sub-service-toggle scenario requires.
+        sub_services={
+            "alpha": SubServiceDescriptor(
+                id="alpha",
+                display_name="Alpha",
+                description="Launches the managed MCP server; the sub-service left enabled across the toggle.",
+                mcp_server=_FIXTURE_MANAGED_SERVER,
+            ),
+            "beta": SubServiceDescriptor(
+                id="beta",
+                display_name="Beta",
+                description="Launches the managed MCP server; the sub-service toggled off then back on.",
+                mcp_server=_FIXTURE_MANAGED_SERVER,
+            ),
+        },
+    )
+    return [
+        descriptor.model_dump(mode="json", exclude_none=True)
+        for descriptor in (oauth_descriptor, noauth_alpha, noauth_beta, noauth_multi)
+    ]
+
+
 def build_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS, auth off — OAuth connect + refresh-lock against the stub IdP.
-    Encryption keys are random per stack; the connector provider is a fixture."""
+    Encryption keys are random per stack; the connector providers are fixtures
+    carried on the manifest ``connectors`` field."""
     manifest = {
         "default_routers": "none",
-        "lifecycle_modules": ["tai42_e2e_fixtures.connector_provider"],
+        "connectors": _fixture_connector_descriptors(res.idp_base_url or _FIXTURE_IDP_BASE_FALLBACK),
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.connectors"],
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,
@@ -1711,9 +1868,8 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
     if res.connectors_state_hmac_key is not None:
         env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
     if res.idp_base_url is not None:
-        # The fixture connector provider reads these to point its OAuth endpoints +
-        # client credentials at the stub IdP.
-        env["E2E_IDP_BASE_URL"] = res.idp_base_url
+        # The fixture OAuth provider's client credentials resolve by env name at the stub
+        # IdP; its authorize/token endpoints are stamped into the manifest descriptor above.
         env["E2E_IDP_CLIENT_ID"] = "e2e-client"
         env["E2E_IDP_CLIENT_SECRET"] = "e2e-secret"
     return StackConfig(
@@ -1733,35 +1889,53 @@ def build_connectors_stack(res: StackResources, variants: Variants) -> StackConf
 
 # ---- shipped-connectors profile (B3) ------------------------------------
 #
-# The two SHIPPED OAuth connector plugins — google + atlassian — loaded as their real
-# descriptor modules (NOT the fixture ``connector_provider``). The descriptors hardcode
-# the vendor authorize/token URLs with no env indirection, so the leg's scope ENDS at
-# descriptor registration + the locally-built authorize (launch) URL: a stub IdP cannot
-# intercept the vendor token exchange, and probe launches the sub-service then calls the
-# real vendor. Token/refresh/probe against live vendors is the real-connector leg.
+# The four SHIPPED OAuth connector plugins — google, atlassian, slack, github — carried on
+# the manifest ``connectors`` field as pure descriptor data (each plugin is a yml-only
+# descriptor dir; there is no import module). The descriptors hardcode the vendor
+# authorize/token URLs with no env indirection, so the leg's scope ENDS at descriptor
+# registration + the locally-built authorize (launch) URL: a stub IdP cannot intercept the
+# vendor token exchange, and probe launches the sub-service then calls the real vendor.
+# Token/refresh/probe against live vendors is the real-connector leg.
 
-# The two shipped connector descriptor modules; importing each registers its provider
-# through ``tai42_app.connectors.register_connector`` (google → Gmail/Calendar/Drive,
-# atlassian → Jira/Confluence/Compass).
-_GOOGLE_CONNECTOR_MODULE = "tai42_connector.google.core.connector"
-_ATLASSIAN_CONNECTOR_MODULE = "tai42_connector.atlassian.core.connector"
+# The shipped connector plugin dirs whose ``tai-plugin.yml`` descriptor each stack loads.
+_SHIPPED_CONNECTOR_NAMES = ("google", "atlassian", "slack", "github")
+_PLUGINS_DIR = Path(__file__).resolve().parents[3] / "plugins"
 
 # The OAuth client credentials each shipped descriptor reads by env name
 # (``client_id_env`` / ``client_secret_env``). Fixed fixture values: the client_id is
-# stamped verbatim into the locally-built authorize URL the leg asserts on; the secret
-# is never used (no token exchange happens on this leg), but the connect flow reads it
-# so it must be present.
-# The client_ids are PUBLIC: the shipped-connectors leg asserts the launch URL stamps
-# them verbatim, so the spec imports these rather than re-hardcoding the literals.
+# stamped verbatim into the locally-built authorize URL the leg asserts on; the secret is
+# never used (no token exchange happens on this leg), but the connect flow reads it so it
+# must be present. The client_ids are PUBLIC: the shipped-connectors leg asserts the launch
+# URL stamps them verbatim, so the spec exports these rather than re-hardcoding the literals.
 GOOGLE_CLIENT_ID = "e2e-google-client-id"
 _GOOGLE_CLIENT_SECRET = "e2e-google-client-secret"
 ATLASSIAN_CLIENT_ID = "e2e-atlassian-client-id"
 _ATLASSIAN_CLIENT_SECRET = "e2e-atlassian-client-secret"
+SLACK_CLIENT_ID = "e2e-slack-client-id"
+_SLACK_CLIENT_SECRET = "e2e-slack-client-secret"
+GITHUB_CLIENT_ID = "e2e-github-client-id"
+_GITHUB_CLIENT_SECRET = "e2e-github-client-secret"
+
+
+def _shipped_connector_descriptors() -> list[dict[str, object]]:
+    """The four shipped connector provider descriptors serialized for the manifest
+    ``connectors`` field. Each is read from its plugin's ``tai-plugin.yml`` via
+    ``load_plugin_spec`` and taken from ``provides[0].provider`` — the single source of
+    truth for the shipped descriptor (the yml the release publishes)."""
+    descriptors: list[dict[str, object]] = []
+    for name in _SHIPPED_CONNECTOR_NAMES:
+        spec = load_plugin_spec(_PLUGINS_DIR / f"connector-{name}" / "tai-plugin.yml")
+        provider = spec.provides[0].provider
+        if provider is None:
+            raise RuntimeError(f"shipped connector plugin connector-{name} has no provider descriptor")
+        descriptors.append(provider.model_dump(mode="json", exclude_none=True))
+    return descriptors
 
 
 def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """MULTIWORKER(1), no backend/metrics, auth off — the SHIPPED google + atlassian
-    connector descriptors loaded and their launch (authorize) URLs asserted.
+    """MULTIWORKER(1), no backend/metrics, auth off — the four SHIPPED connector
+    descriptors (google, atlassian, slack, github) registered from the manifest
+    ``connectors`` field and their launch (authorize) URLs asserted.
 
     Mounts the connectors router over a live connector store (bound to the ``default``
     database, so it is store-configured) with random per-stack crypto keys, and points
@@ -1773,7 +1947,7 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
     redirect_uri against it fail-closed)."""
     manifest = {
         "default_routers": "none",
-        "lifecycle_modules": [_GOOGLE_CONNECTOR_MODULE, _ATLASSIAN_CONNECTOR_MODULE],
+        "connectors": _shipped_connector_descriptors(),
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.connectors"],
         "extensions_modules": _EXTENSION_MODULES,
         "storage_module": variants.storage.module,
@@ -1816,6 +1990,13 @@ def build_shipped_connectors_stack(res: StackResources, variants: Variants) -> S
     else:
         env["CONNECTORS_ATLASSIAN_CLIENT_ID"] = ATLASSIAN_CLIENT_ID
         env["CONNECTORS_ATLASSIAN_CLIENT_SECRET"] = _ATLASSIAN_CLIENT_SECRET
+    # Slack and github have no real leg in this suite (no ``TAI_E2E_REAL`` seam), so their
+    # client credentials are always the fixed fixture values — the client_id is stamped
+    # into the locally-built authorize URL, the secret present-but-unused on this leg.
+    env["CONNECTORS_SLACK_CLIENT_ID"] = SLACK_CLIENT_ID
+    env["CONNECTORS_SLACK_CLIENT_SECRET"] = _SLACK_CLIENT_SECRET
+    env["CONNECTORS_GITHUB_CLIENT_ID"] = GITHUB_CLIENT_ID
+    env["CONNECTORS_GITHUB_CLIENT_SECRET"] = _GITHUB_CLIENT_SECRET
     return StackConfig(
         name="shipped-connectors",
         topology=Topology.MULTIWORKER,
@@ -2116,6 +2297,67 @@ def build_marketplace_authz_stack(res: StackResources, variants: Variants) -> St
     manifest = {**base.manifest, "lifecycle_modules": [variants.identity.lifecycle_module]}
     env = {**base.env, "ACCESS_CONTROL_ENABLE": "true", **variants.identity.auth_provider_env()}
     return replace(base, name="marketplace-authz", manifest=manifest, env=env, auth=True)
+
+
+def build_marketplace_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The marketplace stack with the connectors surface mounted — the home of the
+    descriptor-only (``source='spec'``) connector install lifecycle.
+
+    Same single-worker marketplace wiring as ``build_marketplace_stack`` (registry
+    client, package index, install door) PLUS the connectors router over a live connector
+    store (bound to the ``default`` database, random per-stack crypto keys) so an
+    installed connector descriptor's provider is listed at ``GET /api/connectors/providers``
+    and a no-auth connect launches its managed stdio MCP server. The stack's OAuth/MCP
+    stub base (``res.idp_base_url``) is the value the seeded iota descriptor's endpoints
+    are rendered against, so the installed manifest's connector matches this stack's IdP.
+    One worker so an install's manifest patch + reload is observed on a deterministic
+    process."""
+    if res.marketplace_url is None or res.package_index_url is None:
+        raise RuntimeError(
+            "build_marketplace_connectors_stack requires resources.marketplace_url and resources.package_index_url; "
+            "the fixture allocates the registry + package index and passes them as resource_kwargs"
+        )
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": [
+            *_CORE_ROUTERS,
+            "tai42_skeleton.routers.marketplace",
+            "tai42_skeleton.routers.connectors",
+        ],
+        # The probe entry attaches a proxy branch, so the proxy extension must load
+        # alongside prometheus or extension validation aborts boot.
+        "extensions_modules": ["tai42_toolbox.extensions.prometheus", "tai42_toolbox.extensions.proxy"],
+        "storage_module": variants.storage.module,
+        "tools": [_probe_tools_entry(with_backend_branches=False), *_builtin_entries()],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["MARKETPLACE_URL"] = res.marketplace_url
+    env["MARKETPLACE_ADVISORIES_POLL"] = "true"
+    env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
+    if not _switch().is_real("marketplace-pypi"):
+        env["PIP_INDEX_URL"] = f"{res.package_index_url}/simple/"
+    # The connector store binds to the ``default`` database (skeleton component) _base_env
+    # already declares, so it is live; its Redis cache rides the shared feature Redis.
+    if res.connectors_kek is not None:
+        env["CONNECTORS_KEK"] = res.connectors_kek
+    if res.connectors_state_hmac_key is not None:
+        env["CONNECTORS_STATE_HMAC_KEY"] = res.connectors_state_hmac_key
+    return StackConfig(
+        name="marketplace-connectors",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=env,
+        workers=1,
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+        # The connect flow signs the deployment origin and validates the request-derived
+        # redirect_uri against this allowlist fail-closed; the app port is known only at
+        # boot, so the stack fills it with its own origin.
+        origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
+    )
 
 
 def build_default_router_stack(res: StackResources, variants: Variants) -> StackConfig:

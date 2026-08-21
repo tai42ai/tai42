@@ -153,8 +153,8 @@ def build_fleet_env_stack_builder(env_key: str) -> Callable[[StackResources, Var
 
 def build_fleet_connectors_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The convergence fleet with the connector surface: the ``connectors`` profile (connector
-    router + fixture provider lifecycle module + KEK/HMAC + connector store + stub-IdP
-    env) re-shaped to MULTIWORKER(2), no backend WORKER process.
+    router + fixture provider descriptors on the manifest ``connectors`` field + KEK/HMAC +
+    connector store + stub-IdP env) re-shaped to MULTIWORKER(2), no backend WORKER process.
 
     ``backend_module`` stays in the manifest — the profile's probe tools carry
     ``sync_task`` branches whose extension only registers on the backend module's import,
