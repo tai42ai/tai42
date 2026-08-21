@@ -65,9 +65,6 @@ dependencies = [
     "tai42-channel-web>=1.1,<2",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=1.0,<2",
-    # The shipped OAuth connector plugins the shipped-connectors stack boots.
-    "tai42-connector-google>=1.0,<2",
-    "tai42-connector-atlassian>=1.0,<2",
     # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
     # client the K8sConfigManager imports where the provider runs.
     "tai42-config-k8s[k8s]>=1.0,<2",
@@ -140,6 +137,12 @@ dev = [
     # [project.dependencies] so the published wheel carries no bare, unresolvable
     # reference-plugin Requires-Dist.
     "reference-plugin",
+    # The atlassian and google OAuth connector plugins the shipped-connectors stack
+    # boots. Both are unpublished, so they stay out of [project].dependencies to keep
+    # the wheel free of an unresolvable Requires-Dist; each floats at its workspace
+    # checkout by the source override below and installs for CI as a default dev group.
+    "tai42-connector-atlassian>=1.0,<2",
+    "tai42-connector-google>=1.0,<2",
 ]
 # The docs media-card recapture workflow's capture toolchain, locked so a
 # floating install can never break capture: Playwright (the Python package
