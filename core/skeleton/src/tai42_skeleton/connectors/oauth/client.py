@@ -257,10 +257,27 @@ class TokenResponse:
     raw: dict
 
 
+def _token_error_suffix(payload: dict) -> str:
+    """A ``: error=... error_description=...`` suffix built from the provider's RFC 6749
+    ``error`` / ``error_description`` fields when present, else ``""`` — so a vendor that
+    signals failure in a 200 body carrying no ``access_token`` is loud with its reason.
+    The description is truncated to bound a misbehaving provider echoing the code/token."""
+    error = payload.get("error")
+    desc = payload.get("error_description")
+    parts: list[str] = []
+    if isinstance(error, str) and error:
+        parts.append(f"error={error!r}")
+    if isinstance(desc, str) and desc:
+        if len(desc) > _ERROR_DESCRIPTION_MAX_LEN:
+            desc = desc[:_ERROR_DESCRIPTION_MAX_LEN] + "…"
+        parts.append(f"error_description={desc!r}")
+    return f": {' '.join(parts)}" if parts else ""
+
+
 def _parse_token_response(payload: dict, *, fallback_refresh_token: str | None = None) -> TokenResponse:
     access = payload.get("access_token")
     if not access:
-        raise CodeExchangeFailedError("provider response is missing access_token")
+        raise CodeExchangeFailedError("provider response is missing access_token" + _token_error_suffix(payload))
     if not isinstance(access, str):
         raise CodeExchangeFailedError(f"provider returned a non-string access_token (got {type(access).__name__})")
     raw_expires_in = payload.get("expires_in", 3600)
@@ -314,7 +331,12 @@ async def exchange_code(
     }
     try:
         async with _http() as http:
-            resp = await http.post(_oauth_endpoints(descriptor).token, data=body)
+            # RFC 6749 §5.1: the token endpoint response is JSON. Some authorization
+            # servers default to form-encoding without an explicit Accept header, so
+            # request JSON to keep the body parseable across providers.
+            resp = await http.post(
+                _oauth_endpoints(descriptor).token, data=body, headers={"Accept": "application/json"}
+            )
     except httpx.HTTPError as exc:
         logger.error(
             "connectors: token exchange transport error (%s)",
@@ -370,7 +392,11 @@ async def refresh(*, descriptor: ProviderDescriptor, refresh_token: str) -> Toke
     }
     try:
         async with _http() as http:
-            resp = await http.post(_oauth_endpoints(descriptor).token, data=body)
+            # RFC 6749 §5.1: request a JSON token response (some servers default to
+            # form-encoding without the header).
+            resp = await http.post(
+                _oauth_endpoints(descriptor).token, data=body, headers={"Accept": "application/json"}
+            )
     except httpx.HTTPError as exc:
         logger.warning(
             "connectors: refresh transport error (%s)",
@@ -401,9 +427,9 @@ async def refresh(*, descriptor: ProviderDescriptor, refresh_token: str) -> Toke
             payload = {}
         err = payload.get("error", "")
         reason = "invalid_grant" if err == "invalid_grant" else "transient"
-        # Every invalid_grant is terminal → RECONNECT_REQUIRED. Correct for the
-        # shipped non-rotating-token provider, where a refresh token stays valid
-        # until the user revokes it.
+        # Every invalid_grant is terminal → RECONNECT_REQUIRED, for a connector
+        # whose oauth provider keeps a refresh token valid until the user revokes
+        # it (a non-rotating refresh token).
         logger.warning(
             "connectors: refresh %s (%s) status=%s error=%r",
             reason,
@@ -417,7 +443,7 @@ async def refresh(*, descriptor: ProviderDescriptor, refresh_token: str) -> Toke
             http_status=resp.status_code,
         )
 
-    # Some providers (Google) omit refresh_token on refresh — keep the old one.
+    # An oauth provider may omit refresh_token on refresh — keep the old one.
     try:
         raw = resp.json()
     except ValueError as exc:

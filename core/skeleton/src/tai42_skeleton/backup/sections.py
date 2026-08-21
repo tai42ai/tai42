@@ -46,11 +46,16 @@ def _export_manifest() -> dict[str, Any]:
 
 async def _import_manifest(payload: dict[str, Any]) -> _SectionReport:
     from tai42_skeleton.config.service import ConfigService
+    from tai42_skeleton.operations._broadcast import translate_orphan_env_write
 
     # Replaces the persisted manifest as a whole through the pipeline (validate on the
     # resolved projection, persist, reload, broadcast). Validation failure raises here
-    # with nothing persisted; the router records it as this section's error.
-    result = await ConfigService.from_app().apply_replace(payload)
+    # with nothing persisted; the router records it as this section's error. When the
+    # replacement DROPS an oauth connector the replace crosses the combined env+manifest
+    # seam (to keep the leaving secret masked), so a manifest-persist partial failure is
+    # mapped to a loud, typed OperationFailed exactly as the marketplace / manifest doors.
+    with translate_orphan_env_write():
+        result = await ConfigService.from_app().apply_replace(payload)
     report = _empty_report()
     report["updated"] = 1
     report["fanout"] = result.fanout

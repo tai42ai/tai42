@@ -51,30 +51,93 @@ def router_item(
     }
 
 
+def connector_item(
+    provider_id: str = "acme",
+    *,
+    kind: str = "oauth",
+    origin: str = "system",
+    client_id_env: str | None = None,
+    client_secret_env: str | None = None,
+) -> dict[str, Any]:
+    """A ``connector``-kind provides item carrying a ``ProviderDescriptor`` (no module).
+
+    Abstract synthetic providers only (``acme``/``iota``/``kappa``/``relay``): an
+    ``oauth`` provider names its ``client_id_env`` / ``client_secret_env`` (defaulting to
+    ``<ID>_CLIENT_ID`` / ``<ID>_CLIENT_SECRET``); a ``none`` provider carries neither and
+    needs no install-time env. The item ``name`` equals ``provider.id`` (the manifest /
+    uninstall key). ``origin`` must be ``system`` for the ``tai42`` namespace.
+    """
+    if kind == "oauth":
+        provider: dict[str, Any] = {
+            "id": provider_id,
+            "display_name": provider_id.title(),
+            "icon_url": f"https://example.com/{provider_id}.png",
+            "kind": "oauth",
+            "origin": origin,
+            "category": "productivity",
+            "oauth": {"authorize": "https://auth.example.com/authorize", "token": "https://auth.example.com/token"},
+            "client_id_env": client_id_env or f"{provider_id.upper()}_CLIENT_ID",
+            "client_secret_env": client_secret_env or f"{provider_id.upper()}_CLIENT_SECRET",
+            "sub_services": {
+                "main": {
+                    "id": "main",
+                    "display_name": "Main",
+                    "scopes": ["read"],
+                    "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+                }
+            },
+        }
+    else:  # none
+        provider = {
+            "id": provider_id,
+            "display_name": provider_id.title(),
+            "icon_url": f"https://example.com/{provider_id}.png",
+            "kind": "none",
+            "origin": origin,
+            "category": "productivity",
+            "sub_services": {
+                "main": {
+                    "id": "main",
+                    "display_name": "Main",
+                    "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+                }
+            },
+        }
+    return {
+        "kind": "connector",
+        "name": provider_id,
+        "provider": provider,
+        "description": f"The {provider_id} connector",
+    }
+
+
 def make_spec(
     *,
     namespace: str = "tai42",
     name: str = "toolbox",
-    package: str = "tai42-toolbox",
+    package: str | None = "tai42-toolbox",
     version: str = "1.0.0",
     provides: list[dict[str, Any]] | None = None,
     contract: str = DEFAULT_CONTRACT_RANGE,
 ) -> PluginSpec:
-    """A valid :class:`PluginSpec` with one tool item unless ``provides`` is given."""
-    return PluginSpec.model_validate(
-        {
-            "spec_version": 1,
-            "namespace": namespace,
-            "name": name,
-            "package": package,
-            "version": version,
-            "description": "A test plugin",
-            "license": "Apache-2.0",
-            "contract": contract,
-            "categories": ["dev"],
-            "provides": provides if provides is not None else [tool_item()],
-        }
-    )
+    """A valid :class:`PluginSpec` with one tool item unless ``provides`` is given.
+
+    ``package=None`` builds a descriptor-only plugin (valid only when every provides item
+    is a data item — an mcp-server or a connector)."""
+    document: dict[str, Any] = {
+        "spec_version": 1,
+        "namespace": namespace,
+        "name": name,
+        "version": version,
+        "description": "A test plugin",
+        "license": "Apache-2.0",
+        "contract": contract,
+        "categories": ["dev"],
+        "provides": provides if provides is not None else [tool_item()],
+    }
+    if package is not None:
+        document["package"] = package
+    return PluginSpec.model_validate(document)
 
 
 def make_resolved(

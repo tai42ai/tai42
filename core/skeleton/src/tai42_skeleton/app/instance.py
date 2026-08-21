@@ -163,10 +163,10 @@ def build_app() -> TaiMCP:
     ``cli.metrics.create_app`` — construction is deferred out of import time.
 
     Idempotent: the first call builds the app singleton; later calls return the
-    same app. Provider descriptors come from the code-built registry — a provider
-    plugin (named in the manifest, or installed from the marketplace) self-registers
-    at import via ``register_connector`` — so the resolver's sync ``get_provider``
-    needs no per-boot Postgres read.
+    same app. Provider descriptors come from the code-built registry — each
+    manifest ``connectors`` entry is registered via ``register_connector`` during
+    boot/reload registration — so the resolver's sync ``get_provider`` needs no
+    per-boot Postgres read.
 
     The root-logger re-apply on config reload is NOT wired here: it is a CLI-seam
     concern registered via :func:`register_cli_logging_reload`, so an embedded app

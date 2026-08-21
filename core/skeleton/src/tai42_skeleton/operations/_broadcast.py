@@ -34,18 +34,39 @@ changed nothing, while a mid-mutation failure still publishes.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
 from tai42_skeleton.app.recycle import SELF_DEFERRED
-from tai42_skeleton.operations.errors import BadRequestError
+from tai42_skeleton.operations.errors import BadRequestError, OperationFailed
 
 if TYPE_CHECKING:
     from tai42_skeleton.config.service import ApplyResult, ProfileApplyOutcome
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def translate_orphan_env_write() -> Iterator[None]:
+    """Map a combined env+manifest :class:`~tai42_skeleton.config.service.OrphanEnvWriteError`
+    to a typed :class:`~tai42_skeleton.operations.errors.OperationFailed` (500).
+
+    The one shared translation every door that crosses the combined env+manifest seam wraps
+    around its call: an oauth connector leaving the manifest (installer uninstall/update, a
+    hand ``manifest replace`` / backup restore), ``set_mcp_secret_env``, or any marks-write
+    that lands while the manifest persist exhausts its retries. The error is a partial
+    failure — the env write STANDS as an inert, re-runnable orphan — so it is LOUD (a 500),
+    never folded into a client-input 400. Imported lazily to avoid a config↔operations import
+    cycle (``config.service`` imports this module)."""
+    from tai42_skeleton.config.service import OrphanEnvWriteError
+
+    try:
+        yield
+    except OrphanEnvWriteError as exc:
+        raise OperationFailed(str(exc)) from exc
 
 
 def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:

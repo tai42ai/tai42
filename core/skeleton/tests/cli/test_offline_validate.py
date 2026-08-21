@@ -8,10 +8,32 @@ settings resolve. No client, database, or Redis is touched.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import typer
 from click.testing import CliRunner
 from tai42_cli import app as app_module
+
+_OAUTH_CONNECTOR = {
+    "id": "acme",
+    "display_name": "Acme",
+    "icon_url": "https://example.com/acme.png",
+    "kind": "oauth",
+    "origin": "system",
+    "category": "productivity",
+    "oauth": {"authorize": "https://auth.example.com/authorize", "token": "https://auth.example.com/token"},
+    "client_id_env": "ACME_CLIENT_ID",
+    "client_secret_env": "ACME_CLIENT_SECRET",
+    "sub_services": {
+        "main": {
+            "id": "main",
+            "display_name": "Main",
+            "scopes": ["read"],
+            "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+        }
+    },
+}
 
 _VALID_MANIFEST = """
 tools:
@@ -145,6 +167,35 @@ def test_validate_manifest_file_rejects_non_mapping(tmp_path) -> None:
     scalar.write_text("- just\n- a\n- list\n", encoding="utf-8")
     with pytest.raises(typer.BadParameter, match="YAML mapping"):
         validate_manifest_file(str(scalar))
+
+
+def test_validate_manifest_file_refuses_oauth_connector_missing_client_env(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An offline lint over a manifest carrying a live oauth connector whose client-credential
+    # env is unset is refused by the cli/offline switch to refuse_unresolved_env (the connector
+    # half), naming the var — before Manifest.model_validate, so the phantom credential never
+    # slips through a cold offline check.
+    from tai42_skeleton.cli.offline import validate_manifest_file
+
+    monkeypatch.delenv("ACME_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ACME_CLIENT_SECRET", raising=False)
+    path = tmp_path / "manifest.yml"
+    path.write_text(json.dumps({"connectors": [_OAUTH_CONNECTOR]}), encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="ACME_CLIENT_SECRET"):
+        validate_manifest_file(str(path))
+
+
+def test_config_lint_refuses_oauth_connector_missing_client_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same refusal surfaces through the ``tai config lint`` door as a non-zero exit.
+    monkeypatch.delenv("ACME_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ACME_CLIENT_SECRET", raising=False)
+    path = tmp_path / "manifest.yml"
+    path.write_text(json.dumps({"connectors": [_OAUTH_CONNECTOR]}), encoding="utf-8")
+
+    result = CliRunner().invoke(app_module.app, ["config", "lint", str(path)])
+    assert result.exit_code != 0
+    assert "ACME_CLIENT_SECRET" in result.output
 
 
 def test_validate_manifest_file_rejects_invalid_manifest_shape(tmp_path) -> None:

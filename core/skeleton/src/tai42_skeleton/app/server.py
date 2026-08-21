@@ -589,11 +589,12 @@ class TaiMCP(TaiMCPLifecycleMixin):
     # -- Connectors (AppConnectors facet body) -------------------------------
 
     def _register_connector(self, descriptor: ProviderDescriptor) -> None:
-        """Register an OAuth connector provider from its pure descriptor data.
+        """Register a connector provider from its pure descriptor data.
 
-        Forwarded by the ``tai42_app.connectors`` handle when the manifest loads a
-        provider plugin. A connector is pure data, so this is a plain call, not a
-        decorator — it stores the descriptor in the engine registry."""
+        Forwarded by the ``tai42_app.connectors`` handle for every manifest
+        ``connectors`` entry during boot/reload registration. A connector is pure
+        data, so this is a plain call, not a decorator — it stores the descriptor
+        in the engine registry."""
         from tai42_skeleton.connectors.providers.registry import register_connector
 
         register_connector(descriptor)

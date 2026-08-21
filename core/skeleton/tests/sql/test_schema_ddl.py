@@ -149,3 +149,34 @@ def test_tool_meta_hidden_is_nullable_tristate() -> None:
     block = match.group(1)
     hidden_line = next(line for line in block.splitlines() if line.strip().startswith("hidden"))
     assert "NOT NULL" not in hidden_line
+
+
+# ---------------------------------------------------------------------------
+# 0002_spec_source — widen the marketplace source CHECK to admit 'spec'
+# ---------------------------------------------------------------------------
+
+
+def _spec_source_sql() -> str:
+    scripts = discover_migrations(skeleton_migrations_dir())
+    names = [(s.version, s.name) for s in scripts]
+    assert (2, "spec_source") in names, f"the 0002_spec_source migration must ship in the chain; got {names}"
+    return next(s.sql for s in scripts if s.version == 2)
+
+
+def test_baseline_source_check_is_pypi_github_only() -> None:
+    # The baseline pins the pre-descriptor set; the widening is the 0002 migration's job.
+    ddl = _baseline_sql()
+    assert "source IN ('pypi', 'github')" in ddl
+    assert "'spec'" not in ddl
+
+
+def test_spec_source_migration_widens_the_check_via_alter_on_a_populated_table() -> None:
+    # The CHECK is widened by DROP CONSTRAINT + ADD CONSTRAINT — an in-place ALTER that
+    # applies to an already-populated table, never a table recreate that would drop rows.
+    sql = _spec_source_sql()
+    assert "ALTER TABLE marketplace_installs" in sql
+    assert "DROP CONSTRAINT IF EXISTS marketplace_installs_source_check" in sql
+    assert re.search(r"CHECK\s*\(\s*source IN \('pypi', 'github', 'spec'\)\s*\)", sql) is not None
+    # No table recreate: a widening migration must not CREATE/DROP the table.
+    assert "CREATE TABLE" not in sql
+    assert "DROP TABLE" not in sql

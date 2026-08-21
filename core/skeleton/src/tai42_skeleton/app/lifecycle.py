@@ -822,11 +822,11 @@ class TaiMCPLifecycleMixin(ABC):
         self._resource_manager_cache = None
 
         # Clear the connector registry's write-target generation before
-        # _initialize_components() re-imports the manifest's connector plugin modules,
-        # which re-run their module-level register_connector(...) calls; the registry's
-        # duplicate guard would otherwise crash. During an epoch build this clears the
-        # fresh STAGED generation (the live catalog stays untouched); at boot the
-        # committed map. Mirrors the _agents reset.
+        # _initialize_components() re-registers the manifest's ``connectors`` entries
+        # during boot/reload; the registry's duplicate guard would otherwise crash on
+        # the re-registration. During an epoch build this clears the fresh STAGED
+        # generation (the live catalog stays untouched); at boot the committed map.
+        # Mirrors the _agents reset.
         reset_registry()
 
         # Clear the identity-provider registry's write-target generation before
@@ -857,7 +857,7 @@ class TaiMCPLifecycleMixin(ABC):
         # module-level @tai42_app.tools.tool (and any module-registered prompt /
         # resource / resource-template) decorators, so each re-registration lands in
         # a clean surface and never trips on_duplicate="error". Mirrors the
-        # agent/webhook/channel/connector/identity resets above: tools are the same
+        # agent/webhook/channel/identity resets above: tools are the same
         # shape (a module decorator re-fired every reload), so they get the same
         # reset-before-reimport treatment rather than relying on the CALLER's removal
         # being atomic with the reimport — an interleaving reload whose caller-side
@@ -1087,6 +1087,17 @@ class TaiMCPLifecycleMixin(ABC):
         # declaration while its module imports below (bound through
         # ``_import_additive_plugin``). Reserved-prefix violations fail the build here.
         self._mount_map = self._build_mount_map()
+
+        # Register the manifest's declarative connector providers before importing
+        # any manifest module. A connector is pure data (no import path), so it is
+        # registered here during boot/reload through the module-global app handle's
+        # ``connectors`` facet — the same ``AppConnectors.register_connector`` seam
+        # any holder of the handle uses. ``start()`` cleared the write-target
+        # generation above, so every (re)load re-registers from the current manifest.
+        # A duplicate id across entries is a boot/epoch-build failure: the registry's
+        # duplicate guard raises here rather than quarantining and continuing.
+        for descriptor in self._manifest.connectors:
+            tai42_app.connectors.register_connector(descriptor)
 
         # The pass's run-once ledger: a package walk under one role can sweep in a
         # module that is ALSO its own manifest entry under another role (a root package

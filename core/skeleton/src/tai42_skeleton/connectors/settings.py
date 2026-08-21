@@ -17,8 +17,10 @@ Alongside the engine, :class:`ConnectorAdapterSettings` (``CONNECTORS_*``) carri
 the wire-format contract between the outbound MCP adapter and the connector-
 launched servers — the ``_meta`` token key and the structured-error prefix.
 
-Provider-specific credentials/endpoints (google/atlassian client ids, MCP-server
-distribution) are NOT here — they ship with the provider plugins.
+Provider-specific credentials/endpoints (an oauth connector's client id/secret)
+are NOT here — each connector is a manifest descriptor, and its credentials are
+supplied through the env vars named by the descriptor's ``client_id_env`` and
+``client_secret_env``.
 """
 
 from __future__ import annotations

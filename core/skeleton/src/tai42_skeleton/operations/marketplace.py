@@ -94,6 +94,7 @@ from tai42_skeleton.operations import (
     UpstreamError,
     operation,
 )
+from tai42_skeleton.operations._broadcast import translate_orphan_env_write
 from tai42_skeleton.plugins.quarantine import quarantined_plugins
 
 logger = logging.getLogger(__name__)
@@ -211,11 +212,13 @@ def _to_operation_error(exc: MarketplaceError) -> OperationError:
 class MarketplaceInstall(BaseModel):
     """Install a marketplace plugin by ref, optionally pinning a version.
 
-    ``env`` / ``secret_keys`` are accepted for an mcp-server install: an mcp entry's
-    required ``!ENV`` markers are satisfied by writing these values to the env store
-    in the same transaction that writes the entry (never deferred), and ``secret_keys``
-    marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``). Declared on the
-    model so a Studio body carrying them is not silently dropped (pydantic ignores
+    ``env`` / ``secret_keys`` are accepted for an install whose spec declares
+    install-time env (an mcp entry's required ``!ENV`` markers or an oauth connector's
+    client-credential env): these values are written to the env store in the same
+    transaction that writes the provides entry (never deferred), and ``secret_keys``
+    marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``; an oauth
+    connector's client secret is masked by derivation with no mark needed). Declared on
+    the model so a Studio body carrying them is not silently dropped (pydantic ignores
     unknown fields).
 
     ``route_mounts`` remaps a route-carrying item's declared base (``{item_name:
@@ -239,11 +242,11 @@ class MarketplaceUninstall(BaseModel):
 class MarketplaceUpdate(BaseModel):
     """Update an installed plugin to a newer (or named) version.
 
-    ``env`` / ``secret_keys`` mirror :class:`MarketplaceInstall`: a new mcp-server
-    version adding a required marker is loudly refused unless its value is supplied
-    here. ``route_mounts`` remaps a route-carrying item's base (a surviving item with
-    no override keeps its stored base); ``accept_public_routes`` acknowledges public
-    routes NOT already approved in the installed version."""
+    ``env`` / ``secret_keys`` mirror :class:`MarketplaceInstall`: a new version
+    adding a required ``!ENV`` marker or connector-env is loudly refused unless its
+    value is supplied here. ``route_mounts`` remaps a route-carrying item's base (a
+    surviving item with no override keeps its stored base); ``accept_public_routes``
+    acknowledges public routes NOT already approved in the installed version."""
 
     ref: str
     version: str | None = None
@@ -395,6 +398,9 @@ async def marketplace_installed() -> dict[str, Any]:
     mount the row is installed at (empty means every item at its declared base),
     so Studio seeds its update flow and renders routes at the ACTUAL mounted base.
 
+    Each row also carries ``delivery`` — ``package`` for a pip-installed plugin,
+    ``descriptor`` for a descriptor-only plugin whose stored spec names no package.
+
     ``quarantined`` mirrors the boot pass's plugin-quarantine registry — the
     plugins this worker SKIPPED (incompatible or import-broken) with the
     human-readable reason each.
@@ -431,6 +437,7 @@ async def marketplace_installed() -> dict[str, Any]:
                 "ref": record.ref,
                 "version": record.version,
                 "source": record.source,
+                "delivery": "package" if isinstance(package, str) else "descriptor",
                 "installed_at": record.installed_at.isoformat(),
                 "latest": targets.latest if targets is not None else None,
                 "update_available": targets.update_available if targets is not None else False,
@@ -487,27 +494,33 @@ async def marketplace_install(
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
 ) -> dict[str, Any]:
-    """Resolve, pip install, patch the manifest, reload, and record attribution —
-    aborting and unwinding on any failure (see :meth:`Installer.install`). For an
-    mcp-server install ``env`` / ``secret_keys`` satisfy the entry's required ``!ENV``
-    markers in the same combined transaction. ``route_mounts`` remaps declared route
-    bases; ``accept_public_routes`` acknowledges public routes. The result's
-    ``routes`` lists every route the install mounted."""
+    """Resolve, pip install (nothing for a descriptor-only plugin), patch the manifest,
+    reload, and record attribution — aborting and unwinding on any failure (see
+    :meth:`Installer.install`). When the spec declares install-time env ``env`` /
+    ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in the same
+    combined transaction. ``route_mounts`` remaps declared route bases;
+    ``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists
+    every route the install mounted."""
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # install cannot record, so it refuses with a named, machine-readable reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
-    try:
-        return await Installer().install(
-            ref,
-            version,
-            env=env,
-            secret_keys=secret_keys,
-            route_mounts=route_mounts,
-            accept_public_routes=accept_public_routes,
-        )
-    except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+    # ``translate_orphan_env_write`` maps a combined env+manifest partial failure (a marks
+    # write landed while the manifest persist exhausted retries) to a loud 500 — the same
+    # typed error a connector drop through ``manifest replace`` gets — so a connector
+    # install/uninstall/update never 500s untyped at the boundary.
+    with translate_orphan_env_write():
+        try:
+            return await Installer().install(
+                ref,
+                version,
+                env=env,
+                secret_keys=secret_keys,
+                route_mounts=route_mounts,
+                accept_public_routes=accept_public_routes,
+            )
+        except MarketplaceError as exc:
+            raise _to_operation_error(exc) from exc
 
 
 @operation(
@@ -552,10 +565,11 @@ async def marketplace_uninstall(ref: str) -> dict[str, Any]:
     # is nothing recorded to uninstall, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
-    try:
-        return await Installer().uninstall(ref)
-    except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+    with translate_orphan_env_write():
+        try:
+            return await Installer().uninstall(ref)
+        except MarketplaceError as exc:
+            raise _to_operation_error(exc) from exc
 
 
 @operation(
@@ -583,27 +597,29 @@ async def marketplace_update(
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
 ) -> dict[str, Any]:
-    """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert
-    attribution — with the same pre-flights as install (see :meth:`Installer.update`).
-    ``env`` / ``secret_keys`` satisfy a new mcp-server version's required markers.
-    ``route_mounts`` remaps declared route bases (surviving items keep their stored
-    base); ``accept_public_routes`` acknowledges public routes not already approved.
-    The result's ``routes`` lists every route the update mounted."""
+    """Resolve the target, pip upgrade (nothing for a descriptor-only plugin), re-patch
+    the manifest, reload, and upsert attribution — with the same pre-flights as install
+    (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new version's
+    required ``!ENV`` markers or connector-env. ``route_mounts`` remaps declared route
+    bases (surviving items keep their stored base); ``accept_public_routes`` acknowledges
+    public routes not already approved. The result's ``routes`` lists every route the
+    update mounted."""
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # update cannot upsert, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
-    try:
-        return await Installer().update(
-            ref,
-            version,
-            env=env,
-            secret_keys=secret_keys,
-            route_mounts=route_mounts,
-            accept_public_routes=accept_public_routes,
-        )
-    except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+    with translate_orphan_env_write():
+        try:
+            return await Installer().update(
+                ref,
+                version,
+                env=env,
+                secret_keys=secret_keys,
+                route_mounts=route_mounts,
+                accept_public_routes=accept_public_routes,
+            )
+        except MarketplaceError as exc:
+            raise _to_operation_error(exc) from exc
 
 
 @operation(

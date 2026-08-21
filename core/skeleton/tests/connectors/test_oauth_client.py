@@ -232,6 +232,37 @@ async def test_exchange_code_success(oauth_client_env, install_http):
     assert resp.granted_scopes == ["mail.read", "mail.send"]
 
 
+async def test_exchange_code_sends_accept_json_header(oauth_client_env, install_http):
+    # RFC 6749 §5.1: the token POST asks for a JSON response so a server that would
+    # otherwise default to form-encoding returns parseable JSON.
+    fake = install_http([FakeHttpResponse(json_body={"access_token": "at", "refresh_token": "rt", "expires_in": 3600})])
+    await client.exchange_code(
+        descriptor=make_oauth_descriptor(),
+        code="c",
+        code_verifier="v",
+        redirect_uri="https://app.example.com/cb",
+    )
+    assert fake.headers[0].get("Accept") == "application/json"
+
+
+async def test_exchange_code_200_without_access_token_names_provider_error(oauth_client_env, install_http):
+    # A vendor that signals failure in a 200 body carrying no access_token is loud with
+    # its RFC 6749 error / error_description reason.
+    install_http(
+        [FakeHttpResponse(status_code=200, json_body={"ok": False, "error": "x", "error_description": "bad thing"})]
+    )
+    with pytest.raises(CodeExchangeFailedError, match="x") as exc:
+        await client.exchange_code(
+            descriptor=make_oauth_descriptor(),
+            code="c",
+            code_verifier="v",
+            redirect_uri="https://app.example.com/cb",
+        )
+    message = str(exc.value)
+    assert "x" in message
+    assert "bad thing" in message
+
+
 async def test_exchange_code_transport_error(oauth_client_env, install_http):
     install_http([httpx.ConnectError("boom")])
     with pytest.raises(CodeExchangeFailedError, match="transport error"):
@@ -335,7 +366,7 @@ async def test_exchange_code_allows_missing_refresh_when_not_required(oauth_clie
 
 
 async def test_refresh_success(oauth_client_env, install_http):
-    install_http(
+    fake = install_http(
         [
             FakeHttpResponse(
                 json_body={
@@ -350,6 +381,8 @@ async def test_refresh_success(oauth_client_env, install_http):
     resp = await client.refresh(descriptor=make_oauth_descriptor(), refresh_token="old-rt")
     assert resp.access_token == "new-at"
     assert resp.refresh_token == "new-rt"
+    # RFC 6749 §5.1: the refresh token POST also asks for a JSON response.
+    assert fake.headers[0].get("Accept") == "application/json"
 
 
 async def test_refresh_keeps_old_refresh_token_when_omitted(oauth_client_env, install_http):

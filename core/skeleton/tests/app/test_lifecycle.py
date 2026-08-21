@@ -904,6 +904,125 @@ def test_reload_with_connector_plugin_is_reload_safe():
         conn_registry._REGISTRY.update(saved)
 
 
+def _oauth_descriptor(provider_id: str = "acme"):
+    """An http-transport oauth ProviderDescriptor for the manifest ``connectors``
+    boot/reload tests — synthetic, not a shipped connector."""
+    from tai42_contract.connectors.providers import (
+        McpServerDescriptor,
+        OAuthEndpoints,
+        ProviderDescriptor,
+        SubServiceDescriptor,
+    )
+
+    return ProviderDescriptor(
+        id=provider_id,
+        display_name="Acme",
+        icon_url="https://acme.test/icon.png",
+        kind="oauth",
+        origin="system",
+        category="productivity",
+        oauth=OAuthEndpoints(authorize="https://acme.test/authorize", token="https://acme.test/token"),
+        client_id_env="ACME_CLIENT_ID",
+        client_secret_env="ACME_CLIENT_SECRET",
+        sub_services={
+            "mail": SubServiceDescriptor(
+                id="mail",
+                display_name="Mail",
+                scopes=["mail.read"],
+                mcp_server=McpServerDescriptor(type="http", url="https://acme.test/mcp/mail"),
+            ),
+        },
+    )
+
+
+def test_manifest_connectors_registered_at_boot():
+    # A manifest ``connectors`` entry is registered during boot through the
+    # ``tai42_app.connectors.register_connector`` facet — no import side effect —
+    # so the committed catalog lists it once the app context is up.
+    from tai42_skeleton.connectors.providers import registry as conn_registry
+
+    manifest = Manifest.model_validate({"connectors": [_oauth_descriptor("iota").model_dump(mode="json")]})
+
+    saved = dict(conn_registry._REGISTRY)
+    conn_registry._REGISTRY.clear()
+
+    async def run():
+        async with app.app_context(manifest):
+            assert conn_registry.get_provider("iota").id == "iota"
+            assert "iota" in {p.id for p in conn_registry.list_providers()}
+
+    try:
+        asyncio.run(run())
+    finally:
+        conn_registry._REGISTRY.clear()
+        conn_registry._REGISTRY.update(saved)
+
+
+def test_reload_dropping_connector_unregisters_it():
+    # The registration runs off the manifest each (re)load: a reload to a manifest
+    # without the connector leaves the dropped provider unresolvable, never lingering.
+    from tai42_skeleton.connectors.providers import registry as conn_registry
+
+    with_conn = Manifest.model_validate({"connectors": [_oauth_descriptor("iota").model_dump(mode="json")]})
+    empty = Manifest.model_validate({})
+
+    saved = dict(conn_registry._REGISTRY)
+    conn_registry._REGISTRY.clear()
+
+    async def run():
+        async with app.app_context(with_conn):
+            assert conn_registry.get_provider("iota").id == "iota"
+            await reload_with(app, empty)
+            with pytest.raises(KeyError):
+                conn_registry.get_provider("iota")
+
+    try:
+        asyncio.run(run())
+    finally:
+        conn_registry._REGISTRY.clear()
+        conn_registry._REGISTRY.update(saved)
+
+
+def test_duplicate_connector_ids_fail_boot():
+    # The manifest validator rejects duplicate ids for a hand-written manifest;
+    # bypass it (model_construct) to prove the boot-time registration loop is itself
+    # a loud guard — a duplicate id across entries aborts boot, never a
+    # quarantine-and-continue.
+    from tai42_skeleton.connectors.providers import registry as conn_registry
+
+    manifest = Manifest.model_construct(connectors=[_oauth_descriptor("iota"), _oauth_descriptor("iota")])
+
+    saved = dict(conn_registry._REGISTRY)
+    conn_registry._REGISTRY.clear()
+
+    async def run():
+        async with app.app_context(manifest):
+            pass  # pragma: no cover — boot aborts before the body runs
+
+    try:
+        with pytest.raises(ValueError, match="already registered"):
+            asyncio.run(run())
+    finally:
+        conn_registry._REGISTRY.clear()
+        conn_registry._REGISTRY.update(saved)
+
+
+def test_manifest_rejects_duplicate_connector_ids_on_validate():
+    # Hand-written manifest door: two connectors sharing an id are rejected loudly
+    # at validation, naming the duplicate id.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="duplicate connector id 'iota'"):
+        Manifest.model_validate(
+            {
+                "connectors": [
+                    _oauth_descriptor("iota").model_dump(mode="json"),
+                    _oauth_descriptor("iota").model_dump(mode="json"),
+                ]
+            }
+        )
+
+
 def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
     import os
 
