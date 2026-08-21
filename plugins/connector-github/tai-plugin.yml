@@ -1,0 +1,179 @@
+spec_version: 1
+namespace: tai42
+name: connector-github
+version: 0.0.0
+display_name: GitHub
+description: >-
+  GitHub OAuth connector provider for the TAI ecosystem. Pure descriptor data
+  against GitHub's hosted MCP server; ships no package.
+icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-github
+contract: '>=2.2,<3'
+categories:
+  - connectors
+tags:
+  - connector
+  - oauth
+  - github
+  - dev-tools
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: connector
+    name: github
+    description: OAuth connector for GitHub over GitHub's hosted MCP server.
+    provider:
+      id: github
+      display_name: GitHub
+      description: Connect GitHub over GitHub's hosted MCP server toolsets.
+      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
+      kind: oauth
+      origin: system
+      category: dev-tools
+      oauth:
+        authorize: https://github.com/login/oauth/authorize
+        token: https://github.com/login/oauth/access_token
+        revoke: null
+      client_id_env: CONNECTORS_GITHUB_CLIENT_ID
+      client_secret_env: CONNECTORS_GITHUB_CLIENT_SECRET
+      sub_services:
+        repos:
+          id: repos
+          display_name: Repos
+          description: Repository contents, branches, commits, and file operations.
+          scopes:
+            - repo
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "repos"
+        issues:
+          id: issues
+          display_name: Issues
+          description: Issues, comments, and labels.
+          scopes:
+            - repo
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "issues"
+        pull_requests:
+          id: pull_requests
+          display_name: Pull Requests
+          description: Pull requests, reviews, and merges.
+          scopes:
+            - repo
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "pull_requests"
+        actions:
+          id: actions
+          display_name: Actions
+          description: Workflows, runs, and job logs.
+          scopes:
+            - repo
+            - workflow
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "actions"
+        discussions:
+          id: discussions
+          display_name: Discussions
+          description: Repository and organization discussions.
+          scopes:
+            - repo
+            - read:discussion
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "discussions"
+        code_security:
+          id: code_security
+          display_name: Code Security
+          description: Code scanning alerts.
+          scopes:
+            - repo
+            - security_events
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "code_security"
+        secret_protection:
+          id: secret_protection
+          display_name: Secret Protection
+          description: Secret scanning alerts.
+          scopes:
+            - repo
+            - security_events
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "secret_protection"
+        dependabot:
+          id: dependabot
+          display_name: Dependabot
+          description: Dependabot alerts.
+          scopes:
+            - repo
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "dependabot"
+        notifications:
+          id: notifications
+          display_name: Notifications
+          description: Notification threads and subscriptions.
+          scopes:
+            - notifications
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "notifications"
+        orgs:
+          id: orgs
+          display_name: Orgs
+          description: Organization membership and teams.
+          scopes:
+            - read:org
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "orgs"
+        users:
+          id: users
+          display_name: Users
+          description: User profiles and lookups.
+          scopes:
+            - read:user
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "users"
+        gists:
+          id: gists
+          display_name: Gists
+          description: Gists.
+          scopes:
+            - gist
+          mcp_server:
+            type: http
+            url: https://api.githubcopilot.com/mcp/
+            extra_headers:
+              X-MCP-Toolsets: "gists"
