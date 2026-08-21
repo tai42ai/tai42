@@ -38,11 +38,17 @@ class AgentInvokeResult:
     ``structured`` is ``None`` when no ``response_format`` was requested; otherwise
     it is ``state["structured_response"]`` validated against that format (a missing
     or non-conforming result raises in the invoke path, never surfaces as ``None``).
+
+    ``suspended`` is the async-park RECEIPT (``{"status": "suspended", ...}``) when
+    the run parked on an async ``ask_user`` instead of finishing; ``None`` on a
+    normal terminal run. When set, ``output``/``structured`` carry no answer — the
+    run resumes out of band.
     """
 
     output: str
     usage: CallUsage
     structured: Any = None
+    suspended: dict[str, Any] | None = None
 
 
 def _int_token_count(usage_metadata: Mapping[str, Any], key: str) -> int:

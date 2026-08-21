@@ -107,9 +107,9 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3,<4",
     "aiosqlite>=0.20",
     # The dynamic Postgres MCP server the mcp-mount stack mounts as a subprocess
-    # (console script ``tai42-postgres-mcp``). A released PyPI package, never a
+    # (console script ``tai42-mcp-dynamic-postgres``). A released PyPI package, never a
     # workspace sibling — it carries no [tool.uv.sources] override.
-    "tai42-dynamic-postgres-mcp>=0.3,<0.4",
+    "tai42-mcp-dynamic-postgres>=0.5,<0.6",
 ]
 
 [project.urls]

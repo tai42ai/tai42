@@ -147,6 +147,11 @@ class TaiMCPLifecycleMixin(ABC):
         # worker-bus subscription task above.
         self._reprobe_task: asyncio.Task[None] | None = None
 
+        # The async-park expiry reaper loop, owned by app_context: an async ask_user
+        # has no blocking waiter, so this loop is what fires a parked question's
+        # continuation once its expiry passes. Runs until cancelled at shutdown.
+        self._interactions_reaper_task: asyncio.Task[None] | None = None
+
         # The module → mount-binding map for the CURRENT registration pass, rebuilt at
         # the top of ``_initialize_components`` before any manifest module imports.
         self._mount_map: dict[str, MountBinding] = {}
@@ -483,6 +488,9 @@ class TaiMCPLifecycleMixin(ABC):
             # Start the failed-MCP re-probe task so a server that failed its boot
             # probe self-heals on an exponential backoff without a manual reload.
             self._spawn_reprobe_task()
+            # Start the async-park expiry reaper so a parked ask_user's continuation
+            # fires once its expiry passes even with no blocking waiter to trip it.
+            self._spawn_interactions_reaper()
             yield self
         finally:
             # Shutdown start: drop the readiness sentinel FIRST so the readiness probe
@@ -491,6 +499,7 @@ class TaiMCPLifecycleMixin(ABC):
             remove_ready_sentinel()
             await self._cancel_bus_subscription()
             await self._cancel_reprobe_task()
+            await self._cancel_interactions_reaper()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
@@ -1818,6 +1827,42 @@ class TaiMCPLifecycleMixin(ABC):
         """The re-probe loop's inter-pass sleep, isolated so tests can drive the
         backoff with a controllable clock instead of real time."""
         await asyncio.sleep(seconds)
+
+    # --- lifespan-owned async-park expiry reaper ---
+
+    def _spawn_interactions_reaper(self) -> None:
+        """Start the async-park expiry reaper loop on the serving loop. Owned by
+        ``app_context``; runs until cancelled at shutdown. A no-op each pass when the
+        interactions store is unconfigured."""
+        from tai42_skeleton.interactions.reaper import run_expiry_reaper_loop
+
+        self._interactions_reaper_task = asyncio.create_task(
+            run_expiry_reaper_loop(),
+            name="tai-interactions-expiry-reaper",
+        )
+        # Backstop a silent death OR an unexpected normal return loudly, mirroring the
+        # worker-bus subscription and re-probe loop: a run-until-cancelled task.
+        self._interactions_reaper_task.add_done_callback(self._on_perpetual_task_done)
+
+    async def _cancel_interactions_reaper(self) -> None:
+        """Cancel the expiry reaper and await its termination — the shutdown
+        counterpart of ``_spawn_interactions_reaper``.
+
+        A non-``CancelledError`` death was already surfaced at ERROR by the
+        done-callback, so it is awaited-and-swallowed here (this runs inside
+        ``app_context``'s shutdown ``finally``, where re-raising would skip the
+        remaining teardown)."""
+        task = self._interactions_reaper_task
+        self._interactions_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     async def _probe_and_apply_failed(self, snapshot: dict[str, TaiMCPConfig]) -> tuple[list[dict[str, Any]], set[str]]:
         """Re-probe the snapshotted failed MCP servers OFF the reload gate, then bind

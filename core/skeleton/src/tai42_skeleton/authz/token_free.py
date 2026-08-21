@@ -68,7 +68,8 @@ _IDENT_CHARS = _IDENT_START | frozenset(digits)
 _DIGITS = frozenset(digits)
 
 # The only token separator; every other whitespace character is already refused
-# pre-lexically by :func:`_assert_source_shape`.
+# pre-lexically before a token is read — control whitespace by
+# :func:`_assert_no_control_characters`, the rest by :func:`_assert_source_shape`.
 _WHITESPACE = frozenset(" ")
 
 # The printable-ASCII band the source-shape gate accepts, both ends inclusive.
@@ -154,6 +155,29 @@ def _refusal(condition_text: str, position: int, detail: str) -> TokenFreeCondit
     return TokenFreeConditionError(f"{detail} at offset {position} ({_excerpt(condition_text, position)!r})")
 
 
+def _assert_no_control_characters(condition_text: str) -> None:
+    """Refuse the control characters that make libjq read a DIFFERENT source than the
+    raw text, BEFORE the compile gate hands the text to libjq. A NUL is the sharp case:
+    it terminates the C string libjq lexes, so libjq compiles only the prefix while the
+    scan reasons over the whole text — the compile gate would then answer about a program
+    that is never the one analyzed.
+
+    The whitespace-formatting characters an unrendered template legitimately carries —
+    tab, newline, carriage return — libjq reads faithfully and are left to
+    :func:`_assert_source_shape` (after the compile gate), so such a template still reads
+    as "does not compile" rather than a character complaint.
+    """
+    for position, char in enumerate(condition_text):
+        if char in "\t\n\r":
+            continue
+        if char < _PRINTABLE_ASCII_START or char == "\x7f":
+            raise _refusal(
+                condition_text,
+                position,
+                f"condition contains the control character {char!r}; remove it",
+            )
+
+
 def _assert_source_shape(condition_text: str) -> None:
     """Assert that ``condition_text`` is written in the character subset where this
     module's lexer and jq's cannot disagree about where a token begins and ends:
@@ -164,7 +188,8 @@ def _assert_source_shape(condition_text: str) -> None:
 
     Outside this subset a disagreement that parses SUCCESSFULLY INTO A DIFFERENT PROGRAM
     certifies a program jq never runs while jq runs one never analyzed: a fail-OPEN.
-    Refusing the whole class removes that shape.
+    Refusing the whole class removes that shape. The control characters libjq cannot read
+    faithfully are refused ahead of the compile gate by :func:`_assert_no_control_characters`.
     """
     for position, char in enumerate(condition_text):
         if char == "#":
@@ -186,12 +211,6 @@ def _assert_source_shape(condition_text: str) -> None:
                 condition_text,
                 position,
                 "condition contains a tab; separate tokens with spaces",
-            )
-        if char < _PRINTABLE_ASCII_START or char == "\x7f":
-            raise _refusal(
-                condition_text,
-                position,
-                f"condition contains the control character {char!r}; remove it",
             )
         if char > _PRINTABLE_ASCII_END:
             raise _refusal(
@@ -1013,10 +1032,13 @@ def assert_token_free_evaluable(condition_text: str) -> None:
     offending construct and its offset otherwise, including text that does not compile.
     See the module docstring for the rule.
 
-    Gate ORDER is load-bearing: compile first, so non-jq text is named as such rather than
-    refused for its characters; then the raw-text source-shape gate, so everything below
-    it works over a condition whose token boundaries jq cannot read differently.
+    Gate ORDER is load-bearing: refuse the control characters libjq cannot read faithfully
+    first, so the compile gate is never asked about a NUL-truncated program; then compile,
+    so non-jq text is named as such rather than refused for its characters; then the rest of
+    the raw-text source-shape gate, so everything below it works over a condition whose token
+    boundaries jq cannot read differently.
     """
+    _assert_no_control_characters(condition_text)
     try:
         get_compiled_jq(condition_text)
     except ValueError as exc:

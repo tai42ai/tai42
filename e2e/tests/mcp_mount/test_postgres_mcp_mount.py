@@ -1,6 +1,6 @@
-"""B8 — tai42-dynamic-postgres-mcp mounted as a product-level external MCP.
+"""B8 — tai42-mcp-dynamic-postgres mounted as a product-level external MCP.
 
-The manifest's single ``mcp`` entry launches the released package's ``tai42-postgres-mcp``
+The manifest's single ``mcp`` entry launches the released package's ``tai42-mcp-dynamic-postgres``
 console script as a stdio child pointed at the harness postgres (see
 ``manifests.build_postgres_mcp_stack``). This is the harness's FIRST manifest-``mcp`` mount —
 NOT the ``/api/sub-mcp`` composition router, which only re-exposes already-registered tools.

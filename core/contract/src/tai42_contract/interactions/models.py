@@ -3,7 +3,9 @@
 ``InteractionRequest`` is the durable question written to a per-group stream;
 ``InteractionResponse`` is the validated answer pushed onto the reply channel;
 ``InteractionState`` is the mutable record the answer endpoint reads to guard
-against a duplicate answer and to validate the submitted value.
+against a duplicate answer and to validate the submitted value;
+``SuspendedInteraction`` is the sentinel an ``async`` ask returns in place of an
+answer when it parks the caller.
 """
 
 from __future__ import annotations
@@ -236,6 +238,26 @@ class InteractionRequest(BaseModel):
     # None means no media; a present list is non-empty (a present-but-empty list is
     # a caller bug). Set per question by the tool author.
     media: list[MediaItem] | None = None
+    # Wait discipline. ``sync`` blocks the asking caller until the answer or the
+    # timeout; ``async`` PARKS the caller — the ask returns a SuspendedInteraction
+    # and a later answer/expiry resumes work by invoking ``continuation_tool`` as
+    # ``continuation_identity``. Both continuation fields are required iff async
+    # and forbidden iff sync.
+    mode: Literal["sync", "async"] = "sync"
+    # async only: the registered tool NAME run when the answer arrives or the
+    # question expires — resolved through the platform tool registry, carrying no
+    # resuming-driver state.
+    continuation_tool: str | None = None
+    # async only: the execution key (an api-key ``user_id``) the continuation runs
+    # AS — rebound at answer time, never the answerer's identity. Same string
+    # representation as ``execution_key`` elsewhere in the contract.
+    continuation_identity: str | None = None
+    # When the parked question expires. Distinct from ``timeout_at`` (the sync
+    # wait budget) and mutually exclusive with a sync ``timeout`` at the ask
+    # surface (see ``check_ask_timing``). Required for async (a park always carries
+    # a deadline; the model validator rejects an async request without it); None
+    # only on a sync question.
+    expiry_at: datetime | None = None
 
     @field_validator("question")
     @classmethod
@@ -269,6 +291,20 @@ class InteractionRequest(BaseModel):
             raise ValueError("datetime must be timezone-aware (UTC)")
         return value.astimezone(UTC)
 
+    @field_validator("expiry_at")
+    @classmethod
+    def _ensure_expiry_tz_aware(cls, value: datetime | None) -> datetime | None:
+        # The async park deadline is compared against an aware ``now()`` by the
+        # expiry reaper; a naive value would raise TypeError there. None stays None
+        # (a sync question carries no deadline); a set value is reject-naive +
+        # UTC-normalized, the same strictness as its ``created_at``/``timeout_at``
+        # siblings.
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("datetime must be timezone-aware (UTC)")
+        return value.astimezone(UTC)
+
     @model_validator(mode="after")
     def _check_payload(self) -> InteractionRequest:
         if self.answer_format is AnswerFormat.SELECT:
@@ -289,6 +325,26 @@ class InteractionRequest(BaseModel):
                 raise ValueError(f"{self.answer_format.value} answer_format carries no format_payload")
         return self
 
+    @model_validator(mode="after")
+    def _check_continuation(self) -> InteractionRequest:
+        if self.mode == "async":
+            if self.continuation_tool is None:
+                raise ValueError("async mode requires continuation_tool")
+            if self.continuation_identity is None:
+                raise ValueError("async mode requires continuation_identity")
+            if self.expiry_at is None:
+                # Without an ``expiry_at`` an async park is never expiry-indexed, so
+                # the reaper can never fire its continuation — the idle TTL would drop
+                # it silently. Require the deadline rather than persist an
+                # unresumable park.
+                raise ValueError("async mode requires expiry_at")
+        else:
+            if self.continuation_tool is not None:
+                raise ValueError("sync mode carries no continuation_tool")
+            if self.continuation_identity is not None:
+                raise ValueError("sync mode carries no continuation_identity")
+        return self
+
 
 class InteractionResponse(BaseModel):
     """The answer. Validated server-side before it wakes the caller."""
@@ -306,3 +362,28 @@ class InteractionState(BaseModel):
     group_id: str
     request: InteractionRequest
     response: InteractionResponse | None = None
+
+
+class SuspendedInteraction(BaseModel):
+    """The sentinel an ``async`` ask returns in place of an answer.
+
+    Any async-suspending tool returns it to signal the caller was parked, keyed by
+    ``interaction_id`` so the resume path can find the parked question. Generic:
+    a resuming driver's resume state is keyed by this id, not carried here.
+    """
+
+    interaction_id: str
+    expiry_at: datetime | None = None
+
+    @field_validator("expiry_at")
+    @classmethod
+    def _ensure_expiry_tz_aware(cls, value: datetime | None) -> datetime | None:
+        # The async park deadline is compared against an aware ``now()`` by the
+        # expiry reaper; a naive value would raise TypeError there. None stays None
+        # (a sync question carries no deadline); a set value is reject-naive +
+        # UTC-normalized, the same strictness as its ``InteractionRequest`` sibling.
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("datetime must be timezone-aware (UTC)")
+        return value.astimezone(UTC)

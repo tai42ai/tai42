@@ -36,6 +36,7 @@ from tai42_contract.agent.events import (
     MessageFinal,
     StreamEvent,
     StructuredFinal,
+    SuspendedFinal,
 )
 
 if TYPE_CHECKING:
@@ -179,8 +180,8 @@ class Agent(ABC):
         """Run the agent once and return its final value.
 
         Tool inputs (``tools``/``tool_names``/``presets``) are uniform only for
-        tools-agent-shaped agents; role-specific agents (voting/vqa/refine/
-        mcp_tools) read their own params off ``**kwargs``. ``response_format`` is
+        tools-agent-shaped agents; role-specific agents (voting/vqa/refine) read
+        their own params off ``**kwargs``. ``response_format`` is
         typed ``Any`` because the deep path passes a JSON-Schema ``dict`` while
         the tools-agent path passes a pydantic class. ``resume_checkpoint_id``
         forks past an aborted turn, distinct from ``resume`` (the interrupt
@@ -220,6 +221,11 @@ class Agent(ABC):
 
         Semantics:
 
+        * A :class:`SuspendedFinal` seen → return the suspended RECEIPT dict
+          ``{"status": "suspended", ...}`` (the run parked on an async ask and
+          resumes out of band; it did NOT fail, so this never raises). A park takes
+          precedence over an interrupt — the two never coexist in one pause, but the
+          receipt-before-raise order keeps a park a clean, non-error outcome.
         * Any :class:`InterruptFinal` seen → raise :class:`AgentInterruptedError`
           (a non-streaming caller cannot answer an interrupt).
         * ``response_format`` requested but no :class:`StructuredFinal` produced
@@ -230,15 +236,25 @@ class Agent(ABC):
           partial.
         """
         interrupts: list[InterruptFinal] = []
+        suspended: SuspendedFinal | None = None
         structured: StructuredFinal | None = None
         message: MessageFinal | None = None
         async for event in agen:
-            if isinstance(event, InterruptFinal):
+            if isinstance(event, SuspendedFinal):
+                suspended = event
+            elif isinstance(event, InterruptFinal):
                 interrupts.append(event)
             elif isinstance(event, StructuredFinal):
                 structured = event
             elif isinstance(event, MessageFinal):
                 message = event
+        if suspended is not None:
+            return {
+                "status": "suspended",
+                "interaction_ids": suspended.interaction_ids,
+                "thread_id": suspended.thread_id,
+                "expiry_at": suspended.expiry_at,
+            }
         if interrupts:
             raise AgentInterruptedError(interrupts)
         if response_format is not None:

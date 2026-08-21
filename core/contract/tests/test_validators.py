@@ -10,6 +10,7 @@ wrapped by pydantic into ``ValidationError``, which subclasses ``ValueError``;
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from tai42_contract.connectors.providers import (
     ProviderDescriptor,
     SubServiceDescriptor,
 )
+from tai42_contract.interactions.asker import AskUser, check_ask_timing
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
     MEDIA_DATA_URI_MAX_CHARS,
@@ -44,6 +46,7 @@ from tai42_contract.interactions.models import (
     InteractionRequest,
     MediaItem,
     MediaKind,
+    SuspendedInteraction,
 )
 from tai42_contract.manifest import AgentsConfig, ApiToolsConfig, Manifest, MCPConfig, TaiMCPConfig, ToolsConfig
 from tai42_contract.monitoring.models import MonitoringFilter
@@ -631,6 +634,122 @@ def test_interaction_origin_explicit_json_round_trips():
     assert req.origin == "run-abc123"
     restored = InteractionRequest.model_validate_json(req.model_dump_json())
     assert restored.origin == "run-abc123"
+
+
+# === interactions/models.py — InteractionRequest async park =================
+
+
+def test_interaction_sync_default_carries_no_async_fields():
+    # The default mode is sync, and no continuation fields or expiry are set: every
+    # existing sync caller stays valid without touching the async surface.
+    req = _interaction()
+    assert req.mode == "sync"
+    assert req.continuation_tool is None
+    assert req.continuation_identity is None
+    assert req.expiry_at is None
+
+
+def test_interaction_async_with_continuation_valid_and_json_round_trips():
+    req = _interaction(
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key-1",
+        expiry_at=_now(),
+    )
+    assert req.mode == "async"
+    assert req.continuation_tool == "resume_tool"
+    assert req.continuation_identity == "svc-key-1"
+    restored = InteractionRequest.model_validate_json(req.model_dump_json())
+    assert restored.mode == "async"
+    assert restored.continuation_tool == "resume_tool"
+    assert restored.continuation_identity == "svc-key-1"
+    assert restored.expiry_at == req.expiry_at
+
+
+def test_interaction_async_missing_continuation_tool_raises_naming_it():
+    with pytest.raises(ValueError, match="continuation_tool"):
+        _interaction(mode="async", continuation_identity="svc-key-1")
+
+
+def test_interaction_async_missing_continuation_identity_raises_naming_it():
+    with pytest.raises(ValueError, match="continuation_identity"):
+        _interaction(mode="async", continuation_tool="resume_tool")
+
+
+def test_interaction_sync_with_continuation_tool_raises_naming_it():
+    with pytest.raises(ValueError, match="continuation_tool"):
+        _interaction(continuation_tool="resume_tool")
+
+
+def test_interaction_sync_with_continuation_identity_raises_naming_it():
+    with pytest.raises(ValueError, match="continuation_identity"):
+        _interaction(continuation_identity="svc-key-1")
+
+
+# === interactions/models.py — SuspendedInteraction ==========================
+
+
+def test_suspended_interaction_constructs_and_json_round_trips():
+    s = SuspendedInteraction(interaction_id="i1", expiry_at=_now())
+    assert s.interaction_id == "i1"
+    restored = SuspendedInteraction.model_validate_json(s.model_dump_json())
+    assert restored.interaction_id == "i1"
+    assert restored.expiry_at == s.expiry_at
+
+
+def test_suspended_interaction_expiry_defaults_none():
+    assert SuspendedInteraction(interaction_id="i1").expiry_at is None
+
+
+def test_suspended_interaction_requires_interaction_id():
+    with pytest.raises(ValueError, match="interaction_id"):
+        SuspendedInteraction()  # type: ignore[call-arg]
+
+
+def test_suspended_interaction_rejects_naive_expiry_at():
+    # A naive ``expiry_at`` would raise TypeError when compared against an aware
+    # ``now()`` by the expiry reaper; the validator refuses it at construction.
+    with pytest.raises(ValueError, match="timezone-aware"):
+        SuspendedInteraction(interaction_id="i1", expiry_at=datetime(2026, 1, 1, 12, 0))
+
+
+def test_suspended_interaction_expiry_at_normalized_to_utc():
+    plus2 = timezone(timedelta(hours=2))
+    s = SuspendedInteraction(
+        interaction_id="i1",
+        expiry_at=datetime(2026, 1, 1, 12, 0, tzinfo=plus2),
+    )
+    assert s.expiry_at is not None
+    assert s.expiry_at.tzinfo == UTC
+    assert s.expiry_at.hour == 10
+
+
+# === interactions/asker.py — check_ask_timing + AskUser signature ===========
+
+
+def test_check_ask_timing_allows_timeout_only():
+    check_ask_timing(timeout=5.0, expiry_at=None)
+
+
+def test_check_ask_timing_allows_expiry_only():
+    check_ask_timing(timeout=None, expiry_at=_now())
+
+
+def test_check_ask_timing_allows_neither():
+    check_ask_timing(timeout=None, expiry_at=None)
+
+
+def test_check_ask_timing_rejects_both():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        check_ask_timing(timeout=5.0, expiry_at=_now())
+
+
+def test_ask_user_signature_has_keyword_only_mode_and_expiry():
+    params = inspect.signature(AskUser.__call__).parameters
+    assert params["mode"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["mode"].default == "sync"
+    assert params["expiry_at"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["expiry_at"].default is None
 
 
 # === interactions/models.py — MediaItem + InteractionRequest.media ==========
@@ -1414,3 +1533,28 @@ def test_interaction_datetime_normalized_to_utc():
     req = _interaction(created_at=datetime(2026, 1, 1, 12, 0, tzinfo=plus2))
     assert req.created_at.tzinfo == UTC
     assert req.created_at.hour == 10
+
+
+def test_interaction_rejects_naive_expiry_at():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _interaction(mode="async", continuation_tool="t", continuation_identity="k", expiry_at=datetime(2026, 1, 1))
+
+
+def test_interaction_async_missing_expiry_at_raises_naming_it():
+    # An async park without an ``expiry_at`` is never expiry-indexed, so the reaper
+    # could never fire its continuation — the validator refuses it, naming the field.
+    with pytest.raises(ValueError, match="expiry_at"):
+        _interaction(mode="async", continuation_tool="t", continuation_identity="k")
+
+
+def test_interaction_expiry_at_normalized_to_utc():
+    plus2 = timezone(timedelta(hours=2))
+    req = _interaction(
+        mode="async",
+        continuation_tool="t",
+        continuation_identity="k",
+        expiry_at=datetime(2026, 1, 1, 12, 0, tzinfo=plus2),
+    )
+    assert req.expiry_at is not None
+    assert req.expiry_at.tzinfo == UTC
+    assert req.expiry_at.hour == 10

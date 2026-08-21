@@ -4,7 +4,7 @@ Two complementary walks assert the same rule: every import root reachable from
 ``tai42_agents`` is on the allowlist. The rule (see the README): the shipped
 package imports ``tai42-contract`` + ``tai42-kit`` + the agent runtime (deepagents /
 langgraph / langchain-core / langchain / langchain-anthropic / pydantic /
-fastmcp / mcp / opentelemetry) and their dependency closure ONLY, plus the
+opentelemetry) and their dependency closure ONLY, plus the
 Python standard library. Anything else -- ``tai42-skeleton`` (which sits a layer
 above and must never be pulled in) or any package that is not a declared
 dependency of the shipped wheel -- is absent from the allowlist and fails the
@@ -59,7 +59,6 @@ ALLOWED_THIRD_PARTY = frozenset(
         "docstring_parser",
         "dotenv",
         "exceptiongroup",
-        "fastmcp",
         "filetype",
         "httpx",
         "httpx_sse",
@@ -77,7 +76,6 @@ ALLOWED_THIRD_PARTY = frozenset(
         "langgraph",
         "langgraph_sdk",
         "langsmith",
-        "mcp",
         "opentelemetry",
         "orjson",
         "ormsgpack",
@@ -208,8 +206,19 @@ class _StubAgents:
         return decorator
 
 
+class _StubTools:
+    def tool(self, *args, **kwargs):
+        def decorator(func):
+            return func
+
+        if args and callable(args[0]):
+            return decorator(args[0])
+        return decorator
+
+
 class _StubApp:
     agents = _StubAgents()
+    tools = _StubTools()
 
 
 tai42_app.bind(_StubApp())

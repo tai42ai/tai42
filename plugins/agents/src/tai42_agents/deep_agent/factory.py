@@ -31,10 +31,16 @@ from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.settings import llm_settings
 
+from tai42_agents._internal.park import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents.deep_agent.backend import SKILLS_ROOT, build_backend
 from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+
+# One shared, stateless park hook on every agent + subagent stack, so an async
+# ``ask_user`` parked inside any of them (main, subagent, nested subagent, the
+# auto-added general-purpose subagent) interrupts its own graph and resumes by id.
+_async_park_middleware = AsyncParkMiddleware()
 
 #: Tools deepagents injects into every agent. A user tool sharing one of these
 #: names would shadow a built-in and make dispatch ambiguous.
@@ -62,7 +68,7 @@ def _general_purpose_subagent(skills: list[str] | None = None) -> SubAgent:
     yields ``None`` or a non-empty list, so the key is set only when there are sources
     (matching the auto-add's ``if skills is not None`` / the inline path's truthiness).
     """
-    sub: SubAgent = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [_tool_error_middleware]}
+    sub: SubAgent = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [_async_park_middleware, _tool_error_middleware]}
     if skills:
         sub["skills"] = skills
     return sub
@@ -234,10 +240,11 @@ async def _resolve_subagent(
             provider=spec.llm_provider,
             **llm_settings().with_fallbacks(spec.llm_kwargs or {}),
         )
-    # Every subagent stack merges the shared tool-error middleware onto its own tool
-    # node (deepagents forwards spec ``middleware`` to the subagent's create_agent), so
-    # a tool-logic failure inside a subagent surfaces to its model instead of aborting.
-    sub_middleware: list[Any] = []
+    # Every subagent stack carries the park hook (async ask parks the subagent's own
+    # graph) and merges the shared tool-error middleware onto its own tool node
+    # (deepagents forwards spec ``middleware`` to the subagent's create_agent), so a
+    # tool-logic failure inside a subagent surfaces to its model instead of aborting.
+    sub_middleware: list[Any] = [_async_park_middleware]
     if spec.subagents:
         parent_model = sub.get("model") or llm
         if parent_model is None or store is None or backend is None:
@@ -294,9 +301,10 @@ async def _compile_nested_subagent(
         store=store,
         interrupt_on=child.interrupt_on,
         response_format=as_tool_strategy(child.response_format),
-        # Same tool-error visibility on the nested subagent's own tool node and on its
-        # own auto-added general-purpose subagent, which inherits the child's skills.
-        middleware=[_tool_error_middleware],
+        # Same park hook + tool-error visibility on the nested subagent's own tool node
+        # and on its own auto-added general-purpose subagent, which inherits the child's
+        # skills.
+        middleware=[_async_park_middleware, _tool_error_middleware],
         subagents=[_general_purpose_subagent(child_skills)],
     )
     return {"name": child.name, "description": child.description, "runnable": runnable}
@@ -359,14 +367,18 @@ async def build_deep_agent(
         store=store,
         interrupt_on=interrupt_on,
         response_format=as_tool_strategy(response_format),
-        # The system purge leads so a stored system message never reaches the model
-        # alongside the per-run prompt (state never carries one). The leading-user
-        # middleware keeps a thread that opens with an assistant message user-first
-        # for strict-ordering providers. The rolling-cache-mark middleware keeps a
-        # per-turn-marked thread to one cache breakpoint at the call. A tool-logic
-        # failure surfaces to the model as an error ToolMessage rather than aborting
-        # the run; every other exception stays a loud abort.
+        # The park hook leads: it is the loop's sole before_model hook, so it is the
+        # first per-step hook and recognizes an async-ask park before any compacting
+        # hook (all of which compact through wrap_model_call, skipped on a park
+        # super-step) could evict its marked ToolMessage. The system purge leads the
+        # rest so a stored system message never reaches the model alongside the per-run
+        # prompt (state never carries one). The leading-user middleware keeps a thread
+        # that opens with an assistant message user-first for strict-ordering providers.
+        # The rolling-cache-mark middleware keeps a per-turn-marked thread to one cache
+        # breakpoint at the call. A tool-logic failure surfaces to the model as an error
+        # ToolMessage rather than aborting the run; every other exception stays a loud abort.
         middleware=[
+            _async_park_middleware,
             SystemPurgeMiddleware(),
             LeadingUserMiddleware(),
             RollingCacheMarkMiddleware(),

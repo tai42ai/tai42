@@ -122,12 +122,15 @@ class TestBuildAgentAndInput:
         assert captured["create"]["llm"] == "llm-obj"
         assert captured["create"]["tools"] == [tool]
         assert captured["create"]["checkpointer"] == "checkpointer-obj"
-        # The system-purge middleware leads (state never carries a system message),
-        # the context-overflow middleware is threaded through, the rolling-cache-mark
-        # middleware keeps one breakpoint at the call, and the tool-error middleware is
-        # appended so a tool-logic failure never aborts the loop.
-        assert isinstance(captured["create"]["middleware"][0], bta.SystemPurgeMiddleware)
-        assert captured["create"]["middleware"][1] == "mw"
+        # The park hook leads (it is the loop's first before_model hook, so it recognizes an
+        # async-ask park before any compacting hook could evict its marked ToolMessage);
+        # the system-purge middleware follows (state never carries a system message), the
+        # context-overflow middleware is threaded through, the rolling-cache-mark middleware
+        # keeps one breakpoint at the call, and the tool-error middleware is appended so a
+        # tool-logic failure never aborts the loop.
+        assert isinstance(captured["create"]["middleware"][0], bta.AsyncParkMiddleware)
+        assert isinstance(captured["create"]["middleware"][1], bta.SystemPurgeMiddleware)
+        assert captured["create"]["middleware"][2] == "mw"
         assert any(isinstance(mw, bta.RollingCacheMarkMiddleware) for mw in captured["create"]["middleware"])
         assert captured["create"]["middleware"][-1] is bta._tool_error_middleware
         assert captured["create"]["debug"] is True

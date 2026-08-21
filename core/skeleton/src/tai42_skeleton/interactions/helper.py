@@ -1,10 +1,13 @@
 """The author-facing ``ask_user`` surface — the ``AskUser`` contract impl.
 
-Engine-agnostic: it reads no flow/engine context and depends on nothing the
-engine threads. Each call generates its own ``interaction_id`` and an optional
-caller ``group_id`` (uuid4 when absent), persists the question to Redis, then
-blocks on a per-interaction reply channel until the answer returns or the
-timeout budget elapses (loud ``InteractionTimeoutError`` — never a silent default).
+Engine-agnostic: it reads no engine context and depends on nothing the engine
+threads. Each call generates its own ``interaction_id`` and an optional caller
+``group_id`` (uuid4 when absent) and persists the question to Redis. In
+``mode="sync"`` it then blocks on a per-interaction reply channel until the answer
+returns or the timeout budget elapses (loud ``InteractionTimeoutError`` — never a
+silent default); in ``mode="async"`` it PARKS instead — returning a
+``SuspendedInteraction`` at once — and a later answer/expiry resumes work out of
+band.
 
 The ``external`` answer format acts on an EXTERNAL surface (sign, approve, pay):
 the caller blocks exactly as for any other format while the external system
@@ -22,12 +25,19 @@ import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
-from tai42_contract.interactions import AnswerFormat, InteractionRequest, MediaItem
+from tai42_contract.interactions import (
+    AnswerFormat,
+    InteractionRequest,
+    MediaItem,
+    SuspendedInteraction,
+    check_ask_timing,
+    get_resume_continuation_tool,
+)
 from tai42_contract.secrets import SecretValue
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -178,8 +188,12 @@ async def ask_user(
     sensitive: bool = False,
     audience: str | None = None,
     media: list[MediaItem | dict[str, Any]] | None = None,
+    mode: Literal["sync", "async"] = "sync",
+    expiry_at: datetime | None = None,
 ) -> Any:
-    """Ask a human ``question`` and block until the answer returns.
+    """Ask a human ``question``: in ``mode="sync"`` block until the answer returns;
+    in ``mode="async"`` park the caller and return a ``SuspendedInteraction``
+    immediately.
 
     Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
     select->chosen value, form->validated dict, external->the callback payload).
@@ -264,7 +278,27 @@ async def ask_user(
     part of the answer — the human still answers via ``answer_format`` — and it is
     NOT forwarded to channel deliveries: a channel receives the question text
     only, while the inbox is where the media renders.
+
+    ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
+    returns the typed answer as described above. ``"async"`` PARKS the caller: it
+    persists (and optionally delivers) the question exactly as sync does but
+    returns a ``SuspendedInteraction`` sentinel IMMEDIATELY instead of blocking,
+    and a later answer OR expiry resumes work out of band by running the CURRENT
+    driver's resume continuation. An async ask requires a resuming driver bound in
+    the ``resume_continuation_tool`` context AND a bound execution identity to
+    rebind that continuation as — both are raised loudly when absent, never
+    silently degraded to a blocking wait. ``expiry_at`` is the async park deadline
+    (when the parked question expires); it is mutually exclusive with a sync
+    ``timeout`` (``check_ask_timing`` enforces it) and forbidden with ``mode="sync"``.
     """
+    check_ask_timing(timeout=timeout, expiry_at=expiry_at)
+    if mode != "async" and expiry_at is not None:
+        raise ValueError("expiry_at is only valid with mode='async'")
+    if mode == "async" and expiry_at is None:
+        # An async park with no deadline is never expiry-indexed, so the reaper
+        # could never fire its continuation and the idle TTL would drop it
+        # silently — refuse it up front rather than persist an unresumable park.
+        raise ValueError("async mode requires expiry_at")
     try:
         fmt = AnswerFormat(answer_format)
     except ValueError as exc:
@@ -358,18 +392,52 @@ async def ask_user(
     # interactions store cannot hold the question, so ``ask_user`` fails naming the
     # env var that turns the feature on rather than reaching for an absent Redis.
     require(settings.redis.redis_url, "the interactions store", "INTERACTIONS_REDIS_URL", "TAI_DEFAULT_REDIS_URL")
+    # Async resolves its resume continuation up front, before any state is
+    # written: an async ask with no bound driver or no execution identity to
+    # rebind it as is a caller error that must fail loudly, never persist a
+    # question no answer/expiry could ever resume.
+    continuation_tool: str | None = None
+    continuation_identity: str | None = None
+    continuation_fingerprint: str | None = None
+    if mode == "async":
+        continuation_tool = get_resume_continuation_tool()
+        if continuation_tool is None:
+            raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
+        # Function-local: a module-level edge from here into ``authz`` closes an
+        # import cycle (authz → access_control.backend) that crashes any process
+        # importing ``access_control`` first.
+        from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+        identity = get_execution_identity()
+        if identity is None or identity.user_id is None:
+            raise RuntimeError("async ask requires a bound execution identity to rebind the continuation as")
+        continuation_identity = identity.user_id
+        # Stashed alongside the identity so the answer/expiry path rebinds the
+        # continuation under the SAME fire authority the ask ran under; gate-off
+        # fires carry no fingerprint, recorded as "" (the bind ignores it there).
+        continuation_fingerprint = identity.execution_key_fingerprint or ""
+
     budget = settings.answer_timeout_seconds if timeout is None else timeout
     if budget <= 0:
         # Redis BLPOP treats 0 as "block forever" — the opposite of no-wait —
         # so a non-positive budget can never mean anything sane here.
         raise ValueError(f"timeout must be positive, got {budget!r}")
     created_at = datetime.now(UTC)
-    timeout_at = created_at + timedelta(seconds=budget)
-    # ONE monotonic deadline for the WHOLE ask, anchored with ``created_at`` so the
-    # persisted ``timeout_at`` and the callback ticket TTL (both created here) can
-    # never outlive it. Delivery attempts, their backoff sleeps, and the answer wait
-    # all share this deadline: delivery time shrinks the answer wait, and the caller
-    # can never block past the budget.
+    # The STORED deadline: a sync question expires at its answer budget; an async
+    # park expires at its ``expiry_at`` (required above), NOT the sync budget — no
+    # caller blocks on it, and the expiry reaper is what resumes work when it passes.
+    if mode == "async":
+        assert expiry_at is not None  # async requires expiry_at (guarded above)
+        timeout_at = expiry_at
+    else:
+        timeout_at = created_at + timedelta(seconds=budget)
+    # ONE monotonic deadline for the SYNCHRONOUS phase — the delivery attempts,
+    # their backoff sleeps, and (sync only) the answer wait — anchored with
+    # ``created_at`` at the answer budget. Delivery time shrinks a sync caller's
+    # answer wait, and a sync caller can never block past the budget. An async park
+    # does not wait, so its STORED ``timeout_at``/ticket TTL run to the park deadline
+    # (``expiry_at``), which may exceed this budget; only the delivery phase is bound
+    # by it, never the park's own lifetime.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + budget
 
@@ -377,6 +445,20 @@ async def ask_user(
     group = group_id or str(uuid.uuid4())
     store = InteractionStore(settings.key_prefix)
     reply_to = store.reply_key(interaction_id)
+
+    # An async park's keys must outlive its ``expiry_at`` by enough for the reaper
+    # to fire — at least a couple of its passes — or the state hash would expire
+    # before the reaper reads it, stranding the continuation. Tie the margin to the
+    # reaper interval so it holds under any configured cadence. This is the ONE
+    # source for the async-park margin: the state ``_key_ttl`` (via ``add``'s
+    # ``expiry_ttl_margin_seconds``) AND the callback ticket TTL below both add this
+    # exact value, so ``expiry_at + margin`` is the shared answerable window for the
+    # authenticated ``/answer`` door and the channel-delivery callback door alike —
+    # the reaper claims the park at ``expiry_at``, so both reject a late answer past
+    # it. (The state hash TTL may floor to ``idle_ttl`` as a storage backstop when
+    # the park is short; that is not an extended answerable window — the ticket and
+    # the reaper still bound answering to ``expiry_at + margin``.)
+    park_ttl_margin_seconds = 2 * math.ceil(settings.expiry_reaper_interval_seconds)
 
     ticket: str | None = None
     ticket_ttl: int | None = None
@@ -391,10 +473,15 @@ async def ask_user(
                 "external answer_format (and channel delivery) requires INTERACTIONS_PUBLIC_BASE_URL to be set"
             )
         ticket = secrets.token_urlsafe(32)
-        # TTL = the question's timeout budget, ceiled so the ticket always
-        # outlives the waiter's deadline (floor 1s); the ticket expires on this
-        # TTL and is never deleted on claim.
-        ticket_ttl = max(1, math.ceil(budget))
+        # TTL = seconds until the STORED deadline, ceiled so the ticket always
+        # outlives it (floor 1s): a sync question's answer budget, or an async
+        # park's ``expiry_at`` horizon PLUS the same reaper margin the state
+        # ``_key_ttl`` uses — so the callback door and the authenticated ``/answer``
+        # door stay answerable through the identical park window, never one door
+        # rejecting a late answer the other still accepts. Never deleted on claim.
+        ticket_ttl = max(1, math.ceil((timeout_at - created_at).total_seconds()))
+        if mode == "async":
+            ticket_ttl += park_ttl_margin_seconds
         callback_url = f"{settings.public_base_url.rstrip('/')}/api/interactions/callback/{ticket}"
 
     if is_external:
@@ -431,6 +518,13 @@ async def ask_user(
         # dicts here are coerced to ``MediaItem`` by the model's own validation —
         # the single source of media validation, which raises before any persist.
         media=media,  # type: ignore[arg-type]
+        # Async park: the sentinel-returning discipline plus the generic
+        # continuation resolved above (both None for a sync ask). The model's own
+        # validator enforces continuation-iff-async.
+        mode=mode,
+        continuation_tool=continuation_tool,
+        continuation_identity=continuation_identity,
+        expiry_at=expiry_at,
     )
 
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -452,9 +546,19 @@ async def ask_user(
                 ticket=ticket,
                 ticket_ttl=ticket_ttl,
                 open_member_reserved=True,
+                continuation_fingerprint=continuation_fingerprint,
+                expiry_ttl_margin_seconds=park_ttl_margin_seconds,
             )
         else:
-            await store.add(r, request, settings.idle_ttl_seconds, ticket=ticket, ticket_ttl=ticket_ttl)
+            await store.add(
+                r,
+                request,
+                settings.idle_ttl_seconds,
+                ticket=ticket,
+                ticket_ttl=ticket_ttl,
+                continuation_fingerprint=continuation_fingerprint,
+                expiry_ttl_margin_seconds=park_ttl_margin_seconds,
+            )
 
     # Deliver through the channel AFTER the question is persisted (the callback
     # ticket must be claimable before any human can act on it) and BEFORE the
@@ -552,6 +656,13 @@ async def ask_user(
                         exc_info=exc,
                     )
             break
+
+    # Async park: the question is persisted (and, when a channel was given,
+    # delivered) exactly as sync — but the caller is NOT blocked. Return the
+    # sentinel now; a later answer (either door) or the expiry reaper resumes work
+    # by running the stored generic continuation as the stored identity.
+    if mode == "async":
+        return SuspendedInteraction(interaction_id=interaction_id, expiry_at=expiry_at)
 
     # The answer wait gets what is LEFT of the budget after delivery — the same
     # deadline the delivery attempts ran against — so the whole ask stays inside

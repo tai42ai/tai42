@@ -1,0 +1,43 @@
+"""Agent async ``ask_user`` park/resume: middleware, durable index, and resume driver.
+
+The three pieces behind a park-capable agent run that async-parks on an ``ask_user``:
+
+* :class:`AsyncParkMiddleware` — the ``before_model`` hook that interrupts the loop once
+  per super-step of async-ask parks and substitutes their answers back on resume.
+* the durable park :mod:`~tai42_agents._internal.park.index` — reverses a parked
+  interaction id back to its parked run, in the agents plugin's own Redis.
+* the :mod:`~tai42_agents._internal.park.driver` — park capability, the drive-side
+  finalizer, and the ``agent_resume`` continuation the flow-blind platform fires.
+
+Everything agent-park-specific lives here; the platform contract gains only the generic
+suspension marker + ``SuspendedFinal`` vocabulary.
+"""
+
+from __future__ import annotations
+
+# Importing registers the hidden ``agent_resume`` continuation tool: any park-capable
+# agent module imports the park package, so the tool the platform fires to resume a park
+# is registered exactly once (module import is cached) no matter which agent loads.
+# Imported for its registration side effect.
+from tai42_agents._internal.park import resume_tool as _resume_tool  # noqa: F401
+from tai42_agents._internal.park.driver import (
+    AGENT_RESUME_TOOL_NAME,
+    DURABLE_CHECKPOINT_PROVIDERS,
+    ParkIdentity,
+    agent_resume,
+    build_park_identity,
+    finalize_drive,
+    park_continuation,
+)
+from tai42_agents._internal.park.middleware import AsyncParkMiddleware
+
+__all__ = [
+    "AGENT_RESUME_TOOL_NAME",
+    "DURABLE_CHECKPOINT_PROVIDERS",
+    "AsyncParkMiddleware",
+    "ParkIdentity",
+    "agent_resume",
+    "build_park_identity",
+    "finalize_drive",
+    "park_continuation",
+]

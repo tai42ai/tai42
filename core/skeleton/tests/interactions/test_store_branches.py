@@ -1,5 +1,5 @@
 """Branch coverage for ``InteractionStore``: the bytes-decoding normalizer, the
-sibling-TTL refresh on a second question in a group, a multi-question group that
+shared-TTL extend on a second question in a group, a multi-question group that
 stays pending after one answer, the WATCH-conflict retry, and missing state.
 """
 
@@ -52,21 +52,26 @@ async def test_get_state_returns_none_when_missing(fake_redis):
     assert await store.get_state(fake_redis, "ghost") is None
 
 
-async def test_second_question_refreshes_sibling_ttls(fake_redis):
+async def test_second_question_in_group_keeps_both_states_and_extends_shared_ttl(fake_redis):
     store = InteractionStore("t:")
     await store.add(fake_redis, _request("i1", "g", store), idle_ttl=100)
-    # The second add reads the group's existing entries and refreshes each
-    # sibling's state TTL — the loop only runs when a sibling is present.
+    # A second add to the same group leaves the first question's state intact and
+    # set-or-extends the shared group stream + count_key TTL (extend-only, never
+    # shrinks below any live state's own TTL).
     await store.add(fake_redis, _request("i2", "g", store), idle_ttl=100)
 
     assert (await store.get_state(fake_redis, "i1")) is not None
     assert (await store.get_state(fake_redis, "i2")) is not None
+    count_ttl = fake_redis._ttls[store.count_key("g")]
+    assert count_ttl >= fake_redis._ttls[store.state_key("i1")]
+    assert count_ttl >= fake_redis._ttls[store.state_key("i2")]
 
 
-async def test_sibling_refresh_skips_entry_without_interaction_id(fake_redis):
+async def test_add_tolerates_preexisting_malformed_group_stream_entry(fake_redis):
     store = InteractionStore("t:")
-    # Seed the group stream with a malformed entry carrying no interaction_id;
-    # the sibling-refresh loop must skip it rather than expire a bogus state key.
+    # A pre-existing group-stream entry carrying no interaction_id (a malformed
+    # write) is inert to ``add``: it persists the new question without reading or
+    # choking on the group's prior stream entries.
     fake_redis._streams.setdefault(store.group_key("g"), []).append(("0-0", {"junk": "x"}))
 
     await store.add(fake_redis, _request("i1", "g", store), idle_ttl=100)

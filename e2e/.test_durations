@@ -23,7 +23,6 @@
   "tests/agents/test_agent_run.py::test_authored_agent_preset_created_on_one_worker_runs_via_http": 0.592,
   "tests/agents/test_agent_run.py::test_tools_agent_llm_tool_llm_loop_over_http": 6.729,
   "tests/agents/test_deep_agent.py::test_deep_agent_plan_subagent_synthesis_over_mcp": 5.493,
-  "tests/agents/test_mcp_tools_agent.py::test_mcp_tools_agent_runs_tools_from_mcp_config_over_mcp": 5.518,
   "tests/agents/test_redis_checkpoint.py::test_redis_checkpoint_resumes_across_replicas": 6.228,
   "tests/agents/test_redis_checkpoint.py::test_redis_checkpoint_resumes_across_replicas_over_sse_run_door": 0.058,
   "tests/agents/test_redis_checkpoint.py::test_redis_store_round_trip_through_stack": 1.335,

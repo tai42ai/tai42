@@ -236,11 +236,17 @@ def test_d1_projected_surface_is_the_expected_op_count():
             assert len(projected) == 133, len(projected)
             assert total - len(tier2) - len(tier1) == 133
 
-            # And the LIVE booted tool surface is exactly those 133 (no keep-set /
-            # plugin / toolbox tools are loaded in this projection-only stack).
+            # The LIVE booted tool surface is the 133 projected ops PLUS the one
+            # force-registered hidden mechanism tool the conversations router installs
+            # at startup: ``conversation_deliver``, the completion continuation a resumed
+            # async turn's driver fires through ``run_tool``. It is NOT an api_tools
+            # projection (``projected`` stays 133) — it is a mandatory bridge registered
+            # independently of the api_tools toggle and carried on the live surface like
+            # any hidden tool, so the live count is 134.
             live = await app.tools.get_tools()
-            assert set(live) == set(projected)
-            assert len(live) == 133
+            assert set(live) == set(projected) | {"conversation_deliver"}
+            assert (live["conversation_deliver"].meta or {}).get("tai42/hidden") is True
+            assert len(live) == 134
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -401,11 +407,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface.
+            # api_tools projected the surface: the 133 projected ops plus the
+            # force-registered hidden ``conversation_deliver`` completion mechanism the
+            # conversations router installs at startup (134 live).
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 133
+            assert len(live) == 134
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

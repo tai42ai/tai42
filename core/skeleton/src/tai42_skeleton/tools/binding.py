@@ -26,6 +26,7 @@ from langchain_core.tools import StructuredTool, ToolException, tool
 from makefun import create_function
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, unwrap_secrets
 from tai42_contract.tools import ToolRefsExtractor
@@ -291,6 +292,12 @@ def _serialize_result(result: Any) -> Any:
     A ``SecretValue`` is deliberately not JSON-serializable, so a result carrying
     one keeps the wrapper through the seam (revealed at the sync door, masked by the
     recorder); every other unserializable type still raises loudly."""
+    if isinstance(result, SuspendedInteraction):
+        # An async ask_user parks the caller and returns this sentinel; keep the
+        # object through the direct-run seam (never flattened to a plain dict) so the
+        # turn engine recognizes the park by TYPE and ends the turn silently. Each
+        # edge door that serializes for the wire does so at its own boundary.
+        return result
     if isinstance(result, Image):
         result = result.to_image_content()
     elif isinstance(result, Audio):
@@ -383,6 +390,17 @@ class _SecretRevealingTool(FunctionTool):
     def convert_result(self, raw_value: Any) -> ToolResult:
         gate = inprocess_reveal_gate.get()
         if gate is not None:
+            if isinstance(raw_value, SuspendedInteraction):
+                # An async ask_user through a preset parks the caller and returns this
+                # sentinel. FastMCP's serialization would FLATTEN the pydantic model into
+                # ``structured_content`` (a plain dict), so the dispatch's type-based park
+                # recognition fails and the flow proceeds UN-parked while the delivered
+                # question's later answer strands — a silent lost-park. Stow it RAW so the
+                # in-process dispatch returns the object intact, exactly as the direct-run
+                # seam preserves it; the ToolResult built below is never returned.
+                gate.park = raw_value
+                gate.has_park = True
+                return super().convert_result(raw_value)
             if contains_secrets(raw_value):
                 gate.payload = raw_value
                 gate.has_payload = True
@@ -585,6 +603,11 @@ class ToolBinding:
                     result = await mcp_tool.run(arguments)
             finally:
                 inprocess_reveal_gate.reset(token)
+            if gate.has_park:
+                # An async ask_user parked the caller: return the sentinel object by
+                # TYPE (never the flattened ToolResult), so the preset path recognizes
+                # the park exactly as the direct-run path does.
+                return gate.park
             if gate.has_payload:
                 return gate.payload
             return _tool_result_value(result)
@@ -763,6 +786,15 @@ class ToolBinding:
                     result = target(*args, **kwargs)
                     if inspect.isawaitable(result):
                         result = await result
+                    if isinstance(result, SuspendedInteraction):
+                        # An async ask_user parked the caller and returned this
+                        # sentinel. Inside a graph the tool task must COMPLETE (so
+                        # ask_user runs exactly once, never replayed on resume), so
+                        # convert the sentinel to the reserved contract marker: the
+                        # ToolMessage commits carrying it, and the in-graph park
+                        # middleware recognizes the park by this RESULT shape (never a
+                        # tool name) and interrupts once for the whole super-step.
+                        return suspended_interaction_marker(result.interaction_id, result.expiry_at)
                     # The model never sees a secret value: this adapter feeds the
                     # langchain layer (the model, the checkpoint, the callback trace),
                     # so a wrapped secret is masked before it leaves here.

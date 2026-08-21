@@ -32,10 +32,11 @@ from tai42_e2e.manifests import (
     POSTGRES_MCP_PROBE_SCHEMA,
     POSTGRES_MCP_PROBE_TABLE,
     build_accounts_stack,
-    build_agents_authz_stack,
+    build_agent_async_park_stack,
     build_agents_redis_stack,
     build_agents_stack,
     build_api_router_stack,
+    build_async_park_stack,
     build_auth_stack,
     build_bare_stack,
     build_bridge_stack,
@@ -259,6 +260,13 @@ def recycle_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Ite
 
 
 @pytest.fixture(scope="module")
+def async_park_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """REPLICAS, no backend — the async ``ask_user`` park lifecycle stack (park on A,
+    resume on B via an answer or the 1s expiry reaper)."""
+    yield from _boot(infra, tmp_path_factory.mktemp("async-park"), build_async_park_stack)
+
+
+@pytest.fixture(scope="module")
 def auth_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
     yield from _boot(infra, tmp_path_factory.mktemp("auth"), build_auth_stack, seed_auth=True)
 
@@ -270,24 +278,6 @@ def accounts_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
     ``tai-sess-`` sessions and ``sk-`` keys against one deployment. Seeded with a
     root key like ``auth_stack``."""
     yield from _boot(infra, tmp_path_factory.mktemp("accounts"), build_accounts_stack, seed_auth=True)
-
-
-@pytest.fixture(scope="module")
-def agents_authz_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
-    """The accounts access-control stack with the agents surface added (the
-    ``mcp_tools_agent`` on the scripted LLM stub). Seeded with a root key like
-    ``accounts_stack``; a per-role editor/admin session invokes the agent over
-    ``POST /api/agents/{name}/runs`` so the middleware's secret-capability stamp is
-    exercised per role. The LLM points at the session stub, so the module skips on the
-    real-``llm`` seam exactly as the agents suite does."""
-    resource_kwargs = {"llm_base_url": llm_stub.base_url}
-    yield from _boot(
-        infra,
-        tmp_path_factory.mktemp("agents-authz"),
-        build_agents_authz_stack,
-        resource_kwargs=resource_kwargs,
-        seed_auth=True,
-    )
 
 
 @pytest.fixture(scope="module")
@@ -431,6 +421,29 @@ def agents_redis_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, l
 
 
 @pytest.fixture(scope="module")
+def agent_async_park_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """REPLICAS agents stack on the redis checkpoint provider plus the durable agent park
+    index — the AGENT async ``ask_user`` park lifecycle (a ``tools_agent`` run parks on A,
+    resumes on B via an answer or the 1s expiry reaper). Gated on the module-capable
+    checkpoint Redis, like ``agents_redis_stack``."""
+    if infra.checkpoint_redis is None:
+        pytest.skip(
+            "checkpoint Redis not configured; set TAI_E2E_CHECKPOINT_REDIS_URL and start "
+            "`docker compose --profile agents-redis up -d`"
+        )
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("agent-async-park"),
+        build_agent_async_park_stack,
+        resource_kwargs=resource_kwargs,
+        allocate_checkpoint_db=True,
+    )
+
+
+@pytest.fixture(scope="module")
 def connectors_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, oauth_idp: OAuthIdp) -> Iterator[TaiStack]:
     resource_kwargs = {
         "idp_base_url": oauth_idp.base_url,
@@ -486,7 +499,7 @@ def _seed_postgres_mcp_probe(resources: StackResources) -> None:
 
 @pytest.fixture(scope="module")
 def postgres_mcp_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
-    """The stack mounting the dynamic Postgres MCP server (``tai42-postgres-mcp``) as a stdio
+    """The stack mounting the dynamic Postgres MCP server (``tai42-mcp-dynamic-postgres``) as a stdio
     child over the manifest ``mcp`` seam, exposing its generated per-table CRUD tools through
     the harness. A known probe table is seeded into the isolated clone BEFORE boot (the child
     introspects the schema at startup), so the mount discovers its tools when the app comes up."""

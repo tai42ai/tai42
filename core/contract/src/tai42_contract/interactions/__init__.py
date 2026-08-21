@@ -1,14 +1,28 @@
 """Interactions contract: the ``ask_user`` human-in-the-loop surface.
 
 ``models`` holds the durable request/state and validated response pydantic
-models, the ``AnswerFormat`` enum, and the display-only ``MediaItem``/``MediaKind``
-media models a question may carry; ``asker`` holds the ``AskUser`` callable
-Protocol the engine-agnostic helper satisfies.
+models, the ``SuspendedInteraction`` sentinel an async ask returns, the
+``AnswerFormat`` enum, and the display-only ``MediaItem``/``MediaKind`` media
+models a question may carry; ``asker`` holds the ``AskUser`` callable Protocol
+the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
+``continuation`` holds the generic driver-continuation context an async ask reads.
 """
 
 from __future__ import annotations
 
-from tai42_contract.interactions.asker import AskUser
+from tai42_contract.interactions.asker import AskUser, check_ask_timing
+from tai42_contract.interactions.continuation import (
+    EXPIRY_ANSWER,
+    SUSPENDED_INTERACTION_MARKER_KEY,
+    get_park_completion_tool,
+    get_resume_continuation_tool,
+    read_suspended_interaction_marker,
+    reset_park_completion_tool,
+    reset_resume_continuation_tool,
+    set_park_completion_tool,
+    set_resume_continuation_tool,
+    suspended_interaction_marker,
+)
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
     MEDIA_DATA_URI_MAX_CHARS,
@@ -21,14 +35,17 @@ from tai42_contract.interactions.models import (
     InteractionState,
     MediaItem,
     MediaKind,
+    SuspendedInteraction,
 )
 
 __all__ = [
+    "EXPIRY_ANSWER",
     "MEDIA_CAPTION_MAX_CHARS",
     "MEDIA_DATA_URI_MAX_CHARS",
     "MEDIA_MAX_ITEMS",
     "MEDIA_TOTAL_URI_CHARS",
     "MEDIA_URL_MAX_CHARS",
+    "SUSPENDED_INTERACTION_MARKER_KEY",
     "AnswerFormat",
     "AskUser",
     "InteractionRequest",
@@ -36,4 +53,14 @@ __all__ = [
     "InteractionState",
     "MediaItem",
     "MediaKind",
+    "SuspendedInteraction",
+    "check_ask_timing",
+    "get_park_completion_tool",
+    "get_resume_continuation_tool",
+    "read_suspended_interaction_marker",
+    "reset_park_completion_tool",
+    "reset_resume_continuation_tool",
+    "set_park_completion_tool",
+    "set_resume_continuation_tool",
+    "suspended_interaction_marker",
 ]

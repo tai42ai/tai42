@@ -16,11 +16,12 @@ The feed is a bounded newest-first ring buffer: every write caps it (LTRIM) at
 ``interactions_settings().notifications_feed_max`` entries, keeping the newest N
 and evicting older ones by design, so the feed key cannot grow without limit.
 This is a deliberate, documented retention policy — an explicit product bound,
-not a silent truncation of an error. Every write also refreshes a rolling TTL
-(``interactions_settings().notifications_feed_ttl_seconds``) on the key in the
-same pipeline, so an idle feed — and every distinct ``audience`` feed key, which
-would otherwise be a permanent per-identity list — is reclaimed rather than
-minting keys that never expire.
+not a silent truncation of an error. The SHARED feed key carries NO TTL by
+design — an unbounded lifetime, so a quiet period never drops the operator
+inbox. Only the per-``audience`` feed keys carry a rolling TTL
+(``interactions_settings().notifications_feed_ttl_seconds``), refreshed on
+every push, so a key minted one-per-distinct-identity cannot accumulate forever
+(see the per-key detail below).
 
 ``audience`` is the IDENTITY (a user_id) whose in-app inbox shows a record,
 distinct from ``recipient`` (a channel delivery ADDRESS). When set, the record is

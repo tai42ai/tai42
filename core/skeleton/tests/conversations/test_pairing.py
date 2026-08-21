@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import InterruptFinal, StructuredFinal
+from tai42_contract.agent.events import InterruptFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.conversations import ConversationRoute, ConversationTargetKind, TargetConversationConfig
 from tai42_kit.utils.data.string_util import hash_api_key
 
@@ -959,6 +959,13 @@ class _StreamAgent(Agent):
             yield event
 
 
+def _resolved(outcome):
+    """Assert a resolved (answered/error) outcome and return ``(answer_status, answer,
+    error)`` — the shape the drain tests read."""
+    assert isinstance(outcome, turn_module._ResolvedOutcome), outcome
+    return outcome.answer_status, outcome.answer, outcome.error
+
+
 async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     route = _api_route()
     cases = {
@@ -968,7 +975,7 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     }
     for expected, event in cases.items():
         monkeypatch.setattr(turn_module, "_agent_registry", lambda event=event: {"assistant": _StreamAgent(event)})
-        status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+        status, answer, error = _resolved(await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
         assert status == "answered"
         assert answer == expected
         assert error is None
@@ -978,17 +985,28 @@ async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env,
     route = _api_route()
     agent = _StreamAgent(InterruptFinal(interrupt_id="i1", payload={"q": "?"}, reason="needs input"))
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent})
-    status, answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+    status, answer, error = _resolved(await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
     assert status == "error"
     assert answer == turn_module._ERROR_ANSWER_TEXT
     assert error is not None
     assert "interrupt" in error
 
 
+async def test_agent_drain_async_park_is_a_silent_outcome(env, monkeypatch):
+    # The conversation door binds a completion tool around the turn, so an async ask_user
+    # PARKS: the turn produces no reply now (a silent outcome) and the resumed answer is
+    # delivered out of band by the completion continuation.
+    route = _api_route()
+    agent = _StreamAgent(SuspendedFinal(interaction_ids=["i1"], thread_id="t"))
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": agent})
+    outcome = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+    assert isinstance(outcome, turn_module._SilentOutcome)
+
+
 async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"assistant": _StreamAgent()})  # no events
-    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+    status, _answer, error = _resolved(await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
     assert status == "error"
     assert error == "agent produced an empty answer"
 
@@ -996,7 +1014,7 @@ async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatc
 async def test_agent_turn_for_an_unregistered_agent_is_an_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(turn_module, "_agent_registry", dict)
-    status, _answer, error = await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client")
+    status, _answer, error = _resolved(await turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client"))
     assert status == "error"
     assert error is not None
     assert "not registered" in error

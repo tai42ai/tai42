@@ -112,6 +112,12 @@ class InteractionsSettings(TaiBaseSettings):
     # an outer ``asyncio.wait_for`` (budget/keepalive + grace). Must be positive.
     blocking_grace_seconds: float = Field(default=5, gt=0)
 
+    # Interval (seconds) between async-park expiry reaper passes. An async ask has
+    # no blocking waiter, so this loop is what fires a parked question's continuation
+    # once its ``expiry_at`` passes; it bounds how late past expiry a continuation
+    # fires. Must be positive.
+    expiry_reaper_interval_seconds: float = Field(default=30, gt=0)
+
     @field_validator("public_base_url")
     @classmethod
     def _require_tls(cls, value: str | None) -> str | None:

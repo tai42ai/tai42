@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tai42_agents import mcp_tools_agent, tools_agent, vqa_agent  # noqa: F401
+from tai42_agents import tools_agent, vqa_agent  # noqa: F401
 from tai42_agents.deep_agent import agent as _deep_agent  # noqa: F401
 from tai42_agents.refine_agent import agent as _refine_agent  # noqa: F401
 from tai42_agents.retrieval_tools_agent import agent as _retrieval_agent  # noqa: F401
@@ -22,7 +22,6 @@ _AGENT_NAMES = [
     "voting_agent",
     "retrieval_tools_agent",
     "tools_agent",
-    "mcp_tools_agent",
     "vqa_agent",
 ]
 

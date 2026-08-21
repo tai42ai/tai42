@@ -1,9 +1,12 @@
 """The builtin ``ask_user`` tool: a thin, LLM-facing shim over the interactions
 feature's ``ask_user`` helper. It lets an agent pause mid-run to ask a human a
-question and blocks until the answer — or a timeout — returns.
+question — in ``mode="sync"`` it blocks until the answer (or a timeout) returns;
+in ``mode="async"`` it PARKS, returning a ``SuspendedInteraction`` at once, and a
+later answer/expiry resumes the agent out of band.
 """
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
 
@@ -36,8 +39,11 @@ async def ask_user(
     recipient: str | None = None,
     audience: str | None = None,
     media: list[dict[str, Any]] | None = None,
+    mode: Literal["sync", "async"] = "sync",
+    expiry_at: datetime | None = None,
 ) -> Any:
-    """Ask a human a question mid-run and block until they answer.
+    """Ask a human a question mid-run: in "sync" mode block until they answer; in
+    "async" mode park the caller and return a suspension sentinel immediately.
 
     Args:
         question: The question shown to the human.
@@ -93,6 +99,13 @@ async def ask_user(
             answers via ``answer_format`` — and is NOT forwarded to channel
             deliveries (a channel receives the question text only). Invalid media
             fails the call before the question is stored.
+        mode: The wait discipline. "sync" (the default) blocks and returns the
+            typed answer. "async" PARKS the caller: it stores (and optionally
+            delivers) the question but returns a suspension sentinel immediately,
+            and a later answer or expiry resumes the run's driver out of band.
+            An "async" ask requires a resuming driver bound by the engine.
+        expiry_at: The async park deadline — when the parked question expires.
+            Only valid with mode="async" and mutually exclusive with ``timeout``.
 
     Returns:
         The typed answer (text -> str, confirm -> bool, select -> chosen value,
@@ -124,4 +137,6 @@ async def ask_user(
         # A ``list[dict]`` is a valid ``list[MediaItem | dict]`` argument; the
         # invariant-list check is a type-system limitation, not a runtime one.
         media=media,  # type: ignore[arg-type]
+        mode=mode,
+        expiry_at=expiry_at,
     )

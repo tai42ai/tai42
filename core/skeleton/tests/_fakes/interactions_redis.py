@@ -202,6 +202,14 @@ class FakeRedis:
         self._expired(key)
         return self._hashes.get(key, {}).get(field)
 
+    def _hincrby(self, key, field, amount) -> int:
+        self._expired(key)
+        h = self._hashes.setdefault(key, {})
+        value = int(h.get(field, "0")) + int(amount)
+        h[field] = str(value)
+        self._bump(key)
+        return value
+
     def _hdel(self, key, *fields) -> int:
         h = self._hashes.get(key, {})
         removed = sum(1 for f in fields if h.pop(f, None) is not None)
@@ -393,7 +401,12 @@ class FakeRedis:
           each per-group index delete; it leaves the count key untouched.
         * ``interactions:open-slot-reserve`` — purges stale open members, then
           admits (ZADD) the member only while the live count is below the limit,
-          all in one call (the atomicity the concurrency-cap test relies on)."""
+          all in one call (the atomicity the concurrency-cap test relies on).
+        * ``interactions:continuation-retry-claim`` — score-guards a due
+          continuation record, advances its exponential backoff, and returns the
+          record hash as a flat ``[k, v, ...]`` array (matching Lua ``HGETALL``);
+          ``nil`` when not due or already re-claimed, and the ``'dropped'`` marker
+          on an orphan member whose record TTL-expired (reconciled off the index)."""
         keys = keys_and_args[:numkeys]
         args = keys_and_args[numkeys:]
         if "interactions:pending-deadline-purge" in script:
@@ -417,6 +430,30 @@ class FakeRedis:
                 return 0
             self._zadd(open_key, {member: score})
             return 1
+        if "interactions:continuation-retry-claim" in script:
+            index_key, record_key = keys[0], keys[1]
+            member = str(args[0])
+            now_ms, base_ms, cap_ms = float(args[1]), float(args[2]), float(args[3])
+            score = self._zsets.get(index_key, {}).get(member)
+            if score is None:
+                return None
+            if score > now_ms:
+                return None
+            self._expired(record_key)
+            if not self._hashes.get(record_key):
+                # Orphan index member (record hash TTL-expired past its retention
+                # horizon) — reconcile it off and signal the terminal drop.
+                self._zrem(index_key, member)
+                return "dropped"
+            attempts = self._hincrby(record_key, "attempts", 1)
+            delay = base_ms * (2 ** (attempts - 1))
+            if delay > cap_ms:
+                delay = cap_ms
+            self._zadd(index_key, {member: now_ms + delay})
+            flat: list[str] = []
+            for field, value in self._hashes.get(record_key, {}).items():
+                flat.extend((field, value))
+            return flat
         raise NotImplementedError("FakeRedis.eval only emulates the interactions Lua scripts")
 
     async def zcard(self, key) -> int:

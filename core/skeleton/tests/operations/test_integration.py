@@ -92,15 +92,58 @@ def test_projection_and_authz_survive_reload():
 
 def test_disabled_api_tools_projects_empty_surface():
     """With ``api_tools.enabled`` false the projection registers no tools — the
-    empty surface is the disabled path, NOT an empty registry: the registry is
-    fully repopulated at boot, and only the projection is gated off."""
+    disabled path is an empty PROJECTION, NOT an empty registry: the registry is
+    fully repopulated at boot, and only the projection is gated off.
+
+    The one live tool is the force-registered hidden ``conversation_deliver`` completion
+    mechanism the conversations router installs at startup. It survives the api_tools
+    toggle by design — it is a mandatory bridge, registered by its own startup hook and
+    not by the projection — so a resumed async turn's ``run_tool`` continuation still
+    resolves with api_tools off."""
 
     async def run():
         async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
-            assert await app.tools.get_tools() == {}
-            # The registry IS populated (the boot repopulate ran); the empty
+            tools = await app.tools.get_tools()
+            assert set(tools) == {"conversation_deliver"}
+            assert (tools["conversation_deliver"].meta or {}).get("tai42/hidden") is True
+            # The registry IS populated (the boot repopulate ran); the empty PROJECTION
             # surface is the ``enabled=False`` gate, not the absence of operations.
             assert operation_registry.has("list_system_kinds")
+
+    asyncio.run(run())
+
+
+def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool(monkeypatch):
+    """A resumed async turn's completion continuation must still fire with api_tools off.
+
+    The force-registered hidden ``conversation_deliver`` mechanism stays on the live
+    surface when the projection is gated off, so ``run_tool`` — dispatched here under the
+    parked run's stored (internal) execution identity, exactly as the resume driver fires
+    it — resolves and dispatches it to the real body. The store's exactly-once dedup path
+    (a record already committed for the completion id) returns without the delivery
+    machine, keeping the focus on what is under test: the mechanism is fireable through
+    ``run_tool`` with api_tools disabled. Unregistering it to empty the surface would
+    strand every async turn that parked while api_tools was off."""
+    import tai42_skeleton.conversations.turn as turn_module
+    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+    from tai42_skeleton.authz.identity import INTERNAL_PRINCIPAL
+
+    class _AlreadyCommittedStore:
+        async def get_record(self, completion_id: str) -> object:
+            return object()
+
+    async def run():
+        async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
+            monkeypatch.setattr(turn_module, "_store", lambda: _AlreadyCommittedStore())
+            token = set_execution_identity(INTERNAL_PRINCIPAL)
+            try:
+                out = await app.tools.run_tool(
+                    "conversation_deliver",
+                    {"thread_id": "bridge:line:+15550002222", "result": "hi", "completion_id": "cmpl-x"},
+                )
+            finally:
+                reset_execution_identity(token)
+            assert out == {"message_id": "cmpl-x"}
 
     asyncio.run(run())
 
