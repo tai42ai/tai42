@@ -51,9 +51,6 @@ dependencies = [
     # ``opentelemetry.context``; declared directly rather than leaned on as a
     # transitive of the runtime.
     "opentelemetry-api>=1.30",
-    # The MCP client the mcp-tools agent opens to convert a caller's MCP servers
-    # into LangChain tools.
-    "fastmcp>=3.4.7",
     # Glob matching for the deep-agent skills backends (``wcmatch.glob.globmatch``
     # with ``BRACE | GLOBSTAR``). Imported directly, so declared here rather than
     # leaned on as a transitive of the runtime.
@@ -67,12 +64,21 @@ Issues = "https://github.com/tai42ai/tai42/issues"
 Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/agents/CHANGELOG.md"
 
 [project.optional-dependencies]
+# The durable store behind the agent async-``ask_user`` park index (reached through
+# the kit's ``RedisClient``): a parked run's paused graph is reversed back from an
+# answered interaction id here, independent of the checkpoint provider. Optional and
+# imported lazily — a deployment that never async-parks never installs or touches it, and
+# an unconfigured park index refuses the async ask loudly pre-persist.
+park = ["redis>=5"]
 # Public dev/test tooling.
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",
     "pyright>=1.1.389",
+    # In-memory Redis double for the async-park index resume tests. The lua extra
+    # pulls lupa so the lease/barrier EVAL scripts execute under the double.
+    "fakeredis[lua]>=2.21",
     # The plugin-spec test parses tai-plugin.yml.
     "pyyaml>=6",
     # Test-only: the skeleton-boot e2e integration test (tests/test_skeleton_e2e.py)
