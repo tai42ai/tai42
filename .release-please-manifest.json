@@ -1,7 +1,7 @@
 {
   "core/contract": "3.0.0",
   "core/kit": "3.5.0",
-  "core/cli": "3.3.0",
+  "core/cli": "3.3.1",
   "core/skeleton": "6.0.0",
   "plugins/accounts-oidc": "1.0.3",
   "plugins/accounts-postgres": "2.1.0",
