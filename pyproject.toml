@@ -1,5 +1,13 @@
 [tool.uv.workspace]
 members = ["core/*", "plugins/*", "e2e"]
+# The connector plugins are descriptor-only dirs (tai-plugin.yml, no pyproject):
+# they carry no package, so uv would error on them as workspace members.
+exclude = [
+    "plugins/connector-google",
+    "plugins/connector-atlassian",
+    "plugins/connector-slack",
+    "plugins/connector-github",
+]
 
 [dependency-groups]
 # The whole-repo test closure: the root fleet tests (scripts/, tests/) plus the

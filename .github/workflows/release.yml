@@ -28,11 +28,15 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - name: Resolve component + assert tag matches pyproject version
+      - name: Resolve component + assert tag matches descriptor version
         # Parse component/version out of the tag, look the component up as a
         # package-name in release-please-config.json to find its member dir, and
-        # assert the built version matches — a stale pyproject can never publish
-        # under the wrong tag.
+        # assert the tagged version matches the source of truth — a stale version
+        # can never publish under the wrong tag. Packaged members read
+        # pyproject.toml; a descriptor-only dir (no pyproject) reads the top-level
+        # version out of tai-plugin.yml with a bare regex (this step has no
+        # pyyaml) and sets descriptor=true so the wheel/PyPI steps below skip: a
+        # descriptor's release artifact is the yml at the tag, not a wheel.
         id: resolve
         run: |
           set -euo pipefail
@@ -48,26 +52,51 @@ jobs:
           else:
               sys.exit(f"::error::no package-name {component} in release-please-config.json")
           ' "$component")
-          pyproject_version=$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$dir/pyproject.toml")
-          if [ "$version" != "$pyproject_version" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} version ${version} != ${dir}/pyproject.toml version ${pyproject_version}" >&2
+          if [ -f "$dir/pyproject.toml" ]; then
+            descriptor=false
+            source_version=$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$dir/pyproject.toml")
+            source_file="$dir/pyproject.toml"
+          else
+            descriptor=true
+            source_version=$(python3 -c '
+          import re, sys
+          for line in open(sys.argv[1]):
+              m = re.match(r"^version:\s*(\S+)", line)
+              if m:
+                  print(m.group(1)); break
+          else:
+              sys.exit(f"::error::no top-level version in {sys.argv[1]}")
+          ' "$dir/tai-plugin.yml")
+            source_file="$dir/tai-plugin.yml"
+          fi
+          if [ "$version" != "$source_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} version ${version} != ${source_file} version ${source_version}" >&2
             exit 1
           fi
           echo "component=$component" >> "$GITHUB_OUTPUT"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "descriptor=$descriptor" >> "$GITHUB_OUTPUT"
       - name: API-diff gate
         # Label-honesty gate: a breaking public-API change (griffe classification)
         # may not publish under a bump the release label could not have produced.
-        # Runs before build so a dishonest release never reaches PyPI.
+        # Runs before build so a dishonest release never reaches PyPI. Descriptor
+        # releases have no Python surface to diff, so this and every build/publish
+        # step below are gated off for them.
+        if: steps.resolve.outputs.descriptor != 'true'
         run: |
           uv run --locked --only-group api-gate python scripts/api_gate.py \
             --package "${{ steps.resolve.outputs.component }}" \
             --dir "${{ steps.resolve.outputs.dir }}" \
             --version "${{ steps.resolve.outputs.version }}"
-      - run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
-      - run: uvx twine check dist/*
+      - if: steps.resolve.outputs.descriptor != 'true'
+        run: uv build --package "${{ steps.resolve.outputs.component }}" --out-dir dist
+      - if: steps.resolve.outputs.descriptor != 'true'
+        run: uvx twine check dist/*
       - name: Publish to PyPI
+        # Descriptor releases publish no wheel — their artifact is the tai-plugin.yml
+        # at the tag — so the PyPI upload is skipped for them.
+        if: steps.resolve.outputs.descriptor != 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}

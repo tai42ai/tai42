@@ -13,6 +13,7 @@ import pytest
 import yaml
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
+from tai42_kit.plugins import load_plugin_spec, read_dir_docs, validate_docs
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO_TREE_URL = "https://github.com/tai42ai/tai42/tree/main"
@@ -34,15 +35,33 @@ def _member_dirs() -> list[Path]:
     return dirs
 
 
+def _plugin_dirs_with(predicate) -> list[Path]:
+    return [
+        hit
+        for hit in sorted(ROOT.glob("plugins/*"))
+        if hit.is_dir() and (hit / "tai-plugin.yml").is_file() and predicate(hit)
+    ]
+
+
 MEMBER_DIRS = _member_dirs()
 MEMBER_PATHS = [d.relative_to(ROOT).as_posix() for d in MEMBER_DIRS]
-PLUGIN_DIRS = [d for d in MEMBER_DIRS if d.relative_to(ROOT).parts[0] == "plugins"]
+
+# The two disk-derived fleet sets (design point 12): a plugins/* dir with a
+# pyproject.toml is a PACKAGED workspace member; a plugins/* dir carrying a
+# tai-plugin.yml but NO pyproject.toml is a DESCRIPTOR-only component.
+PACKAGED_DIRS = _plugin_dirs_with(lambda d: (d / "pyproject.toml").is_file())
+DESCRIPTOR_DIRS = _plugin_dirs_with(lambda d: not (d / "pyproject.toml").is_file())
+PACKAGED_PATHS = [d.relative_to(ROOT).as_posix() for d in PACKAGED_DIRS]
+DESCRIPTOR_PATHS = [d.relative_to(ROOT).as_posix() for d in DESCRIPTOR_DIRS]
 
 # name -> current pyproject version, over all members (for cap admission)
 SIBLING_VERSIONS: dict[str, str] = {}
 for _d in MEMBER_DIRS:
     _py = _load_toml(_d / "pyproject.toml")
     SIBLING_VERSIONS[_py["project"]["name"]] = _py["project"]["version"]
+
+# The workspace contract version every descriptor's `contract` range must admit.
+CONTRACT_VERSION = SIBLING_VERSIONS["tai42-contract"]
 
 
 def _root_config() -> dict:
@@ -86,38 +105,40 @@ def _plugin_descriptor(plugin_dir: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------- 1. membership
 
 
-def test_membership_equality():
-    workspace_members = _load_toml(ROOT / "pyproject.toml")["tool"]["uv"]["workspace"]["members"]
+def _workspace_plugin_members() -> set[str]:
+    """The plugins/* dirs uv resolves as workspace members, honouring exclude —
+    the descriptor-only connector dirs are excluded because they carry no
+    pyproject.toml."""
+    workspace = _load_toml(ROOT / "pyproject.toml")["tool"]["uv"]["workspace"]
+    exclude = set(workspace.get("exclude", []))
     resolved: set[str] = set()
-    for pattern in workspace_members:
+    for pattern in workspace["members"]:
         for hit in glob.glob(str(ROOT / pattern)):
             p = Path(hit)
+            rel = p.relative_to(ROOT).as_posix()
+            if rel in exclude:
+                continue
             if p.is_dir() and (p / "pyproject.toml").is_file():
-                resolved.add(p.relative_to(ROOT).as_posix())
+                resolved.add(rel)
+    return {m for m in resolved if m.startswith("plugins/")}
 
-    config_paths = set(_root_config()["packages"].keys())
-    dir_paths = set(MEMBER_PATHS)
 
-    assert resolved == config_paths == dir_paths, (
-        f"members glob={sorted(resolved)} config={sorted(config_paths)} dirs={sorted(dir_paths)}"
+def test_membership_equality():
+    """The packaged plugin dirs (a pyproject.toml on disk) are exactly the
+    plugins uv carries as workspace members."""
+    plugin_members = _workspace_plugin_members()
+    assert plugin_members == set(PACKAGED_PATHS), (
+        f"workspace plugin members={sorted(plugin_members)} packaged dirs={sorted(PACKAGED_PATHS)}"
     )
 
-    for plugin_dir in PLUGIN_DIRS:
+    for plugin_dir in PACKAGED_DIRS:
         assert (plugin_dir / "tai-plugin.yml").is_file(), f"{plugin_dir}: missing tai-plugin.yml"
-
-
-def test_connector_namespace_has_no_init():
-    """tai42_connector is an implicit namespace shared by two members; an
-    __init__.py in either would break the other."""
-    for member in ("plugins/connector-atlassian", "plugins/connector-google"):
-        init = ROOT / member / "src" / "tai42_connector" / "__init__.py"
-        assert not init.exists(), f"{init} must not exist (implicit namespace)"
 
 
 # --------------------------------------------------------------- 2. cap admission
 
 
-@pytest.mark.parametrize("member_dir", MEMBER_DIRS, ids=MEMBER_PATHS)
+@pytest.mark.parametrize("member_dir", PACKAGED_DIRS, ids=PACKAGED_PATHS)
 def test_cap_admission(member_dir: Path):
     pyproject = _load_toml(member_dir / "pyproject.toml")
     for dep_name, spec in _iter_tai42_specifiers(pyproject):
@@ -132,7 +153,7 @@ def test_cap_admission(member_dir: Path):
 # ------------------------------------------------------ 3. descriptor lockstep
 
 
-@pytest.mark.parametrize("plugin_dir", PLUGIN_DIRS, ids=[d.name for d in PLUGIN_DIRS])
+@pytest.mark.parametrize("plugin_dir", PACKAGED_DIRS, ids=[d.name for d in PACKAGED_DIRS])
 def test_descriptor_lockstep(plugin_dir: Path):
     pyproject = _load_toml(plugin_dir / "pyproject.toml")
     name = pyproject["project"]["name"]
@@ -174,15 +195,60 @@ def test_descriptor_lockstep(plugin_dir: Path):
 
 
 def test_manifest_sanity():
+    config_keys = set(_root_config()["packages"].keys())
     manifest = _manifest()
+    manifest_keys = set(manifest.keys())
+
+    # The release-please universe = packaged workspace members (core/*, e2e, and
+    # every packaged plugin) unioned with the descriptor-only plugin dirs.
+    expected = set(MEMBER_PATHS) | set(DESCRIPTOR_PATHS)
+    assert config_keys == manifest_keys == expected, (
+        f"config={sorted(config_keys)} manifest={sorted(manifest_keys)} expected={sorted(expected)}"
+    )
+
+    # Packaged members: the manifest never runs ahead of the built version.
     member_versions = {
         d.relative_to(ROOT).as_posix(): _load_toml(d / "pyproject.toml")["project"]["version"] for d in MEMBER_DIRS
     }
-    for key, value in manifest.items():
-        assert key in member_versions, f"manifest key {key} is not a member path"
-        assert Version(value) <= Version(member_versions[key]), (
-            f"manifest {key}={value} exceeds member version {member_versions[key]}"
+    for key, version in member_versions.items():
+        assert Version(manifest[key]) <= Version(version), (
+            f"manifest {key}={manifest[key]} exceeds member version {version}"
         )
+
+    # Descriptor components: manifest == yml version == version.txt (release-please
+    # `simple` bumps version.txt; the yml stays canonical — drift is loud).
+    for desc_dir in DESCRIPTOR_DIRS:
+        path = desc_dir.relative_to(ROOT).as_posix()
+        spec = load_plugin_spec(desc_dir / "tai-plugin.yml")
+        version_txt = (desc_dir / "version.txt").read_text().strip()
+        assert manifest[path] == spec.version == version_txt, (
+            f"{path}: manifest={manifest[path]} yml={spec.version} version.txt={version_txt}"
+        )
+
+
+# ---------------------------------------------------- 6. descriptor-only plugins
+
+
+@pytest.mark.parametrize("plugin_dir", DESCRIPTOR_DIRS, ids=[d.name for d in DESCRIPTOR_DIRS])
+def test_descriptor_only_plugins(plugin_dir: Path):
+    """A descriptor-only plugin: a valid package-less spec, a first-party docs
+    tree, the required sidecar files, version lockstep, and a contract range that
+    admits the workspace contract version."""
+    spec = load_plugin_spec(plugin_dir / "tai-plugin.yml")
+    assert spec.package is None, f"{plugin_dir.name}: descriptor plugin must carry no package"
+
+    validate_docs(read_dir_docs(plugin_dir), first_party=True)
+
+    for sidecar in ("LICENSE", "icon.png", "CHANGELOG.md", "version.txt"):
+        assert (plugin_dir / sidecar).is_file(), f"{plugin_dir.name}: missing {sidecar}"
+
+    version_txt = (plugin_dir / "version.txt").read_text().strip()
+    assert version_txt == spec.version, f"{plugin_dir.name}: version.txt={version_txt} != yml version {spec.version}"
+
+    assert spec.contract is not None, f"{plugin_dir.name}: descriptor plugin must declare a contract range"
+    assert SpecifierSet(spec.contract).contains(CONTRACT_VERSION, prereleases=True), (
+        f"{plugin_dir.name}: contract {spec.contract!r} does not admit workspace contract {CONTRACT_VERSION}"
+    )
 
 
 # --------------------------------------------------- 5. harness API presence
