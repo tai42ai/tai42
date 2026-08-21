@@ -46,9 +46,9 @@ dependencies = [
     "tai42-accounts-oidc>=1.0,<2",
     "tai42-identity-oidc>=1.0,<2",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
-    "tai42-backend-arq>=1.1,<2",
-    "tai42-backend-celery>=1.1,<2",
-    "tai42-backend-rq>=1.1,<2",
+    "tai42-backend-arq>=2.0,<3",
+    "tai42-backend-celery>=2.0,<3",
+    "tai42-backend-rq>=2.0,<3",
     # The real Storage plugins: the local filesystem backing plus the S3 and
     # GitHub object stores the storage-axis variant sweep boots.
     "tai42-storage-local>=1.0,<2",
@@ -62,7 +62,7 @@ dependencies = [
     "tai42-channel-slack>=1.1,<2",
     "tai42-channel-twilio>=1.1,<2",
     "tai42-channel-whatsapp>=1.2,<2",
-    "tai42-channel-web>=1.1,<2",
+    "tai42-channel-web>=2.0,<3",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=1.0,<2",
     # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
