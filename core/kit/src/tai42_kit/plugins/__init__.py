@@ -32,11 +32,14 @@ import posixpath
 import re
 import zipfile
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
-from tai42_contract.plugins import PluginSpec
+from tai42_contract.plugins import PluginItem, PluginItemKind, PluginSpec
+
+from tai42_kit.utils.data.env_markers import EnvMarkerRef, scan_env_marker_refs
 
 # The canonical spec filename — at a plugin repo's root and inside its wheel.
 PLUGIN_SPEC_FILENAME = "tai-plugin.yml"
@@ -325,6 +328,157 @@ def read_wheel_docs(wheel_path: Path) -> dict[str, bytes]:
     return files
 
 
+def read_dir_docs(plugin_dir: Path) -> dict[str, bytes]:
+    """Read the ``docs/`` tree sitting beside ``tai-plugin.yml`` in a plugin dir.
+
+    The on-disk counterpart of :func:`read_wheel_docs` for a descriptor-only
+    plugin (no wheel): returns ``{relative_path: bytes}`` for every file under
+    ``<plugin_dir>/docs/``, keyed from ``plugin_dir`` so keys begin ``docs/``
+    (e.g. ``docs/index.mdx``) exactly as the wheel reader keys them. The same
+    ceilings apply: a member past :data:`MAX_DOCS_FILE_BYTES` or a cumulative
+    payload past :data:`MAX_DOCS_TOTAL_BYTES` raises :class:`PluginDocsError`. A
+    missing ``docs/`` directory, an empty one, or an unreadable file also raises
+    :class:`PluginDocsError`. Never returns a partial tree.
+    """
+    docs_root = plugin_dir / PLUGIN_DOCS_DIRNAME
+    if not docs_root.is_dir():
+        raise PluginDocsError(f"{plugin_dir} has no {PLUGIN_DOCS_DIRNAME}/ directory at {docs_root}")
+    try:
+        members = sorted(path for path in docs_root.rglob("*") if path.is_file())
+    except OSError as exc:
+        raise PluginDocsError(f"cannot read docs tree at {docs_root}: {exc}") from exc
+    if not members:
+        raise PluginDocsError(f"{plugin_dir} packages no {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root}")
+    # Plugin-provided paths are an untrusted boundary and a symlinked member
+    # resolves/reads through to its target, so containment is anchored on the
+    # plugin dir: ``docs/`` must be a real directory inside it (a symlinked root
+    # would resolve to an external tree whose files then look contained), and no
+    # member may resolve outside that real root. Any escape raises (never a
+    # partial tree).
+    plugin_dir_real = plugin_dir.resolve()
+    docs_root_real = docs_root.resolve()
+    if docs_root.is_symlink() or not docs_root_real.is_relative_to(plugin_dir_real):
+        raise PluginDocsError(f"{docs_root} is not a real {PLUGIN_DOCS_DIRNAME}/ directory inside {plugin_dir_real}")
+    files: dict[str, bytes] = {}
+    total = 0
+    for path in members:
+        if not path.resolve().is_relative_to(docs_root_real):
+            raise PluginDocsError(f"{path} resolves outside the {PLUGIN_DOCS_DIRNAME}/ tree at {docs_root_real}")
+        # ``stat`` first refuses an over-cap file before any bytes are read; the
+        # bounded read then caps at MAX + 1 so a file that grew after the stat is
+        # still refused by the length check below rather than slurped whole.
+        try:
+            size = path.stat().st_size
+            if size > MAX_DOCS_FILE_BYTES:
+                raise PluginDocsError(f"{path} is {size} bytes, past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
+            with path.open("rb") as fh:
+                data = fh.read(MAX_DOCS_FILE_BYTES + 1)
+        except OSError as exc:
+            raise PluginDocsError(f"cannot read docs member {path}: {exc}") from exc
+        if len(data) > MAX_DOCS_FILE_BYTES:
+            raise PluginDocsError(f"{path} is past the {MAX_DOCS_FILE_BYTES}-byte per-file limit")
+        total += len(data)
+        if total > MAX_DOCS_TOTAL_BYTES:
+            raise PluginDocsError(f"{docs_root} docs tree is past the {MAX_DOCS_TOTAL_BYTES}-byte total limit")
+        files[path.relative_to(plugin_dir).as_posix()] = data
+    return files
+
+
+# --- Environment requirements -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnvRequirement:
+    """One environment variable an installed plugin item requires.
+
+    ``name`` is the variable name; ``secret`` marks a value the platform masks
+    in views and profile snapshots. Secret-ness is a property of the requirement
+    the spec DECLARES (an OAuth client secret), not of the marker grammar — a
+    ``!ENV`` marker cannot know whether its value is sensitive, so marker-derived
+    requirements are never secret here.
+    """
+
+    name: str
+    secret: bool
+
+
+def _marker_refs(item: PluginItem) -> list[EnvMarkerRef]:
+    """Every ``!ENV`` marker ref carried in an item's ``mcp`` block, in document
+    order. Only an ``mcp-server`` item carries markers; any other item has no
+    ``mcp`` block and contributes none."""
+    if item.mcp is None:
+        return []
+    return scan_env_marker_refs(item.mcp.model_dump(exclude_none=True))
+
+
+def required_env(item: PluginItem) -> tuple[EnvRequirement, ...]:
+    """The environment variables one item requires to install, in first-seen order.
+
+    An ``mcp-server`` item requires each REQUIRED (no-default) ``!ENV`` marker
+    var in its ``mcp`` block — deduped, ``secret=False`` (the marker cannot know).
+    An ``oauth`` connector requires its client-credential pair
+    (``client_id_env`` non-secret, ``client_secret_env`` secret). A ``none``
+    connector requires nothing at install (its ``config_fields`` are supplied by
+    the end user at connect time), and every other kind requires nothing.
+    """
+    if item.kind is PluginItemKind.MCP_SERVER:
+        seen: set[str] = set()
+        result: list[EnvRequirement] = []
+        for ref in _marker_refs(item):
+            if not ref.required or ref.var in seen:
+                continue
+            seen.add(ref.var)
+            result.append(EnvRequirement(name=ref.var, secret=False))
+        return tuple(result)
+    if item.kind is PluginItemKind.CONNECTOR:
+        provider = item.provider
+        if provider is None:
+            raise ValueError(f"connector item {item.name!r} carries no provider descriptor")
+        if provider.kind == "oauth":
+            client_id_env = provider.client_id_env
+            client_secret_env = provider.client_secret_env
+            if client_id_env is None or client_secret_env is None:
+                raise ValueError(f"oauth provider {provider.id!r} is missing client_id_env/client_secret_env")
+            return (
+                EnvRequirement(name=client_id_env, secret=False),
+                EnvRequirement(name=client_secret_env, secret=True),
+            )
+        return ()
+    return ()
+
+
+def required_env_for_spec(spec: PluginSpec) -> tuple[EnvRequirement, ...]:
+    """The ordered union of every item's :func:`required_env`, keyed by name.
+
+    First-seen order across ``spec.provides`` is preserved; when the same var is
+    required by two items with different secret-ness, ``secret=True`` wins (a
+    value masked by any requirement stays masked).
+    """
+    order: list[str] = []
+    secret_by_name: dict[str, bool] = {}
+    for item in spec.provides:
+        for requirement in required_env(item):
+            if requirement.name not in secret_by_name:
+                order.append(requirement.name)
+                secret_by_name[requirement.name] = requirement.secret
+            else:
+                secret_by_name[requirement.name] = secret_by_name[requirement.name] or requirement.secret
+    return tuple(EnvRequirement(name=name, secret=secret_by_name[name]) for name in order)
+
+
+def accepts_env(spec: PluginSpec) -> bool:
+    """Whether the installer offers an env-supply step for this spec.
+
+    True iff any item carries at least one ``!ENV`` marker (required OR defaulted
+    — an operator may override even a defaulted marker) or the spec has a
+    non-empty :func:`required_env_for_spec`. This is the installer's
+    env-acceptance and routing key.
+    """
+    if required_env_for_spec(spec):
+        return True
+    return any(_marker_refs(item) for item in spec.provides)
+
+
 # --- Canonical docs validation ------------------------------------------------
 
 _DOCS_PREFIX = f"{PLUGIN_DOCS_DIRNAME}/"
@@ -591,11 +745,16 @@ __all__ = [
     "PLUGIN_DOCS_DIRNAME",
     "PLUGIN_DOCS_INDEX",
     "PLUGIN_SPEC_FILENAME",
+    "EnvRequirement",
     "PluginDocsError",
     "PluginSpecLoadError",
+    "accepts_env",
     "load_plugin_spec",
     "parse_plugin_spec",
+    "read_dir_docs",
     "read_wheel_docs",
     "read_wheel_plugin_spec",
+    "required_env",
+    "required_env_for_spec",
     "validate_docs",
 ]
