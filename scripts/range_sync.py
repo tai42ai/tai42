@@ -23,6 +23,29 @@ Files are edited by targeted string/line replacement (not a toml/yaml
 round-trip) so formatting and comments are preserved. Reading uses ``tomllib``.
 Pure Python standard library only; no clock, network, or randomness.
 
+A dependant may mark a first-party cap as deliberate with a
+``[tool.range-sync] pinned = ["<dep-name>", ...]`` table in its own
+``pyproject.toml``. A pinned dep whose derived range would cross a MAJOR at
+either end — the floor major or the cap major, so a deliberately WIDENED cap
+(``>=1.2,<3``) counts as much as a raised floor, and a ``~=``/``==`` spec whose
+implied majors move counts too — is left untouched (and reported) instead of
+rewritten; a pinned dep whose existing spec has an unparseable major structure
+is likewise preserved conservatively rather than rewritten blind. Minor/patch
+syncs within one major ignore the pin and behave identically for every dep. The
+pin decision is read from the same ``tomllib`` parse that discovers
+requirements, so it is robust regardless of the text-level rewrite path (a line
+comment would be invisible to that parse). An unpinned dep whose rewrite is
+guarded (crosses at either end, or unparseable) still syncs, but ``--check``
+emits a non-failing WARNING so a deliberate cap can be annotated. When a pin
+preserves a member's ``tai42-contract`` range, that member's ``contract:``
+descriptor follows the preserved dep (derived from its floor) rather than the
+global released range; when the preserved spec has no derivable floor the
+descriptor is left untouched entirely (and reported) rather than forced to the
+global range — so a pinned member never advertises a contract major its
+dependency refuses. A ``pinned`` name that is not a first-party dependency of
+that member is a loud error, and a ``[tool.range-sync]`` table on a non-member
+pyproject (e.g. the root) is a loud error too — it would silently do nothing.
+
 CLI:
   python scripts/range_sync.py            # APPLY: rewrite in place (default)
   python scripts/range_sync.py --check    # verify sync; exit 1 + diff on drift
@@ -61,6 +84,23 @@ _REQ_RE = re.compile(
 # A ``contract:`` line in a tai-plugin.yml, e.g. ``contract: '>=0.3,<0.4'``.
 _CONTRACT_RE = re.compile(r"^(?P<indent>\s*)contract:\s*(?P<q>['\"])(?P<val>.*?)(?P=q)(?P<trail>\s*)$")
 
+# The integer major of a ``>=<major>...`` floor and a ``<<major>...`` cap. The
+# derived range always carries both; a hand-written spec may carry either, both,
+# or (for ``~=``/``==``/anything else) neither in this shape.
+_FLOOR_RE = re.compile(r">=\s*(\d+)")
+_CAP_RE = re.compile(r"<\s*(\d+)")
+
+# A ``~=X.Y`` or ``==X.Y.Z`` spec: both its floor and its cap major are X.
+_COMPAT_RE = re.compile(r"[~=]=\s*(\d+)")
+
+# The floor VERSION literal (major[.minor[.patch]]) of a ``>=``/``~=``/``==``
+# spec — used to re-derive a descriptor range from a preserved dependency spec.
+_FLOOR_VERSION_RE = re.compile(r"(?:>=|~=|==)\s*(\d+(?:\.\d+)*)")
+
+# The dependant-declared pin table key: ``[tool.range-sync] pinned = [...]``.
+PIN_TABLE = "range-sync"
+PIN_KEY = "pinned"
+
 
 # --------------------------------------------------------------------------- #
 # Core derivation                                                             #
@@ -88,6 +128,49 @@ def derive_range(version: str) -> str:
     floor = f"{major}.{minor}"
     cap = f"0.{minor + 1}" if major == 0 else f"{major + 1}"
     return f">={floor},<{cap}"
+
+
+def _major_structure(spec: str) -> tuple[int | None, int | None]:
+    """The ``(floor_major, cap_major)`` integer majors of a specifier; each is
+    None when that end is absent or unparseable. A ``~=X.Y`` / ``==X.Y.Z`` spec
+    implies floor and cap majors both X; otherwise the floor comes from ``>=``
+    and the cap from ``<``."""
+    s = spec.strip()
+    if not s:
+        return (None, None)
+    compat = _COMPAT_RE.search(s)
+    if compat:
+        major = int(compat.group(1))
+        return (major, major)
+    floor = _FLOOR_RE.search(s)
+    cap = _CAP_RE.search(s)
+    return (
+        int(floor.group(1)) if floor else None,
+        int(cap.group(1)) if cap else None,
+    )
+
+
+def is_cross_major(old_spec: str, new_spec: str) -> bool:
+    """True when *old_spec* and *new_spec* differ in EITHER the floor's integer
+    major OR the cap's integer major — a deliberately widened cap (``<3`` derived
+    down to ``<2``) crosses as surely as a raised floor. Pre-1.0 both majors are
+    0, so a 0.x minor bump never crosses. A major that is absent at one end (no
+    comparable value) does not, by itself, make that end differ."""
+    old_floor, old_cap = _major_structure(old_spec)
+    new_floor, new_cap = _major_structure(new_spec)
+    floor_differs = old_floor is not None and new_floor is not None and old_floor != new_floor
+    cap_differs = old_cap is not None and new_cap is not None and old_cap != new_cap
+    return floor_differs or cap_differs
+
+
+def _pin_guarded(old_spec: str, derived: str) -> bool:
+    """A rewrite a pin should preserve (and an unpinned cap should warn on): the
+    majors cross (floor or cap), or the existing spec's major structure is
+    unparseable — the latter treated conservatively as a crossing rather than
+    rewritten blind. An empty spec is version-less and never guarded."""
+    if is_cross_major(old_spec, derived):
+        return True
+    return bool(old_spec.strip()) and _major_structure(old_spec) == (None, None)
 
 
 @dataclass(frozen=True)
@@ -209,11 +292,72 @@ class SpecChange:
     new_req: str
 
 
-def compute_pyproject_changes(pyproject: dict, first_party: dict[str, str]) -> list[SpecChange]:
-    """Return the set of first-party specifier rewrites for one parsed
-    pyproject. Version-less first-party refs and non-first-party refs are
-    skipped. A change is emitted only when old != new."""
+@dataclass(frozen=True)
+class Preserved:
+    """A pinned first-party cap left untouched across a major bump."""
+
+    dep_name: str
+    kept_range: str
+
+
+@dataclass
+class PyprojectAnalysis:
+    """The outcome of analysing one pyproject: the rewrites to apply, the
+    pinned caps preserved across a major, and the unpinned caps that crossed a
+    major (a subset of ``changes``, surfaced as ``--check`` warnings)."""
+
+    changes: list[SpecChange]
+    preserved: list[Preserved]
+    warnings: list[SpecChange]
+
+
+def pinned_deps(pyproject: dict) -> set[str]:
+    """The normalized first-party names marked deliberate in this member's
+    ``[tool.range-sync] pinned`` list. Raises loudly if the table value is not a
+    list of strings."""
+    table = pyproject.get("tool", {}).get(PIN_TABLE, {})
+    raw = table.get(PIN_KEY, [])
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise RuntimeError(f"[tool.{PIN_TABLE}].{PIN_KEY} must be a list of dependency-name strings")
+    return {_normalize_name(x) for x in raw}
+
+
+def _first_party_dep_names(pyproject: dict, first_party: dict[str, str]) -> set[str]:
+    """Normalized names of this member's first-party dependencies (any table
+    scanned as a source), regardless of whether they carry a specifier."""
+    present: set[str] = set()
+    for raw in _requirement_strings(pyproject):
+        parsed = parse_requirement(raw)
+        if parsed is None:
+            continue
+        key = _normalize_name(parsed.name)
+        if key in first_party:
+            present.add(key)
+    return present
+
+
+def analyze_pyproject(
+    pyproject: dict, first_party: dict[str, str], member_label: str = "<pyproject>"
+) -> PyprojectAnalysis:
+    """Analyse one parsed pyproject. Version-less and non-first-party refs are
+    skipped; a rewrite is computed only when old != derived. A guarded rewrite
+    (floor or cap major crosses, or the existing spec's major structure is
+    unparseable) is preserved for a pinned dep (kept out of ``changes``); an
+    unpinned guarded rewrite still applies but is also flagged as a warning.
+
+    Raises if a ``pinned`` name is not a first-party dependency of this member —
+    a malformed annotation is never silently ignored."""
+    pinned = pinned_deps(pyproject)
+    unknown = pinned - _first_party_dep_names(pyproject, first_party)
+    if unknown:
+        raise RuntimeError(
+            f"{member_label}: [tool.{PIN_TABLE}].{PIN_KEY} names are not first-party "
+            f"dependencies of this member: {sorted(unknown)}"
+        )
+
     changes: dict[str, SpecChange] = {}
+    preserved: dict[str, Preserved] = {}
+    warnings: dict[str, SpecChange] = {}
     for raw in _requirement_strings(pyproject):
         parsed = parse_requirement(raw)
         if parsed is None:
@@ -227,9 +371,27 @@ def compute_pyproject_changes(pyproject: dict, first_party: dict[str, str]) -> l
         if parsed.specifier == derived:
             continue
         new_req = parsed.with_specifier(derived)
-        if new_req != raw:
-            changes[raw] = SpecChange(parsed.name, raw, new_req)
-    return list(changes.values())
+        if new_req == raw:
+            continue
+        change = SpecChange(parsed.name, raw, new_req)
+        guarded = _pin_guarded(parsed.specifier, derived)
+        if guarded and key in pinned:
+            preserved[raw] = Preserved(parsed.name, parsed.specifier)
+            continue  # deliberate cap: leave untouched
+        changes[raw] = change
+        if guarded:
+            warnings[raw] = change
+    return PyprojectAnalysis(
+        changes=list(changes.values()),
+        preserved=list(preserved.values()),
+        warnings=list(warnings.values()),
+    )
+
+
+def compute_pyproject_changes(pyproject: dict, first_party: dict[str, str]) -> list[SpecChange]:
+    """Return the set of first-party specifier rewrites for one parsed
+    pyproject (the rewrites to apply, with pinned cross-major caps excluded)."""
+    return analyze_pyproject(pyproject, first_party).changes
 
 
 def _replace_quoted(text: str, old: str, new: str) -> tuple[str, int]:
@@ -297,13 +459,16 @@ def contract_yaml_value(text: str) -> str | None:
     return None
 
 
-def plugin_descriptor_files(members: list[Path], root: Path) -> list[Path]:
-    """Every tai-plugin.yml (root + packaged copies) under each plugin member."""
-    files: list[Path] = []
+def plugin_descriptor_files(members: list[Path], root: Path) -> list[tuple[Path, Path]]:
+    """Every ``(member, tai-plugin.yml)`` pair (root + packaged copies) under each
+    plugin member — the owning member is carried so a member-specific contract
+    range (a preserved pin) can override the global one."""
+    files: list[tuple[Path, Path]] = []
     for member in members:
         if member.relative_to(root).parts[0] != "plugins":
             continue
-        files.extend(sorted(member.rglob("tai-plugin.yml")))
+        for yml in sorted(member.rglob("tai-plugin.yml")):
+            files.append((member, yml))
     return files
 
 
@@ -314,10 +479,18 @@ def plugin_descriptor_files(members: list[Path], root: Path) -> list[Path]:
 
 @dataclass
 class SyncReport:
-    """What an apply run changed / what a check run found out of sync."""
+    """What an apply run changed / what a check run found out of sync.
+
+    ``preserved``, ``warnings`` and ``descriptor_untouched`` are informational
+    only: a preserved pin is not a drift, a warning does not fail the gate, and
+    a descriptor left untouched under an underivable-floor pin is not a rewrite —
+    so none of them feed ``dirty``."""
 
     spec_changes: list[tuple[str, SpecChange]]  # (member_path, change)
     contract_changes: list[tuple[str, str, str]]  # (yaml_path, old, new)
+    preserved: list[tuple[str, Preserved]]  # (member_path, preserved)
+    warnings: list[tuple[str, SpecChange]]  # (member_path, unpinned cross-major change)
+    descriptor_untouched: list[tuple[str, str]]  # (yaml_path, left-at contract value)
 
     @property
     def dirty(self) -> bool:
@@ -331,32 +504,95 @@ def _contract_range(first_party: dict[str, str]) -> str:
     return derive_range(first_party[key])
 
 
+def _descriptor_range_from_spec(spec: str) -> str | None:
+    """The contract range a descriptor should advertise given a preserved
+    ``tai42-contract`` dependency *spec*: derived from the spec's floor version
+    exactly as the global range derives from a released version. None when the
+    spec has no parseable floor — the descriptor is then left untouched rather
+    than forced to a guessed range."""
+    m = _FLOOR_VERSION_RE.search(spec)
+    if not m:
+        return None
+    return derive_range(m.group(1))
+
+
+def _preserved_contract_ranges(members: list[Path], first_party: dict[str, str], root: Path) -> dict[str, str | None]:
+    """Map member-path -> the contract range that member's descriptors must
+    advertise, for every member whose ``tai42-contract`` dependency a pin
+    preserved. The value is the range derived from the preserved spec's floor;
+    it is None when that spec has no derivable floor — an explicit leave-alone
+    marker so apply/check skip rewriting that member's descriptor entirely
+    rather than forcing it to the global range the pin refuses. (Absence from
+    the map, by contrast, means the member is unpinned and follows the global
+    range.)"""
+    contract_key = _normalize_name(CONTRACT_PACKAGE)
+    out: dict[str, str | None] = {}
+    for member in members:
+        pyproject = _load_toml(member / "pyproject.toml")
+        member_path = member.relative_to(root).as_posix()
+        analysis = analyze_pyproject(pyproject, first_party, member_path)
+        for preserved in analysis.preserved:
+            if _normalize_name(preserved.dep_name) != contract_key:
+                continue
+            out[member_path] = _descriptor_range_from_spec(preserved.kept_range)
+    return out
+
+
+def _assert_no_stray_pin_tables(root: Path, members: list[Path]) -> None:
+    """A ``[tool.range-sync]`` table is only honoured on a workspace MEMBER
+    pyproject. The same table on any non-member pyproject the script reads (the
+    root) would silently do nothing — raise so it is never mistaken for an
+    active pin."""
+    member_dirs = {m.resolve() for m in members}
+    stray: list[str] = []
+    root_py = root / "pyproject.toml"
+    if root_py.is_file() and root.resolve() not in member_dirs and PIN_TABLE in _load_toml(root_py).get("tool", {}):
+        stray.append(root_py.relative_to(root).as_posix())
+    if stray:
+        raise RuntimeError(f"pin tables belong on member pyprojects: {stray}")
+
+
 def apply(root: Path) -> SyncReport:
     """Rewrite every member pyproject + every plugin descriptor in place. Idempotent."""
     members = discover_members(root)
+    _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)
     contract_range = _contract_range(first_party)
-    report = SyncReport(spec_changes=[], contract_changes=[])
+    preserved_contract = _preserved_contract_ranges(members, first_party, root)
+    report = SyncReport(spec_changes=[], contract_changes=[], preserved=[], warnings=[], descriptor_untouched=[])
 
     for member in members:
         py_path = member / "pyproject.toml"
         text = py_path.read_text()
         pyproject = tomllib.loads(text)
-        changes = compute_pyproject_changes(pyproject, first_party)
-        if changes:
-            new_text, _ = rewrite_pyproject_text(text, changes)
+        member_path = member.relative_to(root).as_posix()
+        analysis = analyze_pyproject(pyproject, first_party, member_path)
+        for preserved in analysis.preserved:
+            report.preserved.append((member_path, preserved))
+        for warning in analysis.warnings:
+            report.warnings.append((member_path, warning))
+        if analysis.changes:
+            new_text, _ = rewrite_pyproject_text(text, analysis.changes)
             py_path.write_text(new_text)
-            member_path = member.relative_to(root).as_posix()
-            for change in changes:
+            for change in analysis.changes:
                 report.spec_changes.append((member_path, change))
 
-    for yml in plugin_descriptor_files(members, root):
+    for member, yml in plugin_descriptor_files(members, root):
+        member_path = member.relative_to(root).as_posix()
+        yaml_path = yml.relative_to(root).as_posix()
         text = yml.read_text()
         old = contract_yaml_value(text)
-        new_text, changed = rewrite_contract_yaml(text, contract_range)
+        if member_path in preserved_contract:
+            target = preserved_contract[member_path]
+            if target is None:
+                report.descriptor_untouched.append((yaml_path, old or ""))
+                continue  # underivable-floor pin: descriptor left untouched entirely
+        else:
+            target = contract_range
+        new_text, changed = rewrite_contract_yaml(text, target)
         if changed:
             yml.write_text(new_text)
-            report.contract_changes.append((yml.relative_to(root).as_posix(), old or "", contract_range))
+            report.contract_changes.append((yaml_path, old or "", target))
 
     _self_assert(root)
     return report
@@ -377,21 +613,37 @@ def check(root: Path) -> SyncReport:
     """Verify every first-party specifier + contract pin already equals the
     formula output. Returns a report of any drift (does not modify files)."""
     members = discover_members(root)
+    _assert_no_stray_pin_tables(root, members)
     first_party = first_party_versions(members)
     contract_range = _contract_range(first_party)
-    report = SyncReport(spec_changes=[], contract_changes=[])
+    preserved_contract = _preserved_contract_ranges(members, first_party, root)
+    report = SyncReport(spec_changes=[], contract_changes=[], preserved=[], warnings=[], descriptor_untouched=[])
 
     for member in members:
         pyproject = _load_toml(member / "pyproject.toml")
         member_path = member.relative_to(root).as_posix()
-        for change in compute_pyproject_changes(pyproject, first_party):
+        analysis = analyze_pyproject(pyproject, first_party, member_path)
+        for change in analysis.changes:
             report.spec_changes.append((member_path, change))
+        for preserved in analysis.preserved:
+            report.preserved.append((member_path, preserved))
+        for warning in analysis.warnings:
+            report.warnings.append((member_path, warning))
 
-    for yml in plugin_descriptor_files(members, root):
+    for member, yml in plugin_descriptor_files(members, root):
+        member_path = member.relative_to(root).as_posix()
+        yaml_path = yml.relative_to(root).as_posix()
         text = yml.read_text()
         current = contract_yaml_value(text)
-        if current is not None and current != contract_range:
-            report.contract_changes.append((yml.relative_to(root).as_posix(), current, contract_range))
+        if member_path in preserved_contract:
+            target = preserved_contract[member_path]
+            if target is None:
+                report.descriptor_untouched.append((yaml_path, current or ""))
+                continue  # underivable-floor pin: descriptor not flagged, left untouched
+        else:
+            target = contract_range
+        if current is not None and current != target:
+            report.contract_changes.append((yaml_path, current, target))
 
     return report
 
@@ -404,6 +656,16 @@ def check(root: Path) -> SyncReport:
 def _repo_root() -> Path:
     """The repo root is the parent of this script's ``scripts/`` directory."""
     return Path(__file__).resolve().parent.parent
+
+
+def _print_preserved(report: SyncReport) -> None:
+    for member_path, preserved in report.preserved:
+        print(f"range-sync: {member_path}/pyproject.toml: {preserved.dep_name} pinned, left at {preserved.kept_range}")
+
+
+def _print_descriptor_untouched(report: SyncReport) -> None:
+    for yaml_path, kept in report.descriptor_untouched:
+        print(f"range-sync: {yaml_path}: descriptor left untouched (pinned, underivable floor), at {kept!r}")
 
 
 def _format_drift(report: SyncReport) -> str:
@@ -433,6 +695,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         report = check(root)
+        _print_preserved(report)
+        _print_descriptor_untouched(report)
+        for member_path, change in report.warnings:
+            print(
+                f"range-sync: WARNING: {member_path}/pyproject.toml: cross-major rewrite of an "
+                f"unannotated cap for {change.dep_name}: {change.old_req!r} -> {change.new_req!r} — "
+                f"annotate the cap in [tool.{PIN_TABLE}].{PIN_KEY} if it is deliberate."
+            )
         if report.dirty:
             print("range-sync: OUT OF SYNC — first-party ranges do not match the formula:")
             print(_format_drift(report))
@@ -442,6 +712,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     report = apply(root)
+    _print_preserved(report)
+    _print_descriptor_untouched(report)
     if report.dirty:
         print("range-sync: rewrote first-party ranges:")
         print(_format_drift(report))
