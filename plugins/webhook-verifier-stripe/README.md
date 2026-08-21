@@ -181,10 +181,11 @@ Any non-`v1` scheme key (`v0=`, anything unrecognized) is ignored. A missing
 non-int `tolerance_seconds` raises `ValueError` (fails closed), not
 `WebhookVerificationError`.
 
-**Replay residual.** A captured signed delivery replays successfully inside the
-tolerance window — the verifier keeps no `event.id` dedupe store. Impact is
-bounded to duplicate hook fires plus the callback door's idempotent 200; no new
-state, no double answer.
+**Replay defense.** After a delivery passes verification, the verifier claims its
+Stripe `event.id` in a seen-set, so a captured signed delivery replayed inside the
+tolerance window is refused rather than dispatched again. The seen-set TTL runs until
+the signed freshness window ends (`t + tolerance_seconds`) — anchored to the signed
+timestamp and rounded up so an id is never forgotten before that window ends.
 
 ## Development
 

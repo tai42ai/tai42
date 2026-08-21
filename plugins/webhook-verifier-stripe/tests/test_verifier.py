@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
-from tai42_contract.webhooks import WebhookVerificationError
+from tai42_contract.webhooks import SeenSetClaim, WebhookVerificationError
 
 import tai42_webhook_verifier_stripe.verifier as verifier_module
 from tai42_webhook_verifier_stripe.verifier import StripeWebhookVerifier
@@ -287,6 +288,168 @@ def test_empty_secret_env_var_fails_closed(monkeypatch: pytest.MonkeyPatch) -> N
     headers = {"Stripe-Signature": _header(_EXAMPLE_TS, _sign(_EXAMPLE_BODY, "", _EXAMPLE_TS))}
     with pytest.raises(ValueError, match="set but empty"):
         _verify(_EXAMPLE_BODY, headers, _config())
+
+
+def _event_body(event_id: str, data_object_id: str = "obj_generic_1") -> bytes:
+    """A realistic Stripe event envelope with a top-level ``id`` and a nested object.
+
+    Content is generic on purpose: the top-level ``id`` is the idempotency key the
+    seen-set keys on, and the nested ``data.object.id`` is deliberately DISTINCT to
+    prove it is not the key.
+    """
+    event = {
+        "id": event_id,
+        "object": "event",
+        "api_version": "2020-08-27",
+        "created": _EXAMPLE_TS,
+        "type": "ping",
+        "data": {"object": {"id": data_object_id, "object": "thing"}},
+    }
+    return json.dumps(event).encode("utf-8")
+
+
+def _replay_defense(body: bytes, config: dict[str, Any], *, timestamp: int = _EXAMPLE_TS) -> Any:
+    headers = {"Stripe-Signature": _header(timestamp, _EXAMPLE_V1)}
+    return StripeWebhookVerifier().replay_defense(body, headers, config)
+
+
+def test_replay_defense_is_seen_set_keyed_on_event_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A captured, validly-signed delivery replayed within the freshness window would
+    pass ``verify`` again, so replay_defense is a SeenSetClaim keyed on the Stripe
+    event id, with a TTL running to the signed-timestamp accept-window end."""
+    # Signed timestamp == now, so ``t + tolerance - now`` == tolerance (300).
+    _freeze(monkeypatch, _EXAMPLE_TS)
+    body = _event_body("evt_generic_alpha")
+    defense = _replay_defense(body, _config())
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.key == "stripe:evt_generic_alpha"
+    assert defense.ttl_seconds == 300
+
+
+def test_replay_defense_replayed_delivery_yields_same_key() -> None:
+    """The identical delivery replayed yields the SAME claim key — the seen-set can dedup it."""
+    body = _event_body("evt_generic_alpha")
+    first = _replay_defense(body, _config())
+    second = _replay_defense(body, _config())
+    assert isinstance(first, SeenSetClaim)
+    assert isinstance(second, SeenSetClaim)
+    assert first.key == second.key
+
+
+def test_replay_defense_distinct_events_yield_distinct_keys() -> None:
+    """Two distinct events (distinct top-level ids) yield DISTINCT keys even when their
+    ``data`` is identical — the key tracks the event id, not the body content."""
+    body_one = _event_body("evt_generic_alpha", data_object_id="obj_shared")
+    body_two = _event_body("evt_generic_beta", data_object_id="obj_shared")
+    first = _replay_defense(body_one, _config())
+    second = _replay_defense(body_two, _config())
+    assert isinstance(first, SeenSetClaim)
+    assert isinstance(second, SeenSetClaim)
+    assert first.key == "stripe:evt_generic_alpha"
+    assert second.key == "stripe:evt_generic_beta"
+    assert first.key != second.key
+
+
+def test_replay_defense_custom_tolerance_flows_into_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A custom ``tolerance_seconds`` widens the claim's ttl_seconds so the seen-set
+    remembers the event at least as long as ``verify`` would accept a replay."""
+    _freeze(monkeypatch, _EXAMPLE_TS)
+    body = _event_body("evt_generic_alpha")
+    defense = _replay_defense(body, _config(tolerance_seconds=900))
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 900
+
+
+def test_replay_defense_future_timestamp_ttl_exceeds_plain_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A future-dated ``t`` (sender clock ahead) yields a TTL of ``t + tolerance - now``,
+    which EXCEEDS the plain tolerance — so the seen-set does not forget while ``verify``
+    would still accept the replay. A flat receipt-anchored TTL would forget early here."""
+    now = _EXAMPLE_TS
+    future_t = _EXAMPLE_TS + 120
+    _freeze(monkeypatch, now)
+    defense = _replay_defense(_event_body("evt_future"), _config(), timestamp=future_t)
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 120 + 300
+    assert defense.ttl_seconds > 300
+
+
+def test_replay_defense_past_timestamp_ttl_below_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A past ``t`` (already partway through the accept window) yields a TTL below the
+    plain tolerance — the seen-set forgets no earlier than when ``verify`` starts stale-rejecting."""
+    now = _EXAMPLE_TS
+    past_t = _EXAMPLE_TS - 100
+    _freeze(monkeypatch, now)
+    defense = _replay_defense(_event_body("evt_past"), _config(), timestamp=past_t)
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 300 - 100
+    assert defense.ttl_seconds < 300
+
+
+def test_replay_defense_ttl_rounds_up_on_fractional_remainder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The TTL rounds UP (fail-safe): with a fractional ``t + tolerance - now`` the seen-set must
+    not forget before ``verify`` stops accepting, so a truncating ``int`` would reopen a sub-second
+    replay. Here ``t + tolerance - now`` is 299.6, which must round to 300, not 299."""
+    _freeze(monkeypatch, _EXAMPLE_TS + 0.4)
+    defense = _replay_defense(_event_body("evt_fractional"), _config(), timestamp=_EXAMPLE_TS)
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 300  # ceil(299.6); a truncating int() would give 299
+
+
+def test_replay_defense_missing_signature_header_fails_closed() -> None:
+    """The signed ``t`` anchors the TTL, so a delivery reaching replay_defense with no
+    ``Stripe-Signature`` header cannot be anchored — it fails CLOSED, as verify does."""
+    body = _event_body("evt_generic_alpha")
+    with pytest.raises(WebhookVerificationError, match="missing Stripe-Signature"):
+        StripeWebhookVerifier().replay_defense(body, {}, _config())
+
+
+def test_replay_defense_unparseable_signature_header_fails_closed() -> None:
+    """An unparseable ``Stripe-Signature`` (no ``t=`` element) cannot yield the signed
+    timestamp the TTL anchors on, so it fails CLOSED."""
+    body = _event_body("evt_generic_alpha")
+    with pytest.raises(WebhookVerificationError, match="exactly one t="):
+        StripeWebhookVerifier().replay_defense(body, {"Stripe-Signature": "garbage"}, _config())
+
+
+def test_replay_defense_no_top_level_id_fails_closed() -> None:
+    """A body with no top-level ``id`` cannot be deduped, so it fails CLOSED."""
+    body = json.dumps({"object": "event", "type": "ping"}).encode("utf-8")
+    with pytest.raises(WebhookVerificationError, match="top-level 'id'"):
+        _replay_defense(body, _config())
+
+
+def test_replay_defense_empty_id_fails_closed() -> None:
+    """An empty top-level ``id`` cannot key a seen-set, so it fails CLOSED."""
+    body = json.dumps({"id": "", "object": "event", "type": "ping"}).encode("utf-8")
+    with pytest.raises(WebhookVerificationError, match="top-level 'id'"):
+        _replay_defense(body, _config())
+
+
+def test_replay_defense_non_string_id_fails_closed() -> None:
+    """A non-string top-level ``id`` cannot key a seen-set, so it fails CLOSED."""
+    body = json.dumps({"id": 123, "object": "event", "type": "ping"}).encode("utf-8")
+    with pytest.raises(WebhookVerificationError, match="top-level 'id'"):
+        _replay_defense(body, _config())
+
+
+@pytest.mark.parametrize("body", [b"[1,2]", b"123", b'"str"'])
+def test_replay_defense_non_dict_json_fails_closed(body: bytes) -> None:
+    """A valid-JSON body that is not an object (a list/number/string) has no top-level
+    ``id`` mapping, so it cannot be deduped and fails CLOSED."""
+    with pytest.raises(WebhookVerificationError, match="top-level 'id'"):
+        _replay_defense(body, _config())
+
+
+def test_replay_defense_invalid_json_fails_closed() -> None:
+    """A body that is not valid JSON cannot be parsed for its id, so it fails CLOSED."""
+    with pytest.raises(WebhookVerificationError, match="not valid JSON"):
+        _replay_defense(b"{not json", _config())
+
+
+def test_replay_defense_invalid_utf8_body_fails_closed() -> None:
+    """A body that is not valid UTF-8 cannot be JSON-decoded for its id, so it fails CLOSED."""
+    with pytest.raises(WebhookVerificationError, match="not valid JSON"):
+        _replay_defense(b"\xff", _config())
 
 
 def test_is_post_only() -> None:

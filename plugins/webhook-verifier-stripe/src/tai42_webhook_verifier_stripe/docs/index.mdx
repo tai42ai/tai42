@@ -41,6 +41,13 @@ age past which a delivery is rejected:
 Only a stale timestamp is rejected; a future timestamp is not, since sender clock skew
 is not an attack signal.
 
+Within that window the verifier also dedupes replays. After a delivery passes, its
+Stripe `event.id` (the top-level `evt_…`) is claimed in a seen-set, so a captured signed
+delivery replayed inside the window is refused rather than dispatched again.
+The seen-set TTL runs until the signed freshness window ends (`t + tolerance_seconds`) —
+anchored to the signed timestamp and rounded up so an id is never forgotten before that
+window ends. `tolerance_seconds` is the knob that sets the window.
+
 ## Behaviour
 
 - **Fails closed.** A missing `secret_env` key, a missing environment variable, an
@@ -50,6 +57,9 @@ is not an attack signal.
 - **Rotation-tolerant.** A header may carry several `v1=` digests during a secret
   rotation; any one that matches passes, and a malformed candidate is dropped rather
   than rejecting the delivery.
+- **Replay-deduped.** A delivery that passes verification claims its `event.id` in a
+  seen-set; a replay within the window is refused and nothing re-dispatches. The
+  seen-set TTL runs until the signed freshness window ends (`t + tolerance_seconds`).
 - **POST only.** The signature covers the raw body, so a door binding this verifier
   rejects GET.
 

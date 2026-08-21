@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import math
 import os
 import time
 from collections.abc import Mapping
 from typing import Any
 
-from tai42_contract.webhooks import WebhookVerificationError
+from tai42_contract.webhooks import ReplayDefense, SeenSetClaim, WebhookVerificationError
 
 _SIGNATURE_HEADER = "Stripe-Signature"
 # A well-formed v1 digest is 64 hex chars (a SHA-256 digest rendered as hex).
@@ -87,6 +89,42 @@ class StripeWebhookVerifier:
                 return
 
         raise WebhookVerificationError(f"no {_SIGNATURE_HEADER} v1 signature matches the expected digest")
+
+    def replay_defense(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> ReplayDefense:
+        """Defend replay by a seen-set keyed on the Stripe event id.
+
+        Runs AFTER ``verify`` over the same authenticated ``body``, so parsing it is
+        safe. The top-level ``"id"`` field (Stripe's ``evt_...`` event id) is the
+        canonical idempotency key — NOT ``data.object.id``. The claim's TTL is anchored
+        to the END of the accept window ``verify`` enforces — ``verify`` accepts iff
+        ``now - t <= tolerance``, i.e. until ``t + tolerance`` — and the TTL rounds UP so
+        the seen-set never forgets the event before a replay would begin to fail ``verify``
+        as stale (forgetting early would reopen a sub-second replay window). Anchored
+        at the SIGNED timestamp, not receipt: under sender-ahead skew (``t`` > receipt) a
+        flat receipt-anchored TTL would lapse before ``verify`` stopped accepting,
+        reopening the replay. Fails CLOSED: a non-JSON body, a missing/empty/non-string
+        top-level ``"id"``, or a missing/unparseable ``Stripe-Signature`` (needed for
+        ``t``) raises ``WebhookVerificationError`` rather than dispatch a delivery that
+        cannot be deduped.
+        """
+        try:
+            payload = json.loads(body)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise WebhookVerificationError("Stripe webhook body is not valid JSON") from exc
+        event_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(event_id, str) or not event_id:
+            raise WebhookVerificationError("Stripe webhook body has no non-empty string top-level 'id'")
+
+        signature = _header_lookup(headers, _SIGNATURE_HEADER)
+        if signature is None:
+            raise WebhookVerificationError(f"missing {_SIGNATURE_HEADER} header")
+        timestamp, _ = _parse_signature_header(signature)
+
+        # Round UP (fail-safe): the seen-set must not forget before ``t + tolerance``.
+        # Whenever ``verify`` would accept a replay, ``t + tolerance > now`` holds, so the
+        # value is >= 1 before the clamp; the ``max(1, ...)`` only guards the boundary.
+        ttl_seconds = max(1, math.ceil(timestamp + _tolerance_seconds(config) - time.time()))
+        return SeenSetClaim(key=f"stripe:{event_id}", ttl_seconds=ttl_seconds)
 
 
 def _tolerance_seconds(config: dict[str, Any]) -> int:

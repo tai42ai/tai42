@@ -29,11 +29,28 @@ GITHUB_WEBHOOK_SECRET=...
 The variable name is yours to choose — pick a distinct name per topic when one
 deployment verifies several GitHub webhooks with different secrets.
 
+### Replay window
+
+GitHub sends no signed timestamp, so replay is defended by remembering each delivery's
+`X-GitHub-Delivery` id in a seen-set. `config` takes an optional `replay_window_seconds`
+(a positive int, default `86400` — one day) setting how long an id is remembered:
+
+```json
+{"verifier": "github", "config": {"secret_env": "GITHUB_WEBHOOK_SECRET", "replay_window_seconds": 86400}}
+```
+
+A delivery whose id was already seen within that window is refused as a replay. A manual
+redelivery of the same event carries the same id and is the correct idempotent no-op.
+
 ## Behaviour
 
-- **Fails closed.** A missing `secret_env` key, a missing environment variable, or an
-  empty secret raises loudly rather than degrading to an unauthenticated door. A
-  malformed or mismatched signature is an ordinary verification failure.
+- **Fails closed.** A missing `secret_env` key, a missing environment variable, an
+  empty secret, a missing `X-GitHub-Delivery` header, or a non-positive / non-int
+  `replay_window_seconds` raises loudly rather than degrading to an unauthenticated
+  door. A malformed or mismatched signature is an ordinary verification failure.
+- **Replay-deduped.** Each delivery's `X-GitHub-Delivery` id is remembered in a
+  seen-set for `replay_window_seconds` (default one day); a replay within the window is
+  refused and nothing re-dispatches.
 - **POST only.** The signature covers the raw body, so a door binding this verifier
   rejects GET.
 - The comparison is constant-time, and the `sha256=` digest must be exactly 64 hex
