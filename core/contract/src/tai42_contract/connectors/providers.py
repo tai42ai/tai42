@@ -125,6 +125,9 @@ class ProviderDescriptor(BaseModel):
     display_name: str
     description: str = ""
     icon_url: str
+    """An ``https://`` URL to the provider's icon; http, relative, or empty is
+    rejected. The catalog serves this value verbatim as a brand mark, the same
+    rule the plugin spec's ``icon`` enforces."""
     # "oauth": runs the OAuth dance; carries ``oauth`` + client envs +
     # per-sub-service scopes. "none": no-auth — no OAuth, optional client-supplied
     # ``config_fields``. A descriptor is registered from the manifest
