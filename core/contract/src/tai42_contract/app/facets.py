@@ -284,9 +284,10 @@ class AppAccounts(Protocol):
 @runtime_checkable
 class AppConnectors(Protocol):
     def register_connector(self, descriptor: ProviderDescriptor) -> None:
-        """Register an OAuth connector provider from its pure descriptor data. A
-        provider plugin calls this through the ``tai42_app`` handle when the manifest
-        loads it (a connector is pure data, so this is a plain call, not a decorator)."""
+        """Register a connector provider from its pure descriptor data. Called for
+        every manifest ``connectors`` entry at boot/reload, and by any code holding
+        the handle (a connector is pure data, so this is a plain call, not a
+        decorator)."""
         ...
 
     @property

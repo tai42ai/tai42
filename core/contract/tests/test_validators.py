@@ -230,6 +230,24 @@ def test_provider_id_invalid_raises():
         _oauth_provider(id="Google")
 
 
+def test_provider_icon_url_accepts_https():
+    assert _oauth_provider(icon_url="https://cdn.example.com/mark.png").icon_url == "https://cdn.example.com/mark.png"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://cdn.example.com/mark.png",  # not https
+        "/static/connector-icons/mark.svg",  # relative, no scheme/host
+        "mark.png",  # bare relative path
+        "",  # empty
+    ],
+)
+def test_provider_icon_url_rejects_non_https(bad: str):
+    with pytest.raises(ValueError, match="icon_url"):
+        _oauth_provider(icon_url=bad)
+
+
 def test_provider_sub_services_empty_raises():
     with pytest.raises(ValueError, match="at least one sub-service"):
         _oauth_provider(sub_services={})

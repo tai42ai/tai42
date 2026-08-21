@@ -16,7 +16,8 @@ contract itself has no YAML dependency.
 kind wires into a :class:`~tai42_contract.manifest.Manifest`: which manifest
 field an installer patches and with what shape (a config row, a module-list
 entry, a single-module slot, a package-name entry, an ``mcp`` transport entry,
-or no manifest field at all for the env-selected ``config`` kind).
+a ``connectors`` descriptor-list append, or no manifest field at all for the
+env-selected ``config`` kind).
 
 Version strings are validated as PEP 440 (an anchored regex of the spec's
 canonical pattern) and ``contract`` as a PEP 440 specifier set — shape-level
@@ -36,10 +37,11 @@ from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tai42_contract._urls import check_web_url, is_control_char
+from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.manifest import MCPConfig
 
 # Lowercase slug for the publisher namespace, the listing name, and categories:
@@ -152,51 +154,6 @@ def _check_specifier_clause(clause: str) -> None:
         raise ValueError(f"specifier clause {clause!r}: ~= needs at least two release segments")
 
 
-# Unicode line/paragraph separators that a naive ``"\n" in value`` check misses
-# but which drive a line break (or overwrite) in a terminal or UI. (U+0085 NEL
-# is itself a C1 control and is caught by the 0x7F..0x9F range below.)
-_UNICODE_LINE_SEPARATORS = frozenset("\u2028\u2029\u0085")
-
-
-# Unicode bidirectional and zero-width format controls. In free text rendered
-# untrusted in a marketplace UI these enable Trojan-Source visual spoofing
-# (CVE-2021-42574): bidi overrides/isolates reorder displayed characters and
-# zero-width spaces/BOM hide or splice tokens. Held as explicit code points (not
-# a Unicode-category ban) so that U+200D ZWJ (emoji sequences) and U+200C ZWNJ
-# (required for legitimate Persian/Farsi text) — and all ordinary RTL letters —
-# stay allowed.
-_BIDI_FORMAT_CONTROLS = frozenset(
-    {
-        "؜",  # ARABIC LETTER MARK
-        "‎",  # LEFT-TO-RIGHT MARK
-        "‏",  # RIGHT-TO-LEFT MARK
-        "‪",  # LEFT-TO-RIGHT EMBEDDING
-        "‫",  # RIGHT-TO-LEFT EMBEDDING
-        "‬",  # POP DIRECTIONAL FORMATTING
-        "‭",  # LEFT-TO-RIGHT OVERRIDE
-        "‮",  # RIGHT-TO-LEFT OVERRIDE
-        "⁦",  # LEFT-TO-RIGHT ISOLATE
-        "⁧",  # RIGHT-TO-LEFT ISOLATE
-        "⁨",  # FIRST STRONG ISOLATE
-        "⁩",  # POP DIRECTIONAL ISOLATE
-        "​",  # ZERO WIDTH SPACE
-        "﻿",  # ZERO WIDTH NO-BREAK SPACE / BOM
-    }
-)
-
-
-def _is_control_char(ch: str) -> bool:
-    """True if ``ch`` is a control, line/paragraph separator, or bidirectional /
-    zero-width format character: a C0 control (``ord < 0x20``), ``DEL`` or any C1
-    control (``0x7F..0x9F``, which covers U+0085 NEL, U+009B CSI, U+009D OSC,
-    ...), U+2028/U+2029, or one of the bidi/zero-width format controls in
-    :data:`_BIDI_FORMAT_CONTROLS` (LRM/RLM, embeddings/overrides, isolates, ALM,
-    ZWSP, BOM). This is the terminal-escape / line-overwrite / Trojan-Source
-    injection class. A regular ASCII space (``0x20``), U+200D ZWJ, and U+200C
-    ZWNJ are NOT rejected."""
-    return ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or ch in _UNICODE_LINE_SEPARATORS or ch in _BIDI_FORMAT_CONTROLS
-
-
 def _has_disallowed_control_char(value: str) -> bool:
     """True if ``value`` holds any C0 or C1 control character, ``DEL``, a Unicode
     line/paragraph separator, or a bidirectional / zero-width format control
@@ -204,7 +161,7 @@ def _has_disallowed_control_char(value: str) -> bool:
     line-overwrite / visual-spoofing injection. A regular ASCII space
     (``0x20``), U+200D ZWJ, and U+200C ZWNJ are allowed, so ordinary spaced
     prose, emoji sequences, and legitimate Persian/Farsi text pass."""
-    return any(_is_control_char(ch) for ch in value)
+    return any(is_control_char(ch) for ch in value)
 
 
 def _check_one_line(value: str, *, field: str = "description") -> str:
@@ -212,31 +169,6 @@ def _check_one_line(value: str, *, field: str = "description") -> str:
         raise ValueError(f"{field} must be non-empty")
     if _has_disallowed_control_char(value):
         raise ValueError(f"{field} must be a single line with no control characters")
-    return value
-
-
-def _check_web_url(value: str, *, field: str, schemes: tuple[str, ...]) -> str:
-    """Validate a single-line http(s) URL.
-
-    Rejects any whitespace or control character (a URL never contains raw
-    whitespace, so this also rules out embedded newlines) and requires a
-    parseable ``scheme://host`` whose scheme is in ``schemes``, whose host is
-    non-empty, and which carries no embedded userinfo (a ``user@host``
-    authority-spoofing form). Raises ``ValueError`` naming ``field``.
-    """
-    if any(ch.isspace() or _is_control_char(ch) for ch in value):
-        raise ValueError(f"{field} must be a single-line URL with no whitespace or control characters")
-    try:
-        split = urlsplit(value)
-    except ValueError:
-        raise ValueError(f"{field} must be a {' or '.join(schemes)} URL") from None
-    if split.scheme not in schemes:
-        raise ValueError(f"{field} must be a {' or '.join(schemes)} URL")
-    # A real host and no embedded userinfo: a bare ``scheme://`` (no host), a
-    # ``scheme://user@host`` credential form (the ``trusted.com@evil.com``
-    # authority-spoofing vector), or a hostless ``scheme://user@`` is rejected.
-    if not split.hostname or "@" in split.netloc:
-        raise ValueError(f"{field} must include a host and no embedded credentials")
     return value
 
 
@@ -281,7 +213,9 @@ class ManifestBinding(BaseModel):
     """How one provided item kind wires into a ``Manifest``.
 
     ``field`` names the manifest field an installer patches for an item of
-    this kind; ``mode`` is the patch shape:
+    this kind; ``mode`` is the patch shape; ``payload`` is the axis the item
+    carries — ``module`` (the item names an import path) or ``data`` (the item
+    carries its kind's declarative block):
 
     - ``config_row`` — append a config row (``tools``/``agents``) whose
       ``module`` is the item's module.
@@ -293,15 +227,23 @@ class ManifestBinding(BaseModel):
       module) to a package list (``studio_plugins``).
     - ``mcp_entry`` — append one ``{title: item.name, config: item.mcp}`` object
       to the manifest ``mcp`` list; uninstall removes the entry by title.
+    - ``descriptor_entry`` — append the item's ``provider`` descriptor to the
+      manifest ``connectors`` list; uninstall removes by ``provider.id``.
     - ``env_selected`` — no manifest field: the kind is selected through the
       environment (a ``config`` provider is named by ``TAI_CONFIG_MODE`` and
       imported by the config seam), so ``field`` is ``None``.
+
+    The data modes (``mcp_entry``, ``descriptor_entry``) carry ``payload ==
+    "data"``; every other mode carries ``payload == "module"``.
     """
 
     model_config = ConfigDict(frozen=True)
 
     field: str | None
-    mode: Literal["config_row", "module_list", "scalar_module", "package_list", "mcp_entry", "env_selected"]
+    mode: Literal[
+        "config_row", "module_list", "scalar_module", "package_list", "mcp_entry", "descriptor_entry", "env_selected"
+    ]
+    payload: Literal["module", "data"]
 
     @model_validator(mode="after")
     def _field_iff_manifest_wired(self) -> ManifestBinding:
@@ -309,28 +251,53 @@ class ManifestBinding(BaseModel):
             raise ValueError("field must be None exactly when mode is 'env_selected'")
         return self
 
+    @model_validator(mode="after")
+    def _payload_matches_mode(self) -> ManifestBinding:
+        if (self.mode in ("mcp_entry", "descriptor_entry")) != (self.payload == "data"):
+            raise ValueError("payload must be 'data' exactly when mode is 'mcp_entry' or 'descriptor_entry'")
+        return self
+
 
 # The single source of kind→manifest wiring, consumed by the skeleton
 # installer (patch/unpatch) and the marketplace registry (item classification).
 KIND_MANIFEST_BINDINGS: Mapping[PluginItemKind, ManifestBinding] = MappingProxyType(
     {
-        PluginItemKind.TOOL: ManifestBinding(field="tools", mode="config_row"),
-        PluginItemKind.AGENT: ManifestBinding(field="agents", mode="config_row"),
-        PluginItemKind.EXTENSION: ManifestBinding(field="extensions_modules", mode="module_list"),
-        PluginItemKind.CONNECTOR: ManifestBinding(field="lifecycle_modules", mode="module_list"),
-        PluginItemKind.CHANNEL: ManifestBinding(field="channel_modules", mode="module_list"),
-        PluginItemKind.BACKEND: ManifestBinding(field="backend_module", mode="scalar_module"),
-        PluginItemKind.STORAGE: ManifestBinding(field="storage_module", mode="scalar_module"),
-        PluginItemKind.MONITORING: ManifestBinding(field="monitoring_module", mode="scalar_module"),
-        PluginItemKind.WEBHOOK_VERIFIER: ManifestBinding(field="webhook_verifier_modules", mode="module_list"),
-        PluginItemKind.CONFIG: ManifestBinding(field=None, mode="env_selected"),
-        PluginItemKind.IDENTITY: ManifestBinding(field="lifecycle_modules", mode="module_list"),
-        PluginItemKind.STUDIO_PLUGIN: ManifestBinding(field="studio_plugins", mode="package_list"),
-        PluginItemKind.ROUTER: ManifestBinding(field="routers_modules", mode="module_list"),
-        PluginItemKind.MIDDLEWARE: ManifestBinding(field="middlewares_modules", mode="module_list"),
-        PluginItemKind.MCP_SERVER: ManifestBinding(field="mcp", mode="mcp_entry"),
+        PluginItemKind.TOOL: ManifestBinding(field="tools", mode="config_row", payload="module"),
+        PluginItemKind.AGENT: ManifestBinding(field="agents", mode="config_row", payload="module"),
+        PluginItemKind.EXTENSION: ManifestBinding(field="extensions_modules", mode="module_list", payload="module"),
+        PluginItemKind.CONNECTOR: ManifestBinding(field="connectors", mode="descriptor_entry", payload="data"),
+        PluginItemKind.CHANNEL: ManifestBinding(field="channel_modules", mode="module_list", payload="module"),
+        PluginItemKind.BACKEND: ManifestBinding(field="backend_module", mode="scalar_module", payload="module"),
+        PluginItemKind.STORAGE: ManifestBinding(field="storage_module", mode="scalar_module", payload="module"),
+        PluginItemKind.MONITORING: ManifestBinding(field="monitoring_module", mode="scalar_module", payload="module"),
+        PluginItemKind.WEBHOOK_VERIFIER: ManifestBinding(
+            field="webhook_verifier_modules", mode="module_list", payload="module"
+        ),
+        PluginItemKind.CONFIG: ManifestBinding(field=None, mode="env_selected", payload="module"),
+        PluginItemKind.IDENTITY: ManifestBinding(field="lifecycle_modules", mode="module_list", payload="module"),
+        PluginItemKind.STUDIO_PLUGIN: ManifestBinding(field="studio_plugins", mode="package_list", payload="module"),
+        PluginItemKind.ROUTER: ManifestBinding(field="routers_modules", mode="module_list", payload="module"),
+        PluginItemKind.MIDDLEWARE: ManifestBinding(field="middlewares_modules", mode="module_list", payload="module"),
+        PluginItemKind.MCP_SERVER: ManifestBinding(field="mcp", mode="mcp_entry", payload="data"),
     }
 )
+
+
+# The declarative block a data item of each kind carries — the field the item
+# sets in place of ``module``. Its keys are exactly the data kinds.
+DATA_BLOCK_BY_KIND: Mapping[PluginItemKind, str] = MappingProxyType(
+    {
+        PluginItemKind.MCP_SERVER: "mcp",
+        PluginItemKind.CONNECTOR: "provider",
+    }
+)
+
+
+def data_kinds() -> frozenset[PluginItemKind]:
+    """The item kinds whose binding carries ``payload == "data"`` — the kinds a
+    declarative (no-``module``) item is built for. Derived from
+    ``KIND_MANIFEST_BINDINGS`` so the payload table stays the one source."""
+    return frozenset(kind for kind, binding in KIND_MANIFEST_BINDINGS.items() if binding.payload == "data")
 
 
 class PluginPermissions(BaseModel):
@@ -465,9 +432,13 @@ class PluginItem(BaseModel):
     (or, for env-selected kinds, the module the selecting seam imports); the
     installer patches it into the manifest per ``KIND_MANIFEST_BINDINGS``.
 
-    The item shape is kind-conditional (a model validator enforces it, loud
-    both ways): an ``mcp-server`` item carries ``mcp`` transport config and no
-    ``module``; every other kind carries ``module`` and no ``mcp``.
+    The item shape is table-driven on ``KIND_MANIFEST_BINDINGS`` (a model
+    validator enforces it, loud both ways): a data-payload kind carries exactly
+    the declarative block :data:`DATA_BLOCK_BY_KIND` names for it — ``mcp``
+    transport config for ``mcp-server``, a ``provider`` descriptor for
+    ``connector`` — and no ``module``; every module-payload kind carries
+    ``module`` and no data block. A ``connector`` item's ``name`` MUST equal its
+    ``provider.id`` — that id is the manifest/uninstall key.
 
     ``routes`` declares the item's HTTP mount: REQUIRED for ``kind: router``,
     OPTIONAL for ``kind: channel``, and FORBIDDEN (must be absent) for every
@@ -487,6 +458,7 @@ class PluginItem(BaseModel):
     name: str
     module: str | None = None
     mcp: MCPConfig | None = None
+    provider: ProviderDescriptor | None = None
     description: str
     tags: list[str] = Field(default_factory=list)
     group: str | None = None
@@ -502,8 +474,9 @@ class PluginItem(BaseModel):
     @field_validator("module")
     @classmethod
     def _check_module(cls, value: str | None) -> str | None:
-        # Presence is the model validator's concern (required iff not
-        # mcp-server); this checks only shape when a value is given.
+        # Presence is the model validator's concern (module is required for the
+        # module-payload kinds, not the data-payload mcp-server/connector); this
+        # checks only shape when a value is given.
         if value is None:
             return None
         if not MODULE_RE.fullmatch(value):
@@ -531,24 +504,40 @@ class PluginItem(BaseModel):
 
     @model_validator(mode="after")
     def _shape_by_kind(self) -> PluginItem:
-        if self.kind is PluginItemKind.MCP_SERVER:
-            if self.mcp is None:
-                raise ValueError(f"kind {self.kind.value!r} requires 'mcp' transport config")
-            # A static mcp-server spec must name a reachable transport: MCPConfig
-            # permits zero-transport only for runtime entries built empty then
-            # mutated, so require it loudly at the plugin boundary rather than
-            # letting an empty shell surface late at spawn. Its own validator
-            # already guarantees at MOST one of url/uds/command; this adds the
-            # at-least-one requirement.
-            if self.mcp.url is None and self.mcp.uds is None and self.mcp.command is None:
-                raise ValueError(f"kind {self.kind.value!r} 'mcp' must declare a transport (url/uds/command)")
-            if self.module is not None:
-                raise ValueError(f"kind {self.kind.value!r} must not set 'module'")
-        else:
+        # Table-driven on the payload axis: a data kind carries exactly the
+        # block :data:`DATA_BLOCK_BY_KIND` names for it and no ``module``; a
+        # module kind carries ``module`` and no data block.
+        expected_block = DATA_BLOCK_BY_KIND.get(self.kind)
+        if expected_block is None:
             if self.module is None:
                 raise ValueError(f"kind {self.kind.value!r} requires 'module'")
-            if self.mcp is not None:
-                raise ValueError(f"kind {self.kind.value!r} must not set 'mcp'")
+            for block in DATA_BLOCK_BY_KIND.values():
+                if getattr(self, block) is not None:
+                    raise ValueError(f"kind {self.kind.value!r} must not set {block!r}")
+        else:
+            if getattr(self, expected_block) is None:
+                raise ValueError(f"kind {self.kind.value!r} requires {expected_block!r}")
+            if self.module is not None:
+                raise ValueError(f"kind {self.kind.value!r} must not set 'module'")
+            for block in DATA_BLOCK_BY_KIND.values():
+                if block != expected_block and getattr(self, block) is not None:
+                    raise ValueError(f"kind {self.kind.value!r} must not set {block!r}")
+            if self.kind is PluginItemKind.MCP_SERVER:
+                # A static mcp-server spec must name a reachable transport:
+                # MCPConfig permits zero-transport only for runtime entries built
+                # empty then mutated, so require it loudly at the plugin boundary
+                # rather than letting an empty shell surface late at spawn. Its
+                # own validator already guarantees at MOST one of
+                # url/uds/command; this adds the at-least-one requirement.
+                assert self.mcp is not None
+                if self.mcp.url is None and self.mcp.uds is None and self.mcp.command is None:
+                    raise ValueError(f"kind {self.kind.value!r} 'mcp' must declare a transport (url/uds/command)")
+            elif self.kind is PluginItemKind.CONNECTOR:
+                # ``provider.id`` is the manifest ``connectors`` key and the
+                # uninstall key, so the item name must equal it.
+                assert self.provider is not None
+                if self.name != self.provider.id:
+                    raise ValueError(f"connector item name {self.name!r} must equal provider.id {self.provider.id!r}")
         if self.kind is PluginItemKind.ROUTER:
             if self.routes is None:
                 raise ValueError(f"kind {self.kind.value!r} requires 'routes'")
@@ -562,20 +551,27 @@ class PluginSpec(BaseModel):
 
     Frozen and ``extra="forbid"``: a typo'd key fails validation loudly. The
     listing reference is ``namespace/name`` (:attr:`ref`); ``package`` is the
-    normalized pip distribution the listing points at; ``version`` must equal
-    the built wheel's version (each plugin repo's spec test and the registry's
+    normalized pip distribution the listing points at, OPTIONAL because a spec
+    whose every item is a data item (``mcp-server``/``connector``) may ship no
+    package — a *descriptor-only* plugin that installs nothing but its manifest
+    entry. :attr:`delivery` derives the one word every surface shows
+    (``"package"`` when ``package`` is set, ``"descriptor"`` when absent); a
+    spec with any module item MUST name a package. ``version`` must equal the
+    built wheel's version (each plugin repo's spec test and the registry's
     ingest validation both pin that); ``contract`` is the tai42-contract
     compatibility range as a PEP 440 specifier set, required unless every
     provided item is kind ``mcp-server`` (such a package imports no contract),
-    and a spec may not mix ``mcp-server`` with any other kind. ``display_name``
-    and ``icon`` are optional marketplace display metadata; ``premium`` marks a
-    paid listing.
+    and a spec may not mix ``mcp-server`` with any other kind. A connector
+    item's ``provider.origin`` is ``system`` iff the listing namespace is
+    ``tai42`` — a community listing may not claim the system label.
+    ``display_name`` and ``icon`` are optional marketplace display metadata;
+    ``premium`` marks a paid listing.
 
     ``migrations`` is an OPT-IN, package-relative directory holding the plugin's
     ordered SQL schema chain — absent means the plugin owns no tables and is not
-    a migrations plugin (most plugins). The contract validates only the path's
-    SHAPE; the directory's existence in the installed package is enforced at
-    runner-discovery time, not here.
+    a migrations plugin (most plugins); it requires a ``package``. The contract
+    validates only the path's SHAPE; the directory's existence in the installed
+    package is enforced at runner-discovery time, not here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -584,7 +580,7 @@ class PluginSpec(BaseModel):
     namespace: str
     name: str
     display_name: str | None = None
-    package: str
+    package: str | None = None
     version: str
     description: str
     icon: str | None = None
@@ -603,6 +599,12 @@ class PluginSpec(BaseModel):
     def ref(self) -> str:
         """The full listing reference, ``namespace/name``."""
         return f"{self.namespace}/{self.name}"
+
+    @property
+    def delivery(self) -> Literal["package", "descriptor"]:
+        """How the plugin is delivered: ``"descriptor"`` when it ships no
+        package (an all-data, install-nothing listing), else ``"package"``."""
+        return "descriptor" if self.package is None else "package"
 
     @field_validator("namespace", "name")
     @classmethod
@@ -623,7 +625,11 @@ class PluginSpec(BaseModel):
 
     @field_validator("package")
     @classmethod
-    def _check_package(cls, value: str) -> str:
+    def _check_package(cls, value: str | None) -> str | None:
+        # Presence is the model validator's concern (required iff any module
+        # item); this checks only shape when a value is given.
+        if value is None:
+            return None
         if not PACKAGE_RE.fullmatch(value):
             raise ValueError(f"package {value!r} must be the normalized pip distribution name")
         return value
@@ -646,7 +652,7 @@ class PluginSpec(BaseModel):
         if value is None:
             return None
         if value.startswith("https://"):
-            return _check_web_url(value, field="icon", schemes=("https",))
+            return check_web_url(value, field="icon", schemes=("https",))
         if not ICON_RE.fullmatch(value):
             raise ValueError(
                 f"icon {value!r} must be an https:// URL or a relative POSIX path "
@@ -668,7 +674,7 @@ class PluginSpec(BaseModel):
     def _check_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _check_web_url(value, field="homepage/repository", schemes=("http", "https"))
+        return check_web_url(value, field="homepage/repository", schemes=("http", "https"))
 
     @field_validator("contract")
     @classmethod
@@ -756,6 +762,36 @@ class PluginSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _package_by_payload(self) -> PluginSpec:
+        # Delivery axis: a plugin with any code (module-payload) item must name
+        # the pip distribution that ships it; an all-data spec may be
+        # descriptor-only (no package). ``migrations`` are packaged SQL — a
+        # cross-field rule the ``migrations`` field validator cannot see — so
+        # they also require a package.
+        has_module_item = any(KIND_MANIFEST_BINDINGS[item.kind].payload == "module" for item in self.provides)
+        if has_module_item and self.package is None:
+            raise ValueError("a plugin with code items must name its package")
+        if self.migrations is not None and self.package is None:
+            raise ValueError("migrations require a package")
+        return self
+
+    @model_validator(mode="after")
+    def _connector_origin_matches_namespace(self) -> PluginSpec:
+        # The ``system`` label is reserved for the ``tai42`` namespace: a
+        # community listing may not ship a connector marked ``system`` and a
+        # ``tai42`` listing may not mark one ``community``. The value is never
+        # rewritten — a mismatch is a loud reject.
+        for item in self.provides:
+            if item.kind is PluginItemKind.CONNECTOR:
+                assert item.provider is not None
+                if (item.provider.origin == "system") != (self.namespace == "tai42"):
+                    raise ValueError(
+                        f"connector {item.name!r} origin {item.provider.origin!r} must be 'system' "
+                        f"iff namespace is 'tai42' (namespace is {self.namespace!r})"
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _no_route_collisions(self) -> PluginSpec:
         # One-owner-per-route within the spec: two declared rows collide when
         # their resolved shapes overlap AND their method sets intersect. Same
@@ -781,6 +817,7 @@ class PluginSpec(BaseModel):
 
 
 __all__ = [
+    "DATA_BLOCK_BY_KIND",
     "KIND_MANIFEST_BINDINGS",
     "ManifestBinding",
     "PluginItem",
@@ -790,4 +827,5 @@ __all__ = [
     "RouteDecl",
     "RouteMethod",
     "RoutesDecl",
+    "data_kinds",
 ]
