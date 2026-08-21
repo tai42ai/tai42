@@ -231,11 +231,14 @@ def refuse_unset_connector_env(preserved_manifest: Mapping[str, Any], effective_
     """Refuse a change that leaves an ``oauth`` connector's client-credential env unset.
 
     Each ``connectors[*]`` entry with ``kind == "oauth"`` names a ``client_id_env`` and
-    a ``client_secret_env`` the OAuth client reads at connect time. These names live in
-    the descriptor, not in a scanned ``!ENV`` marker, so :func:`refuse_dangling_env_markers`
-    cannot see them. Both must be present in *effective_env*, else :class:`ValueError`
-    naming each ``(VAR, json-pointer)`` pair (names only, never a value) — the operations
-    layer maps it to a 400."""
+    a ``client_secret_env`` the OAuth client reads STRAIGHT from ``os.environ`` at connect
+    time. These names live in the descriptor, not in a scanned ``!ENV`` marker, so
+    :func:`refuse_dangling_env_markers` cannot see them. *effective_env* is the FULL
+    process environment the connector will see at connect time (never a narrowed profile
+    band — a profile that omits a deployment-supplied cred does not remove it from the
+    process env), so both must be present in it, else :class:`ValueError` naming each
+    ``(VAR, json-pointer)`` pair (names only, never a value) — the operations layer maps
+    it to a 400."""
     connectors = preserved_manifest.get("connectors")
     if not isinstance(connectors, list):
         return
@@ -254,13 +257,26 @@ def refuse_unset_connector_env(preserved_manifest: Mapping[str, Any], effective_
         )
 
 
-def refuse_unresolved_env(preserved_manifest: Mapping[str, Any], effective_env: Mapping[str, str]) -> None:
+def refuse_unresolved_env(
+    preserved_manifest: Mapping[str, Any],
+    effective_env: Mapping[str, str],
+    *,
+    connector_env: Mapping[str, str] | None = None,
+) -> None:
     """The single env-resolution authority: run BOTH the dangling ``!ENV`` refusal and the
-    unset connector-env refusal against *effective_env*.
+    unset connector-env refusal.
+
+    Markers resolve against *effective_env* — the modeled post-change band. Connector
+    client-credential env resolves against *connector_env* (defaulting to *effective_env*):
+    the FULL process environment the OAuth client reads at connect time. A whole-env REPLACE
+    (a settings-profile apply) models a NARROWED band for markers — a dropped stored key must
+    still dangle — but the connector reads the live ``os.environ`` a profile does not own, so
+    the replace path passes the wider *connector_env* to keep a deployment-supplied cred from
+    reading as unset.
 
     Every former :func:`refuse_dangling_env_markers` caller (the config pipeline's four
     validate seams and the offline ``tai manifest validate`` / ``tai config lint`` door)
     crosses this one function, so a manifest write is refused whenever it would leave EITHER
     a marker or an oauth connector's credential env unresolved."""
     refuse_dangling_env_markers(preserved_manifest, effective_env)
-    refuse_unset_connector_env(preserved_manifest, effective_env)
+    refuse_unset_connector_env(preserved_manifest, effective_env if connector_env is None else connector_env)
