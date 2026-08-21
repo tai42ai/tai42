@@ -1,0 +1,48 @@
+spec_version: 1
+namespace: acme
+name: __PLUGIN_NAME__
+version: 0.0.0
+display_name: Acme
+description: OAuth connector provider for Acme.
+icon: https://example.invalid/icon.png
+license: Apache-2.0
+homepage: https://example.invalid
+repository: https://example.invalid
+contract: '>=2,<3'
+categories: [connectors]
+tags: [connector, oauth]
+permissions: {network: false, subprocess: false, filesystem: false}
+provides:
+  - kind: connector
+    # The connector item name MUST equal provider.id below (the manifest and
+    # uninstall key). Rename both together.
+    name: acme
+    description: OAuth connector for Acme.
+    provider:
+      id: acme
+      kind: oauth
+      # ``system`` is reserved for the tai42 namespace; a community listing is
+      # ``community``. Keep this in step with the ``namespace`` above.
+      origin: community
+      category: communication
+      display_name: Acme
+      description: Connect your Acme account.
+      icon_url: https://example.invalid/icon.png
+      oauth:
+        authorize: https://example.invalid/oauth/authorize
+        token: https://example.invalid/oauth/token
+        revoke: https://example.invalid/oauth/revoke
+      # The operator sets these env vars to their own OAuth client credentials;
+      # the client secret is masked automatically.
+      client_id_env: CONNECTORS_ACME_CLIENT_ID
+      client_secret_env: CONNECTORS_ACME_CLIENT_SECRET
+      extra_authorize_params: {access_type: offline}
+      sub_services:
+        acme:
+          id: acme
+          display_name: Acme
+          description: Sample Acme sub-service on a hosted MCP server.
+          scopes: [https://example.invalid/auth/acme.readonly]
+          mcp_server:
+            type: http
+            url: https://example.invalid/mcp

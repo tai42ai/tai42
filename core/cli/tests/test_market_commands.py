@@ -228,6 +228,117 @@ def test_install_dry_run_exits_nonzero_on_collision(monkeypatch) -> None:
     assert "collision" in result.output
 
 
+def _route_capture(preview_payload: dict, action_payload: dict):
+    """A handler that routes ``/install/preview`` to ``preview_payload`` and any
+    other POST to ``action_payload``; returns ``(handler, calls)`` recording every
+    request so a test can assert both the preview and the mutating post."""
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        calls.append({"method": request.method, "path": request.url.path, "body": body})
+        if request.url.path.endswith("/install/preview"):
+            return data_response(preview_payload)
+        return data_response(action_payload)
+
+    return handler, calls
+
+
+def _last(calls: list[dict], suffix: str) -> dict | None:
+    """The last recorded call whose path ends with ``suffix`` (never the preview)."""
+    hits = [c for c in calls if c["path"].endswith(suffix) and not c["path"].endswith("/install/preview")]
+    return hits[-1] if hits else None
+
+
+def test_install_env_and_secret_land_in_body(monkeypatch) -> None:
+    handler, calls = _route_capture({"missing_env": [], "delivery": "descriptor"}, {"ref": "acme/iota"})
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["plugins", "install", "acme/iota", "--env", "IOTA_TOKEN=abc", "--secret", "IOTA_EXTRA"],
+    )
+    assert result.exit_code == 0, result.output
+    install = _last(calls, "/install")
+    assert install is not None
+    assert install["body"] == {"ref": "acme/iota", "env": {"IOTA_TOKEN": "abc"}, "secret_keys": ["IOTA_EXTRA"]}
+
+
+def test_install_uncovered_required_env_exits_nonzero_and_names_it(monkeypatch) -> None:
+    handler, calls = _route_capture({"missing_env": ["IOTA_TOKEN", "KAPPA_KEY"]}, {"ref": "acme/iota"})
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/iota", "--env", "IOTA_TOKEN=abc"])
+    assert result.exit_code != 0
+    # The still-missing var is named; the supplied one is not re-reported.
+    assert "KAPPA_KEY" in result.output
+    # The install is refused BEFORE it is posted — only the preview ran.
+    assert _last(calls, "/install") is None
+
+
+def test_install_supplied_required_env_proceeds(monkeypatch) -> None:
+    handler, calls = _route_capture({"missing_env": ["IOTA_TOKEN"]}, {"ref": "acme/iota"})
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/iota", "--env", "IOTA_TOKEN=abc"])
+    assert result.exit_code == 0, result.output
+    install = _last(calls, "/install")
+    assert install is not None
+    assert install["body"]["env"] == {"IOTA_TOKEN": "abc"}
+
+
+def test_install_duplicate_env_key_is_a_usage_error(monkeypatch) -> None:
+    handler, _ = _capture()
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/iota", "--env", "K=a", "--env", "K=b"])
+    assert result.exit_code != 0
+    assert "more than once" in strip_ansi(result.output)
+
+
+def test_install_dry_run_shows_delivery_and_required_env(monkeypatch) -> None:
+    handler, captured = _capture()
+    captured["_payload"] = {
+        "ref": "acme/iota",
+        "delivery": "descriptor",
+        "required_env": [{"name": "IOTA_TOKEN", "secret": True}],
+        "missing_env": ["IOTA_TOKEN"],
+        "items": [],
+        "collisions": [],
+    }
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "acme/iota", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/marketplace/install/preview"
+    out = strip_ansi(result.output)
+    assert "delivery: descriptor" in out
+    assert "IOTA_TOKEN" in out
+    assert "secret" in out
+
+
+def test_update_env_and_secret_land_in_body(monkeypatch) -> None:
+    handler, calls = _route_capture({"missing_env": []}, {"ref": "acme/iota"})
+    result = run_cli(
+        monkeypatch,
+        handler,
+        ["plugins", "update", "acme/iota", "--env", "IOTA_TOKEN=abc", "--secret", "IOTA_EXTRA"],
+    )
+    assert result.exit_code == 0, result.output
+    update = _last(calls, "/update")
+    assert update is not None
+    assert update["body"] == {"ref": "acme/iota", "env": {"IOTA_TOKEN": "abc"}, "secret_keys": ["IOTA_EXTRA"]}
+
+
+def test_update_dry_run_previews_only(monkeypatch) -> None:
+    handler, captured = _capture()
+    captured["_payload"] = {"delivery": "descriptor", "required_env": [], "items": [], "collisions": []}
+    result = run_cli(monkeypatch, handler, ["plugins", "update", "acme/iota", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    # A dry-run update hits only the shared preview door, never the update door.
+    assert captured["path"] == "/api/marketplace/install/preview"
+    assert "delivery: descriptor" in strip_ansi(result.output)
+
+
+def test_update_uncovered_required_env_exits_nonzero(monkeypatch) -> None:
+    handler, calls = _route_capture({"missing_env": ["KAPPA_KEY"]}, {"ref": "acme/iota"})
+    result = run_cli(monkeypatch, handler, ["plugins", "update", "acme/iota"])
+    assert result.exit_code != 0
+    assert "KAPPA_KEY" in result.output
+    assert _last(calls, "/update") is None
+
+
 def test_uninstall_posts_ref(monkeypatch) -> None:
     handler, captured = _capture()
     captured["_payload"] = {"ref": "tai42/toolbox", "uninstalled": True}
