@@ -12,6 +12,10 @@ import { defineConfig } from 'vitest/config';
  * host import map guarantees in the browser (react/react-dom are external
  * singletons there). The `@` alias mirrors the tsconfig path so source and
  * tests share one import scheme.
+ *
+ * Coverage (v8) runs on every `pnpm test`, so these thresholds are a real gate.
+ * Each one sits a couple of points under what the suite achieves, so one newly
+ * uncovered branch does not break the run while losing a module's tests does.
  */
 export default defineConfig({
   plugins: [react()],
@@ -48,6 +52,22 @@ export default defineConfig({
           /use-sidecar/,
           /aria-hidden/,
         ],
+      },
+    },
+    coverage: {
+      provider: 'v8',
+      include: ['studio-src/**/*.{ts,tsx}'],
+      exclude: [
+        'studio-src/**/*.test.{ts,tsx}',
+        'studio-src/test-setup.ts',
+        'studio-src/**/*.d.ts',
+      ],
+      reporter: ['text'],
+      thresholds: {
+        statements: 65,
+        branches: 75,
+        functions: 60,
+        lines: 65,
       },
     },
   },

@@ -14,9 +14,14 @@ def test_defaults():
     s = InteractionsSettings()
     assert s.public_base_url is None
     assert s.callback_max_body_bytes == 65536
-    assert s.max_concurrent is None
+    # A finite open-questions ceiling ships by default (bounded, not unlimited).
+    assert s.max_concurrent == 1000
     assert s.delivery_max_attempts == 3
     assert s.delivery_retry_backoff_seconds == 1.0
+
+
+def test_max_concurrent_accepts_none_for_unlimited():
+    assert InteractionsSettings(max_concurrent=None).max_concurrent is None
 
 
 def test_env_binding(monkeypatch: pytest.MonkeyPatch):

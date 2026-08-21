@@ -19,6 +19,7 @@ from tai42_kit.backend import CallbackSchema, callback_execution
 from tai42_kit.clients import client_ctx, shutdown_all_clients
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
+from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_rq.settings import rq_settings
 
@@ -43,10 +44,14 @@ async def tool_execution(*args: Any, **kwargs: Any) -> Any:
     closed before its fresh event loop is torn down."""
     tool_name = kwargs.pop(rq_settings().tool_name_arg)
     # A worker executes a dequeued task with no live caller holding a
-    # connection, so the turn budget does not apply.
+    # connection, so the turn budget does not apply, and no HTTP request bound
+    # the secret-read capability — the worker binds the submitter's own capability
+    # carried with the job (falling back to the gate state when none rode along).
+    secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG, None)
     detached_token = mark_detached_run()
     try:
-        return await tai42_app.tools.run_tool(tool_name, kwargs)
+        with bind_worker_secret_capability(secret_capability):
+            return await tai42_app.tools.run_tool(tool_name, kwargs, offload_sync=True)
     finally:
         reset_detached_run(detached_token)
         await shutdown_all_clients()

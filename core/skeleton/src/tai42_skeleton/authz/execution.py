@@ -25,7 +25,12 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import TemplateError
-from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import (
+    KEY_FINGERPRINT_CLAIM,
+    OWNER_USER_ID_CLAIM,
+    reset_request_secret_capability,
+    set_request_secret_capability,
+)
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.app import tai42_app
 
@@ -33,6 +38,7 @@ from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_is_empty
 from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.access_control.user import is_admin_policy
 from tai42_skeleton.authz.check import _authorize_pinned_route, check
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
@@ -147,6 +153,30 @@ async def assert_key_carries_authority(
     return owner
 
 
+async def resolve_execution_key_secret_capability(execution_key: str) -> bool:
+    """The secret-read capability a fire bound to ``execution_key`` runs with: the ADMIN
+    status of the KEY's OWN stored policy, read live at the fire.
+
+    The capability equals the admin status of the identity the fire RUNS AS, never the
+    triggerer's request-scope value — so a NON-admin execution key reads ``False`` even
+    when an admin triggered the fire (the escalation guard), and an admin execution key
+    reads ``True``. Gate off -> ``True``: every principal is then the synthetic admin,
+    with no fence to fail closed on.
+
+    Gate on -> :func:`~tai42_skeleton.access_control.user.is_admin_policy` of the key's
+    live policy (a condition-free ``"*"`` policy that is not an owned key), read against
+    ``policy.policy_data``'s stored owner — the SAME admin discriminator the HTTP auth
+    backend stamps, so a fire and an authenticated request classify a key identically.
+    """
+    settings = access_control_settings()
+    if not settings.enable:
+        return True
+    enforcer = PolicyEnforcer(settings)
+    version = await enforcer.current_policy_version()
+    policy = await enforcer.get_policy_at(execution_key, version)
+    return is_admin_policy(policy, policy.policy_data.get(OWNER_USER_ID_CLAIM))
+
+
 @asynccontextmanager
 async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str) -> AsyncIterator[CallerIdentity]:
     """Run the ``async with`` body AS ``execution_key``, binding the identity built from
@@ -161,14 +191,25 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
     body (the tool-run supervisor) inherits the identity for its own lifetime, past the
     release — which is what keeps an async submit's later inner dispatch bound.
 
+    The secret-read capability (the ``action=secret`` admin fence) is rebound for the fire
+    too, NEVER carried across the execution-identity switch: it is the ADMIN status of the
+    firing execution KEY's own live policy (:func:`resolve_execution_key_secret_capability`),
+    so an admin-owned schedule/hook fire clears the fence while a non-admin key's fire is
+    refused a host-secret-exposing primitive even when an admin triggered it. Restored in
+    the ``finally`` so the triggering request's own capability is unchanged after the fire.
+
     Raises :class:`~tai42_skeleton.operations.errors.PermissionDenied`, body never entered,
     when the key cannot carry authority at all.
     """
     identity = await build_execution_identity(execution_key, bound_fingerprint=bound_fingerprint)
     token = set_execution_identity(identity)
+    secret_capability_token = set_request_secret_capability(
+        await resolve_execution_key_secret_capability(execution_key)
+    )
     try:
         yield identity
     finally:
+        reset_request_secret_capability(secret_capability_token)
         reset_execution_identity(token)
 
 

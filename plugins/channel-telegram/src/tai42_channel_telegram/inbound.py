@@ -84,9 +84,21 @@ def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> b
     return str(chat.get("id")) in recipient_chats or (isinstance(username, str) and f"@{username}" in recipient_chats)
 
 
-async def _forward_answer(message_id: int, callback_url: str, text: str) -> Response:
+async def _forward_answer(
+    message_id: int,
+    callback_url: str,
+    settings: TelegramSettings,
+    chat_id: int,
+    text: str,
+    update: dict[str, object],
+) -> Response:
     """Forward a correlated ForceReply answer to its callback door and map the
-    door's status to this webhook's ack. Transport errors propagate (-> 500)."""
+    door's status to this webhook's ack. Transport errors propagate (-> 500).
+
+    ``settings``/``chat_id``/``text``/``update`` are the bridge context so a terminal
+    404 (the interaction is gone) bridges the reply into the conversation rather than
+    dropping it — ``_bridge`` sets ``provider_message_id`` = the update id, so a
+    Telegram redelivery of the same inbound dedupes at the conversation seam."""
     async with telegram_http() as client:
         forwarded = await client.post(callback_url, json={"answer": text})
 
@@ -97,11 +109,12 @@ async def _forward_answer(message_id: int, callback_url: str, text: str) -> Resp
     # same answer can never succeed. (A duplicate forward resolves idempotently to 200.)
     if forwarded.status_code == 404:
         logger.warning(
-            "telegram inbound: callback door returned terminal HTTP 404 for message_id=%s; dropping correlation",
+            "telegram inbound: callback door returned terminal HTTP 404 for message_id=%s; the interaction "
+            "is gone — bridging the reply into the conversation instead of dropping it",
             message_id,
         )
         await clear_correlation(message_id)
-        return JSONResponse({"data": {"status": "stale"}}, status_code=200)
+        return await _bridge(settings, chat_id, text, update)
     if forwarded.status_code == 400:
         logger.warning(
             "telegram inbound: callback door rejected the answer for message_id=%s (400); "
@@ -226,6 +239,6 @@ async def inbound(request: Request) -> Response:
     if isinstance(replied_id, int) and _is_recipient_chat(chat, settings):
         callback_url = await lookup_callback_url(replied_id)
         if callback_url is not None:
-            return await _forward_answer(replied_id, callback_url, text)
+            return await _forward_answer(replied_id, callback_url, settings, chat_id, text, update)
 
     return await _bridge(settings, chat_id, text, update)

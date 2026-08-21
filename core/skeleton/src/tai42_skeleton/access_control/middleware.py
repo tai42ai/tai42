@@ -5,7 +5,12 @@ from starlette.authentication import AuthCredentials, UnauthenticatedUser
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
-from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
+from tai42_contract.access_control.context import (
+    reset_request_secret_capability,
+    reset_request_user_id,
+    set_request_secret_capability,
+    set_request_user_id,
+)
 
 from tai42_skeleton.access_control.request_scopes import (
     reset_request_effective_scopes,
@@ -232,6 +237,7 @@ class ResourceGuardMiddleware:
         context_token = None
         scopes_token = None
         claims_token = None
+        secret_capability_token = None
         if user.is_authenticated:
             user_id = user.token.client_id
             context_token = set_request_user_id(user_id)
@@ -244,6 +250,12 @@ class ResourceGuardMiddleware:
             # the SAME identity the backend does: the ``.identity.*`` a policy condition
             # references, and the owner reference that drives the owner second-pass enforce.
             claims_token = set_request_identity_claims(user.token.claims)
+            # Carry whether the caller clears the ``action=secret`` admin fence, computed
+            # once by the auth backend as the admin discriminator and stamped on the user.
+            # A plugin gates a host-secret-exposing primitive on it so that primitive's
+            # reach is identical to the secret fence's; fail-closed (default False) when
+            # the flag is absent.
+            secret_capability_token = set_request_secret_capability(bool(getattr(user, "is_admin", False)))
 
         try:
             await self.app(scope, receive, send)
@@ -254,3 +266,41 @@ class ResourceGuardMiddleware:
                 reset_request_effective_scopes(scopes_token)
             if claims_token is not None:
                 reset_request_identity_claims(claims_token)
+            if secret_capability_token is not None:
+                reset_request_secret_capability(secret_capability_token)
+
+
+class DisabledAccessControlSecretCapabilityMiddleware:
+    """Bind the secret-read capability TRUE for every request when access control is OFF.
+
+    With ``ACCESS_CONTROL_ENABLE=false`` no ``AuthAdapter`` is built, so ResourceGuard —
+    and its per-request capability bind — never runs. But gate-off makes every caller the
+    synthetic admin (see ``resolve_caller``), and a host-secret-exposing primitive gated on
+    :func:`~tai42_contract.access_control.context.caller_may_read_secrets` would otherwise
+    read the fail-closed default ``False`` and refuse a caller the gate-off surfaces admit.
+
+    This is the app-wide gate-off analogue of ResourceGuard's bind: installed only when
+    access control is disabled, sitting at the same seam every HTTP door (REST + MCP
+    transport) flows through, it binds ``True`` for the request span and restores the
+    default in the ``finally``. It covers the HTTP seam ALONE; on every other execution
+    seam the capability follows the identity the run acts AS, bound by that seam's own
+    code, so a run reaching neither an HTTP request nor one of them reads the fail-closed
+    default: an in-process fire rebinds it to the firing execution KEY's admin status at
+    the execution-identity switch
+    (:func:`~tai42_skeleton.authz.execution.bind_execution_identity`), and a backend-worker
+    run — a dequeued task in a process with no HTTP request — binds the SUBMITTER's own
+    capability carried with the job at its worker seam
+    (:func:`~tai42_kit.utils.worker_secret_capability.bind_worker_secret_capability`)."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        token = set_request_secret_capability(True)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_request_secret_capability(token)

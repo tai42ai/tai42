@@ -170,17 +170,53 @@ async def test_duplicate_event_id_acks_without_second_forward(fake_redis, http_s
     assert len(http_script.requests) == 1
 
 
-async def test_door_404_is_terminal_drops_correlation_keeps_claim(fake_redis, http_script, caplog):
+async def test_door_404_terminal_bridges_the_reply(fake_redis, http_script, stub_conversations, caplog):
+    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
+    # reply: the correlation is dropped and the reply is bridged into the conversation
+    # carrying its text, under the event id so a Slack redelivery dedupes.
     _seed_correlation(fake_redis)
     http_script.results.append(httpx.Response(404))
 
     with caplog.at_level(logging.WARNING):
         response = await slack_inbound(_signed(_event_body(event=_reply_event())))
 
-    assert body_json(response) == {"status": "stale"}
-    assert _CORR_KEY not in fake_redis.store  # no retry storm against a dead ticket
+    assert body_json(response) == {"status": "accepted"}
+    assert _CORR_KEY not in fake_redis.store  # correlation dropped — no re-forward
     assert _DEDUPE_KEY in fake_redis.store  # Slack's retry acks as duplicate
-    assert any("terminal HTTP 404" in record.message for record in caplog.records)
+    assert any("bridging the reply" in record.message for record in caplog.records)
+    (call,) = stub_conversations.accept_calls
+    assert call.text == "yes, deploy it"
+    assert call.client_address == TEST_DEFAULT_RECIPIENT
+    assert call.provider_message_id == "Ev001"
+
+
+async def test_door_404_bridge_then_redelivery_acks_duplicate_no_second_bridge(
+    fake_redis, http_script, stub_conversations
+):
+    # After a 404-bridge, Slack redelivers the same event_id: the dedupe claim
+    # short-circuits — the retry acks as a duplicate and never bridges a second time.
+    _seed_correlation(fake_redis)
+    http_script.results.append(httpx.Response(404))
+
+    first = await slack_inbound(_signed(_event_body(event=_reply_event())))
+    assert body_json(first) == {"status": "accepted"}
+
+    second = await slack_inbound(_signed(_event_body(event=_reply_event())))
+    assert body_json(second) == {"status": "duplicate"}
+    assert len(stub_conversations.accept_calls) == 1  # still once
+
+
+async def test_door_500_does_not_bridge_only_terminal_404_bridges(fake_redis, http_script, stub_conversations):
+    # A retryable (5xx) failure must NOT be converted into a bridge — only the
+    # terminal 404 bridges. The 5xx keeps the correlation and raises so Slack retries.
+    _seed_correlation(fake_redis)
+    http_script.results.append(httpx.Response(500))
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await slack_inbound(_signed(_event_body(event=_reply_event())))
+
+    assert stub_conversations.accept_calls == []  # never bridged
+    assert fake_redis.store[_CORR_KEY] == _CALLBACK  # correlation kept
 
 
 async def test_door_400_keeps_correlation_for_a_retyped_answer(fake_redis, http_script, caplog):

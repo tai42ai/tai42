@@ -2,8 +2,6 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
-from fastmcp.utilities.types import find_kwarg_by_type
-
 
 def add_signature_params(
     func: Callable,
@@ -25,8 +23,11 @@ def add_signature_params(
     if not exclude_fastmcp_ctx:
         modified_original_params = list(original_sig.parameters.values())
     else:
-        # Loop-invariant: compute the Context kwarg once, not per parameter.
+        # Loop-invariant: compute the Context kwarg once, not per parameter. Imported
+        # function-local so importing this module pulls no fastmcp web/server stack — a
+        # backend worker's shipped graph reaches it only when a tool actually runs.
         from fastmcp import Context
+        from fastmcp.utilities.types import find_kwarg_by_type
 
         context_kwarg = find_kwarg_by_type(func, kwarg_type=Context)
         for param in original_sig.parameters.values():
@@ -46,7 +47,10 @@ def add_signature_params(
 
 
 def exclude_fastmcp_ctx_from_kwargs(func: Callable, arguments: dict[str, Any]) -> dict[str, Any]:
+    # Imported function-local so importing this module pulls no fastmcp web/server stack
+    # into a backend worker's shipped import graph.
     from fastmcp import Context
+    from fastmcp.utilities.types import find_kwarg_by_type
 
     context_kwarg = find_kwarg_by_type(func, kwarg_type=Context)
     if context_kwarg and context_kwarg in arguments:

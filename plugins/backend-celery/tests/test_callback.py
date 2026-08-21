@@ -5,17 +5,20 @@ from __future__ import annotations
 import time
 
 import pytest
+from tai42_contract.access_control import caller_may_read_secrets
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
 
 
-async def test_prepare_backend_kwargs_injects_tool_name() -> None:
+async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() -> None:
     def some_tool(a: int, b: str = "x") -> None: ...
 
+    # No request bound, so the stamped capability is the fail-closed default False;
+    # the worker pops it before running the tool.
     kwargs = await prepare_backend_kwargs(some_tool, "backend_tool_name", "some_tool", {"a": 1})
-    assert kwargs == {"a": 1, "backend_tool_name": "some_tool"}
+    assert kwargs == {"a": 1, "backend_tool_name": "some_tool", "backend_secret_capability": False}
 
 
 async def test_rendered_fields_go_through_resource_manager() -> None:
@@ -48,7 +51,24 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     await callback_execution(7, callback)
 
     assert stub_app.tools.detached_seen == [True]
+    assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
+
+
+@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
+async def test_callback_binds_the_worker_secret_capability(
+    stub_app, access_control, gate_enabled: bool, capable: bool
+) -> None:
+    # A dequeued callback's follow-up tool sees the same worker-bound capability as
+    # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
+    access_control(gate_enabled)
+    stub_app.tools.run_tool_result = {"ran": True}
+    callback = CallbackSchema(expr="{payload: .}", tool="follow_up")
+
+    await callback_execution(7, callback)
+
+    assert stub_app.tools.secret_capability_seen == [capable]
+    assert caller_may_read_secrets() is False
 
 
 async def test_no_tool_returns_expression_output(stub_app) -> None:

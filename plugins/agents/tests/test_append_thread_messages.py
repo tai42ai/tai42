@@ -30,6 +30,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.constants import START
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
+from tai42_contract.access_control.context import (
+    reset_request_secret_capability,
+    set_request_secret_capability,
+)
 from tai42_contract.app import tai42_app
 from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 
@@ -570,6 +574,49 @@ class TestMcpToolsAgentAppend:
         agent = tai42_app.agents.get_agent("mcp_tools_agent")
         with pytest.raises(ValueError, match="requires a thread_id"):
             asyncio.run(agent.append_thread_messages(thread_id=None, messages=_PRIOR))  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("endpoint_key", ["base_url", "api_key"])
+    def test_endpoint_llm_kwargs_refused_without_secret_capability(self, endpoint_key: str) -> None:
+        # The append face accepts ``llm_kwargs``, so the caller-chosen-endpoint fence
+        # holds here too: a caller with no secret capability is refused loudly before
+        # the checkpoint write.
+        agent = tai42_app.agents.get_agent("mcp_tools_agent")
+        with pytest.raises(PermissionError, match=f"llm_kwargs .*{endpoint_key}.* is restricted"):
+            asyncio.run(
+                agent.append_thread_messages(
+                    thread_id="t-mcp-fence", messages=_PRIOR, llm_kwargs={endpoint_key: "http://evil"}
+                )
+            )
+
+    def test_endpoint_llm_kwargs_permitted_with_secret_capability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A secret-capable caller may set a caller-chosen model endpoint on the append
+        # face: the fence passes and the append persists.
+        saver = InMemorySaver()
+        model = ScriptedChatModel([AIMessage(content="reply")])
+        self._base_seams(monkeypatch, model, saver)
+        agent = tai42_app.agents.get_agent("mcp_tools_agent")
+        token = set_request_secret_capability(True)
+        try:
+            asyncio.run(
+                agent.append_thread_messages(
+                    thread_id="t-mcp-fence-ok", messages=_PRIOR, llm_kwargs={"base_url": "http://own"}
+                )
+            )
+        finally:
+            reset_request_secret_capability(token)
+        _assert_role_mapping(self._read(saver, model, "t-mcp-fence-ok"))
+
+    def test_non_endpoint_llm_kwargs_open_for_any_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ``llm_kwargs`` naming no endpoint key capture nothing, so the append face
+        # does not fence them: a caller with no secret capability appends fine.
+        saver = InMemorySaver()
+        model = ScriptedChatModel([AIMessage(content="reply")])
+        self._base_seams(monkeypatch, model, saver)
+        agent = tai42_app.agents.get_agent("mcp_tools_agent")
+        asyncio.run(
+            agent.append_thread_messages(thread_id="t-mcp-open", messages=_PRIOR, llm_kwargs={"temperature": 0})
+        )
+        _assert_role_mapping(self._read(saver, model, "t-mcp-open"))
 
 
 # --------------------------------------------------------------------------

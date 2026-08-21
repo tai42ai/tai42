@@ -39,6 +39,7 @@ from tai42_contract.interactions.models import (
     MEDIA_MAX_ITEMS,
     MEDIA_TOTAL_URI_CHARS,
     MEDIA_URL_MAX_CHARS,
+    QUESTION_MAX_CHARS,
     AnswerFormat,
     InteractionRequest,
     MediaItem,
@@ -533,6 +534,18 @@ def test_interaction_form_valid():
 def test_interaction_form_requires_schema():
     with pytest.raises(ValueError, match="requires a schema"):
         _interaction(answer_format=AnswerFormat.FORM, format_payload={})
+
+
+def test_interaction_question_at_cap_accepted():
+    at_cap = "q" * QUESTION_MAX_CHARS
+    assert _interaction(question=at_cap).question == at_cap
+
+
+def test_interaction_question_over_cap_raises():
+    # The question is stored verbatim into the state hash + group stream, so an
+    # over-cap value is refused loudly rather than persisted unbounded.
+    with pytest.raises(ValueError, match=f"question must be at most {QUESTION_MAX_CHARS}"):
+        _interaction(question="q" * (QUESTION_MAX_CHARS + 1))
 
 
 def test_interaction_text_valid_no_payload():

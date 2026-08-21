@@ -18,6 +18,10 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from tai42_contract.access_control.context import (
+    reset_request_secret_capability,
+    set_request_secret_capability,
+)
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import (
     MessageDelta,
@@ -32,6 +36,19 @@ from tai42_contract.app import tai42_app
 
 import tai42_agents.mcp_tools_agent as mcp_mod
 from tai42_agents._internal.reject import reject_unhonored
+
+
+@pytest.fixture
+def secret_capable():
+    """Bind the caller as authorized to read secrets for the test — the request-scope
+    capability the host stamps from the admin discriminator, so the host-env-injection
+    (``inject_env``) and caller-chosen-endpoint (``llm_kwargs.base_url``/``api_key``)
+    primitives are permitted. Reset to the fail-closed default afterwards."""
+    token = set_request_secret_capability(True)
+    try:
+        yield
+    finally:
+        reset_request_secret_capability(token)
 
 
 async def _collect(agen: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
@@ -132,11 +149,11 @@ def test_astream_forwards_config_and_streams_taxonomy(monkeypatch, resource_mana
     assert captured["config"] == langgraph_config
 
 
-def test_inject_env_injects_only_allowlisted_vars(monkeypatch, resource_manager) -> None:
+def test_inject_env_injects_only_allowlisted_vars(monkeypatch, resource_manager, secret_capable) -> None:
     """inject_env copies only the allow-listed ``os.environ`` names into each
     server's ``env`` (never the whole environment), the server's own value wins on
     conflict, and the langgraph config forwarded to the delegated stream is left
-    untouched."""
+    untouched. A secret-capable caller is required for the host-env primitive."""
     monkeypatch.setenv("MCP_TEST_ENV", "from-os")
     monkeypatch.setenv("MCP_SECRET", "top-secret")
     captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
@@ -176,7 +193,7 @@ def test_inject_env_injects_only_allowlisted_vars(monkeypatch, resource_manager)
     assert captured["config"] == langgraph_config
 
 
-def test_inject_env_does_not_mutate_caller_config(monkeypatch, resource_manager) -> None:
+def test_inject_env_does_not_mutate_caller_config(monkeypatch, resource_manager, secret_capable) -> None:
     """inject_env never mutates the caller's ``mcp_config``: the injected env lands
     only on the fresh copy the client is opened with."""
     monkeypatch.setenv("MCP_TEST_ENV", "from-os")
@@ -199,9 +216,10 @@ def test_inject_env_does_not_mutate_caller_config(monkeypatch, resource_manager)
     assert cfg == {"mcpServers": {"s1": {}, "s2": {"env": {"OWN": "keep"}}}}
 
 
-def test_inject_env_without_allowlist_raises(monkeypatch, resource_manager) -> None:
+def test_inject_env_without_allowlist_raises(monkeypatch, resource_manager, secret_capable) -> None:
     """inject_env=True with no allow-list is a malformed request (it would inject
-    nothing) and raises loudly rather than silently doing nothing."""
+    nothing) and raises loudly rather than silently doing nothing. The malformed-input
+    check is reached only once the caller clears the secret fence."""
     monkeypatch.setenv("MCP_TEST_ENV", "from-os")
     _install_fakes(monkeypatch, [MessageFinal(text="ok")])
 
@@ -209,6 +227,116 @@ def test_inject_env_without_allowlist_raises(monkeypatch, resource_manager) -> N
     cfg = {"mcpServers": {"s1": {}}}
     with pytest.raises(ValueError, match="inject_env=True requires a non-empty env_allowlist"):
         asyncio.run(_collect(agent.astream(mcp_config=cfg, user_message="hi", inject_env=True)))
+
+
+def test_inject_env_refused_without_secret_capability(monkeypatch, resource_manager) -> None:
+    """A caller NOT authorized to read secrets (the fail-closed default, e.g. an editor
+    or an anonymous/unbound caller) is refused ``inject_env`` loudly BEFORE any injection
+    runs — ``os.environ`` is never read and the client is never opened."""
+    monkeypatch.setenv("MCP_SECRET", "top-secret")
+    _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+    injected: dict[str, bool] = {"called": False}
+
+    def _spy_inject(mcp_config, env_allowlist):
+        injected["called"] = True
+        return mcp_config
+
+    monkeypatch.setattr(mcp_mod, "_inject_env", _spy_inject)
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    with pytest.raises(PermissionError, match="inject_env is restricted"):
+        asyncio.run(
+            _collect(agent.astream(mcp_config=cfg, user_message="hi", inject_env=True, env_allowlist=["MCP_SECRET"]))
+        )
+    # The env-reading primitive never ran and the MCP client was never opened.
+    assert injected["called"] is False
+    assert _FakeClient.opened_with is None
+
+
+def test_inject_env_permitted_with_secret_capability(monkeypatch, resource_manager, secret_capable) -> None:
+    """A secret-capable caller (the admin the ``action=secret`` fence admits) is allowed
+    the host-env primitive: the allow-listed value is injected and the run proceeds."""
+    monkeypatch.setenv("MCP_TEST_ENV", "from-os")
+    _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    out = asyncio.run(
+        _collect(agent.astream(mcp_config=cfg, user_message="hi", inject_env=True, env_allowlist=["MCP_TEST_ENV"]))
+    )
+    assert [e.type for e in out] == ["message_final"]
+    opened = _FakeClient.opened_with
+    assert opened is not None
+    assert opened["mcpServers"]["s1"]["env"] == {"MCP_TEST_ENV": "from-os"}
+
+
+def test_mcp_config_open_without_inject_env_for_any_caller(monkeypatch, resource_manager) -> None:
+    """``mcp_config`` runs with the caller's OWN credentials and is NOT fenced: a caller
+    with no secret capability runs a plain ``mcp_config`` (no ``inject_env``, no
+    endpoint kwargs) with no refusal."""
+    _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {"command": "run"}}}
+    out = asyncio.run(_collect(agent.astream(mcp_config=cfg, user_message="hi")))
+    assert [e.type for e in out] == ["message_final"]
+    assert _FakeClient.opened_with is cfg
+
+
+@pytest.mark.parametrize("endpoint_key", ["base_url", "api_key"])
+def test_endpoint_llm_kwargs_refused_without_secret_capability(monkeypatch, resource_manager, endpoint_key) -> None:
+    """A caller-chosen model endpoint (``llm_kwargs.base_url``/``api_key``) captures the
+    conversation and whatever key is in scope, so it is fenced identically to host-env
+    injection: a caller with no secret capability is refused loudly before the model is
+    resolved (the delegated stream never runs)."""
+    captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    with pytest.raises(PermissionError, match=f"llm_kwargs .*{endpoint_key}.* is restricted"):
+        asyncio.run(
+            _collect(agent.astream(mcp_config=cfg, user_message="hi", llm_kwargs={endpoint_key: "http://evil"}))
+        )
+    # Refused before the delegated tools-agent stream was ever entered.
+    assert captured == {}
+
+
+def test_endpoint_llm_kwargs_permitted_with_secret_capability(monkeypatch, resource_manager, secret_capable) -> None:
+    """A secret-capable caller may set a caller-chosen model endpoint: the ``llm_kwargs``
+    forward intact to the delegated stream."""
+    captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    out = asyncio.run(_collect(agent.astream(mcp_config=cfg, user_message="hi", llm_kwargs={"base_url": "http://own"})))
+    assert [e.type for e in out] == ["message_final"]
+    assert captured["llm_kwargs"] == {"base_url": "http://own"}
+
+
+def test_non_endpoint_llm_kwargs_open_for_any_caller(monkeypatch, resource_manager) -> None:
+    """``llm_kwargs`` that name NO endpoint key (e.g. ``temperature``) capture nothing,
+    so they are not fenced: a caller with no secret capability passes them through."""
+    captured = _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    out = asyncio.run(_collect(agent.astream(mcp_config=cfg, user_message="hi", llm_kwargs={"temperature": 0})))
+    assert [e.type for e in out] == ["message_final"]
+    assert captured["llm_kwargs"] == {"temperature": 0}
+
+
+def test_run_face_also_refuses_inject_env_without_secret_capability(monkeypatch, resource_manager) -> None:
+    """The ``run`` face delegates to ``astream``, so the secret fence covers it too: a
+    non-secret-capable caller is refused ``inject_env`` on ``run`` exactly as on
+    ``astream``."""
+    monkeypatch.setenv("MCP_SECRET", "top-secret")
+    _install_fakes(monkeypatch, [MessageFinal(text="ok")])
+
+    agent = tai42_app.agents.get_agent("mcp_tools_agent")
+    cfg = {"mcpServers": {"s1": {}}}
+    with pytest.raises(PermissionError, match="inject_env is restricted"):
+        asyncio.run(agent.run(mcp_config=cfg, user_message="hi", inject_env=True, env_allowlist=["MCP_SECRET"]))
 
 
 def test_run_drains_astream_to_final_text(monkeypatch, resource_manager) -> None:

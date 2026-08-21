@@ -36,16 +36,19 @@ class _FakeResourceManager:
 
 
 class _FakeTools:
-    """Records each ``run_tool`` call and the detached-run flag it observed."""
+    """Records each ``run_tool`` call, the detached-run flag it observed, and the
+    offload flag it was dispatched with."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.detached_seen: list[bool] = []
+        self.offloads: list[bool] = []
         self.result: Any = "ran"
 
-    async def run_tool(self, key: str, arguments: Any) -> Any:
+    async def run_tool(self, key: str, arguments: Any, *, offload_sync: bool = False) -> Any:
         self.calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
+        self.offloads.append(offload_sync)
         return self.result
 
 
@@ -69,7 +72,9 @@ async def test_prepare_backend_kwargs_injects_tool_name() -> None:
     async def some_tool(a: int, b: str = "x") -> None: ...
 
     kwargs = await prepare_backend_kwargs(some_tool, "backend_tool_name", "some_tool", {"a": 1})
-    assert kwargs == {"a": 1, "backend_tool_name": "some_tool"}
+    # No request is bound in the test, so the stamped capability is the fail-closed
+    # default False; the submit seam always stamps it so the worker binds it verbatim.
+    assert kwargs == {"a": 1, "backend_tool_name": "some_tool", "backend_secret_capability": False}
 
 
 async def test_prepare_backend_kwargs_strips_fastmcp_context() -> None:
@@ -77,7 +82,7 @@ async def test_prepare_backend_kwargs_strips_fastmcp_context() -> None:
         return x
 
     kwargs = await prepare_backend_kwargs(some_tool, "backend_tool_name", "some_tool", {"x": 1, "ctx": object()})
-    assert kwargs == {"x": 1, "backend_tool_name": "some_tool"}
+    assert kwargs == {"x": 1, "backend_tool_name": "some_tool", "backend_secret_capability": False}
 
 
 # -- render methods ---------------------------------------------------------
@@ -152,6 +157,8 @@ async def test_callback_runs_tool_detached(bound_app) -> None:
     callback = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
     await callback_execution({"ok": True, "value": 5}, callback)
     assert bound_app.tools.detached_seen == [True]
+    # A dequeued callback offloads a blocking sync tool off the worker's event loop.
+    assert bound_app.tools.offloads == [True]
     assert in_detached_run() is False
 
 

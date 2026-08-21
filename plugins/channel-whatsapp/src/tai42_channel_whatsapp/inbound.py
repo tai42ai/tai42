@@ -546,15 +546,48 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
     await _forward_to_callback(phone_number_id, wa_id, answer, wamid, popped)
 
 
+def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQuestion) -> str:
+    """A faithful, ALWAYS non-empty text rendering of a correlated reply for the
+    conversation bridge when the interaction is terminally gone.
+
+    A typed reply or a resolved select tap is already its human-readable string; a
+    completed Flow form is rendered as readable ``label: value`` lines — the schema
+    property's ``title`` when it has one, else the raw field key (the schema may be
+    gone). A scalar value renders as itself; a non-scalar value (list/object) renders
+    as compact JSON, never a Python ``repr``. A completed-but-empty form renders as a
+    compact JSON dump of the raw response so the bridge is handed a non-blank string —
+    the ``conversations.accept`` door rejects blank text, and the reply must never be
+    dropped.
+    """
+    if isinstance(answer, str):
+        return answer
+    properties = pending.schema.get("properties", {}) if isinstance(pending.schema, dict) else {}
+    props = properties if isinstance(properties, dict) else {}
+    lines = []
+    for key, value in answer.items():
+        prop = props.get(key)
+        title = prop.get("title") if isinstance(prop, dict) else None
+        label = title if isinstance(title, str) and title else key
+        rendered = value if isinstance(value, str | int | float | bool) else json.dumps(value, ensure_ascii=False)
+        lines.append(f"{label}: {rendered}")
+    text = "\n".join(lines)
+    if not text:
+        # A completed form carrying no fields would render blank and be rejected by the
+        # accept door; fall back to a faithful compact dump so the reply still bridges.
+        return json.dumps(answer, ensure_ascii=False)
+    return text
+
+
 async def _forward_to_callback(
     phone_number_id: str, wa_id: str, answer: str | dict[str, Any], wamid: str, pending: PendingQuestion
 ) -> None:
     """Forward a correlated reply to the callback door and apply the status policy:
-    2xx answered; 404 terminal drop; anything else restores the correlation and raises
-    so Meta's retry re-resolves — the answer is never lost. A 400 branches on the ask
-    kind: a text/select ask is kept for a re-reply in place, while a form ask (a
-    completed Flow, which has no re-reply surface) is recovered by re-sending a fresh
-    Flow carrying the door's error (bounded).
+    2xx answered; 404 terminal — the interaction is gone, so the reply is bridged as
+    a conversation message (never lost); anything else restores the correlation and
+    raises so Meta's retry re-resolves — the answer is never lost. A 400 branches on
+    the ask kind: a text/select ask is kept for a re-reply in place, while a form ask
+    (a completed Flow, which has no re-reply surface) is recovered by re-sending a
+    fresh Flow carrying the door's error (bounded).
 
     ``answer`` is already final: a typed reply's stripped body, the option text an
     interactive tap resolved to, or the coerced dict of a completed form (Flow).
@@ -571,10 +604,17 @@ async def _forward_to_callback(
         await mark_seen(wamid)
         return
     if forwarded.status_code == 404:
-        # Terminal: the ticket is gone; retrying can't succeed, so stay dropped
-        # and ack (no redelivery storm on a dead ticket).
-        logger.warning("callback door returned terminal HTTP 404 for %s; dropping the correlation", wamid)
-        await mark_seen(wamid)
+        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
+        # ticket can't accept the answer, but the human's reply must NEVER be lost —
+        # bridge it as an ordinary conversation message with a faithful text
+        # rendering. _bridge_inbound sets provider_message_id=wamid, so a Meta
+        # redelivery of the same inbound dedupes at the conversation seam.
+        logger.warning(
+            "callback door returned terminal HTTP 404 for %s; the interaction is gone — "
+            "bridging the reply into the conversation instead of dropping it",
+            wamid,
+        )
+        await _bridge_inbound(phone_number_id, wa_id, _render_answer_for_bridge(answer, pending), wamid)
         return
     if forwarded.status_code == 400:
         if pending.schema is not None:

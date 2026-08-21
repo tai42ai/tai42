@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from arq.jobs import JobStatus
+from tai42_contract.access_control import caller_may_read_secrets
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import jq_util
@@ -64,7 +65,37 @@ async def test_tool_execution_runs_the_tool_detached(stub_app) -> None:
     await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
 
     assert stub_app.tools.detached_seen == [True]
+    assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
+
+
+@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
+async def test_tool_execution_binds_the_worker_secret_capability(
+    stub_app, access_control, gate_enabled: bool, capable: bool
+) -> None:
+    # No HTTP request bound the capability, so the worker binds it to the gate
+    # state (OFF -> secret-capable synthetic admin, ON -> fail-closed) and the
+    # bind never leaks past the job.
+    access_control(gate_enabled)
+    ctx = {"redis": _Ctx(), "job_id": "job-9"}
+
+    await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
+
+    assert stub_app.tools.secret_capability_seen == [capable]
+    assert caller_may_read_secrets() is False
+
+
+async def test_tool_execution_binds_the_propagated_submitter_capability(stub_app, access_control) -> None:
+    # An admin submitter's capability rides with the job as True; the worker binds it
+    # verbatim even gate ON, and never passes the reserved kwarg to the tool.
+    access_control(True)
+    ctx = {"redis": _Ctx(), "job_id": "job-9"}
+
+    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=True, text="hi")
+
+    assert stub_app.tools.secret_capability_seen == [True]
+    stub_app.tools.run_tool_mock.assert_awaited_once_with("mytool", {"text": "hi"})
+    assert caller_may_read_secrets() is False
 
 
 # -- callback_job ------------------------------------------------------------------------
@@ -161,7 +192,23 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     await callback_execution({"ok": True, "value": 5}, cb)
 
     assert stub_app.tools.detached_seen == [True]
+    assert stub_app.tools.offloads == [True]
     assert in_detached_run() is False
+
+
+@pytest.mark.parametrize(("gate_enabled", "capable"), [(False, True), (True, False)])
+async def test_callback_binds_the_worker_secret_capability(
+    stub_app, access_control, gate_enabled: bool, capable: bool
+) -> None:
+    # A dequeued callback's follow-up tool sees the same worker-bound capability as
+    # a dequeued task: OFF -> secret-capable, ON -> fail-closed, reset after.
+    access_control(gate_enabled)
+    cb = CallbackSchema(condition=".ok", expr="{x: .value}", tool="next")
+
+    await callback_execution({"ok": True, "value": 5}, cb)
+
+    assert stub_app.tools.secret_capability_seen == [capable]
+    assert caller_may_read_secrets() is False
 
 
 async def test_callback_condition_fail_returns_none(stub_app) -> None:
@@ -231,12 +278,14 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
 # -- prepare_backend_kwargs / render methods -----------------------------------------------
 
 
-async def test_prepare_backend_kwargs_injects_tool_name() -> None:
+async def test_prepare_backend_kwargs_injects_tool_name_and_stamps_capability() -> None:
     async def tool(a: int) -> int:
         return a
 
+    # No request is bound in the test, so ``caller_may_read_secrets`` reads the fail-closed
+    # default and the stamped capability is False; the worker pops it before running the tool.
     out = await prepare_backend_kwargs(tool, "backend_tool_name", "tool", {"a": 1})
-    assert out == {"a": 1, "backend_tool_name": "tool"}
+    assert out == {"a": 1, "backend_tool_name": "tool", "backend_secret_capability": False}
 
 
 async def test_rendered_fields_resolve_through_resource_manager() -> None:

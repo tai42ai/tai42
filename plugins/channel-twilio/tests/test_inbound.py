@@ -394,24 +394,54 @@ async def test_door_5xx_restores_pending_and_raises_so_twilio_retries(
     assert not await _pending_intact(fake_redis)
 
 
-async def test_door_404_is_terminal_drop(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+async def test_door_404_terminal_bridges_the_sms_reply(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
+    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
+    # SMS: it is bridged into the conversation carrying the Body verbatim, under the
+    # same MessageSid so a Twilio redelivery dedupes rather than double-dispatching.
     await _seed_pending()
     fake_httpx.responses.append(response(404))
 
     with caplog.at_level("WARNING"):
-        result = await handler(signed_request(_pairs()))
+        result = await handler(signed_request(_pairs(Body="ship it")))
 
     assert result.status_code == 204
-    assert not await _pending_intact(fake_redis)  # correlation stays dropped
+    assert not await _pending_intact(fake_redis)  # correlation consumed
     assert _SEEN_KEY in fake_redis.store
-    assert any("terminal HTTP 404" in record.message for record in caplog.records)
+    assert any("bridging the reply" in record.message for record in caplog.records)
+    assert stub_app.conversations.accept_calls == [
+        {
+            "channel": "twilio",
+            "our_identity": _TWILIO,
+            "client_address": _HUMAN,
+            "cap_key": _HUMAN,
+            "text": "ship it",
+            "provider_message_id": "SM777",
+        }
+    ]
 
-    # Redelivery dedupes — no retry storm on a dead ticket.
-    redelivery = await handler(signed_request(_pairs()))
+    # Twilio redelivers the same MessageSid: dedupe short-circuits — no second bridge,
+    # no second forward to the dead ticket.
+    redelivery = await handler(signed_request(_pairs(Body="ship it")))
     assert redelivery.status_code == 204
+    assert len(stub_app.conversations.accept_calls) == 1  # still once
     assert len(fake_httpx.calls) == 1
+
+
+async def test_door_5xx_does_not_bridge_only_terminal_404_bridges(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A retryable (5xx) failure must NOT be converted into a bridge — only the
+    # terminal 404 bridges. The 5xx restores the correlation and raises.
+    await _seed_pending()
+    fake_httpx.responses.append(response(500, text="oops"))
+
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
+        await handler(signed_request(_pairs()))
+
+    assert stub_app.conversations.accept_calls == []  # never bridged
+    assert await _pending_intact(fake_redis)  # restored for the retry
 
 
 async def test_door_400_keeps_correlation_for_a_re_reply(

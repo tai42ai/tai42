@@ -58,11 +58,12 @@ class InteractionsSettings(TaiBaseSettings):
     # retention cap — not a silent truncation. Must be positive.
     notifications_feed_max: int = Field(default=1000, gt=0)
 
-    # Rolling TTL (30d) on each notifications sink feed key, refreshed on every
-    # write. Each distinct ``audience`` mints its own per-identity feed key; without
-    # a TTL that set of keys grows without limit and no key is ever reclaimed. The
-    # LTRIM cap above bounds a key's LENGTH; this bounds its LIFETIME. Must be
-    # positive — a non-positive TTL would delete the key on write.
+    # Idle TTL (seconds) on a PER-AUDIENCE notifications feed key, refreshed on each
+    # push (30d, mirroring the answer-record retention neighbor). A per-identity feed
+    # is minted one-per-distinct-audience and read non-destructively, so without an
+    # expiry its key would accumulate forever; this bounds an idle identity's key.
+    # The shared feed key is deliberately NOT expired here — a TTL there could drop
+    # the operator inbox after a quiet period. Must be positive.
     notifications_feed_ttl_seconds: int = Field(default=30 * 86400, gt=0)
 
     # Default wait budget for a blocked ask_user before it raises (1h); a caller
@@ -86,9 +87,13 @@ class InteractionsSettings(TaiBaseSettings):
     # Oversized -> 413, loudly — never truncated. Must be positive.
     callback_max_body_bytes: int = Field(default=65536, gt=0)
 
-    # Open-questions guard: refuse new ask_user calls once this many questions
-    # are open platform-wide. None = unlimited; a set value must be positive.
-    max_concurrent: int | None = Field(default=None, gt=0)
+    # Open-questions guard: refuse new ask_user calls once this many questions are
+    # open platform-wide (the atomic reserve-and-check in ``reserve_open_slot``).
+    # A finite ceiling by default so pending human questions cannot grow without
+    # bound; well above any realistic live count and on the same scale as this
+    # file's other retention ceiling (``notifications_feed_max``). Set ``None`` for
+    # unlimited; a set value must be positive.
+    max_concurrent: int | None = Field(default=1000, gt=0)
 
     # Total channel-delivery attempts per ask, retries included: a transiently
     # failing send (a medium 5xx, a rate limit, a transport fault) is attempted

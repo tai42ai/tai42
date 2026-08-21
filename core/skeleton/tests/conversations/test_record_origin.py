@@ -83,3 +83,16 @@ def test_caller_view_publishes_origin():
     view = _record(origin="operator", inbound_text="", caller_principal="op-1").caller_view()
     assert view["origin"] == "operator"
     assert view["inbound_text"] == ""
+
+
+def test_client_address_accepts_a_long_legitimate_value():
+    # 256 chars is comfortably above any real address (phone / visitor id / email).
+    record = _record(client_address="a" * 256)
+    assert len(record.client_address) == 256
+
+
+def test_client_address_refuses_an_oversized_value():
+    # ``client_address`` is embedded verbatim into Redis key names, so an oversized
+    # value is refused loudly rather than forming an unbounded key.
+    with pytest.raises(ValueError, match="client_address"):
+        _record(client_address="a" * 257)

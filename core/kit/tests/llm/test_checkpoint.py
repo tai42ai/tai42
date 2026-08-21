@@ -231,9 +231,9 @@ def _install_fake_redis_saver(monkeypatch) -> dict[str, Any]:
     return captured
 
 
-async def test_redis_ttl_unset_passes_no_ttl(monkeypatch):
-    # With the setting unset the saver gets no TTL, so redis keeps checkpoints
-    # forever — today's behavior.
+async def test_redis_ttl_none_passes_no_ttl(monkeypatch):
+    # Explicit ``None`` opts out: the saver gets no TTL, so redis keeps checkpoints
+    # forever (the operator override of the bounded default).
     from types import SimpleNamespace
 
     captured = _install_fake_redis_saver(monkeypatch)
@@ -243,6 +243,21 @@ async def test_redis_ttl_unset_passes_no_ttl(monkeypatch):
     )
     await cp.create_checkpoint_resource("redis", "redis://h/0")
     assert captured["ttl"] is None
+
+
+async def test_redis_ttl_default_bounds_retention(monkeypatch):
+    # The shipped default is a finite idle-TTL, so the redis saver enforces bounded
+    # retention out of the box (30 days) with no operator configuration.
+    from tai42_kit.settings import reset_all_settings
+
+    captured = _install_fake_redis_saver(monkeypatch)
+    monkeypatch.delenv("LLM_PROVIDER_CHECKPOINT_TTL_MINUTES", raising=False)
+    reset_all_settings()
+    try:
+        await cp.create_checkpoint_resource("redis", "redis://h/0")
+    finally:
+        reset_all_settings()
+    assert captured["ttl"] == {"default_ttl": 30 * 24 * 60, "refresh_on_read": True}
 
 
 async def test_redis_ttl_set_passes_idle_ttl_config(monkeypatch):

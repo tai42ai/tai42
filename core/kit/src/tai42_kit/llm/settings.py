@@ -141,7 +141,11 @@ class LLMProviderSettings(TaiBaseSettings):
     # to the shared connection namespace (redis -> the base Redis URL, postgres ->
     # the base Postgres DSN); a double-None raises a named error there.
     checkpoint_conn_string: str | None = None
-    checkpoint_ttl_minutes: int | None = None  # idle-TTL (minutes); None = keep forever
+    # Idle-TTL (minutes) for a conversation checkpoint: the redis saver measures it
+    # from the last read and ``sweep_checkpoints`` evicts past it. Defaults to 30 days
+    # (mirrors ``answer_retention_ttl_seconds``), so retention is bounded out of the
+    # box; set ``None`` to keep checkpoints forever.
+    checkpoint_ttl_minutes: int | None = 30 * 24 * 60
     store: str = "redis"
     store_conn_string: str | None = None
 

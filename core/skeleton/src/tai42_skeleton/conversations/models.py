@@ -56,7 +56,10 @@ class ConversationRecord(BaseModel):
     route_name: str = Field(min_length=1)
     door: ConversationDoor
     thread_id: str = Field(min_length=1)
-    client_address: str = Field(min_length=1)
+    # Embedded verbatim into the thread-index / person-index Redis key names, so an
+    # oversized value would form an unbounded key: capped generously above any
+    # legitimate address (phone / visitor id / email) and refused loudly past it.
+    client_address: str = Field(min_length=1, max_length=256)
 
     # door=channel delivery target: the channel to notify and the identity to send FROM.
     channel: str | None = None

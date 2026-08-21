@@ -78,7 +78,7 @@ async def test_sync_task_dispatches_and_returns_result(fake_task) -> None:
     assert out == "worker-result"
     (call,) = fake_task.calls
     # makefun materializes the wrapped tool's defaulted params in the call.
-    assert call["kwargs"] == {"a": 1, "b": "x", "backend_tool_name": "sample_tool"}
+    assert call["kwargs"] == {"a": 1, "b": "x", "backend_tool_name": "sample_tool", "backend_secret_capability": False}
     assert call["opts"] == {"queue": "q1"}
     # The wait is bounded by the configured task timeout.
     assert fake_task._result.get_calls == [extensions.celery_settings().task_timeout]
@@ -104,7 +104,7 @@ async def test_async_task_returns_submission(fake_task) -> None:
     out = await branch(a=2)
     assert out == {"task_id": "task-123", "status": "submitted"}
     (call,) = fake_task.calls
-    assert call["kwargs"] == {"a": 2, "b": "x", "backend_tool_name": "sample_tool"}
+    assert call["kwargs"] == {"a": 2, "b": "x", "backend_tool_name": "sample_tool", "backend_secret_capability": False}
     assert call["opts"] == {}
 
 
@@ -151,7 +151,12 @@ async def test_schedule_task_saves_interval_entry(fake_entry) -> None:
     assert entry.kwargs["task"] == "celery.tool_execution"
     assert isinstance(entry.kwargs["schedule"], schedule)
     assert entry.kwargs["schedule"].run_every.total_seconds() == 30.0
-    assert entry.kwargs["kwargs"] == {"a": 1, "b": "x", "backend_tool_name": "sample_tool"}
+    assert entry.kwargs["kwargs"] == {
+        "a": 1,
+        "b": "x",
+        "backend_tool_name": "sample_tool",
+        "backend_secret_capability": False,
+    }
 
 
 async def test_schedule_task_saves_crontab_entry(fake_entry) -> None:
