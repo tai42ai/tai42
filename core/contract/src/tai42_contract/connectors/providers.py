@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tai42_contract._urls import check_web_url
+
 # Canonical slug rule (provider_id, sub_service, config-field key): lowercase,
 # must start with a letter, then alphanumerics/underscores. ``connectors.models``
 # imports this — defined here (the lower layer) to avoid an import cycle.
@@ -125,7 +127,8 @@ class ProviderDescriptor(BaseModel):
     icon_url: str
     # "oauth": runs the OAuth dance; carries ``oauth`` + client envs +
     # per-sub-service scopes. "none": no-auth — no OAuth, optional client-supplied
-    # ``config_fields``. Both are built by a provider plugin registered at import.
+    # ``config_fields``. A descriptor is registered from the manifest
+    # ``connectors`` list at boot/reload, not by any import side effect.
     kind: Literal["oauth", "none"]
     # Who curated the provider: "system" for shipped/ops-curated providers,
     # "community" for marketplace-contributed provider plugins. Orthogonal to
@@ -157,6 +160,13 @@ class ProviderDescriptor(BaseModel):
         if not SLUG_RE.match(value):
             raise ValueError("provider id must match ^[a-z][a-z0-9_]*$")
         return value
+
+    @field_validator("icon_url")
+    @classmethod
+    def _check_icon_url(cls, value: str) -> str:
+        # The catalog serves this value verbatim as a brand mark; it must be an
+        # ``https://`` URL, the same rule the plugin spec's ``icon`` enforces.
+        return check_web_url(value, field="icon_url", schemes=("https",))
 
     @field_validator("sub_services")
     @classmethod

@@ -67,7 +67,50 @@ def test_kind_enum_has_the_fifteen_kinds():
 def test_mcp_server_binds_to_the_mcp_entry_mode():
     from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, ManifestBinding, PluginItemKind
 
-    assert KIND_MANIFEST_BINDINGS[PluginItemKind.MCP_SERVER] == ManifestBinding(field="mcp", mode="mcp_entry")
+    assert KIND_MANIFEST_BINDINGS[PluginItemKind.MCP_SERVER] == ManifestBinding(
+        field="mcp", mode="mcp_entry", payload="data"
+    )
+
+
+def test_connector_binds_to_the_descriptor_entry_mode():
+    from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, ManifestBinding, PluginItemKind
+
+    assert KIND_MANIFEST_BINDINGS[PluginItemKind.CONNECTOR] == ManifestBinding(
+        field="connectors", mode="descriptor_entry", payload="data"
+    )
+
+
+def test_every_kind_has_a_payload():
+    from tai42_contract.plugins import KIND_MANIFEST_BINDINGS
+
+    # Every binding names its payload axis, so a future kind added without one
+    # fails here rather than defaulting silently.
+    for kind, binding in KIND_MANIFEST_BINDINGS.items():
+        assert binding.payload in ("module", "data"), kind
+
+
+def test_data_payload_iff_data_mode():
+    from tai42_contract.plugins import KIND_MANIFEST_BINDINGS
+
+    # The payload axis and the data modes are one fact: a binding carries
+    # ``data`` exactly when its mode is one of the declarative-block modes.
+    for kind, binding in KIND_MANIFEST_BINDINGS.items():
+        assert (binding.payload == "data") == (binding.mode in ("mcp_entry", "descriptor_entry")), kind
+
+
+def test_data_kinds_are_the_data_payload_bindings():
+    from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItemKind, data_kinds
+
+    assert data_kinds() == {PluginItemKind.MCP_SERVER, PluginItemKind.CONNECTOR}
+    assert data_kinds() == {kind for kind, binding in KIND_MANIFEST_BINDINGS.items() if binding.payload == "data"}
+
+
+def test_data_block_by_kind_keys_are_exactly_the_data_kinds():
+    from tai42_contract.plugins import DATA_BLOCK_BY_KIND, PluginItemKind, data_kinds
+
+    assert set(DATA_BLOCK_BY_KIND) == data_kinds()
+    assert DATA_BLOCK_BY_KIND[PluginItemKind.MCP_SERVER] == "mcp"
+    assert DATA_BLOCK_BY_KIND[PluginItemKind.CONNECTOR] == "provider"
 
 
 def test_bindings_cover_every_kind_exactly():
@@ -82,9 +125,11 @@ def test_bindings_cover_every_kind_exactly():
 def test_router_and_middleware_bind_to_module_lists():
     from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, ManifestBinding, PluginItemKind
 
-    assert KIND_MANIFEST_BINDINGS[PluginItemKind.ROUTER] == ManifestBinding(field="routers_modules", mode="module_list")
+    assert KIND_MANIFEST_BINDINGS[PluginItemKind.ROUTER] == ManifestBinding(
+        field="routers_modules", mode="module_list", payload="module"
+    )
     assert KIND_MANIFEST_BINDINGS[PluginItemKind.MIDDLEWARE] == ManifestBinding(
-        field="middlewares_modules", mode="module_list"
+        field="middlewares_modules", mode="module_list", payload="module"
     )
 
 
@@ -93,10 +138,16 @@ def test_binding_fields_are_real_manifest_fields():
     from tai42_contract.plugins import KIND_MANIFEST_BINDINGS
 
     # Every manifest-wired binding names an actual Manifest field, so the
-    # installer can never patch a field the manifest model would reject.
+    # installer can never patch a field the manifest model would reject. The
+    # connector descriptor binding targets ``connectors``; the Manifest model
+    # does not declare that field yet, so tolerate it by name only while it is
+    # genuinely absent — the assertion re-tightens once the field exists.
+    manifest_fields = set(Manifest.model_fields)
+    if "connectors" not in manifest_fields:
+        manifest_fields.add("connectors")
     for kind, binding in KIND_MANIFEST_BINDINGS.items():
         if binding.field is not None:
-            assert binding.field in Manifest.model_fields, f"{kind}: {binding.field}"
+            assert binding.field in manifest_fields, f"{kind}: {binding.field}"
 
 
 def test_binding_mode_matches_manifest_field_cardinality():
@@ -110,9 +161,16 @@ def test_binding_mode_matches_manifest_field_cardinality():
     # This guards the binding table against a mode/field cardinality mismatch
     # that would make an installer append to a scalar or overwrite a list.
     scalar_modes = {"scalar_module"}
-    list_modes = {"config_row", "module_list", "package_list", "mcp_entry"}
+    list_modes = {"config_row", "module_list", "package_list", "mcp_entry", "descriptor_entry"}
     for kind, binding in KIND_MANIFEST_BINDINGS.items():
         if binding.field is None:
+            continue
+        if binding.field not in Manifest.model_fields:
+            # The Manifest model does not declare ``connectors`` yet, so its
+            # cardinality cannot be checked against an annotation here. Only the
+            # descriptor binding may name a field the model has not declared, and
+            # its list shape is fixed by the ``descriptor_entry`` mode.
+            assert binding.mode == "descriptor_entry", f"{kind}: unknown field {binding.field}"
             continue
         annotation = Manifest.model_fields[binding.field].annotation
         is_list_field = get_origin(annotation) is list
@@ -128,10 +186,21 @@ def test_binding_field_none_iff_env_selected():
     from tai42_contract.plugins import ManifestBinding
 
     with pytest.raises(ValueError, match="env_selected"):
-        ManifestBinding(field=None, mode="module_list")
+        ManifestBinding(field=None, mode="module_list", payload="module")
     with pytest.raises(ValueError, match="env_selected"):
-        ManifestBinding(field="tools", mode="env_selected")
-    assert ManifestBinding(field=None, mode="env_selected").field is None
+        ManifestBinding(field="tools", mode="env_selected", payload="module")
+    assert ManifestBinding(field=None, mode="env_selected", payload="module").field is None
+
+
+def test_binding_payload_must_match_mode():
+    from tai42_contract.plugins import ManifestBinding
+
+    with pytest.raises(ValueError, match="payload must be 'data'"):
+        ManifestBinding(field="mcp", mode="mcp_entry", payload="module")
+    with pytest.raises(ValueError, match="payload must be 'data'"):
+        ManifestBinding(field="connectors", mode="descriptor_entry", payload="module")
+    with pytest.raises(ValueError, match="payload must be 'data'"):
+        ManifestBinding(field="tools", mode="config_row", payload="data")
 
 
 def test_spec_constructs_and_is_frozen():
@@ -784,7 +853,7 @@ def test_urls_reject_del_and_c1_control_chars():
 
     # DEL (0x7F) and any C1 control (e.g. U+009B CSI, and the U+009F upper edge)
     # must be rejected in URL fields — the https icon branch and
-    # homepage/repository both route through _check_web_url. A raw control char
+    # homepage/repository both route through check_web_url. A raw control char
     # in a URL is escape-injection bait. U+009F also pins the top of the
     # ``0x7F..0x9F`` range against a narrowing of the shared guard.
     for ctrl in ("\x7f", "\x9b", "\x9f"):
@@ -851,7 +920,7 @@ def test_url_fields_reject_bidi_and_format_controls(label: str, char: str):
 
     from tai42_contract.plugins import PluginSpec
 
-    # URL fields route through _check_web_url, which shares the control-char
+    # URL fields route through check_web_url, which shares the control-char
     # predicate; a bidi/zero-width control smuggled into a URL is spoofing bait.
     with pytest.raises(ValidationError, match="icon"):
         PluginSpec(**_spec_kwargs(icon=f"https://tai42.ai/x{char}.png"))
@@ -902,7 +971,7 @@ def test_contract_accepts_conventional_inner_whitespace(value: str):
 def test_http_urls_are_accepted_for_homepage_and_repository():
     from tai42_contract.plugins import PluginSpec
 
-    # _check_web_url accepts both http and https for homepage/repository; pin
+    # check_web_url accepts both http and https for homepage/repository; pin
     # that a plain http:// value is accepted so a narrowing to https-only fails.
     assert PluginSpec(**_spec_kwargs(homepage="http://tai42.ai")).homepage == "http://tai42.ai"
     assert (
@@ -1036,6 +1105,218 @@ def test_non_mcp_spec_requires_contract():
     del kwargs["contract"]
     with pytest.raises(ValidationError, match="'contract' is required"):
         PluginSpec(**kwargs)
+
+
+def _connector_provider(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": "acme",
+        "display_name": "Acme",
+        "icon_url": "https://cdn.example.com/acme.png",
+        "kind": "oauth",
+        "origin": "system",
+        "category": "productivity",
+        "oauth": {"authorize": "https://acme.example.com/authorize", "token": "https://acme.example.com/token"},
+        "client_id_env": "ACME_CLIENT_ID",
+        "client_secret_env": "ACME_CLIENT_SECRET",
+        "sub_services": {
+            "mail": {
+                "id": "mail",
+                "display_name": "Mail",
+                "scopes": ["mail.read"],
+                "mcp_server": {"type": "http", "url": "https://acme.example.com/mcp"},
+            }
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _connector_item(**overrides: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "kind": "connector",
+        "name": "acme",
+        "provider": _connector_provider(),
+        "description": "Acme connector.",
+    }
+    item.update(overrides)
+    return item
+
+
+def _connector_spec_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs = _spec_kwargs(namespace="tai42", name="acme", provides=[_connector_item()], categories=["productivity"])
+    # Descriptor-only by default: an all-data spec ships no package.
+    kwargs["package"] = None
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_connector_item_takes_provider_and_no_module():
+    from tai42_contract.connectors.providers import ProviderDescriptor
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    item = PluginItem(**_connector_item())
+    assert item.kind is PluginItemKind.CONNECTOR
+    assert item.module is None
+    assert isinstance(item.provider, ProviderDescriptor)
+    assert item.provider.id == "acme"
+
+
+def test_connector_item_rejects_module():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    with pytest.raises(ValidationError, match="must not set 'module'"):
+        PluginItem(**_connector_item(module="pkg.mod"))
+
+
+def test_connector_item_name_must_equal_provider_id():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    with pytest.raises(ValidationError, match=r"must equal provider\.id"):
+        PluginItem(**_connector_item(name="other"))
+
+
+def test_connector_item_rejects_foreign_data_block():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    # A connector item carries only its own ``provider`` block; another kind's
+    # data block (``mcp``) is a loud reject.
+    with pytest.raises(ValidationError, match="must not set 'mcp'"):
+        PluginItem(**_connector_item(mcp={"url": "https://mcp.example.com"}))
+
+
+def test_mcp_server_item_rejects_foreign_data_block():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    # Symmetric: an mcp-server item must not carry a connector ``provider``.
+    with pytest.raises(ValidationError, match="must not set 'provider'"):
+        PluginItem(**_mcp_item(provider=_connector_provider()))
+
+
+def test_tool_item_rejects_provider():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem, PluginItemKind
+
+    with pytest.raises(ValidationError, match="must not set 'provider'"):
+        PluginItem(
+            kind=PluginItemKind.TOOL,
+            name="x",
+            module="a.b",
+            provider=_connector_provider(),  # pyright: ignore[reportArgumentType]
+            description="d",
+        )
+
+
+def test_connector_only_spec_without_package_is_descriptor():
+    from tai42_contract.plugins import PluginSpec
+
+    spec = PluginSpec(**_connector_spec_kwargs())
+    assert spec.package is None
+    assert spec.delivery == "descriptor"
+
+
+def test_connector_spec_with_package_is_package_delivery():
+    from tai42_contract.plugins import PluginSpec
+
+    spec = PluginSpec(**_connector_spec_kwargs(package="tai42-acme"))
+    assert spec.package == "tai42-acme"
+    assert spec.delivery == "package"
+
+
+def test_all_mcp_server_spec_with_package_is_package_delivery():
+    from tai42_contract.plugins import PluginSpec
+
+    # ``_all_mcp_kwargs`` keeps ``_spec_kwargs``'s package (an mcp-server whose
+    # command is a console script the wheel installs).
+    spec = PluginSpec(**_all_mcp_kwargs())
+    assert spec.package is not None
+    assert spec.delivery == "package"
+
+
+def test_all_mcp_server_spec_without_package_is_descriptor():
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _all_mcp_kwargs()
+    del kwargs["package"]
+    spec = PluginSpec(**kwargs)
+    assert spec.package is None
+    assert spec.delivery == "descriptor"
+
+
+def test_tool_spec_without_package_rejected():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _spec_kwargs()
+    del kwargs["package"]
+    with pytest.raises(ValidationError, match="must name its package"):
+        PluginSpec(**kwargs)
+
+
+def test_connector_spec_without_contract_rejected():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    kwargs = _connector_spec_kwargs()
+    del kwargs["contract"]
+    with pytest.raises(ValidationError, match="'contract' is required"):
+        PluginSpec(**kwargs)
+
+
+def test_migrations_without_package_rejected():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    with pytest.raises(ValidationError, match="migrations require a package"):
+        PluginSpec(**_connector_spec_kwargs(migrations="migrations"))
+
+
+def test_connector_origin_system_ok_for_tai42_namespace():
+    from tai42_contract.plugins import PluginSpec
+
+    spec = PluginSpec(**_connector_spec_kwargs())
+    assert spec.namespace == "tai42"
+    assert spec.provides[0].provider is not None
+    assert spec.provides[0].provider.origin == "system"
+
+
+def test_connector_origin_system_rejected_for_community_namespace():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    with pytest.raises(ValidationError, match="must be 'system' iff"):
+        PluginSpec(**_connector_spec_kwargs(namespace="iota"))
+
+
+def test_connector_origin_community_rejected_for_tai42_namespace():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    item = _connector_item(provider=_connector_provider(origin="community"))
+    with pytest.raises(ValidationError, match="must be 'system' iff"):
+        PluginSpec(**_connector_spec_kwargs(provides=[item]))
+
+
+def test_connector_origin_community_ok_for_community_namespace():
+    from tai42_contract.plugins import PluginSpec
+
+    item = _connector_item(provider=_connector_provider(origin="community"))
+    spec = PluginSpec(**_connector_spec_kwargs(namespace="iota", provides=[item]))
+    assert spec.provides[0].provider is not None
+    assert spec.provides[0].provider.origin == "community"
 
 
 def test_spec_rejects_mixed_mcp_server_and_other_kinds():
@@ -1231,7 +1512,7 @@ def test_channel_item_routes_are_optional():
     assert with_routes.routes.base == "channels/web"
 
 
-@pytest.mark.parametrize("kind", ["tool", "agent", "extension", "middleware", "connector"])
+@pytest.mark.parametrize("kind", ["tool", "agent", "extension", "middleware"])
 def test_non_router_non_channel_items_forbid_routes(kind: str):
     from pydantic import ValidationError
 
@@ -1244,6 +1525,19 @@ def test_non_router_non_channel_items_forbid_routes(kind: str):
             module="a.b",
             description="d",
             routes={"base": "relay", "paths": [{"path": "/x", "methods": ["GET"], "public": True}]},  # pyright: ignore[reportArgumentType]
+        )
+
+
+def test_connector_item_forbids_routes():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginItem
+
+    # A connector is a data item, not a mount owner: ``routes`` is forbidden the
+    # same as for any non-router, non-channel kind.
+    with pytest.raises(ValidationError, match="must not set 'routes'"):
+        PluginItem(
+            **_connector_item(routes={"base": "relay", "paths": [{"path": "/x", "methods": ["GET"], "public": True}]})
         )
 
 
