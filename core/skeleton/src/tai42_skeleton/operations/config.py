@@ -49,8 +49,8 @@ from tai42_skeleton.operations._broadcast import apply_response, broadcast, prof
 
 # Importing this module registers ``EnvSecretMarksSettings`` (registration runs at
 # class-definition time) so the marks group appears in the settings schema, and
-# exposes the reload-aware accessor used by the env read.
-from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
+# exposes the derived masked-key accessor the env read and profile snapshot use.
+from tai42_skeleton.settings.env_secret_marks import effective_secret_keys
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView, settings_profile_store
 
 
@@ -83,11 +83,16 @@ async def read_env() -> dict:
     """Return the stored env map alongside the operator's secret-key marks.
 
     ``data.env`` is the stored env key-value map (a never-written store yields
-    an empty map). ``data.secret_keys`` is the current
-    ``EnvSecretMarksSettings.secret_keys`` — the env key names the operator
-    marked secret so the editor masks them on display.
+    an empty map). ``data.secret_keys`` is the DERIVED masked-key set
+    (:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`): the
+    operator's stored ``TAI_ENV_SECRET_KEYS`` marks UNIONED with every live
+    ``connectors[*].client_secret_env``, so an oauth connector's client secret is
+    masked on display even with no operator mark.
     """
-    return {"env": _stored_env(), "secret_keys": env_secret_marks_settings().secret_keys}
+    return {
+        "env": _stored_env(),
+        "secret_keys": list(effective_secret_keys(tai42_app.admin.live_manifest)),
+    }
 
 
 @operation(summary="Read the active config backend mode", tags=["config"])
@@ -449,14 +454,16 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     """Snapshot the CURRENT stored env into the reserved ``@previous`` profile.
 
     Creates ``@previous`` on the first apply, appends a new version thereafter — the apply
-    pipeline's rollback anchor. Carries the current display secret-marks so a rollback
-    re-applies with the same masking. Never carries env VALUES onto any report — this is a
-    store write, not a response."""
+    pipeline's rollback anchor. Carries the current DERIVED masked-key set
+    (:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`: stored marks
+    UNIONED with every live ``connectors[*].client_secret_env``) so a rollback re-applies
+    with the same masking, including a connector secret with no operator mark. Never carries
+    env VALUES onto any report — this is a store write, not a response."""
     store = _profile_store()
     body = SettingsProfileBody(
         description="Auto-saved snapshot of the stored env before the last settings-profile apply.",
         env=dict(stored_env),
-        secret_keys=list(env_secret_marks_settings().secret_keys),
+        secret_keys=list(effective_secret_keys(tai42_app.admin.live_manifest)),
     )
     try:
         await store.get_profile(_PREVIOUS_NAME)

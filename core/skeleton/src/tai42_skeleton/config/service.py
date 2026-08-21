@@ -68,9 +68,9 @@ from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.reload_gate import FORK_QUIESCE_SECONDS, reload_gate
 from tai42_skeleton.config.boundary import (
-    refuse_dangling_env_markers,
     refuse_incomplete_admin_pair,
     refuse_key_material,
+    refuse_unresolved_env,
     refuse_x_band,
     reload_class_by_env_var,
     x_band_env_keys,
@@ -89,6 +89,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterator
 
     from ruamel.yaml.comments import CommentedMap
+
+
+# The operator's "treat these env keys as secret" marks var — the same
+# comma-separated key-name list ``set_mcp_secret_env`` and the installer append to.
+_SECRET_MARKS_VAR = "TAI_ENV_SECRET_KEYS"
 
 
 class OrphanEnvWriteError(RuntimeError):
@@ -265,7 +270,18 @@ class ConfigService:
         raises inside the transaction, so nothing is persisted. The mutated document
         is SEALED against the pre-mutation document before it persists, so a mutator
         that ingests resolved secret values (a resolved round-trip) cannot bake a
-        secret to disk — see :meth:`_seal_secrets`."""
+        secret to disk — see :meth:`_seal_secrets`.
+
+        When the mutation DROPS an oauth connector, its ``client_secret_env`` NAME must
+        stay masked after removal (its value is not deleted), so this method DELEGATES to
+        the combined :meth:`apply_env_and_change` seam — persisting the marks union and the
+        manifest mutation atomically under the env-write lock — instead of the plain
+        transaction. When nothing leaves, the plain path runs unchanged."""
+        preserved = self._read_preserved_manifest()
+        candidate = copy.deepcopy(preserved)
+        mutator(candidate)
+        if _leaving_connector_secrets(preserved, candidate):
+            return await self._apply_change_with_leaving(mutator)
 
         def guarded(document: dict[str, Any]) -> None:
             # Snapshot the preserved document the mutator received BEFORE it runs, so
@@ -288,11 +304,43 @@ class ConfigService:
         resolved values) — the seam persists it verbatim. The document is SEALED
         against the CURRENT persisted manifest before it persists, so a replacement
         carrying a resolved secret (a resolved round-trip) is retagged or refused —
-        see :meth:`_seal_secrets`."""
+        see :meth:`_seal_secrets`.
+
+        When the replacement DROPS an oauth connector, its ``client_secret_env`` NAME must
+        stay masked after removal, so this method DELEGATES to the combined
+        :meth:`apply_env_and_change` seam with a replace-as-mutator (``clear()`` +
+        ``update()``, so the whole-document replace still DELETES omitted sections — never
+        a merge) — persisting the marks union and the replace atomically. When nothing
+        leaves, the plain replace runs unchanged."""
+        preserved = self._read_preserved_manifest()
+        if _leaving_connector_secrets(preserved, document):
+
+            def replace_mutator(doc: dict[str, Any]) -> None:
+                doc.clear()
+                doc.update(document)
+
+            return await self._apply_change_with_leaving(replace_mutator)
         self._validate_manifest(document)
-        self._seal_secrets(document, self._read_preserved_manifest())
+        self._seal_secrets(document, preserved)
         persisted = self._config_manager.replace_manifest(document)
         return await self._reload_and_broadcast(document=persisted)
+
+    async def _apply_change_with_leaving(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
+        """Persist a manifest mutation that drops an oauth connector through the combined
+        env+manifest seam, so the leaving ``client_secret_env`` names are folded into the
+        stored ``TAI_ENV_SECRET_KEYS`` marks and the manifest mutation land atomically.
+
+        ``prepare`` returns an EMPTY change set and the caller's own ``mutator``:
+        :meth:`apply_env_and_change` itself computes the leaving names from the mutated
+        candidate and folds the marks union into the env write (written only when it grows
+        the stored set). Its validate/seal/persist/reload rules then apply exactly as for
+        the combined seam's native callers, and a manifest-persist failure surfaces the same
+        :class:`OrphanEnvWriteError` (a marks write may have landed)."""
+
+        async def prepare(_stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
+            return {}, mutator
+
+        return await self.apply_env_and_change(prepare)
 
     async def apply_env_change(self, changes: dict[str, str]) -> ApplyResult:
         """Apply env overrides: VALIDATE the effective/resolved config (the manifest's
@@ -364,8 +412,14 @@ class ConfigService:
             # candidate is built OUTSIDE the store so the effective-env-dependent checks run
             # BEFORE anything persists (the k8s transaction cannot resolve markers against the
             # not-yet-live env, so validation cannot move inside it).
-            candidate = copy.deepcopy(self._read_preserved_manifest())
+            preserved = self._read_preserved_manifest()
+            candidate = copy.deepcopy(preserved)
             mutator(candidate)
+            # Stickiness across removal: an oauth connector this mutation DROPS keeps its
+            # secret value in the store, so fold its client_secret_env NAME into the marks
+            # union (stored union caller marks union leaving; written only when it grows the stored
+            # set) BEFORE the env write, so the value stays masked after the connector goes.
+            self._fold_leaving_secret_marks(changes, stored, preserved, candidate)
             self._validate_env_and_manifest(changes, candidate)
 
             # STEP 2 — env-write-FIRST. Env-first (not manifest-first) guarantees there is
@@ -382,6 +436,13 @@ class ConfigService:
             def guarded(document: dict[str, Any]) -> None:
                 current = copy.deepcopy(document)
                 mutator(document)
+                # Parity with ``apply_change.guarded``: re-validate the mutated document
+                # inside the transaction so a k8s optimistic-concurrency REPLAY against a
+                # concurrently-changed manifest never persists an unvalidated result. ONE
+                # validator for every caller — the env-aware ``_validate_env_and_manifest``
+                # (``_validate_manifest`` would wrongly reject the just-written store key its
+                # os.environ marker resolution cannot see).
+                self._validate_env_and_manifest(changes, document)
                 self._seal_secrets(document, current)
 
             try:
@@ -403,6 +464,30 @@ class ConfigService:
 
         # STEP 4 — lock RELEASED; reload + broadcast (acquires reload_gate) runs outside it.
         return await self._reload_and_broadcast(document=persisted)
+
+    @staticmethod
+    def _fold_leaving_secret_marks(
+        changes: dict[str, str],
+        stored: Mapping[str, str],
+        preserved: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+    ) -> None:
+        """Fold every oauth ``client_secret_env`` NAME this change DROPS from the manifest
+        into ``changes[TAI_ENV_SECRET_KEYS]``, so a leaving connector's secret value stays
+        masked after removal (its value is never deleted).
+
+        The union is ``stored marks union caller marks (already in ``changes`` when the caller
+        set them) union leaving names``, written back only when it GROWS the stored set — so a
+        no-op change never rewrites the marks and a leaving name already marked adds nothing.
+        Names only; env VALUES are untouched."""
+        leaving = _leaving_connector_secrets(preserved, candidate)
+        if not leaving:
+            return
+        stored_marks = _parse_marks(stored.get(_SECRET_MARKS_VAR))
+        base = _parse_marks(changes[_SECRET_MARKS_VAR]) if _SECRET_MARKS_VAR in changes else list(stored_marks)
+        final = list(dict.fromkeys([*base, *sorted(leaving)]))
+        if set(final) != set(stored_marks):
+            changes[_SECRET_MARKS_VAR] = ",".join(final)
 
     # -- Profile apply (C5) ----------------------------------------------------
 
@@ -562,7 +647,7 @@ class ConfigService:
         the bus configuration is the current one."""
         manifest = self._validated_projection(document)
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_settings().enabled)
-        refuse_dangling_env_markers(document, dict(os.environ))
+        refuse_unresolved_env(document, dict(os.environ))
 
     def _validate_env(self, changes: dict[str, str]) -> None:
         """Validate the effective config an env change produces: refuse an X-band key
@@ -580,7 +665,7 @@ class ConfigService:
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
-            refuse_dangling_env_markers(preserved, effective)
+            refuse_unresolved_env(preserved, effective)
             manifest = self._validated_projection(preserved)
             # Resolve the bus through its settings against the effective env (a fresh
             # read, NOT the cached singleton) so a bus configured only via
@@ -605,7 +690,7 @@ class ConfigService:
         effective = self._effective_env(changes)
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
-            refuse_dangling_env_markers(document, effective)
+            refuse_unresolved_env(document, effective)
             manifest = self._validated_projection(document)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
@@ -628,7 +713,7 @@ class ConfigService:
         refuse_incomplete_admin_pair(effective)
         with _environ(effective):
             preserved = self._read_preserved_manifest()
-            refuse_dangling_env_markers(preserved, effective)
+            refuse_unresolved_env(preserved, effective)
             manifest = self._validated_projection(preserved)
             bus_configured = BusSettings().enabled
         check_backend_needs_bus(backend_module=manifest.backend_module, bus_configured=bus_configured)
@@ -772,6 +857,41 @@ class ConfigService:
             raise FleetBroadcastError(report.op, report, local_failure) from local_failure
         # local_result is set on the success path (no local_failure).
         return ApplyResult(fleet=report, local=cast("dict[str, Any]", local_result), document=document)
+
+
+def _oauth_secret_names(manifest: Mapping[str, Any]) -> set[str]:
+    """Every ``connectors[*].client_secret_env`` NAME in a manifest dict whose connector
+    is ``kind == "oauth"`` — the env key names whose values the platform masks by
+    derivation. A missing/malformed ``connectors`` key contributes nothing."""
+    names: set[str] = set()
+    connectors = manifest.get("connectors")
+    if isinstance(connectors, list):
+        for connector in connectors:
+            if isinstance(connector, dict) and connector.get("kind") == "oauth":
+                var = connector.get("client_secret_env")
+                if isinstance(var, str) and var:
+                    names.add(var)
+    return names
+
+
+def _leaving_connector_secrets(
+    preserved_manifest: Mapping[str, Any], candidate_manifest: Mapping[str, Any]
+) -> set[str]:
+    """The oauth ``client_secret_env`` NAMES the change DROPS from the manifest: present in
+    ``preserved`` (before), absent from ``candidate`` (after). A set difference of NAMES, not
+    of connector ids — an ``oauth -> none`` update keeps the connector id but drops the name.
+
+    When a connector leaves, its secret env VALUE is not deleted (mcp-server parity), so its
+    name must stay masked: :class:`ConfigService` persists these names into the stored
+    ``TAI_ENV_SECRET_KEYS`` through the one locked env+manifest seam so the value keeps its
+    mask even though it is no longer a live ``client_secret_env`` derivation."""
+    return _oauth_secret_names(preserved_manifest) - _oauth_secret_names(candidate_manifest)
+
+
+def _parse_marks(value: str | None) -> list[str]:
+    """The comma-separated ``TAI_ENV_SECRET_KEYS`` value as an ordered, de-duplicated,
+    whitespace-trimmed list (empty segments dropped)."""
+    return list(dict.fromkeys(mark.strip() for mark in (value or "").split(",") if mark.strip()))
 
 
 def _replace_diff_keys(stored: Mapping[str, str], proposed: Mapping[str, str]) -> set[str]:

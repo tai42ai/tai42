@@ -94,6 +94,7 @@ from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpe
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.plugins import accepts_env, required_env_for_spec
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
@@ -539,9 +540,11 @@ class Installer:
         routes per item, the collisions against the live registry (excluding the
         plugin's OWN routes when it is already installed — an update preview), the
         public routes requiring acceptance, and — for an update — the ``new`` public
-        rows not already approved. A resolved public route under a reserved prefix,
-        an unknown-item override, or a registry/contract fault raises loudly, exactly
-        as the install would.
+        rows not already approved. It also reports ``required_env`` (``{name, secret}``
+        per var the spec requires), ``missing_env`` (those not in the env store union
+        process env), and ``delivery`` (``package`` / ``descriptor``). A resolved public
+        route under a reserved prefix, an unknown-item override, or a registry/contract
+        fault raises loudly, exactly as the install would.
         """
         ns, name = _parse_ref(ref)
         existing = await self._store.get(ref)
@@ -572,6 +575,13 @@ class Installer:
             new_public = [row for row in public if routes_mod.row_key(row) not in approved]
         else:
             new_public = public
+        # The env picture, computed server-side so no client re-derives it: every var the
+        # spec requires with its derived secret-ness, and which of them is not already
+        # present in the env store union process env (the SAME rule the installer's pre-check
+        # and the config pipeline's refusal apply). ``delivery`` is the one word every
+        # surface shows (``package`` / ``descriptor``).
+        required = required_env_for_spec(spec)
+        effective = self._svc()._effective_env({})
         return {
             "ref": spec.ref,
             "version": pinned_version,
@@ -580,6 +590,9 @@ class Installer:
             "public_routes": public,
             "new_public_routes": new_public,
             "requires_public_acceptance": bool(new_public),
+            "required_env": [{"name": req.name, "secret": req.secret} for req in required],
+            "missing_env": [req.name for req in required if req.name not in effective],
+            "delivery": spec.delivery,
         }
 
     # -- install ------------------------------------------------------------
@@ -603,10 +616,12 @@ class Installer:
         manifest BEFORE pip; ``pip install`` the locally-composed pin; patch the
         manifest through the one door and reload; write the attribution row.
 
-        ``env`` / ``secret_keys`` are accepted only for an mcp-server install: an
-        mcp entry's ``!ENV`` markers are satisfied by writing these values to the env
-        store in the SAME combined transaction that writes the entry (never deferred).
-        ``secret_keys`` marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``).
+        ``env`` / ``secret_keys`` are accepted for an install whose spec declares
+        install-time env (an mcp entry's ``!ENV`` markers or an oauth connector's
+        client-credential env): the values are written to the env store in the SAME
+        combined transaction that writes the provides entry (never deferred).
+        ``secret_keys`` marks the given keys secret (appended to ``TAI_ENV_SECRET_KEYS``);
+        an oauth connector's client secret is masked by derivation with no mark needed.
 
         ``route_mounts`` remaps a route-carrying item's declared base; every declared
         route is collision-checked against the live registry and any public route
@@ -635,15 +650,23 @@ class Installer:
         existing = await self._store.get(ref)
         if existing is not None:
             raise InstallStateError(f"{ref} is already installed (version {existing.version}); use update")
-        ensure_pip_available()
-        if self._prefix is not None:
-            # A set-but-unwritable prefix fails HERE, before the registry call and
-            # any state change — never a silent fall back to the environment.
-            self._prefix_ensure_writable(self._prefix)
 
         resolved = await self._registry.resolve(ns, name, version)
         spec, source = self._prepare_resolved(resolved)
         pinned_version = _require(resolved, "version")
+
+        # Package prep runs only for a packaged spec: a descriptor-only plugin
+        # (``spec.package is None``) installs nothing, so pip need not be present nor
+        # the prefix writable. A set-but-unwritable prefix fails HERE for a packaged
+        # spec, before any state change — never a silent fall back to the environment.
+        if spec.package is not None:
+            ensure_pip_available()
+            if self._prefix is not None:
+                self._prefix_ensure_writable(self._prefix)
+
+        # Early, readable env pre-check before any pip work: a required var neither
+        # supplied, stored, nor in the process env fails now, naming it.
+        self._precheck_required_env(spec, env)
 
         cm = self._cm()
         found = collisions(dict(cm.read_manifest_preserved()), spec)
@@ -662,28 +685,32 @@ class Installer:
             approved_public=None,
         )
 
-        if self._prefix is not None:
-            # A prefix install of a version the environment already shadows at a
-            # DIFFERENT version is refused here, before any package/manifest/store write.
-            self._guard_env_shadow(spec.package, pinned_version, self._prefix)
+        # Step 3 — the package steps, run ONLY for a packaged spec. A descriptor-only
+        # plugin (``spec.package is None``) installs nothing but its manifest entry, so
+        # there is no env-shadow guard, no pip, and no migrations — ``pip_output`` is None.
+        pip_output: str | None = None
+        if spec.package is not None:
+            if self._prefix is not None:
+                # A prefix install of a version the environment already shadows at a
+                # DIFFERENT version is refused here, before any package/manifest/store write.
+                self._guard_env_shadow(spec.package, pinned_version, self._prefix)
 
-        # Step 3 — pip install (github: fetch + verify + install the local
-        # tarball). A failure propagates as-is: the venv may hold a
-        # partially-resolved state pip itself left, and pip's own transaction
-        # handling is the boundary.
-        pip_output = await self._pip_install(
-            spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
-        )
+            # pip install (github: fetch + verify + install the local tarball). A failure
+            # propagates as-is: the venv may hold a partially-resolved state pip itself
+            # left, and pip's own transaction handling is the boundary.
+            pip_output = await self._pip_install(
+                spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
+            )
 
-        # Step 3.5 — run the plugin's schema migrations, when it declares a chain.
-        # The package has landed but the manifest is not yet patched, so the plugin
-        # is inert: a migration failure aborts the install with the manifest
-        # untouched (no half-active plugin), unwinding the just-installed package.
-        try:
-            await self._run_plugin_migrations(spec)
-        except Exception as migration_error:
-            await self._unwind_install(migration_error, package=spec.package, saved_manifest=None)
-            raise
+            # Step 3.5 — run the plugin's schema migrations, when it declares a chain.
+            # The package has landed but the manifest is not yet patched, so the plugin
+            # is inert: a migration failure aborts the install with the manifest
+            # untouched (no half-active plugin), unwinding the just-installed package.
+            try:
+                await self._run_plugin_migrations(spec)
+            except Exception as migration_error:
+                await self._unwind_install(migration_error, package=spec.package, saved_manifest=None)
+                raise
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False
@@ -763,7 +790,7 @@ class Installer:
         self,
         step_error: Exception,
         *,
-        package: str,
+        package: str | None,
         saved_manifest: dict[str, Any] | None,
         env_restore: dict[str, str] | None = None,
     ) -> None:
@@ -775,8 +802,9 @@ class Installer:
         ``TAI_ENV_SECRET_KEYS`` marks var keeps an operator's OTHER marks), restore the
         manifest through the pipeline (converging the live app and the fleet back) when
         the change had persisted, then pip uninstall the freshly-installed package. A
-        failed sub-step escalates to :class:`InstallUnwindError`; otherwise the caller
-        re-raises the original step error."""
+        descriptor-only spec (``package is None``) installed nothing, so no package is
+        removed. A failed sub-step escalates to :class:`InstallUnwindError`; otherwise the
+        caller re-raises the original step error."""
         try:
             if saved_manifest is not None:
                 await self._svc().apply_replace(saved_manifest)
@@ -786,10 +814,36 @@ class Installer:
             await self._revert_env_write(env_restore)
         except Exception as unwind_error:
             raise InstallUnwindError(step_error, unwind_error) from step_error
+        if package is None:
+            # Nothing was pip-installed for a descriptor-only plugin — no package to remove.
+            return
         try:
             await self._remove_package(package)
         except Exception as unwind_error:
             raise InstallUnwindError(step_error, unwind_error) from step_error
+
+    def _precheck_required_env(self, spec: PluginSpec, env: dict[str, str] | None) -> None:
+        """Refuse an install/update whose spec requires env var(s) none of the supplied
+        env, the env store, or the process env provides — a readable failure BEFORE any
+        pip work, naming the missing vars. The authoritative refusal is the config
+        pipeline's :func:`~tai42_skeleton.config.boundary.refuse_unresolved_env` at the
+        manifest write; this is only the early, named one so an operator sees the gap
+        before a minutes-long install begins."""
+        required = required_env_for_spec(spec)
+        if not required:
+            return
+        supplied = set(env or {})
+        try:
+            stored = set(self._cm().read_env())
+        except FileNotFoundError:
+            stored = set()
+        available = supplied | stored | set(os.environ)
+        missing = [req.name for req in required if req.name not in available]
+        if missing:
+            raise InstallStateError(
+                f"{spec.ref} requires env var(s) not supplied, stored, or present in the process "
+                f"environment: {', '.join(missing)}"
+            )
 
     @staticmethod
     def _env_to_write(env: dict[str, str] | None) -> dict[str, str]:
@@ -831,15 +885,19 @@ class Installer:
     ) -> ApplyResult:
         """Persist a provides patch through the pipeline.
 
-        An mcp-server spec routes through the COMBINED env+manifest pipeline
+        A spec that ACCEPTS env (:func:`~tai42_kit.plugins.accepts_env` — any ``!ENV``
+        marker or a non-empty required-env, i.e. an mcp-server with markers or an oauth
+        connector) routes through the COMBINED env+manifest pipeline
         (:meth:`~tai42_skeleton.config.service.ConfigService.apply_env_and_change`): the
-        supplied env values land in the store and the ``{title, config}`` entry is
-        written in ONE unit, so the entry is written exactly once (the standalone
-        ``apply_provides`` never runs a second time). An unsatisfied required marker is
-        the pipeline's dangling refusal, surfaced as :class:`InstallEnvError` naming each
-        missing var + json-pointer BEFORE anything persists. The non-atomicity
-        contract is preserved (a manifest-persist failure leaves the env write standing
-        and raises ``OrphanEnvWriteError``); the installer-unwind above reverts it.
+        supplied env values land in the store and the provides entry is written in ONE
+        unit, so the entry is written exactly once (the standalone ``apply_provides``
+        never runs a second time). ``manifest_pointer`` is the binding field of the
+        spec's data items (``mcp`` / ``connectors``), named in the orphan report. An
+        unsatisfied required marker or connector-env is the pipeline's unresolved-env
+        refusal, surfaced as :class:`InstallEnvError` naming each missing var +
+        json-pointer BEFORE anything persists. The non-atomicity contract is preserved (a
+        manifest-persist failure leaves the env write standing and raises
+        ``OrphanEnvWriteError``); the installer-unwind above reverts it.
 
         Under the pipeline's env-write lock (against the SAME stored-env snapshot the write
         derives from) this records the PRIOR store value of EVERY key it will write into
@@ -849,17 +907,18 @@ class Installer:
         this install's contribution without deleting an operator's pre-existing store value
         or clobbering their other secret marks.
 
-        Every other spec routes through ``apply_change``; ``env`` / ``secret_keys`` are
-        meaningless there and supplying them is a loud input error."""
-        if not _mcp_entry_items(spec):
+        A spec that accepts no env routes through ``apply_change``; ``env`` /
+        ``secret_keys`` are meaningless there and supplying them is a loud input error."""
+        if not accepts_env(spec):
             if env or secret_keys:
                 raise InstallEnvError(
-                    f"env / secret_keys are only accepted for an mcp-server install; {spec.ref} provides "
-                    "no mcp-server item"
+                    f"env / secret_keys were supplied but {spec.ref} declares no install-time env "
+                    "(no !ENV marker and no required connector env)"
                 )
             return await self._apply_composed(mutator)
 
         marks = list(secret_keys or [])
+        manifest_pointer = _env_manifest_pointer(spec)
 
         async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
             changes = dict(env_to_write)
@@ -879,7 +938,7 @@ class Installer:
             return changes, mutator
 
         try:
-            return await self._svc().apply_env_and_change(prepare, manifest_pointer="mcp")
+            return await self._svc().apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
         except (ValidationError, BackendNeedsBusError) as exc:
             raise ManifestComposeError(f"the composed manifest is invalid: {exc}") from exc
         except ValueError as exc:
@@ -911,14 +970,15 @@ class Installer:
             return await self._uninstall_locked(ref)
 
     async def _uninstall_locked(self, ref: str) -> dict[str, Any]:
-        if self._prefix is None:
-            # The environment path shells ``pip uninstall``; the prefix path removes
-            # the plugin's files by its RECORD and needs no pip.
-            ensure_pip_available()
         row = await self._store.get(ref)
         if row is None:
             raise InstallStateError(f"{ref} is not installed", not_installed=True)
         spec = _spec_from_row(row)
+        if spec.package is not None and self._prefix is None:
+            # The environment path shells ``pip uninstall``; the prefix path removes
+            # the plugin's files by its RECORD and needs no pip. A descriptor-only
+            # plugin (``spec.package is None``) removes no package, so needs no pip.
+            ensure_pip_available()
 
         cm = self._cm()
         reload_result: dict[str, Any] | None
@@ -942,12 +1002,13 @@ class Installer:
             reload_result = None
 
         # A failure here leaves the app converged but the package present;
-        # re-running uninstall (step 3 now a no-op) completes the removal.
-        removed = await self._remove_package(spec.package)
+        # re-running uninstall (step 3 now a no-op) completes the removal. A
+        # descriptor-only plugin installed no package, so there is nothing to remove.
+        removed = await self._remove_package(spec.package) if spec.package is not None else False
         await self._store.delete(ref)
 
         notes = _uninstall_notes(spec)
-        if self._prefix is not None and not removed:
+        if spec.package is not None and self._prefix is not None and not removed:
             # The env-shadowed no-op install landed nothing in the prefix; the
             # uninstall stripped the manifest and dropped the row but removed no
             # files. Surface that in the result, never only a log line.
@@ -1012,9 +1073,6 @@ class Installer:
         accept_public_routes: bool,
     ) -> dict[str, Any]:
         ns, name = _parse_ref(ref)
-        ensure_pip_available()
-        if self._prefix is not None:
-            self._prefix_ensure_writable(self._prefix)
         row = await self._store.get(ref)
         if row is None:
             raise InstallStateError(f"{ref} is not installed", not_installed=True)
@@ -1025,6 +1083,22 @@ class Installer:
         pinned_version = _require(resolved, "version")
         if pinned_version == row.version:
             raise InstallStateError(f"{ref} is already at {pinned_version}")
+
+        # A version may not switch delivery form (packaged <-> descriptor-only) in place:
+        # an in-place pip upgrade/downgrade has no meaning across the boundary, so it is
+        # refused loudly with the uninstall-then-install remedy.
+        if (old_spec.package is None) != (new_spec.package is None):
+            raise InstallStateError("delivery form changed between versions; uninstall then install")
+
+        # Package prep runs only for a packaged new spec (a descriptor-only plugin
+        # installs nothing). Done after the resolve so the delivery form is known.
+        if new_spec.package is not None:
+            ensure_pip_available()
+            if self._prefix is not None:
+                self._prefix_ensure_writable(self._prefix)
+
+        # Early, readable env pre-check before any pip work (mirrors install).
+        self._precheck_required_env(new_spec, env)
 
         cm = self._cm()
         preview = dict(cm.read_manifest_preserved())
@@ -1046,52 +1120,58 @@ class Installer:
             approved_public=self._approved_public_of(row),
         )
 
-        if self._prefix is not None:
-            # The environment shadows the prefix, so it cannot hold a version the
-            # environment already provides at a different one — refused before any
-            # state change, and before the old prefix wheel is removed below.
-            self._guard_env_shadow(new_spec.package, pinned_version, self._prefix)
+        # Step 4 — the package steps, run ONLY for a packaged spec. A descriptor-only
+        # update installs nothing but re-patches the manifest, so pip_output is None.
+        pip_output: str | None = None
+        if new_spec.package is not None:
+            # The delivery-form check above guarantees the old spec is packaged too.
+            assert old_spec.package is not None
+            if self._prefix is not None:
+                # The environment shadows the prefix, so it cannot hold a version the
+                # environment already provides at a different one — refused before any
+                # state change, and before the old prefix wheel is removed below.
+                self._guard_env_shadow(new_spec.package, pinned_version, self._prefix)
 
-        # Step 4 — install the new pin (github: fetch + verify + install the local
-        # tarball). On the environment path pip upgrades in place and a failure
-        # propagates as-is (nothing skeleton-side has changed yet; pip's own
-        # transaction is the boundary). On the prefix path pip cannot upgrade a
-        # distribution it does not see on its own path, so the old version is
-        # removed first and reinstalled if the new install then fails — a failed
-        # step 4 never leaves the prefix plugin-less, and a failed restore of the
-        # old pin there escalates to a loud unwind error.
-        if self._prefix is not None:
-            self._prefix_uninstall(old_spec.package, self._prefix)
-            try:
+            # Install the new pin (github: fetch + verify + install the local tarball).
+            # On the environment path pip upgrades in place and a failure propagates
+            # as-is (nothing skeleton-side has changed yet; pip's own transaction is the
+            # boundary). On the prefix path pip cannot upgrade a distribution it does not
+            # see on its own path, so the old version is removed first and reinstalled if
+            # the new install then fails — a failed step 4 never leaves the prefix
+            # plugin-less, and a failed restore of the old pin there escalates to a loud
+            # unwind error.
+            if self._prefix is not None:
+                self._prefix_uninstall(old_spec.package, self._prefix)
+                try:
+                    pip_output = await self._pip_install(
+                        new_spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
+                    )
+                except Exception as install_error:
+                    try:
+                        await self._pip_install(old_spec.package, row.version, row.source, row.artifact_ref, row.sha256)
+                    except Exception as restore_error:
+                        raise InstallUnwindError(install_error, restore_error) from install_error
+                    raise
+            else:
                 pip_output = await self._pip_install(
                     new_spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
                 )
-            except Exception as install_error:
-                try:
-                    await self._pip_install(old_spec.package, row.version, row.source, row.artifact_ref, row.sha256)
-                except Exception as restore_error:
-                    raise InstallUnwindError(install_error, restore_error) from install_error
-                raise
-        else:
-            pip_output = await self._pip_install(
-                new_spec.package, pinned_version, source, resolved.get("artifact_ref"), resolved.get("sha256")
-            )
 
-        # Run the new version's schema migrations before the manifest patch, the
-        # same ordering install uses: the new wheel has landed but is not yet
-        # active, so a migration failure unwinds to the OLD pin with the manifest
-        # untouched, never a half-migrated active plugin.
-        try:
-            await self._run_plugin_migrations(new_spec)
-        except Exception as migration_error:
-            await self._unwind_update(
-                migration_error,
-                old_package=old_spec.package,
-                new_package=new_spec.package,
-                row=row,
-                saved_manifest=None,
-            )
-            raise
+            # Run the new version's schema migrations before the manifest patch, the
+            # same ordering install uses: the new wheel has landed but is not yet
+            # active, so a migration failure unwinds to the OLD pin with the manifest
+            # untouched, never a half-migrated active plugin.
+            try:
+                await self._run_plugin_migrations(new_spec)
+            except Exception as migration_error:
+                await self._unwind_update(
+                    migration_error,
+                    old_package=old_spec.package,
+                    new_package=new_spec.package,
+                    row=row,
+                    saved_manifest=None,
+                )
+                raise
 
         saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         manifest_persisted = False
@@ -1170,8 +1250,8 @@ class Installer:
         self,
         step_error: Exception,
         *,
-        old_package: str,
-        new_package: str,
+        old_package: str | None,
+        new_package: str | None,
         row: InstallRecord,
         saved_manifest: dict[str, Any] | None,
         env_restore: dict[str, str] | None = None,
@@ -1187,12 +1267,18 @@ class Installer:
         ``artifact_ref`` + ``sha256`` — the old version's integrity is re-checked,
         never cloned from a mutable tag. On the prefix path the NEW version's files
         are removed first, or the old and new dist-info would coexist in the prefix.
-        A failed sub-step (including an integrity mismatch on the old artifact)
-        escalates to :class:`InstallUnwindError`."""
+        A descriptor-only update (``old_package``/``new_package`` both None) installed no
+        package, so only the manifest and env write are reverted. A failed sub-step
+        (including an integrity mismatch on the old artifact) escalates to
+        :class:`InstallUnwindError`."""
         try:
-            if self._prefix is not None:
-                self._prefix_uninstall(new_package, self._prefix)
-            await self._pip_install(old_package, row.version, row.source, row.artifact_ref, row.sha256)
+            if old_package is not None:
+                # A packaged update: put the OLD wheel back BEFORE the manifest restore's
+                # reload. The delivery-form check guarantees new_package is packaged too.
+                if self._prefix is not None:
+                    assert new_package is not None
+                    self._prefix_uninstall(new_package, self._prefix)
+                await self._pip_install(old_package, row.version, row.source, row.artifact_ref, row.sha256)
             if saved_manifest is not None:
                 await self._svc().apply_replace(saved_manifest)
             # Revert the env write this update made AFTER the old manifest is back, so
@@ -1290,15 +1376,19 @@ class Installer:
             raise RegistryResponseError(f"registry served an invalid plugin spec: {exc}", status=None) from exc
 
         source = _require(resolved, "source")
-        if source == "github":
+        if source in ("github", "spec"):
+            # A github source ships a wheel; a ``spec`` source ships a descriptor-only
+            # ``tai-plugin.yml`` (a plugin with no package). Both carry the SAME pointer
+            # fields — repository_url + tag for display, artifact_ref + sha256 for the
+            # verified fetch/integrity — so the same presence requirements apply.
             if not resolved.get("repository_url") or not resolved.get("tag"):
                 raise RegistryResponseError(
-                    "registry resolve response for a github source is missing repository_url or tag",
+                    f"registry resolve response for a {source} source is missing repository_url or tag",
                     status=None,
                 )
             if not resolved.get("artifact_ref") or not resolved.get("sha256"):
                 raise RegistryResponseError(
-                    "registry resolve response for a github source is missing artifact_ref or sha256",
+                    f"registry resolve response for a {source} source is missing artifact_ref or sha256",
                     status=None,
                 )
         elif source != "pypi":
@@ -1368,11 +1458,12 @@ def _spec_from_row(row: InstallRecord) -> PluginSpec:
 
 def _pin_provenance(resolved: dict[str, Any], source: str) -> tuple[str | None, str | None, str | None, str | None]:
     """The ``(repository_url, tag, artifact_ref, sha256)`` to store for the pin:
-    the resolve values only for a github source, else all ``None`` — so a pypi row
-    keeps every pin column NULL even when the resolve response carries them. The
-    stored ``artifact_ref`` + ``sha256`` are what let update-unwind reinstall the
-    old github pin through the same verified fetch path."""
-    if source == "github":
+    the resolve values for a github OR a ``spec`` source (both carry the pointer
+    fields), else all ``None`` — so a pypi row keeps every pin column NULL even when
+    the resolve response carries them. The stored ``artifact_ref`` + ``sha256`` are
+    what let update-unwind reinstall the old github pin through the same verified
+    fetch path (a descriptor ``spec`` pin stores them for provenance/integrity)."""
+    if source in ("github", "spec"):
         return (
             resolved.get("repository_url"),
             resolved.get("tag"),
@@ -1420,6 +1511,20 @@ def _mcp_entry_items(spec: PluginSpec) -> list[PluginItem]:
         if binding is not None and binding.mode == "mcp_entry":
             items.append(item)
     return items
+
+
+def _env_manifest_pointer(spec: PluginSpec) -> str:
+    """The manifest field(s) the spec's DATA items bind into (``mcp`` / ``connectors``),
+    joined — the pointer named in a combined-op orphan report. A spec never mixes
+    mcp-server with other kinds and every connector item binds to ``connectors``, so this
+    is a single field in practice; ``manifest`` when the spec has no data item (never on
+    the env-accepting path)."""
+    fields: list[str] = []
+    for item in spec.provides:
+        binding = KIND_MANIFEST_BINDINGS.get(item.kind)
+        if binding is not None and binding.payload == "data" and binding.field and binding.field not in fields:
+            fields.append(binding.field)
+    return ",".join(fields) if fields else "manifest"
 
 
 def _install_notes(spec: PluginSpec) -> list[str]:

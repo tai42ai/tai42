@@ -16,6 +16,7 @@ from tai42_kit.settings import SettingsClassInfo, SettingsFieldInfo, TaiBaseSett
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.routers import config as router
+from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 
 from .._fakes.bus import FakeBus
 
@@ -55,9 +56,9 @@ def _clear_marks_cache():
     # The secret-marks accessor is an ``@settings_cache`` singleton keyed off the
     # process env; clear it around each test so ``TAI_ENV_SECRET_KEYS`` set by
     # one test never bleeds into another.
-    config_ops.env_secret_marks_settings.cache_clear()
+    env_secret_marks_settings.cache_clear()
     yield
-    config_ops.env_secret_marks_settings.cache_clear()
+    env_secret_marks_settings.cache_clear()
 
 
 def _req() -> Request:
@@ -99,20 +100,27 @@ class _FakeConfigManager:
 
 
 class _FakeAdmin:
-    def __init__(self, manager):
+    def __init__(self, manager, live_manifest=None):
         self._manager = manager
         self.reloads = 0
+        self._live_manifest = live_manifest if live_manifest is not None else {}
 
     def reload_config(self):
         self.reloads += 1
         return {"status": "ok", "env_keys": len(self._manager._env)}
 
+    @property
+    def live_manifest(self):
+        # The dumped live manifest the derived secret-marks read consults for
+        # ``connectors[*].client_secret_env``; empty unless a test sets one.
+        return self._live_manifest
+
 
 @pytest.fixture
 def install(monkeypatch):
-    def _install(env=None):
+    def _install(env=None, live_manifest=None):
         manager = _FakeConfigManager(env if env is not None else {})
-        admin = _FakeAdmin(manager)
+        admin = _FakeAdmin(manager, live_manifest=live_manifest)
         # No worker bus: the reload stays local-only (the fan-out itself is
         # covered by the dedicated propagation test).
         impl = SimpleNamespace(
@@ -134,10 +142,26 @@ def install(monkeypatch):
 async def test_read_env(install, monkeypatch):
     install({"API_KEY": "abc", "DEBUG": "1"})
     monkeypatch.setenv("TAI_ENV_SECRET_KEYS", "API_KEY")
-    config_ops.env_secret_marks_settings.cache_clear()
+    env_secret_marks_settings.cache_clear()
     resp = await router.read_env(_req())
     assert resp.status_code == 200
     assert _json(resp) == {"data": {"env": {"API_KEY": "abc", "DEBUG": "1"}, "secret_keys": ["API_KEY"]}}
+
+
+async def test_read_env_derives_connector_secret_key_from_live_manifest(install, monkeypatch):
+    # A live oauth connector's ``client_secret_env`` is DERIVED into the masked secret_keys
+    # beyond the operator's own marks — so the connector's client secret shows as masked even
+    # with no operator mark for it.
+    install(
+        {"API_KEY": "abc"},
+        live_manifest={"connectors": [{"id": "acme", "kind": "oauth", "client_secret_env": "ACME_CLIENT_SECRET"}]},
+    )
+    monkeypatch.setenv("TAI_ENV_SECRET_KEYS", "API_KEY")
+    env_secret_marks_settings.cache_clear()
+    resp = await router.read_env(_req())
+    assert resp.status_code == 200
+    # The operator mark AND the connector-derived key both appear (sorted, deduped).
+    assert _json(resp)["data"]["secret_keys"] == ["ACME_CLIENT_SECRET", "API_KEY"]
 
 
 async def test_read_env_missing_file_yields_empty_env(monkeypatch):
@@ -145,7 +169,8 @@ async def test_read_env_missing_file_yields_empty_env(monkeypatch):
         def read_env(self):
             raise FileNotFoundError
 
-    impl = SimpleNamespace(config=SimpleNamespace(config_manager=_Missing()), admin=None)
+    admin = SimpleNamespace(live_manifest={})
+    impl = SimpleNamespace(config=SimpleNamespace(config_manager=_Missing()), admin=admin)
     monkeypatch.setattr(tai42_app, "_impl", impl)
     monkeypatch.delenv("TAI_ENV_SECRET_KEYS", raising=False)
     resp = await router.read_env(_req())
@@ -279,8 +304,8 @@ async def test_settings_schema_missing_env_is_empty_not_500(monkeypatch):
 
 async def test_secret_marks_roundtrip_and_group(install, monkeypatch):
     monkeypatch.setenv("TAI_ENV_SECRET_KEYS", "API_KEY, DB_URL ,")
-    config_ops.env_secret_marks_settings.cache_clear()
-    assert config_ops.env_secret_marks_settings().secret_keys == ["API_KEY", "DB_URL"]
+    env_secret_marks_settings.cache_clear()
+    assert env_secret_marks_settings().secret_keys == ["API_KEY", "DB_URL"]
     install({})
     resp = await router.read_settings_schema(_req())
     names = [g["name"] for g in _json(resp)["data"]["groups"]]

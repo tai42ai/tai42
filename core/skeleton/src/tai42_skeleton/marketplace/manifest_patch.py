@@ -7,7 +7,7 @@ handle — so each kind of provides item is unit-testable in isolation:
 three are driven by :data:`~tai42_contract.plugins.KIND_MANIFEST_BINDINGS`: it
 names the manifest field each item kind wires into and the patch shape.
 
-The five patch shapes:
+The six patch shapes:
 
 - ``config_row`` (``tools``, ``agents``) — one config entry per DISTINCT module,
   ``{"title": <module>, "module": <module>}``. The title IS the module path:
@@ -29,6 +29,12 @@ The five patch shapes:
   ``item.name``/``item.mcp``, never ``item.module``). Deduped by title; a title
   already present (hand-written or previously installed) is a collision, never an
   overwrite; uninstall removes by title, convergently.
+- ``descriptor_entry`` (``connectors``) — the item's ``provider`` descriptor
+  (``item.provider.model_dump(mode="json", exclude_none=True)``) appended to the
+  manifest ``connectors`` list (a connector item carries a ``ProviderDescriptor`` and
+  NO module, so the payload is the descriptor itself). Deduped by ``id``; an ``id``
+  already present (hand-written or previously installed) is a collision, never an
+  overwrite; uninstall removes by ``id``, convergently.
 - ``scalar_module`` (``backend_module``, ``storage_module``,
   ``monitoring_module``) — a single-module slot; a second plugin claiming an
   occupied slot is a collision, as is one spec providing two distinct modules for
@@ -58,8 +64,9 @@ class _FieldTargets(NamedTuple):
 
     ``values`` is a per-mode payload union: string modes carry ``list[str]``
     (module paths or the distribution name); ``mcp_entry`` carries the built
-    ``{title, config}`` dicts. Each writer branches on ``mode`` before reading a
-    payload, so the two shapes never mix at one site."""
+    ``{title, config}`` dicts; ``descriptor_entry`` carries the dumped provider
+    descriptor dicts. Each writer branches on ``mode`` before reading a payload, so
+    the shapes never mix at one site."""
 
     mode: str
     values: list[Any]
@@ -87,15 +94,22 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
         if target is None:
             target = _FieldTargets(mode=binding.mode, values=[])
             grouped[field] = target
-        if binding.mode == "mcp_entry":
-            # An mcp-server item carries transport config in ``item.mcp`` and no
-            # module — build the ``{title, config}`` payload from ``item.name``/
-            # ``item.mcp`` (markers in ``env``/``headers`` stay as strings), deduped
-            # by title. The contract guarantees ``mcp`` is set for this kind.
-            assert item.mcp is not None
-            payload = {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
-            if not any(existing["title"] == payload["title"] for existing in target.values):
-                target.values.append(payload)
+        if binding.payload == "data":
+            # A data item carries its kind's declarative block and no module. The
+            # ``mcp_entry`` shape wraps ``item.mcp`` as a ``{title, config}`` object
+            # (deduped by title); ``descriptor_entry`` appends the item's
+            # ``provider`` descriptor itself (deduped by id). The contract guarantees
+            # the block the kind names is set.
+            if binding.mode == "mcp_entry":
+                assert item.mcp is not None
+                mcp_payload = {"title": item.name, "config": item.mcp.model_dump(exclude_none=True)}
+                if not any(existing["title"] == mcp_payload["title"] for existing in target.values):
+                    target.values.append(mcp_payload)
+            else:  # descriptor_entry
+                assert item.provider is not None
+                provider_payload = item.provider.model_dump(mode="json", exclude_none=True)
+                if not any(existing["id"] == provider_payload["id"] for existing in target.values):
+                    target.values.append(provider_payload)
             continue
         value = spec.package if binding.mode == "package_list" else item.module
         if value not in target.values:
@@ -121,7 +135,10 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
     single-module slot (an intra-spec self-conflict a last-write-wins apply would
     otherwise silently drop). An ``mcp_entry`` item collides when an existing
     manifest ``mcp`` entry already carries that title (hand-written or previously
-    installed) — never overwritten. ``env_selected`` (``config``) items never collide.
+    installed) — never overwritten. A ``descriptor_entry`` item collides when an
+    existing manifest ``connectors`` entry already carries that provider ``id``
+    (hand-written or previously installed) — never overwritten. ``env_selected``
+    (``config``) items never collide.
     """
     messages: list[str] = []
     for field, target in _grouped_targets(spec).items():
@@ -142,6 +159,12 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
             for payload in target.values:
                 if payload["title"] in titles:
                     messages.append(f"{field} entry titled {payload['title']!r} already exists")
+        elif target.mode == "descriptor_entry":
+            entries = _existing_list(manifest_dict, field)
+            ids = {entry.get("id") for entry in entries}
+            for payload in target.values:
+                if payload["id"] in ids:
+                    messages.append(f"{field} entry with id {payload['id']!r} already exists")
         elif target.mode == "scalar_module":
             current = manifest_dict.get(field)
             if current:
@@ -200,6 +223,15 @@ def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
                 manifest_dict[field] = entries
             for payload in target.values:
                 entries.append(payload)
+        elif target.mode == "descriptor_entry":
+            # The collisions() re-check above rejects a provider id already present, so a
+            # hand-written or previously-installed connector is never overwritten.
+            entries = manifest_dict.get(field)
+            if not isinstance(entries, list):
+                entries = []
+                manifest_dict[field] = entries
+            for payload in target.values:
+                entries.append(payload)
         elif target.mode == "scalar_module":
             # The collisions() re-check above rejects a spec with two distinct
             # modules for one scalar slot, so target.values holds at most one here.
@@ -220,6 +252,8 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
     ``None`` only while it still equals the spec's module — a foreign value means
     the operator replaced it, so it is left untouched. An ``mcp_entry`` item drops
     the manifest ``mcp`` entry matching its title; a title already gone is skipped
+    (convergent), never an error. A ``descriptor_entry`` item drops the manifest
+    ``connectors`` entry matching its provider ``id``; an id already gone is skipped
     (convergent), never an error. ``env_selected`` (``config``) items remove nothing.
     """
     changed = False
@@ -242,6 +276,13 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
             entries = _existing_list(manifest_dict, field)
             titles = {payload["title"] for payload in target.values}
             kept = [entry for entry in entries if entry.get("title") not in titles]
+            if len(kept) != len(entries):
+                manifest_dict[field] = kept
+                changed = True
+        elif target.mode == "descriptor_entry":
+            entries = _existing_list(manifest_dict, field)
+            ids = {payload["id"] for payload in target.values}
+            kept = [entry for entry in entries if entry.get("id") not in ids]
             if len(kept) != len(entries):
                 manifest_dict[field] = kept
                 changed = True

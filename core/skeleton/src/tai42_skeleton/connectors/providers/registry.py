@@ -2,11 +2,10 @@
 
 The catalog endpoint reads the registry, so adding a provider needs no UI
 changes. The skeleton ships no concrete provider: registration is
-manifest-driven. A provider plugin module (named in the manifest, or installed
-from the marketplace) calls ``tai42_app.connectors.register_connector(descriptor)``
-on import, which forwards to :func:`register_connector` here. Descriptors are
-validated when built so a misconfigured provider fails deployment loudly rather
-than at first user click.
+manifest-driven. Each ``connectors`` entry in the manifest is registered through
+``tai42_app.connectors.register_connector(descriptor)`` during boot/reload, which
+forwards to :func:`register_connector` here. Descriptors are validated when built
+so a misconfigured provider fails deployment loudly rather than at first user click.
 
 The descriptor models live in :mod:`tai42_contract.connectors.providers`; this
 module owns only the registry STATE (the code-built ``_REGISTRY``) and the
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Code-side mirror of the connector_category seed rows in the init SQL.
 # register_connector validates registry descriptors against it because
-# registration runs at import time, before the DB is reachable. A provider's
+# registration runs during boot/reload, before the DB is reachable. A provider's
 # category is a foreign key into connector_category, so a descriptor must name a
 # seeded category.
 SEED_CATEGORY_IDS = (
@@ -46,7 +45,7 @@ SEED_CATEGORY_IDS = (
 
 
 # -- Registry ----------------------------------------------------------------
-# Provider plugin modules call register_connector at import with a descriptor.
+# The reload seam calls register_connector for each manifest ``connectors`` entry.
 # ``_REGISTRY`` is the COMMITTED generation the request path (catalog, resolver)
 # reads; ``_pending`` is the generation an epoch build stages into, promoted
 # atomically on success and dropped on failure — so a failed build leaves the
@@ -64,7 +63,7 @@ def register_connector(descriptor: ProviderDescriptor) -> None:
     target = _write_target()
     if descriptor.id in target:
         raise ValueError(f"Provider {descriptor.id!r} already registered")
-    # Registration runs at import time, before the DB is reachable, so the
+    # Registration runs during boot/reload, before the DB is reachable, so the
     # category check goes against the code-side seed constants.
     if descriptor.category not in SEED_CATEGORY_IDS:
         raise ValueError(
@@ -77,8 +76,9 @@ def register_connector(descriptor: ProviderDescriptor) -> None:
 
 def reset_registry() -> None:
     """Clear the write-target provider registry — the STAGED generation while a build is
-    staging (``start()`` clears the fresh staged map before re-importing connector
-    plugins, never the committed one), else the committed map (boot, test isolation)."""
+    staging (``start()`` clears the fresh staged map before re-registering the
+    manifest's ``connectors`` entries, never the committed one), else the committed
+    map (boot, test isolation)."""
     _write_target().clear()
 
 

@@ -940,3 +940,143 @@ async def test_env_change_with_backend_and_default_namespace_bus_is_allowed(monk
         assert result.document is None
     finally:
         reset_all_settings()
+
+
+# ---------------------------------------------------------------------------
+# Connector-secret stickiness across removal
+# ---------------------------------------------------------------------------
+
+
+def _oauth_descriptor(provider_id: str = "acme") -> dict[str, Any]:
+    return {
+        "id": provider_id,
+        "display_name": provider_id.title(),
+        "icon_url": f"https://example.com/{provider_id}.png",
+        "kind": "oauth",
+        "origin": "system",
+        "category": "productivity",
+        "oauth": {"authorize": "https://auth.example.com/authorize", "token": "https://auth.example.com/token"},
+        "client_id_env": f"{provider_id.upper()}_CLIENT_ID",
+        "client_secret_env": f"{provider_id.upper()}_CLIENT_SECRET",
+        "sub_services": {
+            "main": {
+                "id": "main",
+                "display_name": "Main",
+                "scopes": ["read"],
+                "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+            }
+        },
+    }
+
+
+def _none_descriptor(provider_id: str = "acme") -> dict[str, Any]:
+    return {
+        "id": provider_id,
+        "display_name": provider_id.title(),
+        "icon_url": f"https://example.com/{provider_id}.png",
+        "kind": "none",
+        "origin": "system",
+        "category": "productivity",
+        "sub_services": {
+            "main": {
+                "id": "main",
+                "display_name": "Main",
+                "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+            }
+        },
+    }
+
+
+async def test_apply_change_dropping_oauth_connector_persists_its_secret_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"connectors": [_oauth_descriptor("acme")]}, env={})
+    service, _admin, _bus = _service(store)
+
+    def drop(document: dict[str, Any]) -> None:
+        document["connectors"] = []
+
+    await service.apply_change(drop)
+
+    # The connector is gone, but its client_secret_env name is now in the stored marks so
+    # the orphaned value keeps its mask (the value itself is never deleted).
+    assert store.manifest["connectors"] == []
+    assert "ACME_CLIENT_SECRET" in store.env["TAI_ENV_SECRET_KEYS"].split(",")
+
+
+async def test_update_to_none_kind_keeps_the_dropped_secret_name_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An oauth->none update keeps the connector id but drops its client_secret_env NAME; the
+    # name must still be persisted into the marks (a set difference of NAMES, not of ids).
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"connectors": [_oauth_descriptor("acme")]}, env={})
+    service, _admin, _bus = _service(store)
+
+    def to_none(document: dict[str, Any]) -> None:
+        document["connectors"] = [_none_descriptor("acme")]
+
+    await service.apply_change(to_none)
+
+    assert store.manifest["connectors"][0]["kind"] == "none"
+    assert "ACME_CLIENT_SECRET" in store.env["TAI_ENV_SECRET_KEYS"].split(",")
+
+
+async def test_apply_change_not_dropping_a_connector_writes_no_marks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A manifest change that drops NO oauth connector never touches the marks var (no env
+    # write) — the plain apply_change path.
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service, _admin, _bus = _service(store)
+
+    def add(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    await service.apply_change(add)
+    assert store.env_writes == []
+    assert "TAI_ENV_SECRET_KEYS" not in store.env
+
+
+async def test_apply_replace_dropping_connector_persists_mark_and_deletes_omitted_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hand `manifest replace` that drops an oauth connector AND omits another top-level
+    # section: the leaving secret name is persisted, and the omitted section is DELETED (the
+    # delegated replace-as-mutator is clear()+update(), never a merge).
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(
+        manifest={"connectors": [_oauth_descriptor("acme")], "mcp": [{"title": "srv", "config": {"url": "http://x"}}]},
+        env={},
+    )
+    service, _admin, _bus = _service(store)
+
+    # The replacement carries neither the connector nor the mcp section.
+    await service.apply_replace({"user_tools": []})
+
+    assert "connectors" not in store.manifest or store.manifest["connectors"] == []
+    assert "mcp" not in store.manifest  # the omitted section was deleted, not merged
+    assert "ACME_CLIENT_SECRET" in store.env["TAI_ENV_SECRET_KEYS"].split(",")
+
+
+async def test_leaving_mark_written_only_when_it_grows_the_stored_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The leaving name is ALREADY in the stored marks, so dropping the connector must NOT
+    # rewrite the marks var (no growth).
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(
+        manifest={"connectors": [_oauth_descriptor("acme")]},
+        env={"TAI_ENV_SECRET_KEYS": "ACME_CLIENT_SECRET"},
+    )
+    service, _admin, _bus = _service(store)
+
+    def drop(document: dict[str, Any]) -> None:
+        document["connectors"] = []
+
+    await service.apply_change(drop)
+    # No env write carried the marks var (the set did not grow); the value stands.
+    assert all("TAI_ENV_SECRET_KEYS" not in write for write in store.env_writes)
+    assert store.env["TAI_ENV_SECRET_KEYS"] == "ACME_CLIENT_SECRET"

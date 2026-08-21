@@ -240,6 +240,9 @@ class FakeHttp:
         # responses: list of FakeHttpResponse | Exception, consumed in order.
         self._responses = list(responses)
         self.posts: list[tuple[str, dict]] = []
+        # Per-post request headers, in order — so a test can assert the Accept header
+        # the token POST carries (RFC 6749 §5.1).
+        self.headers: list[dict] = []
 
     async def __aenter__(self):
         return self
@@ -247,8 +250,9 @@ class FakeHttp:
     async def __aexit__(self, *exc):
         return False
 
-    async def post(self, url, data=None, timeout=None):
+    async def post(self, url, data=None, timeout=None, headers=None):
         self.posts.append((url, dict(data or {})))
+        self.headers.append(dict(headers or {}))
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item

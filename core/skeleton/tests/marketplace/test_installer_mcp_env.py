@@ -28,7 +28,7 @@ from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.config.boundary import refuse_dangling_env_markers
 from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.marketplace.errors import InstallEnvError
+from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError
 from tai42_skeleton.marketplace.installer import Installer
 from tai42_skeleton.marketplace.manifest_patch import apply_provides
 from tai42_skeleton.marketplace.store import InstallRecord
@@ -155,6 +155,11 @@ class _FakeSvc:
         self._cm._manifest = copy.deepcopy(document)
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 
+    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+        import os
+
+        return {**os.environ, **self._cm.read_env(), **changes}
+
     async def apply_env_change(self, changes: dict[str, str]) -> ApplyResult:
         # Counted so a test can assert the unwind fired NO env change (no fleet broadcast)
         # on a pre-persist refusal where nothing actually landed in the store.
@@ -213,10 +218,12 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_install_missing_required_var_is_a_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With nothing supplied, the installer's early env pre-check (before any pip work)
+    # fails loudly naming the required var, ahead of the pipeline's authoritative refusal.
     spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
-    with pytest.raises(InstallEnvError, match=r"GUARD_PG_PW.*/mcp/0/config/env/PGPASSWORD"):
+    with pytest.raises(InstallStateError, match="GUARD_PG_PW"):
         await h.installer().install(spec.ref)
     # Nothing persisted: no env key, no manifest entry, no attribution row.
     assert h.cm._env == {}
@@ -234,6 +241,27 @@ async def test_combined_transaction_lands_values_and_entry(monkeypatch: pytest.M
     assert h.cm._env["TAI_ENV_SECRET_KEYS"] == "GUARD_PG_PW"
     assert h.cm._manifest["mcp"][0]["title"] == "postgres"
     assert h.store.rows[spec.ref].version == "1.0.0"
+    assert any("mounted MCP server 'postgres'" in note for note in result["notes"])
+
+
+async def test_env_accepted_when_all_markers_carry_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A marker with a DEFAULT (``!ENV ${VAR:x}``) is not REQUIRED, so required_env is empty —
+    # but the spec still ACCEPTS env (a marker is present). Supplying env for that var must be
+    # accepted and WRITTEN through the accepts_env combined route, not rejected as "no env".
+    from tai42_kit.plugins import accepts_env, required_env_for_spec
+
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW:x}"})
+    assert list(required_env_for_spec(spec)) == []  # the marker's default makes it non-required
+    assert accepts_env(spec) is True  # yet the spec accepts env (a marker is present)
+
+    h = Harness()
+    h.registry.resolved = make_resolved(spec)
+    result = await h.installer().install(spec.ref, env={"GUARD_PG_PW": "supplied"}, secret_keys=["GUARD_PG_PW"])
+    # The supplied value landed via the combined env+manifest route (accepts_env), marked
+    # secret, alongside the mcp entry.
+    assert h.cm._env["GUARD_PG_PW"] == "supplied"
+    assert h.cm._env["TAI_ENV_SECRET_KEYS"] == "GUARD_PG_PW"
+    assert h.cm._manifest["mcp"][0]["title"] == "postgres"
     assert any("mounted MCP server 'postgres'" in note for note in result["notes"])
 
 
@@ -298,15 +326,18 @@ async def test_persist_failure_restores_prior_store_value_not_this_installs(monk
 
 
 async def test_pre_persist_refusal_writes_nothing_and_broadcasts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A partial-supply install (one of two required vars given) is refused at the dangling-
-    # marker validation step BEFORE anything persists. The unwind must not fire a fleet
+    # Both required var KEYS are supplied (so the early presence pre-check passes), but one
+    # carries an EMPTY value — the store drops empties, so the pipeline's dangling-marker
+    # validation refuses it BEFORE anything persists. The unwind must not fire a fleet
     # broadcast on that no-op: nothing landed in the store, so the env-revert diff is empty
     # and no apply_env_change runs.
     spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}", "PGUSER": "!ENV ${GUARD_PG_USER}"})
     h = Harness()
     h.registry.resolved = make_resolved(spec)
     with pytest.raises(InstallEnvError, match="GUARD_PG_USER"):
-        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
+        await h.installer().install(
+            spec.ref, env={"GUARD_PG_PW": "s3cret", "GUARD_PG_USER": ""}, secret_keys=["GUARD_PG_PW"]
+        )
     # Byte-identical store (nothing written) AND zero env-change broadcasts.
     assert h.cm._env == {}
     assert h.cm._manifest.get("mcp", []) == []
@@ -315,14 +346,15 @@ async def test_pre_persist_refusal_writes_nothing_and_broadcasts_nothing(monkeyp
 
 
 async def test_non_mcp_spec_with_env_is_a_loud_input_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # env / secret_keys are meaningless for a non-mcp spec (its provides write no mcp
-    # entry); supplying either is a loud InstallEnvError before any state changes.
-    spec = make_spec()  # a plain tool-kind spec, no mcp-server item
+    # env / secret_keys are meaningless for a spec that declares no install-time env (a
+    # plain tool spec accepts_env == False); supplying either is a loud InstallEnvError
+    # before any state changes.
+    spec = make_spec()  # a plain tool-kind spec, no install-time env
     h = Harness()
     h.registry.resolved = make_resolved(spec)
-    with pytest.raises(InstallEnvError, match="only accepted for an mcp-server install"):
+    with pytest.raises(InstallEnvError, match="declares no install-time env"):
         await h.installer().install(spec.ref, env={"SOME_VAR": "v"})
-    with pytest.raises(InstallEnvError, match="only accepted for an mcp-server install"):
+    with pytest.raises(InstallEnvError, match="declares no install-time env"):
         await h.installer().install(spec.ref, secret_keys=["SOME_VAR"])
     assert h.cm._env == {}
     assert h.store.rows == {}
@@ -334,7 +366,8 @@ async def test_upgrade_adding_a_required_var_is_refused_without_it(monkeypatch: 
     h = Harness(manifest={"mcp": [{"title": "postgres", "config": {"command": "pg-mcp-server"}}]})
     h.store.preload(old)
     h.registry.resolved = make_resolved(new, version="2.0.0")
-    with pytest.raises(InstallEnvError, match="GUARD_PG_PW"):
+    # The early env pre-check fires (the new required var is neither supplied nor stored).
+    with pytest.raises(InstallStateError, match="GUARD_PG_PW"):
         await h.installer().update(old.ref)
     # Refused before persist: the manifest still carries the OLD entry, the row is unchanged.
     assert h.store.rows[old.ref].version == "1.0.0"

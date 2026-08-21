@@ -16,7 +16,7 @@ from tai42_skeleton.marketplace import manifest_patch
 from tai42_skeleton.marketplace.errors import ManifestBindingError, ManifestCollisionError
 from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
 
-from ._specs import make_spec
+from ._specs import connector_item, make_spec
 
 
 def _item(kind: str, name: str, module: str) -> dict:
@@ -71,16 +71,51 @@ def test_apply_channel_appends_to_channel_modules() -> None:
     assert manifest["channel_modules"] == ["pkg.chan"]
 
 
-def test_apply_connector_and_identity_target_lifecycle_modules() -> None:
-    spec = make_spec(
-        provides=[
-            _item("connector", "conn", "pkg.conn"),
-            _item("identity", "idp", "pkg.idp"),
-        ]
-    )
+def test_apply_identity_targets_lifecycle_modules() -> None:
+    spec = make_spec(provides=[_item("identity", "idp", "pkg.idp")])
     manifest: dict = {}
     apply_provides(manifest, spec)
-    assert manifest["lifecycle_modules"] == ["pkg.conn", "pkg.idp"]
+    assert manifest["lifecycle_modules"] == ["pkg.idp"]
+
+
+def test_apply_connector_appends_provider_descriptor_to_connectors() -> None:
+    # A connector is a DATA item: its ``provider`` descriptor is appended to the
+    # manifest ``connectors`` list (descriptor_entry), never a module.
+    spec = make_spec(package=None, provides=[connector_item("acme")])
+    manifest: dict = {}
+    apply_provides(manifest, spec)
+    assert [entry["id"] for entry in manifest["connectors"]] == ["acme"]
+    assert manifest["connectors"][0]["kind"] == "oauth"
+    assert "module" not in manifest["connectors"][0]
+
+
+def test_connector_collides_on_existing_provider_id() -> None:
+    spec = make_spec(package=None, provides=[connector_item("acme")])
+    manifest: dict = {"connectors": [{"id": "acme", "kind": "none"}]}
+    found = collisions(manifest, spec)
+    assert found == ["connectors entry with id 'acme' already exists"]
+    with pytest.raises(ManifestCollisionError):
+        apply_provides(manifest, spec)
+
+
+def test_connector_remove_drops_by_id_and_is_convergent() -> None:
+    spec = make_spec(package=None, provides=[connector_item("acme")])
+    manifest: dict = {}
+    apply_provides(manifest, spec)
+    assert remove_provides(manifest, spec) is True
+    assert manifest["connectors"] == []
+    # A second removal is a convergent no-op, never an error.
+    assert remove_provides(manifest, spec) is False
+
+
+def test_connector_and_tool_coexist_in_one_spec() -> None:
+    # A community-style spec mixing a code tool with a data connector: the tool binds
+    # to ``tools`` (config_row) and the connector to ``connectors`` (descriptor_entry).
+    spec = make_spec(provides=[_item("tool", "gen-uuid", "pkg.tools.uuid"), connector_item("iota")])
+    manifest: dict = {}
+    apply_provides(manifest, spec)
+    assert manifest["tools"] == [{"title": "pkg.tools.uuid", "module": "pkg.tools.uuid"}]
+    assert [entry["id"] for entry in manifest["connectors"]] == ["iota"]
 
 
 def test_apply_webhook_verifier_appends_to_its_module_list() -> None:

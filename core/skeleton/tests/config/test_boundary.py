@@ -51,6 +51,8 @@ from tai42_skeleton.config.boundary import (
     refuse_dangling_env_markers,
     refuse_incomplete_admin_pair,
     refuse_key_material,
+    refuse_unresolved_env,
+    refuse_unset_connector_env,
     refuse_x_band,
     registered_env_var_names,
     x_band_env_keys,
@@ -408,6 +410,67 @@ def test_refusal_reports_only_the_dangling_ref() -> None:
     message = str(exc.value)
     assert "MISSING_ONE" in message
     assert "PRESENT" not in message
+
+
+# ---------------------------------------------------------------------------
+# Unset connector-env refusal + the refuse_unresolved_env wrapper (pure)
+# ---------------------------------------------------------------------------
+
+
+def _oauth_connector(provider_id: str = "acme") -> dict:
+    return {
+        "id": provider_id,
+        "kind": "oauth",
+        "client_id_env": f"{provider_id.upper()}_CLIENT_ID",
+        "client_secret_env": f"{provider_id.upper()}_CLIENT_SECRET",
+    }
+
+
+def test_oauth_connector_with_both_creds_set_passes() -> None:
+    manifest = {"connectors": [_oauth_connector("acme")]}
+    env = {"ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"}
+    refuse_unset_connector_env(manifest, env)  # no raise
+    refuse_unresolved_env(manifest, env)  # no raise
+
+
+def test_oauth_connector_missing_one_cred_is_refused_naming_var_and_pointer() -> None:
+    manifest = {"connectors": [_oauth_connector("acme")]}
+    with pytest.raises(ValueError, match="ACME_CLIENT_SECRET") as exc:
+        refuse_unset_connector_env(manifest, {"ACME_CLIENT_ID": "id"})
+    message = str(exc.value)
+    assert "ACME_CLIENT_SECRET" in message
+    assert "/connectors/0/client_secret_env" in message
+    # The set credential is not named.
+    assert "/connectors/0/client_id_env" not in message
+
+
+def test_none_connector_needs_no_env() -> None:
+    manifest = {"connectors": [{"id": "iota", "kind": "none"}]}
+    refuse_unset_connector_env(manifest, {})  # no raise
+
+
+def test_refuse_unresolved_env_runs_both_refusals() -> None:
+    # A manifest with BOTH a dangling !ENV marker and an unset oauth connector cred:
+    # the wrapper refuses (the marker is scanned first).
+    manifest = {
+        "connectors": [_oauth_connector("acme")],
+        "mcp": [{"title": "s", "config": {"env": {"AUTH": "!ENV ${SECRET_TOKEN}"}}}],
+    }
+    with pytest.raises(ValueError, match="SECRET_TOKEN"):
+        refuse_unresolved_env(manifest, {"ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"})
+    # Marker satisfied but connector cred unset: the wrapper still refuses (connector half).
+    with pytest.raises(ValueError, match="ACME_CLIENT_SECRET"):
+        refuse_unresolved_env(manifest, {"SECRET_TOKEN": "x", "ACME_CLIENT_ID": "id"})
+
+
+def test_refuse_unresolved_env_passes_a_clean_manifest() -> None:
+    manifest = {
+        "connectors": [_oauth_connector("acme")],
+        "mcp": [{"title": "s", "config": {"env": {"AUTH": "!ENV ${SECRET_TOKEN}"}}}],
+    }
+    refuse_unresolved_env(
+        manifest, {"SECRET_TOKEN": "x", "ACME_CLIENT_ID": "id", "ACME_CLIENT_SECRET": "sec"}
+    )  # no raise
 
 
 # ---------------------------------------------------------------------------

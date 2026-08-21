@@ -226,8 +226,9 @@ async def list_connector_providers() -> dict[str, Any]:
     """The provider catalog — one entry per registered connector provider, plus
     the category groupings the UI arranges them under.
 
-    Providers come from the in-memory registry (populated by provider plugins at
-    import), so they list regardless of store configuration. The category
+    Providers come from the in-memory registry (populated from the manifest's
+    ``connectors`` list at boot/reload), so they list regardless of store
+    configuration. The category
     groupings live in the connector store's Postgres, so they are served only when
     that store is configured (otherwise an empty grouping list, mirroring the
     OFF-state connections read)."""

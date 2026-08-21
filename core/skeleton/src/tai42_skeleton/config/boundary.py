@@ -29,6 +29,18 @@ Dangling ``!ENV`` refusal
     ``!ENV ${VAR}`` marker references (with no ``:default``) would therefore run
     on a phantom value, so it is caught pre-persist and refused, naming the var
     and the manifest json-pointer — names only, never the marker's value.
+
+Unset connector-env refusal
+    An ``oauth`` connector in the manifest ``connectors`` list names a
+    ``client_id_env`` and a ``client_secret_env`` the OAuth client reads at
+    connect time; unlike an ``!ENV`` marker these names live in the descriptor,
+    not in a scanned marker, so the dangling-marker scan cannot see them. A change
+    that leaves either var absent from the effective env is refused, naming the
+    ``(VAR, json-pointer)`` pairs exactly like the marker refusal.
+
+The single-call authority :func:`refuse_unresolved_env` runs BOTH the dangling
+``!ENV`` and the unset connector-env refusals — every config-pipeline writer and
+the offline lint cross it.
 """
 
 from __future__ import annotations
@@ -213,3 +225,42 @@ def refuse_dangling_env_markers(preserved_manifest: Mapping[str, Any], effective
             "Refusing a change that leaves manifest !ENV markers dangling — these "
             'references resolve to no env var and would silently run on "N/A": ' + ", ".join(dangling) + "."
         )
+
+
+def refuse_unset_connector_env(preserved_manifest: Mapping[str, Any], effective_env: Mapping[str, str]) -> None:
+    """Refuse a change that leaves an ``oauth`` connector's client-credential env unset.
+
+    Each ``connectors[*]`` entry with ``kind == "oauth"`` names a ``client_id_env`` and
+    a ``client_secret_env`` the OAuth client reads at connect time. These names live in
+    the descriptor, not in a scanned ``!ENV`` marker, so :func:`refuse_dangling_env_markers`
+    cannot see them. Both must be present in *effective_env*, else :class:`ValueError`
+    naming each ``(VAR, json-pointer)`` pair (names only, never a value) — the operations
+    layer maps it to a 400."""
+    connectors = preserved_manifest.get("connectors")
+    if not isinstance(connectors, list):
+        return
+    unset: list[str] = []
+    for index, connector in enumerate(connectors):
+        if not isinstance(connector, dict) or connector.get("kind") != "oauth":
+            continue
+        for field_name in ("client_id_env", "client_secret_env"):
+            var = connector.get(field_name)
+            if isinstance(var, str) and var and var not in effective_env:
+                unset.append(f"{var} (at /connectors/{index}/{field_name})")
+    if unset:
+        raise ValueError(
+            "Refusing a change that leaves an oauth connector's client-credential env unset — "
+            "these variables the connector needs at connect time resolve to no env var: " + ", ".join(unset) + "."
+        )
+
+
+def refuse_unresolved_env(preserved_manifest: Mapping[str, Any], effective_env: Mapping[str, str]) -> None:
+    """The single env-resolution authority: run BOTH the dangling ``!ENV`` refusal and the
+    unset connector-env refusal against *effective_env*.
+
+    Every former :func:`refuse_dangling_env_markers` caller (the config pipeline's four
+    validate seams and the offline ``tai manifest validate`` / ``tai config lint`` door)
+    crosses this one function, so a manifest write is refused whenever it would leave EITHER
+    a marker or an oauth connector's credential env unresolved."""
+    refuse_dangling_env_markers(preserved_manifest, effective_env)
+    refuse_unset_connector_env(preserved_manifest, effective_env)

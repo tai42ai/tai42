@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -259,6 +260,12 @@ class FakeConfigService:
             raise self.raise_on_validate
         resolved = parse_config(data=dump_manifest(cast("Any", document))) or {}
         Manifest.model_validate(resolved)
+
+    def _effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+        # The preview's missing-env computation reads the effective env through this
+        # seam (stored env overlaid on the process env). The fake tracks no env store,
+        # so the process env plus any ``changes`` stands in.
+        return {**os.environ, **changes}
 
     async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
         return self._persist(copy.deepcopy(document))
@@ -857,18 +864,24 @@ async def test_update_bad_ref_raises_malformed_ref_error() -> None:
         await h.installer().update("noslash")
 
 
-async def test_update_pipless_fails_before_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_pipless_fails_after_resolve_for_packaged_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pip presence is now checked AFTER the resolve (the delivery form must be known
+    # first — a descriptor-only spec needs no pip), so a pipless environment fails the
+    # update of a PACKAGED spec, after the resolve counted, before any pip work.
     def _no_pip() -> None:
         raise PipUnavailableError("no pip")
 
     monkeypatch.setattr(installer_module, "ensure_pip_available", _no_pip)
-    spec = make_spec(version="1.0.0")
+    old = make_spec(version="1.0.0")
+    new = make_spec(version="2.0.0")
     h = Harness()
-    h.store.preload(spec, version="1.0.0")
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
     with pytest.raises(PipUnavailableError):
         await h.installer().update("tai42/toolbox")
-    # step 0 pre-flight fires before resolve counts a download.
-    assert h.registry.resolve_calls == []
+    # The resolve ran (the pip check now follows it); no pip command was issued.
+    assert h.registry.resolve_calls != []
+    assert h.pip.calls == []
 
 
 async def test_update_unwind_reinstalls_old_github_pin_through_verified_fetch(

@@ -90,6 +90,11 @@ def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
     """
     if spec.migrations is None:
         return None
+    # ``migrations`` requires a ``package`` (a cross-field contract rule — a
+    # descriptor-only plugin owns no packaged SQL), so a non-None ``migrations``
+    # here guarantees a non-None ``package``.
+    if spec.package is None:
+        raise MigrationDiscoveryError("migrations require a package")
     package = _import_package_for_distribution(spec.package)
     migrations_dir = importlib.resources.files(package).joinpath(*spec.migrations.split("/"))
     return MigrationEntry(

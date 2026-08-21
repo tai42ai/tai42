@@ -55,7 +55,7 @@ from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.manifest import AgentsConfig, TaiMCPConfig, ToolsConfig
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations._broadcast import apply_response, broadcast
+from tai42_skeleton.operations._broadcast import apply_response, broadcast, translate_orphan_env_write
 
 # The env var the operator's "treat these env keys as secret" marks live under — a
 # comma-separated key-name list backing ``EnvSecretMarksSettings.secret_keys``. The
@@ -284,16 +284,17 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     def mutator(document: dict[str, Any]) -> None:
         document["mcp"] = mcp
 
-    try:
-        result = await ConfigService.from_app().apply_change(mutator)
-    except BackendNeedsBusError as exc:
-        # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
-        # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
-        # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
-        raise BadRequestError(str(exc)) from exc
-    except ValueError as exc:
-        raise BadRequestError(f"invalid mcp config: {exc}") from exc
-    return apply_response(result)
+    with translate_orphan_env_write():
+        try:
+            result = await ConfigService.from_app().apply_change(mutator)
+        except BackendNeedsBusError as exc:
+            # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
+            # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
+            # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
+            raise BadRequestError(str(exc)) from exc
+        except ValueError as exc:
+            raise BadRequestError(f"invalid mcp config: {exc}") from exc
+        return apply_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -349,35 +350,37 @@ def _without_entry(current: list[Any], title: str) -> list[Any]:
 async def _apply_entries_add(section: str, entries: list[Any], replace: bool) -> dict:
     # Empty ``entries`` is refused INSIDE the try (op-level, so the projection path is
     # refused identically) — a guard above the try would escape as a 500.
-    try:
-        if not entries:
-            raise ValueError("entries must be a non-empty list")
+    with translate_orphan_env_write():
+        try:
+            if not entries:
+                raise ValueError("entries must be a non-empty list")
 
-        def mutator(document: dict[str, Any]) -> None:
-            document[section] = _merged_entries(document.get(section) or [], entries, replace)
+            def mutator(document: dict[str, Any]) -> None:
+                document[section] = _merged_entries(document.get(section) or [], entries, replace)
 
-        result = await ConfigService.from_app().apply_change(mutator)
-    except BackendNeedsBusError as exc:
-        raise BadRequestError(str(exc)) from exc
-    except ValueError as exc:
-        raise BadRequestError(f"invalid {section} config: {exc}") from exc
-    return apply_response(result)
+            result = await ConfigService.from_app().apply_change(mutator)
+        except BackendNeedsBusError as exc:
+            raise BadRequestError(str(exc)) from exc
+        except ValueError as exc:
+            raise BadRequestError(f"invalid {section} config: {exc}") from exc
+        return apply_response(result)
 
 
 async def _apply_entry_remove(section: str, title: str) -> dict:
-    try:
+    with translate_orphan_env_write():
+        try:
 
-        def mutator(document: dict[str, Any]) -> None:
-            document[section] = _without_entry(document.get(section) or [], title)
+            def mutator(document: dict[str, Any]) -> None:
+                document[section] = _without_entry(document.get(section) or [], title)
 
-        result = await ConfigService.from_app().apply_change(mutator)
-    except BackendNeedsBusError as exc:
-        raise BadRequestError(str(exc)) from exc
-    except LookupError as exc:
-        raise NotFoundError(f"unknown {section} entry title: {title!r}") from exc
-    except ValueError as exc:
-        raise BadRequestError(f"invalid {section} config: {exc}") from exc
-    return apply_response(result)
+            result = await ConfigService.from_app().apply_change(mutator)
+        except BackendNeedsBusError as exc:
+            raise BadRequestError(str(exc)) from exc
+        except LookupError as exc:
+            raise NotFoundError(f"unknown {section} entry title: {title!r}") from exc
+        except ValueError as exc:
+            raise BadRequestError(f"invalid {section} config: {exc}") from exc
+        return apply_response(result)
 
 
 @operation(
@@ -485,28 +488,29 @@ async def update_api_tools(
     include_remove = include_remove or []
     exclude_add = exclude_add or []
     exclude_remove = exclude_remove or []
-    try:
-        if not (include_add or include_remove or exclude_add or exclude_remove):
-            raise ValueError("nothing to change")
+    with translate_orphan_env_write():
+        try:
+            if not (include_add or include_remove or exclude_add or exclude_remove):
+                raise ValueError("nothing to change")
 
-        def mutator(document: dict[str, Any]) -> None:
-            api_tools = document.get("api_tools")
-            if not isinstance(api_tools, dict):
-                api_tools = {}
-                document["api_tools"] = api_tools
-            included = _edit_name_list(api_tools.get("include") or [], include_add, include_remove, "include")
-            excluded = _edit_name_list(api_tools.get("exclude") or [], exclude_add, exclude_remove, "exclude")
-            api_tools["include"] = included
-            api_tools["exclude"] = excluded
+            def mutator(document: dict[str, Any]) -> None:
+                api_tools = document.get("api_tools")
+                if not isinstance(api_tools, dict):
+                    api_tools = {}
+                    document["api_tools"] = api_tools
+                included = _edit_name_list(api_tools.get("include") or [], include_add, include_remove, "include")
+                excluded = _edit_name_list(api_tools.get("exclude") or [], exclude_add, exclude_remove, "exclude")
+                api_tools["include"] = included
+                api_tools["exclude"] = excluded
 
-        result = await ConfigService.from_app().apply_change(mutator)
-    except BackendNeedsBusError as exc:
-        raise BadRequestError(str(exc)) from exc
-    except LookupError as exc:
-        raise NotFoundError(str(exc)) from exc
-    except ValueError as exc:
-        raise BadRequestError(f"invalid api_tools config: {exc}") from exc
-    return apply_response(result)
+            result = await ConfigService.from_app().apply_change(mutator)
+        except BackendNeedsBusError as exc:
+            raise BadRequestError(str(exc)) from exc
+        except LookupError as exc:
+            raise NotFoundError(str(exc)) from exc
+        except ValueError as exc:
+            raise BadRequestError(f"invalid api_tools config: {exc}") from exc
+        return apply_response(result)
 
 
 def _parse_manifest_pointer(pointer: str) -> list[str]:
@@ -664,15 +668,18 @@ async def set_mcp_secret_env(
 
         return changes, mutator
 
-    try:
-        result = await service.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
-    except BackendNeedsBusError as exc:
-        raise BadRequestError(str(exc)) from exc
-    except ValueError as exc:
-        # A bad/colliding key from _resolve_secret_env_key (raised inside prepare, before any
-        # write) or a boundary refusal (X-band / dangling marker) — a loud 400 either way.
-        raise BadRequestError(str(exc)) from exc
-    return apply_response(result)
+    with translate_orphan_env_write():
+        try:
+            result = await service.apply_env_and_change(prepare, manifest_pointer=manifest_pointer)
+        except BackendNeedsBusError as exc:
+            raise BadRequestError(str(exc)) from exc
+        except ValueError as exc:
+            # A bad/colliding key from _resolve_secret_env_key (raised inside prepare, before
+            # any write) or a boundary refusal (X-band / dangling marker) — a loud 400 either
+            # way. A manifest-persist failure after the env write is the OrphanEnvWriteError
+            # the surrounding context manager maps to a loud 500.
+            raise BadRequestError(str(exc)) from exc
+        return apply_response(result)
 
 
 @operation(
@@ -727,16 +734,17 @@ async def update_manifest(manifest_text: str) -> Any:
         document = cast("dict[str, Any]", load_manifest(manifest_text))
     except Exception as exc:
         raise BadRequestError(f"invalid manifest: {exc}") from exc
-    try:
-        result = await ConfigService.from_app().apply_replace(document)
-    except BackendNeedsBusError as exc:
-        # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
-        # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
-        # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
-        raise BadRequestError(str(exc)) from exc
-    except ValueError as exc:
-        raise BadRequestError(f"invalid manifest: {exc}") from exc
-    return apply_response(result)
+    with translate_orphan_env_write():
+        try:
+            result = await ConfigService.from_app().apply_replace(document)
+        except BackendNeedsBusError as exc:
+            # The invariant is a RuntimeError (a boot-time refusal must still crash loudly),
+            # so the mutate-time path maps it explicitly to a loud, actionable 400 naming
+            # TAI_BUS_REDIS_URL rather than letting it escape as a 500.
+            raise BadRequestError(str(exc)) from exc
+        except ValueError as exc:
+            raise BadRequestError(f"invalid manifest: {exc}") from exc
+        return apply_response(result)
 
 
 @operation(

@@ -11,9 +11,11 @@ pipeline's ordering / failure contract is oracled in ``tests/config/test_profile
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tai42_contract.app import tai42_app
 from tai42_contract.settings_profiles import SettingsProfileBody
 from tai42_contract.versioning import VersionedStore
 from tai42_contract.versioning.errors import (
@@ -27,6 +29,7 @@ from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
 from tai42_skeleton.operations import config as config_ops
+from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
 
 
@@ -393,6 +396,28 @@ async def test_apply_no_self_exit_when_not_serve_affecting(
 async def test_apply_absent_is_404() -> None:
     with pytest.raises(NotFoundError):
         await config_ops.apply_profile("nope")
+
+
+async def test_save_previous_version_derives_connector_secret_key(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # The @previous snapshot the apply pipeline saves carries a secret_keys set DERIVED from
+    # effective_secret_keys(live_manifest): the operator's stored marks UNIONED with every
+    # live oauth connector's client_secret_env, so a rollback re-applies with the connector
+    # secret still masked even without an operator mark for it.
+    monkeypatch.setenv("TAI_ENV_SECRET_KEYS", "API_KEY")
+    env_secret_marks_settings.cache_clear()
+    live_manifest = {"connectors": [{"id": "acme", "kind": "oauth", "client_secret_env": "ACME_CLIENT_SECRET"}]}
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(live_manifest=live_manifest)))
+    try:
+        await config_ops._save_previous_version({"API_KEY": "v"})
+    finally:
+        env_secret_marks_settings.cache_clear()
+
+    body = await view.get_active_body("@previous")
+    assert body.env == {"API_KEY": "v"}
+    # The connector-derived key sits alongside the operator's own mark in the snapshot.
+    assert set(body.secret_keys) == {"API_KEY", "ACME_CLIENT_SECRET"}
 
 
 async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:

@@ -10,7 +10,8 @@ them. Masking driven by these marks is display-side (Studio); the marks
 themselves are plain data.
 """
 
-from typing import Annotated
+from collections.abc import Mapping
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import NoDecode
@@ -37,3 +38,24 @@ class EnvSecretMarksSettings(TaiBaseSettings):
 @settings_cache
 def env_secret_marks_settings() -> EnvSecretMarksSettings:
     return EnvSecretMarksSettings()
+
+
+def effective_secret_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    """The env key names masked as secret: the stored operator marks
+    (``EnvSecretMarksSettings.secret_keys``) UNIONED with every live
+    ``connectors[*].client_secret_env``, deduped and sorted.
+
+    Secret-ness of a connector's client secret is an invariant the manifest already
+    STATES, so it is DERIVED here at read time rather than duplicated into the env
+    store — an oauth connector's secret value stays masked even with no operator mark.
+    ``manifest`` is the live manifest as a dumped dict (``tai42_app.admin.live_manifest``);
+    a missing or malformed ``connectors`` key contributes nothing."""
+    keys = set(env_secret_marks_settings().secret_keys)
+    connectors = manifest.get("connectors")
+    if isinstance(connectors, list):
+        for connector in connectors:
+            if isinstance(connector, dict):
+                var = connector.get("client_secret_env")
+                if isinstance(var, str) and var:
+                    keys.add(var)
+    return tuple(sorted(keys))

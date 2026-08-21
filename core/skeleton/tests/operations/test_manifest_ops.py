@@ -10,6 +10,7 @@ metadata is pinned too (``update_manifest`` is tier-2, off the default surface).
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -193,6 +194,53 @@ async def test_update_manifest_backend_without_bus_maps_to_400(monkeypatch: pyte
             await manifest_ops.update_manifest("backend_module: myapp.backend\n")
 
         assert store.replaced == []  # rejected in validation, before any persist
+    finally:
+        reset_all_settings()
+
+
+def _oauth_connector(provider_id: str = "acme") -> dict[str, Any]:
+    """A valid oauth ``ProviderDescriptor`` for the manifest ``connectors`` list — its
+    ``client_id_env`` / ``client_secret_env`` name the env the connector reads at connect
+    time (abstract synthetic provider ids only)."""
+    return {
+        "id": provider_id,
+        "display_name": provider_id.title(),
+        "icon_url": f"https://example.com/{provider_id}.png",
+        "kind": "oauth",
+        "origin": "system",
+        "category": "productivity",
+        "oauth": {"authorize": "https://auth.example.com/authorize", "token": "https://auth.example.com/token"},
+        "client_id_env": f"{provider_id.upper()}_CLIENT_ID",
+        "client_secret_env": f"{provider_id.upper()}_CLIENT_SECRET",
+        "sub_services": {
+            "main": {
+                "id": "main",
+                "display_name": "Main",
+                "scopes": ["read"],
+                "mcp_server": {"type": "http", "url": "https://mcp.example.com/mcp"},
+            }
+        },
+    }
+
+
+async def test_update_manifest_oauth_connector_missing_client_env_maps_to_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A replacement carrying a live oauth connector whose client_id_env / client_secret_env
+    # resolve to no env var is refused by refuse_unresolved_env's CONNECTOR half (not the
+    # dangling-marker half): a ValueError inside the pipeline the op maps to a loud 400
+    # naming the unset var, driven end-to-end through the operations-layer door.
+    monkeypatch.delenv("ACME_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ACME_CLIENT_SECRET", raising=False)
+    reset_all_settings()
+    try:
+        store = _ReplaceStore()
+        _install_pipeline(monkeypatch, store=store, admin=_ReloadAdmin())
+
+        with pytest.raises(BadRequestError, match="ACME_CLIENT_SECRET"):
+            await manifest_ops.update_manifest(json.dumps({"connectors": [_oauth_connector("acme")]}))
+
+        assert store.replaced == []  # refused in validation, before any persist
     finally:
         reset_all_settings()
 
