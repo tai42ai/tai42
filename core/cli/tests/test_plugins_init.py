@@ -21,6 +21,8 @@ from tai42_contract.plugins import PluginSpec
 
 from tai42_cli import app as app_module
 
+from .remote_harness import visible
+
 _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 
@@ -125,7 +127,10 @@ def test_init_refuses_existing_dir(tmp_path: Path) -> None:
     dest.mkdir()
     result = _run(["plugins", "init", "taken", "--kind", "mcp-server", "--dir", str(dest)])
     assert result.exit_code != 0
-    assert "already exists" in result.output
+    # The refusal message interpolates the long resolved ``dest`` path, so rich can
+    # wrap it mid-phrase inside the error panel; assert against the de-framed,
+    # de-wrapped text so the phrase reads regardless of the width rich rendered at.
+    assert "already exists" in visible(result.output)
 
 
 def test_schema_is_valid_json_with_provides() -> None:
