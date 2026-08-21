@@ -1,16 +1,17 @@
 spec_version: 1
 namespace: tai42
 name: connector-slack
-version: 0.0.0
+version: 1.0.0
 display_name: Slack
 description: >-
   Slack OAuth connector provider for the TAI ecosystem. Pure descriptor data
   against Slack's hosted MCP server; ships no package.
-icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
+icon: >-
+  https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-slack
-contract: '>=2.3,<3'
+contract: '>=3.0,<4'
 categories:
   - connectors
 tags:
@@ -30,7 +31,8 @@ provides:
       id: slack
       display_name: Slack
       description: Connect a Slack workspace over Slack's hosted MCP server.
-      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
+      icon_url: >-
+        https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
       kind: oauth
       origin: system
       category: communication

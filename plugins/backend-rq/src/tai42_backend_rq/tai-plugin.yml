@@ -9,7 +9,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/backend-rq
-contract: '>=2.3,<3'
+contract: '>=3.0,<4'
 categories:
   - execution
 tags:
