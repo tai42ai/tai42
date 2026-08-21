@@ -13,11 +13,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.webhooks import FreshnessWindow, ReplayDefense
 
 
 class _FixtureVerifier:
     async def verify(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> None:
         return None
+
+    def replay_defense(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> ReplayDefense:
+        return FreshnessWindow()
 
 
 tai42_app.webhook_verifiers.register("fixture_verifier", _FixtureVerifier())

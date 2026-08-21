@@ -1,3 +1,5 @@
+import heapq
+import time
 from typing import Any
 
 from tai42_contract.hooks.models import HookParams, TopicVerifierBinding
@@ -12,6 +14,17 @@ class InMemoryHooksManager(BaseHooksManager):
         self._hooks: dict[str, dict[str, HookParams]] = {}
         self._name_topic_map: dict[str, str] = {}
         self._topic_verifiers: dict[str, dict[str, Any]] = {}
+        # Full seen-set key -> monotonic expiry. Per-process, matching this manager's
+        # single-worker validity (siblings do not share it, exactly as they do not
+        # share registrations here); the Redis manager holds the cross-worker seen-set.
+        self._webhook_seen: dict[str, float] = {}
+        # A min-heap of ``(expiry, key)`` mirroring ``_webhook_seen`` in expiry order, so
+        # a claim pops only the already-lapsed prefix instead of scanning every id. TTLs
+        # vary per claim, so expiry order is NOT insertion order — hence a heap, not a
+        # queue. A key holds one live heap entry at a time (a re-claim happens only after
+        # its prior entry lapses and is popped), so the heap stays bounded by the live
+        # window, not history.
+        self._webhook_seen_expiry: list[tuple[float, str]] = []
 
     @property
     def hook_count(self) -> int:
@@ -83,3 +96,26 @@ class InMemoryHooksManager(BaseHooksManager):
 
     async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]:
         return {topic: dict(binding) for topic, binding in self._topic_verifiers.items()}
+
+    async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        if ttl_seconds <= 0:
+            raise ValueError(f"webhook replay claim requires a positive ttl_seconds, got {ttl_seconds!r}")
+        # No await between the presence check and the write, so the check-and-set is
+        # atomic under the single-threaded loop — the in-memory analogue of SET NX EX.
+        now = time.monotonic()
+        # Pop only the already-lapsed prefix off the expiry heap, not the whole set.
+        # A popped entry is stale by construction; drop its id iff the id's CURRENT
+        # expiry is also lapsed (a re-claim after a lapse holds a fresh, later expiry
+        # whose own heap entry is untouched here).
+        while self._webhook_seen_expiry and self._webhook_seen_expiry[0][0] <= now:
+            _, lapsed_key = heapq.heappop(self._webhook_seen_expiry)
+            current_expiry = self._webhook_seen.get(lapsed_key)
+            if current_expiry is not None and current_expiry <= now:
+                del self._webhook_seen[lapsed_key]
+        key = self.settings.webhook_seen_key(topic, replay_key)
+        if key in self._webhook_seen:
+            return False
+        expiry = now + ttl_seconds
+        self._webhook_seen[key] = expiry
+        heapq.heappush(self._webhook_seen_expiry, (expiry, key))
+        return True

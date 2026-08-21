@@ -74,12 +74,24 @@ class _FakeManager:
     def __init__(self, verifier_binding: dict | None = None) -> None:
         self.events: list[tuple[str, dict]] = []
         self._binding = verifier_binding
+        # An in-memory seen-set so a SeenSetClaim delivery is deduped exactly as the
+        # real managers do: the first claim of a (topic, key) passes, a repeat is a replay.
+        self._seen: set[tuple[str, str]] = set()
+        self.claims: list[tuple[str, str, int]] = []
 
     async def on_event(self, topic: str, payload: dict) -> None:
         self.events.append((topic, payload))
 
     async def get_topic_verifier(self, topic: str) -> dict | None:
         return self._binding
+
+    async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        self.claims.append((topic, replay_key, ttl_seconds))
+        pair = (topic, replay_key)
+        if pair in self._seen:
+            return False
+        self._seen.add(pair)
+        return True
 
 
 def _body(response: Response) -> dict:
@@ -323,12 +335,25 @@ class _TopicDelReq:
 
 class _FakeVerifier:
     """A controllable verifier: records each ``verify`` call, optionally raises,
-    and declares its ``post_only`` delivery constraint."""
+    and declares its ``post_only`` delivery constraint. Its replay defense defaults
+    to a :class:`FreshnessWindow` (no seen-set); a test wanting the dedup path passes
+    ``replay=`` a :class:`ReplayDefense` (or a callable ``(body, headers, config)``
+    that returns one / raises)."""
 
-    def __init__(self, *, post_only: bool = False, raise_exc: Exception | None = None, order: list | None = None):
+    def __init__(
+        self,
+        *,
+        post_only: bool = False,
+        raise_exc: Exception | None = None,
+        order: list | None = None,
+        replay=None,
+    ):
+        from tai42_contract.webhooks import FreshnessWindow
+
         self.post_only = post_only
         self._raise = raise_exc
         self._order = order
+        self._replay = replay if replay is not None else FreshnessWindow()
         self.calls: list = []
 
     async def verify(self, body, headers, config):
@@ -337,6 +362,13 @@ class _FakeVerifier:
         self.calls.append((body, dict(headers), config))
         if self._raise is not None:
             raise self._raise
+
+    def replay_defense(self, body, headers, config):
+        if self._order is not None:
+            self._order.append("replay_defense")
+        if callable(self._replay):
+            return self._replay(body, headers, config)
+        return self._replay
 
 
 @pytest.fixture
@@ -463,8 +495,8 @@ async def test_bound_topic_verifies_before_parse(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
     resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b'{"hello":"world"}')))
     assert resp.status_code == 200
-    # Verify ran, and it ran BEFORE the parse.
-    assert order == ["verify", "parse"]
+    # Verify ran, then replay defense, and both ran BEFORE the parse.
+    assert order == ["verify", "replay_defense", "parse"]
 
 
 async def test_bound_topic_verify_failure_401_nothing_dispatched(monkeypatch: pytest.MonkeyPatch, registry) -> None:
@@ -566,6 +598,190 @@ async def test_bound_unresolvable_verifier_fails_closed_500(monkeypatch: pytest.
     assert resp.status_code == 500
     assert parsed["called"] is False
     assert resp.background is None
+
+
+async def test_seen_set_claim_first_delivery_dispatches_replay_refused(
+    monkeypatch: pytest.MonkeyPatch, registry
+) -> None:
+    # A verifier yielding a per-delivery SeenSetClaim: the FIRST delivery of an id is
+    # claimed and dispatched; a SECOND with the SAME id is a replay — the idempotent
+    # already_seen 200, dispatching nothing (no hook re-fires).
+    from tai42_contract.webhooks import SeenSetClaim
+
+    registry.register("prov", _FakeVerifier(replay=SeenSetClaim(key="d-1", ttl_seconds=300)))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+
+    async def fake_parse(request, include_query=True):
+        return {"hello": "world"}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+
+    first = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert first.status_code == 200
+    assert _body(first) == {"status": "accepted", "topic": "events"}
+    assert first.background is not None
+    await first.background()
+
+    second = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert second.status_code == 200
+    assert _body(second) == {"status": "already_seen", "topic": "events"}
+    # The replay dispatches nothing — no background task, and only the first event fired.
+    assert second.background is None
+    assert manager.events == [("events", {"hello": "world"})]
+    # Both deliveries claimed under the same (topic, key) with the declared TTL.
+    assert manager.claims == [("events", "d-1", 300), ("events", "d-1", 300)]
+
+
+async def test_distinct_delivery_ids_are_not_dropped(monkeypatch: pytest.MonkeyPatch, registry) -> None:
+    # Two DISTINCT delivery ids (same body) both pass — a legitimate distinct event is
+    # never conflated, which is why the key is a delivery id and not a body hash.
+    from tai42_contract.webhooks import SeenSetClaim
+
+    ids = iter(["a", "b"])
+
+    def replay(body, headers, config):
+        return SeenSetClaim(key=next(ids), ttl_seconds=300)
+
+    registry.register("prov", _FakeVerifier(replay=replay))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+
+    async def fake_parse(request, include_query=True):
+        return {"same": "body"}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+
+    for _ in range(2):
+        resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"same")))
+        assert _body(resp)["status"] == "accepted"
+        assert resp.background is not None
+        await resp.background()
+
+    assert manager.events == [("events", {"same": "body"}), ("events", {"same": "body"})]
+
+
+async def test_seen_set_store_error_fails_closed_500(monkeypatch: pytest.MonkeyPatch, registry) -> None:
+    # The seen-set store is unreachable during the claim: refuse to dispatch undefended
+    # — a loud 500, nothing parsed or dispatched.
+    from tai42_contract.webhooks import SeenSetClaim
+
+    registry.register("prov", _FakeVerifier(replay=SeenSetClaim(key="d-1", ttl_seconds=300)))
+
+    class _BrokenManager(_FakeManager):
+        async def claim_webhook_delivery(self, topic, replay_key, ttl_seconds):
+            raise RuntimeError("redis down")
+
+    manager = _BrokenManager(verifier_binding={"verifier": "prov", "config": {}})
+    parsed = {"called": False}
+
+    async def fake_parse(request, include_query=True):
+        parsed["called"] = True
+        return {}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 500
+    assert parsed["called"] is False
+    assert resp.background is None
+
+
+async def test_replay_id_header_missing_fails_closed_401(monkeypatch: pytest.MonkeyPatch, registry) -> None:
+    # A verifier whose replay_defense raises WebhookVerificationError (a validly-signed
+    # delivery carrying no replay-id header) is refused 401 — never dispatched undefended.
+    from tai42_contract.webhooks import WebhookVerificationError
+
+    def replay(body, headers, config):
+        raise WebhookVerificationError("delivery id header missing")
+
+    registry.register("prov", _FakeVerifier(replay=replay))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+    parsed = {"called": False}
+
+    async def fake_parse(request, include_query=True):
+        parsed["called"] = True
+        return {}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 401
+    assert _body(resp)["error"] == "webhook verification failed"
+    assert parsed["called"] is False
+    assert resp.background is None
+
+
+async def test_freshness_window_verifier_does_no_seen_set_claim(monkeypatch: pytest.MonkeyPatch, registry) -> None:
+    # A FreshnessWindow verifier defends replay in verify itself, so the ingress takes
+    # no seen-set claim and dispatches normally.
+    registry.register("prov", _FakeVerifier())  # default replay == FreshnessWindow
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+
+    async def fake_parse(request, include_query=True):
+        return {"hello": "world"}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 200
+    assert _body(resp) == {"status": "accepted", "topic": "events"}
+    assert manager.claims == []
+
+
+async def test_unrecognized_replay_defense_fails_closed_500(monkeypatch: pytest.MonkeyPatch, registry) -> None:
+    # A verifier returning a ReplayDefense that is NEITHER a SeenSetClaim nor a
+    # FreshnessWindow is an unrecognized, undefended declaration: the ingress must
+    # never dispatch it — a loud 500, nothing parsed or dispatched.
+    from tai42_contract.webhooks import ReplayDefense
+
+    class _CustomDefense(ReplayDefense):
+        # The abstract base's __init__ raises; a concrete subclass overrides it so the
+        # test can construct an unrecognized-but-typed defense.
+        def __init__(self) -> None:
+            pass
+
+    registry.register("prov", _FakeVerifier(replay=_CustomDefense()))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+    parsed = {"called": False}
+
+    async def fake_parse(request, include_query=True):
+        parsed["called"] = True
+        return {}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 500
+    assert parsed["called"] is False
+    assert resp.background is None
+    assert manager.claims == []
+
+
+async def test_replay_defense_non_verification_error_fails_closed_500(
+    monkeypatch: pytest.MonkeyPatch, registry
+) -> None:
+    # replay_defense raising a NON-WebhookVerificationError (a binding misconfiguration,
+    # e.g. a shared_secret binding with no id_header -> ValueError) is a fail-closed 500,
+    # distinct from the 401 a WebhookVerificationError gets — nothing parsed or dispatched.
+    def replay(body, headers, config):
+        raise ValueError("shared_secret verifier config requires a non-empty 'id_header'")
+
+    registry.register("prov", _FakeVerifier(replay=replay))
+    manager = _FakeManager(verifier_binding={"verifier": "prov", "config": {}})
+    parsed = {"called": False}
+
+    async def fake_parse(request, include_query=True):
+        parsed["called"] = True
+        return {}
+
+    monkeypatch.setattr(hooks, "parse_any_payload", fake_parse)
+    monkeypatch.setattr(hooks, "get_hooks_manager", lambda: manager)
+    resp = await hooks.universal_webhook(cast(Request, _FakeRequest("events", body=b"x")))
+    assert resp.status_code == 500
+    assert parsed["called"] is False
+    assert resp.background is None
+    assert manager.claims == []
 
 
 async def test_over_cap_body_413(monkeypatch: pytest.MonkeyPatch) -> None:

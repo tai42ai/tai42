@@ -144,6 +144,24 @@ class BaseHooksManager(ABC):
     @abstractmethod
     async def all_topic_verifiers(self) -> dict[str, dict[str, Any]]: ...
 
+    # -- Webhook replay defense (seen-set) -----------------------------------
+    #
+    # The public ingress fan-out re-fires every hook bound to a topic on each
+    # delivery, so a captured validly-signed delivery would re-fire them all on
+    # replay. A verifier that yields a per-delivery ``SeenSetClaim`` is deduped
+    # here: the FIRST delivery of an id is claimed and passes, a replay within the
+    # window is refused. The claim and its TTL are ONE atomic op — never a claim
+    # without a TTL, which would leak a permanent key.
+
+    @abstractmethod
+    async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        """Atomically claim a delivery id for ``topic``: ``True`` on the FIRST claim
+        (a legitimate first delivery — proceed), ``False`` when the id was already
+        claimed within ``ttl_seconds`` (a replay — the caller returns the idempotent
+        already-seen response and dispatches nothing). Raises on a non-positive
+        ``ttl_seconds`` — a claim is never taken without a bounded TTL."""
+        ...
+
     async def on_event(
         self, topic: str, payload: dict[str, Any], *, tool_kwargs_override: dict[str, Any] | None = None
     ):

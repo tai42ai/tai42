@@ -59,3 +59,72 @@ async def test_malformed_config_raises(monkeypatch: pytest.MonkeyPatch, config: 
 def test_shared_secret_is_not_post_only() -> None:
     # Header-based: works over any delivery method.
     assert SharedSecretVerifier().post_only is False
+
+
+_ID_CONFIG = {**_CONFIG, "id_header": "X-Delivery-Id"}
+
+
+def test_replay_defense_keys_on_id_header() -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = SharedSecretVerifier().replay_defense(b"", {"X-Delivery-Id": "n-1"}, _ID_CONFIG)
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.key == "shared_secret:x-delivery-id:n-1"
+    assert defense.ttl_seconds == 86400
+
+
+def test_replay_defense_id_header_case_insensitive() -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = SharedSecretVerifier().replay_defense(b"", {"x-delivery-id": "n-2"}, _ID_CONFIG)
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.key == "shared_secret:x-delivery-id:n-2"
+
+
+def test_replay_defense_custom_window_honored() -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = SharedSecretVerifier().replay_defense(
+        b"", {"X-Delivery-Id": "n-3"}, {**_ID_CONFIG, "replay_window_seconds": 120}
+    )
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 120
+
+
+def test_replay_defense_missing_id_header_config_raises() -> None:
+    # Without id_header the scheme cannot be replay-safe: an operator misconfiguration
+    # (500), never a silent undefended pass.
+    with pytest.raises(ValueError, match="non-empty 'id_header'"):
+        SharedSecretVerifier().replay_defense(b"", {"X-Delivery-Id": "n"}, _CONFIG)
+
+
+def test_replay_defense_missing_id_header_value_fails_closed() -> None:
+    # id_header configured but the delivery carries no id under it — refused (401), never
+    # dispatched undefended.
+    with pytest.raises(WebhookVerificationError, match="replay id header missing"):
+        SharedSecretVerifier().replay_defense(b"", {"Other": "x"}, _ID_CONFIG)
+
+
+@pytest.mark.parametrize("window", [0, -1])
+def test_replay_defense_non_positive_window_raises(window: int) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        SharedSecretVerifier().replay_defense(
+            b"", {"X-Delivery-Id": "n"}, {**_ID_CONFIG, "replay_window_seconds": window}
+        )
+
+
+def test_replay_defense_bool_window_raises() -> None:
+    with pytest.raises(ValueError, match="must be an int"):
+        SharedSecretVerifier().replay_defense(
+            b"", {"X-Delivery-Id": "n"}, {**_ID_CONFIG, "replay_window_seconds": True}
+        )
+
+
+@pytest.mark.parametrize("window", [1.5, "5"])
+def test_replay_defense_non_int_window_raises(window: object) -> None:
+    # A float or a numeric string is not a sane seconds count: an operator
+    # misconfiguration that fails CLOSED, never a coerced window.
+    with pytest.raises(ValueError, match="must be an int"):
+        SharedSecretVerifier().replay_defense(
+            b"", {"X-Delivery-Id": "n"}, {**_ID_CONFIG, "replay_window_seconds": window}
+        )
