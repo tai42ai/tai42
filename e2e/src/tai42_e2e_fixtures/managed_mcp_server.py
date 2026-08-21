@@ -1,8 +1,8 @@
 """A self-contained managed MCP server the fixtures launch over stdio or http.
 
-The connector fixtures in ``connector_provider`` point a sub-service's ``mcp_server`` at
-this module, so the connectors engine spawns it as a stdio child on connect and its tools
-bind onto the fleet's MCP surface. Launched as ``python -m
+The fixture connector descriptors (built in ``tai42_e2e.manifests``) point a sub-service's
+``mcp_server`` at this module, so the connectors engine spawns it as a stdio child on
+connect and its tools bind onto the fleet's MCP surface. Launched as ``python -m
 tai42_e2e_fixtures.managed_mcp_server`` — no network, no package index, no ``uvx``.
 
 The MCP-connection-resilience scenario launches the SAME server over streamable-http on a

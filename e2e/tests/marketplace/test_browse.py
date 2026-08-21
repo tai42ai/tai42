@@ -17,13 +17,22 @@ from tai42_e2e.marketplace import (
     ALPHA_REF,
     BETA_REF,
     GAMMA_REF,
+    IOTA_PROVIDER_ID,
+    IOTA_REF,
+    IOTA_VERSION_V1,
     MarketplaceService,
     contract_facet_probe_versions,
+    seed_iota_listing,
 )
+from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.stack import TaiStack
 
 # The marketplace stack runs no backend worker; skip on non-default backend legs.
 pytestmark = pytest.mark.backendless
+
+# iota is never connected in a browse leg, so its endpoints resolve to a fixed inert https
+# base (a valid URL the model accepts; the ingest never fetches it).
+_IOTA_IDP_BASE = "https://iota-idp.invalid"
 
 
 def _listings(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -161,3 +170,38 @@ async def test_skeleton_proxy_parity(marketplace_service: MarketplaceService, ma
     direct = _refs(await marketplace_service.api.get("/api/v1/search?q=probe"))
     proxied = _refs(await marketplace_stack.api().get("/api/marketplace/search?q=probe"))
     assert proxied == direct
+
+
+# Defined LAST so it seeds iota only after the exact-membership legs above have run
+# against the pristine alpha/beta/gamma catalog. Publish-circular skipped like every
+# descriptor leg: the spec-source ingest lives only on the unpushed marketplace, and the
+# isolated registry venv resolves tai42-contract from PyPI where the package-optional
+# PluginSpec + connector kind are not yet published — un-skipped after _MARKETPLACE_PIN
+# (marketplace.py) is bumped to the descriptor-capable commit.
+@pytest.mark.skip(
+    reason="Publish-circular: the spec-source (source='spec') ingest lives only on the unpushed "
+    "marketplace; the isolated registry venv resolves tai42-contract from PyPI where the "
+    "package-optional PluginSpec + connector kind are not yet published. Un-skipped after "
+    "_MARKETPLACE_PIN (marketplace.py) is bumped."
+)
+async def test_descriptor_listing_browses_as_spec_connector(
+    marketplace_service: MarketplaceService, package_index: FixturePackageIndex
+) -> None:
+    api = marketplace_service.api
+    await seed_iota_listing(marketplace_service, package_index, _IOTA_IDP_BASE, versions=(IOTA_VERSION_V1,))
+
+    # Search surfaces the descriptor listing with the ``connector`` kind facet and a null
+    # package (its descriptor signal); source lives on the detail/resolve payloads.
+    listings = {row["ref"]: row for row in _listings(await api.get("/api/v1/search?kind=connector"))}
+    assert IOTA_REF in listings, listings
+    iota = listings[IOTA_REF]
+    assert iota["kinds"] == [{"kind": "connector", "count": 1, "names": [IOTA_PROVIDER_ID]}], iota
+    assert iota["package"] is None, iota
+
+    # Detail reports source='spec' (listing badge) and a descriptor delivery on its
+    # latest version; resolve reports the version's own source='spec'.
+    detail = await api.get(f"/api/v1/plugins/{IOTA_REF}")
+    assert detail["source"] == "spec", detail
+    assert detail["latest"]["delivery"] == "descriptor", detail
+    resolved = await api.post(f"/api/v1/plugins/{IOTA_REF}/resolve", json={})
+    assert resolved["source"] == "spec", resolved

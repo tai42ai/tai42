@@ -20,11 +20,12 @@ from __future__ import annotations
 import contextlib
 import importlib.metadata
 import os
+import re
 import secrets
 import subprocess
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -223,6 +224,68 @@ ZETA_TOOLS_MODULE = "tai_e2e_market_zeta.tools"
 # spec matches its tag-push deliveries on this repository URL.
 DELTA_REPOSITORY_URL = "https://github.com/tai42ai/tai-e2e-market-delta"
 
+# ---- descriptor-only (source='spec') fixtures ---------------------------
+#
+# iota / kappa are yml-only connector descriptors: they ship NO package, so the forge
+# builds no wheel and the registry classifies them ``source='spec'`` (the raw
+# ``tai-plugin.yml`` at the tag is the artifact, its sha256 the ingest-time integrity
+# digest). The served yml carries real values the model demands (an http(s) MCP url, a
+# stdio interpreter path), which are only known once a stack allocates them, so each
+# fixture ships as a ``tai-plugin.yml.tmpl`` template rendered PER STACK by
+# :func:`render_descriptor_fixture`; the github-API stub serves the rendered text at the
+# tag. The template is never published.
+
+# iota — a yml-only OAuth connector over the harness OAuth/MCP stub. Standalone repo
+# (``v<version>`` tags); two versions publish, 0.2.0 adding a scope.
+IOTA_NAMESPACE = "tai42"
+IOTA_NAME = "iota"
+IOTA_REF = "tai42/iota"
+IOTA_PROVIDER_ID = "iota"
+IOTA_REPOSITORY_URL = "https://github.com/tai42ai/tai-e2e-market-iota"
+IOTA_VERSION_V1 = "0.1.0"
+IOTA_VERSION_V2 = "0.2.0"
+IOTA_TAG_V1 = "v0.1.0"
+IOTA_TAG_V2 = "v0.2.0"
+IOTA_CLIENT_ID_ENV = "CONNECTORS_IOTA_CLIENT_ID"
+IOTA_CLIENT_SECRET_ENV = "CONNECTORS_IOTA_CLIENT_SECRET"
+# The single scope 0.1.0 grants and the extra scope 0.2.0 adds (the visible update delta).
+IOTA_SCOPE_V1 = "read"
+IOTA_SCOPE_V2_ADDED = "write"
+
+# iota, seeded MONOREPO-style (the shape the shipped connectors use): a subdir listing
+# with a ``<component>-v<version>`` tag whose component equals ``<namespace>-<name>``.
+# A distinct plugin name so the tag component routes to it (see PLAN_4 §3). The listing
+# is seeded at 0.1.0 (registering it under the tree URL), then a 0.2.0 tag push is routed
+# by its component and published by the webhook.
+IOTA_MONOREPO_NAME = "connector-iota"
+IOTA_MONOREPO_REF = "tai42/connector-iota"
+IOTA_MONOREPO_REPOSITORY_URL = "https://github.com/tai42ai/tai42/tree/main/plugins/connector-iota"
+# The repo-relative subpath the ``/tree/<branch>/<path>`` URL names — where the descriptor
+# and its docs sit in the monorepo, the segment path the github docs-ingest walks.
+IOTA_MONOREPO_SUBPATH = "plugins/connector-iota"
+IOTA_MONOREPO_SEED_VERSION = "0.1.0"
+IOTA_MONOREPO_SEED_TAG = "tai42-connector-iota-v0.1.0"
+IOTA_MONOREPO_VERSION = "0.2.0"
+IOTA_MONOREPO_TAG = "tai42-connector-iota-v0.2.0"
+
+# kappa — a yml-only no-auth (``kind: none``) connector launching the managed stdio MCP
+# server. One version; installs with NO env dialog, connects with user-supplied config.
+KAPPA_NAMESPACE = "tai42"
+KAPPA_NAME = "kappa"
+KAPPA_REF = "tai42/kappa"
+KAPPA_PROVIDER_ID = "kappa"
+KAPPA_REPOSITORY_URL = "https://github.com/tai42ai/tai-e2e-market-kappa"
+KAPPA_VERSION = "0.1.0"
+KAPPA_TAG = "v0.1.0"
+# The two client-supplied config fields (both target the stdio env channel). The managed
+# server reflects each back through ``reflect_env``.
+KAPPA_CONFIG_FIELD_REQUIRED = "kappa_alpha"
+KAPPA_CONFIG_FIELD_SECRET = "kappa_beta"
+
+# The ``{{TOKEN}}`` grammar the descriptor templates use (upper-snake names). Any token
+# still present after substitution is a fixture bug, rejected loudly by the renderer.
+_DESCRIPTOR_TOKEN_RE = re.compile(r"\{\{([A-Z_]+)\}\}")
+
 
 @dataclass(frozen=True)
 class FixtureArtifacts:
@@ -341,6 +404,77 @@ def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> 
         delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
         delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),
     )
+
+
+# ---- descriptor templating (source='spec') ------------------------------
+
+
+def render_descriptor_fixture(tmpl_path: Path, values: Mapping[str, str]) -> bytes:
+    """Render a descriptor-only fixture template to the exact ``tai-plugin.yml`` bytes
+    the github-API stub serves and the registry digests (``sha256``, ``source='spec'``).
+
+    Substitutes every ``{{TOKEN}}`` from ``values`` (e.g. ``IDP_BASE_URL`` — the
+    per-stack OAuth/MCP stub base a sub-service/oauth endpoint points at; ``PYTHON`` —
+    the interpreter a stdio sub-service launches with; plus the listing's identity
+    tokens). The values differ per test stack, so a template is rendered PER STACK,
+    never once and shared. ANY ``{{...}}`` token still present after substitution raises
+    loudly — a served descriptor must carry no placeholder (the model rejects a
+    non-http(s) MCP url and a non-https icon), so an unrendered token is a fixture bug,
+    never shipped. Returns UTF-8 bytes; the registry's ``sha256`` is taken over exactly
+    these bytes and the raw yml URL at the tag is the install pointer."""
+    text = tmpl_path.read_text(encoding="utf-8")
+    for token, value in values.items():
+        text = text.replace(f"{{{{{token}}}}}", value)
+    remaining = sorted(set(_DESCRIPTOR_TOKEN_RE.findall(text)))
+    if remaining:
+        raise RuntimeError(
+            f"descriptor template {tmpl_path} still carries unrendered token(s) {remaining} "
+            f"after substitution with {sorted(values)}; a served descriptor must carry no placeholder"
+        )
+    return text.encode("utf-8")
+
+
+def _descriptor_template(fixture: str, fixtures_dir: Path | None = None) -> Path:
+    """The ``tai-plugin.yml.tmpl`` of a descriptor-only fixture dir under the resolved
+    marketplace fixtures tree (``fixtures_dir`` / ``TAI_E2E_MARKETPLACE_FIXTURES`` /
+    in-repo default). A missing template raises loudly — never a silent empty render."""
+    path = _resolve_fixtures_dir(fixtures_dir) / fixture / "tai-plugin.yml.tmpl"
+    if not path.is_file():
+        raise RuntimeError(f"descriptor template {path} does not exist")
+    return path
+
+
+def _descriptor_docs(fixture: str, fixtures_dir: Path | None = None) -> dict[str, str]:
+    """The docs tree a descriptor-only fixture publishes, keyed docs-relative
+    (``index.mdx`` -> its text) — the shape the registry's github docs-ingest fetches
+    over the tree/blob surfaces. Every published version must carry its docs index."""
+    docs_dir = _resolve_fixtures_dir(fixtures_dir) / fixture / "docs"
+    if not docs_dir.is_dir():
+        raise RuntimeError(f"descriptor docs dir {docs_dir} does not exist")
+    return {
+        p.relative_to(docs_dir).as_posix(): p.read_text(encoding="utf-8")
+        for p in sorted(docs_dir.rglob("*"))
+        if p.is_file()
+    }
+
+
+def render_iota_descriptor(idp_base_url: str, version: str, *, name: str = IOTA_NAME) -> str:
+    """Render the iota OAuth-connector descriptor for ``version`` against ``idp_base_url``.
+
+    ``0.1.0`` grants the single ``read`` scope; ``0.2.0`` adds ``write`` (the visible
+    update delta). ``name`` overrides the top-level plugin name for the monorepo-style
+    listing (its component tag routes to ``<namespace>-<name>``); the provider id stays
+    ``iota`` regardless. The MCP/oauth endpoints resolve to the stack's OAuth/MCP stub."""
+    scope_lines = [IOTA_SCOPE_V1] if version == IOTA_VERSION_V1 else [IOTA_SCOPE_V1, IOTA_SCOPE_V2_ADDED]
+    scopes = "\n".join(f"            - {scope}" for scope in scope_lines)
+    values = {"IDP_BASE_URL": idp_base_url.rstrip("/"), "NAME": name, "VERSION": version, "SCOPES": scopes}
+    return render_descriptor_fixture(_descriptor_template("iota"), values).decode("utf-8")
+
+
+def render_kappa_descriptor(python: str) -> str:
+    """Render the kappa no-auth-connector descriptor, launching the managed stdio MCP
+    server with ``python`` (the SUT interpreter that already has ``tai42_e2e_fixtures``)."""
+    return render_descriptor_fixture(_descriptor_template("kappa"), {"PYTHON": python}).decode("utf-8")
 
 
 @dataclass
@@ -838,3 +972,116 @@ async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, a
     index.register(artifacts.eta_v1)
     await _admin_seed(mp, ((ETA_PACKAGE, artifacts.eta_v1.plugin_yml),))
     await _wait_published(mp, ETA_REF, "0.1.0")
+
+
+# ---- descriptor-only (source='spec') seeding ----------------------------
+
+
+async def _seed_descriptor_version(
+    mp: MarketplaceService,
+    index: FixturePackageIndex,
+    *,
+    ref: str,
+    repository_url: str,
+    tag: str,
+    plugin_yml: str,
+    version: str,
+    docs: dict[str, str],
+    docs_subpath: str = "",
+    default_branch: bool = False,
+) -> None:
+    """Stage one descriptor version on the github surfaces and publish it repo-form
+    through the real admin-seed + ingest pipeline.
+
+    A descriptor-only seed carries NO package: the entry is a REPO entry
+    (``{"repo", "plugin_yml", "tag"}``), the ingest sees ``spec.package is None`` and
+    classifies it ``source='spec'`` — the raw yml at the tag is the artifact, its
+    sha256 the digest of the served bytes; no PyPI lookup, no wheel gate. The rendered
+    yml is served at the tag (``default_branch`` also serves it ref-less for a subdir
+    listing's seed-time existence probe) and its docs tree over the tree/blob
+    surfaces (a published version must carry its docs index). Raises on a failed row."""
+    index.register_github_release(tag, plugin_yml, default_branch=default_branch)
+    index.register_github_docs_tree(tag, docs, subpath=docs_subpath)
+    seeded = await mp.api.post(
+        "/api/v1/admin/seed",
+        json={"repos": [{"repo": repository_url, "plugin_yml": plugin_yml, "tag": tag}]},
+        headers=mp.admin_headers,
+    )
+    row = seeded["results"][0]
+    if row.get("status") != "published":
+        raise RuntimeError(f"descriptor seed for {ref}@{version} failed: {row}")
+    await _wait_published(mp, ref, version)
+
+
+async def seed_iota_listing(
+    mp: MarketplaceService,
+    index: FixturePackageIndex,
+    idp_base_url: str,
+    *,
+    versions: Sequence[str] = (IOTA_VERSION_V1, IOTA_VERSION_V2),
+) -> None:
+    """Publish the standalone iota OAuth-connector descriptor for each of ``versions``
+    (in order) through the real admin-seed + ingest pipeline, rendered against
+    ``idp_base_url`` (the stack's OAuth/MCP stub). ``0.2.0`` adds a scope over ``0.1.0``.
+
+    Kept OUT of :func:`seed_fixture_catalog` like every other non-browse fixture, so the
+    shared alpha/beta/gamma browse catalog is unpolluted; the descriptor specs select
+    this seed themselves. Pass ``versions=(IOTA_VERSION_V1,)`` to stage only 0.1.0 before
+    an update-to-0.2.0 leg (the synchronous seed publishes each version in its request,
+    with no background poller detecting a newer release)."""
+    docs = _descriptor_docs("iota")
+    tags = {IOTA_VERSION_V1: IOTA_TAG_V1, IOTA_VERSION_V2: IOTA_TAG_V2}
+    for version in versions:
+        yml = render_iota_descriptor(idp_base_url, version)
+        await _seed_descriptor_version(
+            mp,
+            index,
+            ref=IOTA_REF,
+            repository_url=IOTA_REPOSITORY_URL,
+            tag=tags[version],
+            plugin_yml=yml,
+            version=version,
+            docs=docs,
+        )
+
+
+async def seed_iota_monorepo_listing(mp: MarketplaceService, index: FixturePackageIndex, idp_base_url: str) -> None:
+    """Publish the MONOREPO-style iota listing (name ``connector-iota``) at its 0.1.0
+    seed tag, registering it under the ``/tree/<branch>/<path>`` URL so a later
+    ``tai42-connector-iota-v<version>`` tag push routes to it by its component.
+
+    The subdir listing's seed confirms the ``tai-plugin.yml`` exists under the repo path
+    (a ref-less contents fetch), so the rendered yml is staged as the default-branch
+    content too. Its provider id stays ``iota`` — only the top-level plugin name differs
+    (the routing key)."""
+    yml = render_iota_descriptor(idp_base_url, IOTA_MONOREPO_SEED_VERSION, name=IOTA_MONOREPO_NAME)
+    await _seed_descriptor_version(
+        mp,
+        index,
+        ref=IOTA_MONOREPO_REF,
+        repository_url=IOTA_MONOREPO_REPOSITORY_URL,
+        tag=IOTA_MONOREPO_SEED_TAG,
+        plugin_yml=yml,
+        version=IOTA_MONOREPO_SEED_VERSION,
+        docs=_descriptor_docs("iota"),
+        docs_subpath=IOTA_MONOREPO_SUBPATH,
+        default_branch=True,
+    )
+
+
+async def seed_kappa_listing(mp: MarketplaceService, index: FixturePackageIndex, python: str) -> None:
+    """Publish the kappa no-auth (``kind: none``) connector descriptor through the real
+    admin-seed + ingest pipeline, launching the managed stdio MCP server with ``python``.
+
+    Kept OUT of :func:`seed_fixture_catalog` like the other descriptor fixtures — the
+    kappa spec seeds the fixture it installs itself."""
+    await _seed_descriptor_version(
+        mp,
+        index,
+        ref=KAPPA_REF,
+        repository_url=KAPPA_REPOSITORY_URL,
+        tag=KAPPA_TAG,
+        plugin_yml=render_kappa_descriptor(python),
+        version=KAPPA_VERSION,
+        docs=_descriptor_docs("kappa"),
+    )

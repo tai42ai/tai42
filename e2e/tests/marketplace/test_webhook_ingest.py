@@ -13,17 +13,35 @@ import hashlib
 import hmac
 import json
 
+import httpx
 import pytest
 
 from tai42_e2e.marketplace import (
     DELTA_REF,
     DELTA_REPOSITORY_URL,
+    IOTA_MONOREPO_NAME,
+    IOTA_MONOREPO_REF,
+    IOTA_MONOREPO_SUBPATH,
+    IOTA_MONOREPO_TAG,
+    IOTA_MONOREPO_VERSION,
+    IOTA_REF,
+    IOTA_REPOSITORY_URL,
+    IOTA_TAG_V2,
+    IOTA_VERSION_V1,
+    IOTA_VERSION_V2,
     FixtureArtifacts,
     MarketplaceService,
+    render_iota_descriptor,
+    seed_iota_listing,
+    seed_iota_monorepo_listing,
 )
 from tai42_e2e.pkgsource import FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for_async
+
+# iota is never connected in the webhook legs, so its OAuth/MCP endpoints resolve to a
+# fixed inert https base (a valid URL the model accepts; the ingest never fetches it).
+_IOTA_IDP_BASE = "https://iota-idp.invalid"
 
 pytestmark = [
     pytest.mark.backendless,
@@ -155,3 +173,102 @@ async def test_signed_webhook_ingests_github_source(
     await _wait_published(mp, "0.2.0")
     detail = await mp.api.get(f"/api/v1/plugins/{DELTA_REF}")
     assert detail["latest"]["version"] == "0.2.0"
+
+
+# The docs the descriptor-only iota versions publish over the tree/blob surfaces.
+_IOTA_DOCS = {
+    "index.mdx": (
+        "---\n"
+        "title: iota fixture connector\n"
+        "description: Descriptor-only OAuth connector marketplace fixture exercising spec-source ingest.\n"
+        "---\n"
+        "\n"
+        "# iota fixture connector\n"
+        "\n"
+        "This landing page ships so the descriptor-only fixture carries the mandatory docs index.\n"
+    )
+}
+_IOTA_REPO_FULL_NAME = "tai42ai/tai-e2e-market-iota"
+# A monorepo push arrives with the BARE repo URL (never the listing's /tree/<branch>/<path>
+# URL), so only the tag component can route it.
+_MONOREPO_HTML_URL = "https://github.com/tai42ai/tai42"
+_MONOREPO_FULL_NAME = "tai42ai/tai42"
+
+
+async def _wait_version_published(mp: MarketplaceService, ref: str, version: str, *, deadline: float = 30.0) -> None:
+    async def published() -> bool:
+        rows = (await mp.api.get(f"/api/v1/plugins/{ref}/versions"))["versions"]
+        statuses = {row["version"]: row["status"] for row in rows}
+        if statuses.get(version) == "scan_failed":
+            raise AssertionError(f"{ref} {version} is scan_failed (ingest validation failed): {statuses}")
+        return statuses.get(version) == "published"
+
+    await wait_for_async(published, deadline=deadline, message=f"{ref} {version} never reached status 'published'")
+
+
+async def _push_tag(mp: MarketplaceService, *, html_url: str, full_name: str, tag: str) -> httpx.Response:
+    """POST a correctly-signed tag-push webhook and return the raw response."""
+    body = {"ref": f"refs/tags/{tag}", "repository": {"html_url": html_url, "full_name": full_name}}
+    raw = json.dumps(body).encode()
+    signature = hmac.new(mp.webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
+    return await mp.api.request_raw(
+        "POST",
+        "/api/v1/webhooks/github",
+        content=raw,
+        headers={"X-Hub-Signature-256": f"sha256={signature}", "X-GitHub-Event": "push"},
+    )
+
+
+async def test_iota_tag_push_publishes_spec_version_with_yml_sha256_idempotently(
+    marketplace_service: MarketplaceService, package_index: FixturePackageIndex
+) -> None:
+    mp = marketplace_service
+
+    # Seed the standalone iota listing at 0.1.0 (registers it under its repo URL), then
+    # stage the 0.2.0 tag's rendered descriptor + docs on the github surfaces.
+    await seed_iota_listing(mp, package_index, _IOTA_IDP_BASE, versions=(IOTA_VERSION_V1,))
+    yml_v2 = render_iota_descriptor(_IOTA_IDP_BASE, IOTA_VERSION_V2)
+    package_index.register_github_release(IOTA_TAG_V2, yml_v2)
+    package_index.register_github_docs_tree(IOTA_TAG_V2, _IOTA_DOCS)
+
+    # A standalone ``v<version>`` tag has no component, so the push routes by repository
+    # URL; the descriptor is digested source='spec' from the raw yml bytes.
+    response = await _push_tag(mp, html_url=IOTA_REPOSITORY_URL, full_name=_IOTA_REPO_FULL_NAME, tag=IOTA_TAG_V2)
+    assert response.status_code in (200, 202), f"webhook rejected: {response.status_code} {response.text}"
+    assert response.json()["data"]["action"] == "published", response.text
+
+    await _wait_version_published(mp, IOTA_REF, IOTA_VERSION_V2)
+    versions = {row["version"]: row for row in (await mp.api.get(f"/api/v1/plugins/{IOTA_REF}/versions"))["versions"]}
+    expected_sha = hashlib.sha256(yml_v2.encode("utf-8")).hexdigest()
+    assert versions[IOTA_VERSION_V2]["sha256"] == expected_sha, versions[IOTA_VERSION_V2]
+
+    resolved = await mp.api.post(f"/api/v1/plugins/{IOTA_REF}/resolve", json={"version": IOTA_VERSION_V2})
+    assert resolved["source"] == "spec", resolved
+
+    # Same tag again is idempotent: the already-published version is not re-published.
+    again = await _push_tag(mp, html_url=IOTA_REPOSITORY_URL, full_name=_IOTA_REPO_FULL_NAME, tag=IOTA_TAG_V2)
+    assert again.status_code in (200, 202), again.text
+    assert again.json()["data"]["action"] == "already_published", again.text
+
+
+async def test_monorepo_tag_component_routes_and_publishes(
+    marketplace_service: MarketplaceService, package_index: FixturePackageIndex
+) -> None:
+    mp = marketplace_service
+
+    # Seed the monorepo-style iota listing (name connector-iota) under the /tree URL, then
+    # stage the 0.2.0 component tag's rendered descriptor + docs at the repo subpath.
+    await seed_iota_monorepo_listing(mp, package_index, _IOTA_IDP_BASE)
+    yml_v2 = render_iota_descriptor(_IOTA_IDP_BASE, IOTA_MONOREPO_VERSION, name=IOTA_MONOREPO_NAME)
+    package_index.register_github_release(IOTA_MONOREPO_TAG, yml_v2)
+    package_index.register_github_docs_tree(IOTA_MONOREPO_TAG, _IOTA_DOCS, subpath=IOTA_MONOREPO_SUBPATH)
+
+    # The bare repo URL cannot match the listing's /tree URL, so the tag component
+    # (tai42-connector-iota) routes it against <namespace>-<name>, and 0.2.0 publishes.
+    response = await _push_tag(mp, html_url=_MONOREPO_HTML_URL, full_name=_MONOREPO_FULL_NAME, tag=IOTA_MONOREPO_TAG)
+    assert response.status_code in (200, 202), f"webhook rejected: {response.status_code} {response.text}"
+    assert response.json()["data"]["action"] == "published", response.text
+
+    await _wait_version_published(mp, IOTA_MONOREPO_REF, IOTA_MONOREPO_VERSION)
+    detail = await mp.api.get(f"/api/v1/plugins/{IOTA_MONOREPO_REF}")
+    assert detail["latest"]["version"] == IOTA_MONOREPO_VERSION, detail

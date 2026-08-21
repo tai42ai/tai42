@@ -96,10 +96,12 @@ docker compose --profile agents-redis up -d
   outage specs inject with (`tcprelay.py`), the single waiting primitive
   (`waiting.py`), and failure diagnostics (`diagnostics.py`).
 - `src/tai42_e2e_fixtures/` — SUT-SIDE modules the spawned server imports via its
-  manifest: the probe tools (`tools.py`), the fixture OAuth connector provider
-  (`connector_provider.py`), and the second value on each pluggable axis — the
-  PG-backed identity provider (`identity_provider.py`), the storage backend
-  (`storage.py`), and the monitoring backend (`monitor_backend.py`).
+  manifest: the probe tools (`tools.py`), the managed MCP server the fixture
+  connector descriptors launch (`managed_mcp_server.py`), and the second value on
+  each pluggable axis — the PG-backed identity provider (`identity_provider.py`),
+  the storage backend (`storage.py`), and the monitoring backend
+  (`monitor_backend.py`). The fixture connector descriptors themselves ride the
+  manifest `connectors` field (built in `tai42_e2e.manifests`).
 - `tests/` — the suites by seam class, plus `tests/harness/` self-tests.
 - `docs/adding-a-test.md` — the 6-step recipe for a new feature's e2e test.
 

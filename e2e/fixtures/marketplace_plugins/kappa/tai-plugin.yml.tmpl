@@ -1,0 +1,65 @@
+spec_version: 1
+namespace: tai42
+name: kappa
+version: 0.1.0
+display_name: Kappa
+description: >-
+  No-auth connector marketplace fixture (descriptor-only): a yml-only kind=none
+  provider launching the managed stdio MCP server. Ships no package.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai-e2e-market-kappa
+contract: '>=2,<3'
+categories:
+  - connectors
+tags:
+  - connector
+  - kappa
+permissions:
+  network: false
+  subprocess: true
+  filesystem: false
+provides:
+  - kind: connector
+    # The connector item name MUST equal provider.id below (the manifest and
+    # uninstall key).
+    name: kappa
+    description: No-auth connector fixture launching the managed stdio MCP server.
+    provider:
+      id: kappa
+      display_name: Kappa
+      description: Connect the kappa fixture with user-supplied static config.
+      # A FIXED https literal served verbatim by the catalog — never fetched by the
+      # harness (which serves only http), so it is a literal, not a rendered token.
+      icon_url: https://raw.githubusercontent.com/tai42ai/tai-e2e-market-kappa/main/icon.png
+      kind: none
+      # namespace is tai42, so origin MUST be system (the contract binds the two).
+      origin: system
+      category: dev-tools
+      # Two client-supplied static values injected on the stdio transport's env
+      # channel (target env for a stdio sub-service); the managed server reflects
+      # them back through reflect_env.
+      config_fields:
+        - key: kappa_alpha
+          label: Kappa alpha
+          target: env
+          required: true
+        - key: kappa_beta
+          label: Kappa beta
+          target: env
+          required: false
+          secret: true
+      sub_services:
+        default:
+          id: default
+          display_name: Default
+          description: Launches the managed stdio MCP server; config values inject on its env.
+          mcp_server:
+            # The harness has no network/uvx, so the descriptor carries the
+            # interpreter path the render substitutes at seed time (the interpreter
+            # placeholder below) and launches the managed server module directly.
+            type: stdio
+            command: {{PYTHON}}
+            args:
+              - -m
+              - tai42_e2e_fixtures.managed_mcp_server

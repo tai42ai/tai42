@@ -18,8 +18,10 @@ on a leftover.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import importlib.metadata
+import secrets
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -30,6 +32,7 @@ import pytest
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
     build_marketplace_authz_stack,
+    build_marketplace_connectors_stack,
     build_marketplace_prefix_stack,
     build_marketplace_stack,
     build_router_merge_stack,
@@ -55,6 +58,7 @@ from tai42_e2e.marketplace import (
     seed_fixture_catalog,
     seed_zeta_listing,
 )
+from tai42_e2e.netfixtures import OAuthIdp
 from tai42_e2e.pkgsource import BuiltWheel, FixturePackageIndex
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import Infra, TaiStack
@@ -309,6 +313,40 @@ def router_merge_stack(
         infra,
         tmp_path_factory.mktemp("router-merge"),
         build_router_merge_stack,
+        resource_kwargs=resource_kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def marketplace_connectors_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+    oauth_idp: OAuthIdp,
+) -> Iterator[TaiStack]:
+    """The marketplace stack with the connectors surface mounted — the home of the
+    descriptor-only (``source='spec'``) connector install lifecycle (iota / kappa).
+
+    Wired at the harness-run registry + fixture index like ``marketplace_stack`` so its
+    install door resolves a descriptor listing, PLUS a live connector store (random
+    per-stack crypto keys) so the installed provider is listed and a no-auth connect
+    launches its managed stdio MCP server. The OAuth/MCP stub base
+    (``idp_base_url``) is the value the seeded iota descriptor is rendered against, so the
+    installed manifest's connector endpoints match this stack's IdP. The connector crypto
+    reads the KEK/state-HMAC as STANDARD base64 (KEK to exactly 32 bytes), so mint padded
+    standard-base64 keys."""
+    resource_kwargs = {
+        "marketplace_url": marketplace_service.base_url,
+        "package_index_url": package_index.url,
+        "idp_base_url": oauth_idp.base_url,
+        "connectors_kek": base64.b64encode(secrets.token_bytes(32)).decode(),
+        "connectors_state_hmac_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+    }
+    yield from boot_stack(
+        infra,
+        tmp_path_factory.mktemp("marketplace-connectors"),
+        build_marketplace_connectors_stack,
         resource_kwargs=resource_kwargs,
     )
 

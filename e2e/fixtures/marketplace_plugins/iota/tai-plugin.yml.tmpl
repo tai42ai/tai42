@@ -1,0 +1,54 @@
+spec_version: 1
+namespace: tai42
+name: {{NAME}}
+version: {{VERSION}}
+display_name: Iota
+description: >-
+  OAuth connector marketplace fixture (descriptor-only): a yml-only provider
+  descriptor over the harness OAuth/MCP stub. Ships no package.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai-e2e-market-iota
+contract: '>=2,<3'
+categories:
+  - connectors
+tags:
+  - connector
+  - oauth
+  - iota
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: connector
+    # The connector item name MUST equal provider.id below (the manifest and
+    # uninstall key); the top-level plugin name is templated separately.
+    name: iota
+    description: OAuth connector fixture over the harness OAuth/MCP stub.
+    provider:
+      id: iota
+      display_name: Iota
+      description: Connect the iota fixture over the harness OAuth/MCP stub.
+      # A FIXED https literal served verbatim by the catalog — never fetched by the
+      # harness (which serves only http), so it is a literal, not the IDP-base-URL placeholder.
+      icon_url: https://raw.githubusercontent.com/tai42ai/tai-e2e-market-iota/main/icon.png
+      kind: oauth
+      # namespace is tai42, so origin MUST be system (the contract binds the two).
+      origin: system
+      category: dev-tools
+      oauth:
+        authorize: {{IDP_BASE_URL}}/authorize
+        token: {{IDP_BASE_URL}}/token
+      client_id_env: CONNECTORS_IOTA_CLIENT_ID
+      client_secret_env: CONNECTORS_IOTA_CLIENT_SECRET
+      sub_services:
+        default:
+          id: default
+          display_name: Default
+          description: The iota fixture sub-service over the harness OAuth/MCP stub.
+          scopes:
+{{SCOPES}}
+          mcp_server:
+            type: http
+            url: {{IDP_BASE_URL}}/mcp

@@ -138,3 +138,30 @@ async def test_install_go_live_and_uninstall_mcp_server(
     await uninstall_and_assert_clean(
         stack, ETA_REF, package=ETA_PACKAGE, tool_name=ETA_MCP_TOOL, mcp_title=ETA_MCP_TITLE
     )
+
+
+@pytest.mark.skip(
+    reason="Full-stack mcp-server preview verifies against the marketplace's mcp-server "
+    "ingest branch and the mcp-server contract kind, both shipping in the release wave this "
+    "check gates (the ingest lives only on the unpushed marketplace commit; the isolated "
+    "registry venv resolves tai42-contract from PyPI where the mcp-server kind is not yet "
+    "published). Verified post-release, after _MARKETPLACE_PIN (marketplace.py) is bumped."
+)
+async def test_eta_preview_reports_no_required_env_and_package_delivery(
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+    fixture_artifacts: FixtureArtifacts,
+    marketplace_stack: TaiStack,
+) -> None:
+    stack = marketplace_stack
+
+    # Publish eta into THIS spec's registry only (kept out of the shared browse catalog).
+    await seed_eta_listing(marketplace_service, package_index, fixture_artifacts)
+
+    # eta's mcp block carries NO ``!ENV`` markers, so the preview's required_env is empty;
+    # and eta ships a package (its mcp.command is a console script), so delivery is
+    # ``package`` — the pip-installed path the go-live spec above exercises.
+    preview = await stack.api().post("/api/marketplace/install/preview", json={"ref": ETA_REF, "version": "0.1.0"})
+    assert preview["required_env"] == [], preview
+    assert preview["missing_env"] == [], preview
+    assert preview["delivery"] == "package", preview
