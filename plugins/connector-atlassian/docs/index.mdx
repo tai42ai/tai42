@@ -5,14 +5,48 @@ description: "Set up the Atlassian 3LO app, granular scopes, and credentials for
 
 Registers the `atlassian` connector: one Atlassian OAuth 2.0 (3LO) connection per
 alias, unlocking three services — Jira, Confluence, and Compass. Every service is a
-remote HTTP MCP endpoint hosted by Atlassian, so nothing is launched locally.
+remote HTTP MCP endpoint hosted by Atlassian, so nothing is launched locally. The
+plugin is pure descriptor data; the runtime's connector engine runs the OAuth flow,
+seals the tokens, and reaches Atlassian's hosted MCP endpoint with the connection's
+own token.
 
-Register it in the manifest:
+## Install
+
+```bash
+tai plugins install tai42/connector-atlassian \
+  --env CONNECTORS_ATLASSIAN_CLIENT_ID=... \
+  --secret CONNECTORS_ATLASSIAN_CLIENT_SECRET
+```
+
+Or add it by hand to the manifest under `connectors:` (the descriptor block the
+plugin provides):
 
 ```yaml manifest.yml
-lifecycle_modules:
-  - tai42_connector.atlassian.core.connector
+connectors:
+  - id: atlassian
+    kind: oauth
+    origin: system
+    category: dev-tools
+    display_name: Atlassian
+    description: Connect Jira, Confluence, and Compass.
+    icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-atlassian/icon.png
+    oauth:
+      authorize: https://auth.atlassian.com/authorize
+      token: https://auth.atlassian.com/oauth/token
+      revoke: null
+    client_id_env: CONNECTORS_ATLASSIAN_CLIENT_ID
+    client_secret_env: CONNECTORS_ATLASSIAN_CLIENT_SECRET
+    sub_services:
+      jira:
+        id: jira
+        display_name: Jira
+        scopes: [offline_access, read:issue:jira, write:issue:jira]
+        mcp_server: {type: http, url: https://mcp.atlassian.com/v1/mcp/authv2}
+    extra_authorize_params: {audience: api.atlassian.com, prompt: consent}
 ```
+
+The manifest block above is trimmed to one sub-service and a short scope set for
+brevity; the plugin's `tai-plugin.yml` carries the full set.
 
 ## Create the Atlassian app
 
@@ -34,9 +68,13 @@ CONNECTORS_ATLASSIAN_CLIENT_ID=...
 CONNECTORS_ATLASSIAN_CLIENT_SECRET=...
 ```
 
-The engine-wide `CONNECTORS_*` settings — the key-encryption key, the state HMAC
-key, and the redirect-URI allowlist — are shared by every connector and are
-described in [Connectors](/concepts/connectors).
+The engine-wide `CONNECTORS_*` settings — the key-encryption key
+(`CONNECTORS_KEK`), the state HMAC key (`CONNECTORS_STATE_HMAC_KEY`), and the
+redirect-URI allowlist (or `CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared
+bridge) — are shared by every connector and are described in
+[Connectors](/concepts/connectors). The origin you registered with Atlassian must
+appear in the redirect-URI allowlist, and it must be https for anything but a local
+host.
 
 ## Services and scopes
 
@@ -49,9 +87,10 @@ is granular.
 | `confluence` | `offline_access`, `read:page:confluence`, `read:hierarchical-content:confluence`, `read:comment:confluence`, `read:space:confluence`, `write:page:confluence`, `read:content-details:confluence` |
 | `compass` | `offline_access`, `read:component:compass`, `write:component:compass` |
 
-The authorize request adds `audience=api.atlassian.com` and `prompt=consent`.
-`offline_access` is what makes the refresh token available, so a connection survives
-the access token's expiry.
+All three services resolve to Atlassian's hosted MCP endpoint at
+`https://mcp.atlassian.com/v1/mcp/authv2`. The authorize request adds
+`audience=api.atlassian.com` and `prompt=consent`. `offline_access` is what makes the
+refresh token available, so a connection survives the access token's expiry.
 
 <Warning>
 Atlassian publishes no 3LO revocation endpoint, so disconnecting removes the stored
