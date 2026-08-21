@@ -142,10 +142,10 @@ class LLMProviderSettings(TaiBaseSettings):
     # the base Postgres DSN); a double-None raises a named error there.
     checkpoint_conn_string: str | None = None
     # Idle-TTL (minutes) for a conversation checkpoint: the redis saver measures it
-    # from the last read and ``sweep_checkpoints`` evicts past it. Defaults to 30 days
-    # (mirrors ``answer_retention_ttl_seconds``), so retention is bounded out of the
-    # box; set ``None`` to keep checkpoints forever.
-    checkpoint_ttl_minutes: int | None = 30 * 24 * 60
+    # from the last read and ``sweep_checkpoints`` evicts past it. ``None`` (the
+    # default) keeps checkpoints forever; a deployment that wants bounded retention
+    # sets a positive number of minutes explicitly.
+    checkpoint_ttl_minutes: int | None = None
     store: str = "redis"
     store_conn_string: str | None = None
 

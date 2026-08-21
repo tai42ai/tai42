@@ -66,10 +66,10 @@ def test_configured_temperature_passes_through_unchanged():
     assert dumped["temperature"] == 0.7
 
 
-def test_checkpoint_ttl_minutes_defaults_to_thirty_days():
-    # Retention is bounded out of the box (30 days, mirroring the answer retention
-    # window); an operator sets ``None`` to keep every checkpoint forever.
-    assert llm_settings_mod.llm_provider_settings().checkpoint_ttl_minutes == 30 * 24 * 60
+def test_checkpoint_ttl_minutes_defaults_to_none():
+    # The default keeps every checkpoint forever; a deployment sets a positive
+    # number of minutes to bound retention.
+    assert llm_settings_mod.llm_provider_settings().checkpoint_ttl_minutes is None
 
 
 def test_checkpoint_ttl_minutes_accepts_none_to_keep_forever():
