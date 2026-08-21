@@ -65,7 +65,10 @@ where = ["src"]
 include = ["tai42_cli*"]
 
 [tool.setuptools.package-data]
-tai42_cli = ["py.typed"]
+# ``py.typed`` marks the package typed; ``templates/**`` ships the
+# ``tai plugins init`` descriptor-only plugin skeletons as package data so the
+# wheel carries them (read via importlib.resources, never off the source tree).
+tai42_cli = ["py.typed", "templates/**/*"]
 
 [tool.pytest.ini_options]
 # importlib import mode + package-less test dirs (no tests/__init__.py): each test
