@@ -15,12 +15,21 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from tai42_contract.webhooks import WebhookVerificationError
+from tai42_contract.webhooks import ReplayDefense, SeenSetClaim, WebhookVerificationError
 
 # A well-formed value is ``sha256=`` followed by 64 hex chars.
 _SIGNATURE_HEADER = "X-Hub-Signature-256"
 _SIGNATURE_PREFIX = "sha256="
 _HEX_DIGEST_LEN = hashlib.sha256().digest_size * 2  # 64
+
+# GitHub stamps each delivery with a stable UUID (identical across a manual
+# redelivery of the same event), sends no timestamp, so replay is defended by a
+# seen-set on this id.
+_DELIVERY_HEADER = "X-GitHub-Delivery"
+# How long a delivery id is remembered. GitHub carries no signed timestamp, so the
+# seen-set is the ONLY replay defense — a longer window defends longer, bounded by
+# the id storage it costs. One day by default; ``replay_window_seconds`` overrides.
+_DEFAULT_REPLAY_WINDOW_SECONDS = 86400
 
 
 class GitHubWebhookVerifier:
@@ -70,6 +79,35 @@ class GitHubWebhookVerifier:
         # Constant-time compare so a mismatch position cannot be timed.
         if not hmac.compare_digest(provided_digest, expected_digest):
             raise WebhookVerificationError(f"{_SIGNATURE_HEADER} digest mismatch")
+
+    def replay_defense(self, body: bytes, headers: Mapping[str, str], config: dict[str, Any]) -> ReplayDefense:
+        """Defend replay by a seen-set on the delivery's ``X-GitHub-Delivery`` UUID.
+
+        GitHub sends no timestamp, so a captured validly-signed delivery would replay
+        indefinitely; the delivery id is stable per event (and identical across a manual
+        redelivery, which is the correct idempotent no-op). Fails CLOSED: a delivery with
+        a valid signature but no delivery-id header cannot be deduped, so it is refused
+        (:class:`WebhookVerificationError`) rather than dispatched undefended.
+        """
+        delivery_id = _header_lookup(headers, _DELIVERY_HEADER)
+        if not delivery_id:
+            raise WebhookVerificationError(f"missing {_DELIVERY_HEADER} header")
+        return SeenSetClaim(key=f"github:{delivery_id}", ttl_seconds=_replay_window_seconds(config))
+
+
+def _replay_window_seconds(config: dict[str, Any]) -> int:
+    """The positive-int seen-set window, defaulting to ``_DEFAULT_REPLAY_WINDOW_SECONDS``.
+
+    A present but non-int (``bool`` included) or non-positive value is an operator
+    misconfiguration and raises ``ValueError`` — the door fails CLOSED rather than run
+    with a nonsensical window.
+    """
+    window = config.get("replay_window_seconds", _DEFAULT_REPLAY_WINDOW_SECONDS)
+    if isinstance(window, bool) or not isinstance(window, int):
+        raise ValueError(f"replay_window_seconds must be an int, got {window!r}")
+    if window <= 0:
+        raise ValueError(f"replay_window_seconds must be positive, got {window!r}")
+    return window
 
 
 def _header_lookup(headers: Mapping[str, str], name: str) -> str | None:

@@ -143,6 +143,66 @@ def test_empty_secret_env_var_fails_closed(monkeypatch: pytest.MonkeyPatch) -> N
         _verify(_EXAMPLE_BODY, headers, _config())
 
 
+def test_replay_defense_keys_on_delivery_id() -> None:
+    """The seen-set key is the ``X-GitHub-Delivery`` UUID; default window is a day."""
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = GitHubWebhookVerifier().replay_defense(_EXAMPLE_BODY, {"X-GitHub-Delivery": "uuid-1"}, _config())
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.key == "github:uuid-1"
+    assert defense.ttl_seconds == 86400
+
+
+def test_replay_defense_delivery_header_case_insensitive() -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = GitHubWebhookVerifier().replay_defense(_EXAMPLE_BODY, {"x-github-delivery": "uuid-2"}, _config())
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.key == "github:uuid-2"
+
+
+def test_replay_defense_custom_window_honored() -> None:
+    from tai42_contract.webhooks import SeenSetClaim
+
+    defense = GitHubWebhookVerifier().replay_defense(
+        _EXAMPLE_BODY, {"X-GitHub-Delivery": "uuid-3"}, {**_config(), "replay_window_seconds": 600}
+    )
+    assert isinstance(defense, SeenSetClaim)
+    assert defense.ttl_seconds == 600
+
+
+def test_replay_defense_missing_delivery_header_fails_closed() -> None:
+    """A validly-signed delivery with no delivery id cannot be deduped — refused, not
+    dispatched undefended."""
+    with pytest.raises(WebhookVerificationError, match="X-GitHub-Delivery"):
+        GitHubWebhookVerifier().replay_defense(_EXAMPLE_BODY, {}, _config())
+
+
+@pytest.mark.parametrize("window", [0, -1])
+def test_replay_defense_non_positive_window_raises(window: int) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        GitHubWebhookVerifier().replay_defense(
+            _EXAMPLE_BODY, {"X-GitHub-Delivery": "u"}, {**_config(), "replay_window_seconds": window}
+        )
+
+
+def test_replay_defense_bool_window_raises() -> None:
+    with pytest.raises(ValueError, match="must be an int"):
+        GitHubWebhookVerifier().replay_defense(
+            _EXAMPLE_BODY, {"X-GitHub-Delivery": "u"}, {**_config(), "replay_window_seconds": True}
+        )
+
+
+@pytest.mark.parametrize("window", [1.5, "5"])
+def test_replay_defense_non_int_window_raises(window: Any) -> None:
+    # A float or a numeric string is not a sane seconds count: an operator
+    # misconfiguration that fails CLOSED, never a coerced window.
+    with pytest.raises(ValueError, match="must be an int"):
+        GitHubWebhookVerifier().replay_defense(
+            _EXAMPLE_BODY, {"X-GitHub-Delivery": "u"}, {**_config(), "replay_window_seconds": window}
+        )
+
+
 def test_is_post_only() -> None:
     """A body-signature verifier is POST-only: a door rejects GET for its topic."""
     assert GitHubWebhookVerifier().post_only is True

@@ -87,6 +87,13 @@ At verify time the secret is read from `os.environ[config["secret_env"]]`. A
 `ValueError` — verification fails **CLOSED**, so a misconfigured secret never
 becomes a silently-unauthenticated door.
 
+Replay defense: after a valid signature, each delivery is deduped by its
+`X-GitHub-Delivery` id in a seen-set, so a replayed delivery draws an idempotent
+`already_seen` and re-fires no hook. The window defaults to 24h and is set with an
+optional `replay_window_seconds` (a positive int) in `config`; a delivery with no
+`X-GitHub-Delivery` header, or a non-positive/non-int `replay_window_seconds`,
+fails **CLOSED**.
+
 > **Secret hygiene.** The secret lives only in an environment variable. Never
 > commit it to a file, a fixture, a manifest, or a URL. The example secret below
 > (`It's a Secret to Everybody`) is GitHub's own published example — it is a
