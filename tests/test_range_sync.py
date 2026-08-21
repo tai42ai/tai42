@@ -684,6 +684,78 @@ def test_check_underivable_pin_reports_untouched_no_drift(tmp_path: Path, capsys
     assert rc == 0
 
 
+# ------------------------------------ descriptor-only connector follows global
+
+
+def _build_descriptor_only_tree(root: Path) -> None:
+    """A workspace with a DESCRIPTOR-ONLY connector: a ``plugins/*`` dir carrying
+    a ``tai-plugin.yml`` but NO ``pyproject.toml`` (listed under the root's
+    ``[tool.uv.workspace].exclude``). It ships no package, so it is never a member
+    — yet its ``contract:`` still tracks the global released contract range. Here
+    the released contract is 2.0.0 (global derived ``>=2.0,<3``) while the
+    connector advertises a stale ``>=1.1,<2``."""
+    _write(
+        root / "pyproject.toml",
+        """
+        [tool.uv.workspace]
+        members = ["core/*", "plugins/*"]
+        exclude = ["plugins/connector-demo"]
+        """,
+    )
+    _write(
+        root / "core/contract/pyproject.toml",
+        """
+        [project]
+        name = "tai42-contract"
+        version = "2.0.0"
+        dependencies = []
+        """,
+    )
+    _write(
+        root / "plugins/connector-demo/tai-plugin.yml",
+        """
+        spec_version: 1
+        namespace: tai42
+        name: connector-demo
+        version: 1.0.0
+        contract: '>=1.1,<2'
+        """,
+    )
+
+
+_CONNECTOR_YML = "plugins/connector-demo/tai-plugin.yml"
+
+
+def test_discover_descriptor_only_files(tmp_path: Path):
+    _build_descriptor_only_tree(tmp_path)
+    found = [p.relative_to(tmp_path).as_posix() for p in range_sync.descriptor_only_contract_files(tmp_path)]
+    assert found == [_CONNECTOR_YML]
+    # the descriptor-only dir is never mistaken for a packaged member
+    members = [m.relative_to(tmp_path).as_posix() for m in range_sync.discover_members(tmp_path)]
+    assert "plugins/connector-demo" not in members
+
+
+def test_apply_rewrites_descriptor_only_connector(tmp_path: Path):
+    _build_descriptor_only_tree(tmp_path)
+    report = range_sync.apply(tmp_path)
+
+    # the connector's contract is bumped to the GLOBAL derived range >=2.0,<3
+    assert "contract: '>=2.0,<3'" in (tmp_path / _CONNECTOR_YML).read_text()
+    assert any(y == _CONNECTOR_YML and new == ">=2.0,<3" for y, _, new in report.contract_changes)
+
+    # idempotent: a follow-up check finds no drift
+    assert range_sync.check(tmp_path).dirty is False
+
+
+def test_check_detects_descriptor_only_connector_drift(tmp_path: Path):
+    _build_descriptor_only_tree(tmp_path)
+    report = range_sync.check(tmp_path)
+    assert report.dirty
+    assert any(
+        y == _CONNECTOR_YML and old == ">=1.1,<2" and new == ">=2.0,<3" for y, old, new in report.contract_changes
+    )
+
+
 # ------------------------------------------------- stray pin table is loud
 
 
