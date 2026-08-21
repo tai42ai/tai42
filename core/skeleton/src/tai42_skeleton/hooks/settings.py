@@ -68,6 +68,13 @@ class HooksSettings(TaiBaseSettings):
         # no topic name can collide with the per-topic hook keys above.
         return f"{self.prefix}:topic_verifiers"
 
+    def webhook_seen_key(self, topic: str, replay_key: str) -> str:
+        """The replay seen-set STRING key for a delivery on ``topic``. Namespaced by
+        topic so a sender-chosen id (e.g. a shared_secret nonce) reused across topics
+        cannot make one topic's delivery mask another's — distinct doors, distinct
+        deliveries."""
+        return f"{self.prefix}:webhook_seen:{topic}:{replay_key}"
+
     # -- Trigger-link keys ---------------------------------------------------
     #
     # A trigger link is three STRING keys under the shared ``:trigger:`` segment.

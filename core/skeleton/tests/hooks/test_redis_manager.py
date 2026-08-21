@@ -174,6 +174,38 @@ async def test_register_funnels_through_single_eval_leaving_one_topic_entry(monk
     assert fake_redis._hashes["hooks:name_trigger_map"]["mv"] == topics_holding_mv[0]
 
 
+async def test_claim_webhook_delivery_first_true_replay_false(monkeypatch, fake_redis):
+    # First claim of a (topic, key) wins; a replay of the same pair is refused.
+    manager = _manager(monkeypatch, fake_redis)
+    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
+    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is False
+    # A different id (same topic) is a distinct delivery — never dropped.
+    assert await manager.claim_webhook_delivery("events", "github:d-2", 300) is True
+    # Same id, different topic — distinct door, distinct delivery.
+    assert await manager.claim_webhook_delivery("other", "github:d-1", 300) is True
+
+
+async def test_claim_webhook_delivery_sets_ttl_atomically(monkeypatch, fake_redis):
+    # The claim writes its key WITH an expiry in one op: after the TTL lapses the key is
+    # gone (never a permanent key), so the same id claims fresh again.
+    manager = _manager(monkeypatch, fake_redis)
+    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
+    key = manager.settings.webhook_seen_key("events", "github:d-1")
+    # The key carries a bounded expiry, not an unbounded (None) one.
+    assert fake_redis._strings[key][1] is not None
+    fake_redis.advance(301)
+    assert await manager.claim_webhook_delivery("events", "github:d-1", 300) is True
+
+
+async def test_claim_webhook_delivery_non_positive_ttl_raises(monkeypatch, fake_redis):
+    import pytest
+
+    manager = _manager(monkeypatch, fake_redis)
+    # Never a claim without a positive bounded TTL.
+    with pytest.raises(ValueError, match="positive ttl_seconds"):
+        await manager.claim_webhook_delivery("events", "d", 0)
+
+
 async def test_list_hooks_skips_orphaned_map_entry(monkeypatch, fake_redis):
     # The name->topic map references a hook whose hash entry is gone (e.g. it
     # expired): list_hooks must skip the orphan rather than emit a null hook.

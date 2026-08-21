@@ -11,9 +11,13 @@ authed management doors the Studio's hooks UI consumes.
   one. A bound topic verifies the RAW body BEFORE parsing; failure -> 401 with a
   constant message (no oracle), nothing dispatched. A
   body-signature (``post_only``) verifier rejects GET delivery — a GET door would
-  sign an empty body while the real payload rides the URL unauthenticated. This
-  ingress carries a discriminated status body (413/401/405/500/accepted) with
-  custom headers and a background dispatch task, so it stays a native handler.
+  sign an empty body while the real payload rides the URL unauthenticated. A
+  passing verifier then declares its replay defense: a scheme carrying a stable
+  per-delivery id yields a seen-set claim, and a delivery whose id was already
+  claimed within the window is a REPLAY — answered with the idempotent
+  ``already_seen`` 200, dispatching nothing, so no bound hook re-fires. This
+  ingress carries a discriminated status body (413/401/405/500/accepted/already_seen)
+  with custom headers and a background dispatch task, so it stays a native handler.
 - ``GET /api/hooks`` (AUTHED) — list registered hooks (``?topic=`` filters) plus
   the per-topic verifier bindings under ``data.topic_verifiers`` and, under
   ``data.trigger_auth``, how a topic's webhook ingress door authenticates its caller
@@ -66,7 +70,7 @@ from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookRegister
-from tai42_contract.webhooks import WebhookVerificationError
+from tai42_contract.webhooks import FreshnessWindow, SeenSetClaim, WebhookVerificationError
 
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.authz.execution import bind_execution_identity
@@ -176,9 +180,13 @@ async def universal_webhook(request: Request) -> Response:
     # query string (else a captured signed delivery replays with appended params).
     strip_query = False
     if binding is not None:
-        denied, strip_query = await _verify_ingress(request, raw, binding, topic)
-        if denied is not None:
-            return denied
+        # ``_verify_ingress`` verifies, then consults the verifier's replay defense and
+        # claims the delivery's seen-set id: it returns a terminal response for a failed
+        # verification (401/405/500) OR a refused REPLAY (the idempotent already-seen
+        # 200, dispatching nothing), and ``None`` only for a legitimate first delivery.
+        verify_response, strip_query = await _verify_ingress(request, raw, binding, topic, manager)
+        if verify_response is not None:
+            return verify_response
 
     try:
         payload = await parse_any_payload(request, include_query=not strip_query)
@@ -293,16 +301,20 @@ async def _dispatch_trigger_link(resolved: ResolvedTrigger, payload: dict) -> No
         )
 
 
-async def _verify_ingress(request: Request, raw: bytes, binding: dict, topic: str) -> tuple[Response | None, bool]:
-    """Run the topic's bound verifier over the raw body. Return
-    ``(deny_response, False)`` on any failure (nothing dispatched), or
-    ``(None, post_only)`` when verification passes — ``post_only`` tells the
-    caller whether to drop the unauthenticated query string from the payload
-    (True for a body-signature verifier, whose signature covers only the body).
+async def _verify_ingress(
+    request: Request, raw: bytes, binding: dict, topic: str, manager
+) -> tuple[Response | None, bool]:
+    """Verify the topic's bound verifier over the raw body, then enforce its replay
+    defense. Return ``(terminal_response, False)`` when the door must answer without
+    dispatching — a verification failure OR a refused replay — or ``(None, post_only)``
+    for a legitimate first delivery, where ``post_only`` tells the caller whether to
+    drop the unauthenticated query string (True for a body-signature verifier).
 
-    Fails CLOSED on every path: a signature failure -> 401 (constant message);
-    an unknown verifier name / missing secret env / verifier bug -> 500. A
-    ``post_only`` (body-signature) verifier rejects GET delivery -> 405."""
+    Fails CLOSED on every failure path: a signature failure -> 401 (constant message);
+    a ``post_only`` (body-signature) verifier rejecting GET -> 405; an unknown verifier
+    name / missing secret env / verifier bug / replay-store error -> 500. A refused
+    REPLAY is NOT a failure: it returns the idempotent already-seen 200 (nothing
+    dispatched), because the sender's redelivery of an id already handled is correct."""
     # ``get_topic_verifier`` validates the stored binding against
     # ``TopicVerifierBinding`` (whose ``verifier`` carries ``min_length=1``), so
     # ``verifier`` is a guaranteed non-empty str and ``config`` a dict here — no
@@ -326,6 +338,11 @@ async def _verify_ingress(request: Request, raw: bytes, binding: dict, topic: st
 
     try:
         await verifier.verify(raw, request.headers, config)
+        # The verifier's per-scheme replay declaration, computed over the SAME raw
+        # bytes/headers only AFTER a passing verify. A missing required delivery-id
+        # header raises WebhookVerificationError here (fail-closed 401), exactly as a
+        # bad signature does; a binding misconfiguration raises -> 500 below.
+        defense = verifier.replay_defense(raw, request.headers, config)
     except WebhookVerificationError as exc:
         # Log the reason (never the raw body verbatim — a payload can itself hold
         # sensitive data); return the constant no-oracle message.
@@ -335,6 +352,28 @@ async def _verify_ingress(request: Request, raw: bytes, binding: dict, topic: st
         # A missing secret env var / verifier bug fails CLOSED as a loud 500, not
         # a soft-open dispatch.
         logger.error("webhook verifier error for topic %s", safe_topic, exc_info=True)
+        return _error("webhook verification error", 500), False
+
+    if isinstance(defense, SeenSetClaim):
+        try:
+            fresh = await manager.claim_webhook_delivery(topic, defense.key, defense.ttl_seconds)
+        except Exception:
+            # The seen-set store is unreachable: refuse to dispatch undefended rather
+            # than let a possible replay through. Loud 500, logged.
+            logger.error("webhook replay-defense store error for topic %s", safe_topic, exc_info=True)
+            return _error("webhook verification error", 500), False
+        if not fresh:
+            # A delivery id already claimed within the window: a replay (or the
+            # sender's own redelivery). Refuse LOUDLY in the log, but answer the
+            # idempotent already-seen 200 — nothing is dispatched, no hook re-fires.
+            logger.warning("webhook replay refused for topic %s (delivery id already seen)", safe_topic)
+            return _ingress_json({"status": "already_seen", "topic": topic}), post_only
+    elif not isinstance(defense, FreshnessWindow):
+        # Both known forms are handled above and here (a FreshnessWindow needs no
+        # seen-set — its verify already stale-rejects). ANY other value is an
+        # unrecognized replay declaration: never dispatch it undefended. Fail CLOSED
+        # with a loud 500, logged — the same posture as a verifier bug.
+        logger.error("webhook verify: unrecognized replay defense %r for topic %s", type(defense), safe_topic)
         return _error("webhook verification error", 500), False
     return None, post_only
 

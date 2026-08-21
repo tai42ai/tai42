@@ -121,7 +121,12 @@ class FakeRedis:
         return 0 if self._is_expired(key) else 1
 
     # -- direct string surface ----------------------------------------------
-    async def set(self, key, value, ex=None) -> bool:
+    async def set(self, key, value, ex=None, nx=False):
+        # SET ... NX: set only when the key is absent (or expired). Returns True on a
+        # successful set, None when NX declined — matching redis-py's return contract,
+        # which the replay-claim path relies on (truthy == first claimant).
+        if nx and not self._is_expired(key):
+            return None
         self._set_str(key, value, ex=ex)
         return True
 

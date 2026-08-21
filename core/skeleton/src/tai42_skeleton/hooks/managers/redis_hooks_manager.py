@@ -136,3 +136,14 @@ class RedisHooksManager(BaseHooksManager):
         return {
             topic: TopicVerifierBinding.model_validate_json(binding).model_dump() for topic, binding in data.items()
         }
+
+    async def claim_webhook_delivery(self, topic: str, replay_key: str, ttl_seconds: int) -> bool:
+        # SET NX EX is one atomic command: the claim and its expiry land together, so
+        # no window exists where a claimed key outlives its TTL (a permanent key) or a
+        # replay slips between a claim and a separate expire. NX returns truthy only to
+        # the FIRST claimant; a replay finds the key present and gets None -> False.
+        if ttl_seconds <= 0:
+            raise ValueError(f"webhook replay claim requires a positive ttl_seconds, got {ttl_seconds!r}")
+        key = self.settings.webhook_seen_key(topic, replay_key)
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            return bool(await awaited(r.set(key, "1", nx=True, ex=ttl_seconds)))

@@ -11,6 +11,11 @@ class _V:
     async def verify(self, body, headers, config) -> None:
         return None
 
+    def replay_defense(self, body, headers, config):
+        from tai42_contract.webhooks import FreshnessWindow
+
+        return FreshnessWindow()
+
 
 def test_register_get_round_trip() -> None:
     reg = WebhookVerifierRegistry()

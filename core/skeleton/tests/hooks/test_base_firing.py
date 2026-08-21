@@ -395,7 +395,7 @@ async def test_span_writer_records_override_values(make_app, monkeypatch):
 
 
 def test_base_manager_cannot_be_constructed():
-    # ``BaseHooksManager`` is an ABC: a backend that forgets one of the eight
+    # ``BaseHooksManager`` is an ABC: a backend that forgets one of the nine
     # abstract ops fails at CONSTRUCTION (TypeError), not deferred to call time.
     with pytest.raises(TypeError):
         BaseHooksManager(_settings())  # type: ignore[abstract]

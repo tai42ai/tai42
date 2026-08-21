@@ -108,6 +108,11 @@ class _FakeVerifier:
     async def verify(self, body, headers, config):
         return None
 
+    def replay_defense(self, body, headers, config):
+        from tai42_contract.webhooks import FreshnessWindow
+
+        return FreshnessWindow()
+
 
 @pytest.fixture
 def registry():
