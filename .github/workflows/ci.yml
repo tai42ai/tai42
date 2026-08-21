@@ -61,8 +61,6 @@ jobs:
             channel-web: [plugins/channel-web/**]
             channel-whatsapp: [plugins/channel-whatsapp/**]
             config-k8s: [plugins/config-k8s/**]
-            connector-atlassian: [plugins/connector-atlassian/**]
-            connector-google: [plugins/connector-google/**]
             identity-oidc: [plugins/identity-oidc/**]
             identity-redis: [plugins/identity-redis/**]
             monitoring-langfuse: [plugins/monitoring-langfuse/**]
@@ -120,8 +118,6 @@ jobs:
           channel-web|plugins/channel-web|tai42-channel-web|tai42_channel_web||arq|cov
           channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
           config-k8s|plugins/config-k8s|tai42-config-k8s|tai42_config_k8s||arq|cov
-          connector-atlassian|plugins/connector-atlassian|tai42-connector-atlassian|tai42_connector/atlassian||arq|cov
-          connector-google|plugins/connector-google|tai42-connector-google|tai42_connector/google||arq|cov
           identity-oidc|plugins/identity-oidc|tai42-identity-oidc|tai42_identity_oidc|--extra dev|arq|cov
           identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
           monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov

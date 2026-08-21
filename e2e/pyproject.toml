@@ -216,8 +216,6 @@ tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
 tai42-channel-web = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
-tai42-connector-google = { workspace = true }
-tai42-connector-atlassian = { workspace = true }
 tai42-config-k8s = { workspace = true }
 reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 

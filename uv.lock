@@ -23,8 +23,6 @@ members = [
     "tai42-channel-whatsapp",
     "tai42-cli",
     "tai42-config-k8s",
-    "tai42-connector-atlassian",
-    "tai42-connector-google",
     "tai42-contract",
     "tai42-e2e",
     "tai42-identity-oidc",
@@ -5510,64 +5508,6 @@ dev = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "tai42-config-k8s", extras = ["k8s"] },
-]
-
-[[package]]
-name = "tai42-connector-atlassian"
-version = "1.0.1"
-source = { editable = "plugins/connector-atlassian" }
-dependencies = [
-    { name = "tai42-contract" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "tai42-contract", editable = "core/contract" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyright", specifier = ">=1.1.389" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-cov", specifier = ">=5" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
-name = "tai42-connector-google"
-version = "1.0.1"
-source = { editable = "plugins/connector-google" }
-dependencies = [
-    { name = "tai42-contract" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "tai42-contract", editable = "core/contract" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyright", specifier = ">=1.1.389" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-cov", specifier = ">=5" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

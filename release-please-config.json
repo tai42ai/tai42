@@ -230,16 +230,12 @@
     "plugins/connector-atlassian": {
       "package-name": "tai42-connector-atlassian",
       "component": "tai42-connector-atlassian",
+      "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
         {
           "type": "yaml",
           "path": "tai-plugin.yml",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "yaml",
-          "path": "src/tai42_connector/atlassian/tai-plugin.yml",
           "jsonpath": "$.version"
         }
       ]
@@ -247,16 +243,38 @@
     "plugins/connector-google": {
       "package-name": "tai42-connector-google",
       "component": "tai42-connector-google",
+      "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
         {
           "type": "yaml",
           "path": "tai-plugin.yml",
           "jsonpath": "$.version"
-        },
+        }
+      ]
+    },
+    "plugins/connector-github": {
+      "package-name": "tai42-connector-github",
+      "component": "tai42-connector-github",
+      "release-type": "simple",
+      "skip-changelog": true,
+      "extra-files": [
         {
           "type": "yaml",
-          "path": "src/tai42_connector/google/tai-plugin.yml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/connector-slack": {
+      "package-name": "tai42-connector-slack",
+      "component": "tai42-connector-slack",
+      "release-type": "simple",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
           "jsonpath": "$.version"
         }
       ]
