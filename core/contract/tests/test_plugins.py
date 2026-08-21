@@ -139,12 +139,9 @@ def test_binding_fields_are_real_manifest_fields():
 
     # Every manifest-wired binding names an actual Manifest field, so the
     # installer can never patch a field the manifest model would reject. The
-    # connector descriptor binding targets ``connectors``; the Manifest model
-    # does not declare that field yet, so tolerate it by name only while it is
-    # genuinely absent — the assertion re-tightens once the field exists.
+    # connector descriptor binding targets ``connectors``, a real Manifest field.
     manifest_fields = set(Manifest.model_fields)
-    if "connectors" not in manifest_fields:
-        manifest_fields.add("connectors")
+    assert "connectors" in manifest_fields
     for kind, binding in KIND_MANIFEST_BINDINGS.items():
         if binding.field is not None:
             assert binding.field in manifest_fields, f"{kind}: {binding.field}"
@@ -159,18 +156,14 @@ def test_binding_mode_matches_manifest_field_cardinality():
     # A scalar mode must target a non-list Manifest field (a single-module slot
     # like ``str | None``); every list/row mode must target a list-typed field.
     # This guards the binding table against a mode/field cardinality mismatch
-    # that would make an installer append to a scalar or overwrite a list.
+    # that would make an installer append to a scalar or overwrite a list. The
+    # descriptor binding's ``connectors`` field is now a real list-typed Manifest
+    # field, so the list-cardinality assertion below covers it like every other
+    # list mode.
     scalar_modes = {"scalar_module"}
     list_modes = {"config_row", "module_list", "package_list", "mcp_entry", "descriptor_entry"}
     for kind, binding in KIND_MANIFEST_BINDINGS.items():
         if binding.field is None:
-            continue
-        if binding.field not in Manifest.model_fields:
-            # The Manifest model does not declare ``connectors`` yet, so its
-            # cardinality cannot be checked against an annotation here. Only the
-            # descriptor binding may name a field the model has not declared, and
-            # its list shape is fixed by the ``descriptor_entry`` mode.
-            assert binding.mode == "descriptor_entry", f"{kind}: unknown field {binding.field}"
             continue
         annotation = Manifest.model_fields[binding.field].annotation
         is_list_field = get_origin(annotation) is list
@@ -1659,3 +1652,34 @@ def test_spec_detects_collision_across_base_plus_path_shape():
     ]
     with pytest.raises(ValidationError, match="route collision"):
         PluginSpec(**_spec_kwargs(provides=provides))
+
+
+def test_manifest_connectors_round_trip():
+    from tai42_contract.connectors.providers import ProviderDescriptor
+    from tai42_contract.manifest import Manifest
+
+    provider = _connector_provider(id="iota")
+    manifest = Manifest.model_validate({"connectors": [provider]})
+    assert [d.id for d in manifest.connectors] == ["iota"]
+    assert all(isinstance(d, ProviderDescriptor) for d in manifest.connectors)
+
+    dumped = manifest.model_dump(mode="json")
+    assert dumped["connectors"][0]["id"] == "iota"
+
+    reloaded = Manifest.model_validate(dumped)
+    assert [d.id for d in reloaded.connectors] == ["iota"]
+
+
+def test_manifest_connectors_default_empty():
+    from tai42_contract.manifest import Manifest
+
+    assert Manifest().connectors == []
+
+
+def test_manifest_rejects_duplicate_connector_ids():
+    from pydantic import ValidationError
+
+    from tai42_contract.manifest import Manifest
+
+    with pytest.raises(ValidationError, match="duplicate connector id 'kappa'"):
+        Manifest.model_validate({"connectors": [_connector_provider(id="kappa"), _connector_provider(id="kappa")]})

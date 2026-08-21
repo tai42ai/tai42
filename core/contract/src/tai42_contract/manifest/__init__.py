@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tai42_contract.connectors.models import ConnectorRef
+from tai42_contract.connectors.providers import ProviderDescriptor
 
 # One element inside an extension combo. A bare ``str`` names an extension with no
 # author-bound config; a ``{"name": str, "config": dict}`` mapping binds
@@ -302,6 +303,13 @@ class Manifest(BaseModel):
     extensions_modules: list[str] = Field(default_factory=list)
     lifecycle_modules: list[str] = Field(default_factory=list)
 
+    # Declarative connector providers registered at boot/reload through the
+    # ``tai42_app.connectors.register_connector`` facet (a connector is pure
+    # data — it carries no import path). A NORMAL serialized field (no exclude):
+    # it must survive ``model_dump`` so it appears in ``live_manifest`` output
+    # and rides the deep copy the reload seam re-registers from.
+    connectors: list[ProviderDescriptor] = Field(default_factory=list[ProviderDescriptor])
+
     # Modules imported at app load whose import side-effect registers webhook
     # verifiers via ``tai42_app.webhook_verifiers.register(...)`` — the dedicated
     # home for verifier plugins (generic boot imports stay in
@@ -355,6 +363,20 @@ class Manifest(BaseModel):
 
     include_title_mcp_tools_map: dict[str, frozenset[str]] | None = Field(default_factory=dict, exclude=True)
     exclude_title_mcp_tools_map: dict[str, frozenset[str]] | None = Field(default_factory=dict, exclude=True)
+
+    @model_validator(mode="after")
+    def _reject_duplicate_connector_ids(self):
+        """Reject two ``connectors`` entries sharing an ``id``: the reload seam
+        registers each descriptor by id and the registry's duplicate guard would
+        crash the boot — fail loudly here naming the duplicate id instead."""
+        seen: set[str] = set()
+        for descriptor in self.connectors:
+            if descriptor.id in seen:
+                raise ValueError(
+                    f"manifest: duplicate connector id {descriptor.id!r} — each connectors[*] id must be unique"
+                )
+            seen.add(descriptor.id)
+        return self
 
     # -- Filter-predicate signatures (impl builds the maps these read) --------
 
