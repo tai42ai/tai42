@@ -39,7 +39,7 @@ dependencies = [
     "rq-scheduler~=0.14.0",
     "rq-dashboard~=0.8.6",
     # Cooperative green-thread pool for `--pool gevent`.
-    "gevent~=25.9.1",
+    "gevent~=26.8.0",
     # Builds the extension branch tools with concrete composed signatures.
     "makefun~=1.16.0",
     # Imported directly: the worker CLI options and the listener thread's
