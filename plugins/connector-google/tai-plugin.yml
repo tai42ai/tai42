@@ -1,12 +1,13 @@
 spec_version: 1
 namespace: tai42
 name: connector-google
-version: 1.0.1
+version: 2.0.0
 display_name: Google
 description: >-
   Google Workspace OAuth connector provider (Gmail, Calendar, Drive, Docs,
   Sheets, Slides, Chat, People) on Google's hosted Workspace MCP servers.
-icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-google/icon.png
+icon: >-
+  https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-google/icon.png
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-google
@@ -35,7 +36,8 @@ provides:
       category: communication
       display_name: Google
       description: Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People.
-      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-google/icon.png
+      icon_url: >-
+        https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-google/icon.png
       oauth:
         authorize: https://accounts.google.com/o/oauth2/v2/auth
         token: https://oauth2.googleapis.com/token
@@ -153,4 +155,4 @@ provides:
       extra_authorize_params:
         access_type: offline
         prompt: consent
-        include_granted_scopes: "true"
+        include_granted_scopes: 'true'

@@ -1,12 +1,13 @@
 spec_version: 1
 namespace: tai42
 name: connector-atlassian
-version: 1.0.1
+version: 2.0.0
 display_name: Atlassian
 description: >-
   Atlassian (Jira, Confluence, Compass) OAuth connector provider on Atlassian's
   hosted Rovo MCP endpoint.
-icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-atlassian/icon.png
+icon: >-
+  https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-atlassian/icon.png
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-atlassian
@@ -38,7 +39,8 @@ provides:
       category: dev-tools
       display_name: Atlassian
       description: Connect Jira, Confluence, and Compass.
-      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-atlassian/icon.png
+      icon_url: >-
+        https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-atlassian/icon.png
       oauth:
         authorize: https://auth.atlassian.com/authorize
         token: https://auth.atlassian.com/oauth/token

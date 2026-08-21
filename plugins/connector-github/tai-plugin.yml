@@ -1,12 +1,13 @@
 spec_version: 1
 namespace: tai42
 name: connector-github
-version: 0.0.0
+version: 1.0.0
 display_name: GitHub
 description: >-
   GitHub OAuth connector provider for the TAI ecosystem. Pure descriptor data
   against GitHub's hosted MCP server; ships no package.
-icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
+icon: >-
+  https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-github
@@ -30,7 +31,8 @@ provides:
       id: github
       display_name: GitHub
       description: Connect GitHub over GitHub's hosted MCP server toolsets.
-      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
+      icon_url: >-
+        https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-github/icon.png
       kind: oauth
       origin: system
       category: dev-tools
@@ -51,7 +53,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "repos"
+              X-MCP-Toolsets: repos
         issues:
           id: issues
           display_name: Issues
@@ -62,7 +64,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "issues"
+              X-MCP-Toolsets: issues
         pull_requests:
           id: pull_requests
           display_name: Pull Requests
@@ -73,7 +75,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "pull_requests"
+              X-MCP-Toolsets: pull_requests
         actions:
           id: actions
           display_name: Actions
@@ -85,7 +87,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "actions"
+              X-MCP-Toolsets: actions
         discussions:
           id: discussions
           display_name: Discussions
@@ -97,7 +99,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "discussions"
+              X-MCP-Toolsets: discussions
         code_security:
           id: code_security
           display_name: Code Security
@@ -109,7 +111,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "code_security"
+              X-MCP-Toolsets: code_security
         secret_protection:
           id: secret_protection
           display_name: Secret Protection
@@ -121,7 +123,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "secret_protection"
+              X-MCP-Toolsets: secret_protection
         dependabot:
           id: dependabot
           display_name: Dependabot
@@ -132,7 +134,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "dependabot"
+              X-MCP-Toolsets: dependabot
         notifications:
           id: notifications
           display_name: Notifications
@@ -143,7 +145,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "notifications"
+              X-MCP-Toolsets: notifications
         orgs:
           id: orgs
           display_name: Orgs
@@ -154,7 +156,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "orgs"
+              X-MCP-Toolsets: orgs
         users:
           id: users
           display_name: Users
@@ -165,7 +167,7 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "users"
+              X-MCP-Toolsets: users
         gists:
           id: gists
           display_name: Gists
@@ -176,4 +178,4 @@ provides:
             type: http
             url: https://api.githubcopilot.com/mcp/
             extra_headers:
-              X-MCP-Toolsets: "gists"
+              X-MCP-Toolsets: gists
