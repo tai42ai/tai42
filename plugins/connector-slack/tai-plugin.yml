@@ -1,0 +1,63 @@
+spec_version: 1
+namespace: tai42
+name: connector-slack
+version: 0.0.0
+display_name: Slack
+description: >-
+  Slack OAuth connector provider for the TAI ecosystem. Pure descriptor data
+  against Slack's hosted MCP server; ships no package.
+icon: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-slack
+contract: '>=2.2,<3'
+categories:
+  - connectors
+tags:
+  - connector
+  - oauth
+  - slack
+  - communication
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: connector
+    name: slack
+    description: OAuth connector for Slack over Slack's hosted MCP server.
+    provider:
+      id: slack
+      display_name: Slack
+      description: Connect a Slack workspace over Slack's hosted MCP server.
+      icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
+      kind: oauth
+      origin: system
+      category: communication
+      oauth:
+        authorize: https://slack.com/oauth/v2_user/authorize
+        token: https://slack.com/api/oauth.v2.user.access
+        revoke: null
+      client_id_env: CONNECTORS_SLACK_CLIENT_ID
+      client_secret_env: CONNECTORS_SLACK_CLIENT_SECRET
+      sub_services:
+        slack:
+          id: slack
+          display_name: Slack
+          description: Read and post across channels, DMs, and search.
+          scopes:
+            - search:read
+            - channels:read
+            - channels:history
+            - groups:read
+            - groups:history
+            - im:read
+            - im:history
+            - mpim:read
+            - mpim:history
+            - users:read
+            - reactions:read
+            - chat:write
+          mcp_server:
+            type: http
+            url: https://mcp.slack.com/mcp

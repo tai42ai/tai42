@@ -1,0 +1,11 @@
+tai42-connector-slack
+Copyright 2026 tai42
+
+This product includes software developed at tai42 (https://tai42.ai).
+Licensed under the Apache License, Version 2.0.
+
+icon.png is the official Slack logomark, rasterized to PNG from Slack's own
+official brand SVG at https://a.slack-edge.com/38f0e7c/marketing/img/nav/logo.svg
+(referenced from Slack's Media Kit, https://slack.com/media-kit). The Slack logo
+is a trademark of Slack Technologies, LLC (a Salesforce company), used per
+Slack's brand guidelines; this repository claims no rights in it.
