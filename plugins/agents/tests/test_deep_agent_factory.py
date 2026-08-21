@@ -11,6 +11,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -79,11 +80,16 @@ def _tool(name: str) -> StructuredTool:
 
 
 def test_resolve_subagent_emits_only_set_keys() -> None:
-    """Inheritance relies on optional keys being ABSENT, not None; the shared
-    tool-error middleware is the one always-present stack entry every subagent gets."""
+    """Inheritance relies on optional keys being ABSENT, not None; the shared async-park
+    hook + tool-error middleware are the always-present stack entries every subagent gets."""
     spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p")
     sub = cast(dict[str, Any], asyncio.run(_resolve_subagent(spec)))
-    assert sub == {"name": "b", "description": "d", "system_prompt": "p", "middleware": [_tool_error_middleware]}
+    assert sub == {
+        "name": "b",
+        "description": "d",
+        "system_prompt": "p",
+        "middleware": [factory._async_park_middleware, _tool_error_middleware],
+    }
 
 
 def test_resolve_subagent_resolves_model_when_provider_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,14 +226,18 @@ def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch
     _assert_bound_to_model(cast(ToolStrategy[Any], captured["response_format"]), M)
 
 
-def test_build_deep_agent_leads_with_system_purge_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The purge middleware leads the main agent's stack, so a thread whose stored
-    # history carries a system message (written by another face) runs cleanly:
-    # state never reaches the model with one alongside the per-run prompt.
+def test_build_deep_agent_leads_with_async_park_then_system_purge_middleware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The async-park hook leads the main agent's stack (the loop's first before_model
+    # hook, so it recognizes a park before any compaction), followed by the system purge
+    # so a thread whose stored history carries a system message runs cleanly: state never
+    # reaches the model with one alongside the per-run prompt.
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
     asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
-    assert isinstance(captured["middleware"][0], SystemPurgeMiddleware)
+    assert captured["middleware"][0] is factory._async_park_middleware
+    assert isinstance(captured["middleware"][1], SystemPurgeMiddleware)
 
 
 def test_build_deep_agent_wires_rolling_cache_mark_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,19 +251,21 @@ def test_build_deep_agent_wires_rolling_cache_mark_middleware(monkeypatch: pytes
 
 
 def test_build_deep_agent_pins_main_middleware_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The main agent's stack is order-pinned: system purge clears a stored system message
-    # first, leading-user keeps the thread user-first, rolling-cache-mark rolls the
-    # breakpoint at the call, and the shared tool-error middleware trails last (mirroring
-    # every subagent stack's tool-error tail).
+    # The main agent's stack is order-pinned: the async-park hook leads (the sole
+    # before_model hook, so it sees a park before any compaction), system purge clears a
+    # stored system message next, leading-user keeps the thread user-first,
+    # rolling-cache-mark rolls the breakpoint at the call, and the shared tool-error
+    # middleware trails last (mirroring every subagent stack's tool-error tail).
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
     asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     stack = captured["middleware"]
-    assert len(stack) == 4
-    assert isinstance(stack[0], SystemPurgeMiddleware)
-    assert isinstance(stack[1], LeadingUserMiddleware)
-    assert isinstance(stack[2], RollingCacheMarkMiddleware)
-    assert stack[3] is _tool_error_middleware
+    assert len(stack) == 5
+    assert stack[0] is factory._async_park_middleware
+    assert isinstance(stack[1], SystemPurgeMiddleware)
+    assert isinstance(stack[2], LeadingUserMiddleware)
+    assert isinstance(stack[3], RollingCacheMarkMiddleware)
+    assert stack[4] is _tool_error_middleware
 
 
 def test_compile_nested_subagent_pins_response_format_to_tool_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -471,9 +483,10 @@ def test_resolve_subagent_compiles_nested_into_middleware(monkeypatch: pytest.Mo
     assert [t.name for t in captured[0]["tools"]] == ["search"]
     assert captured[0]["system_prompt"] == "cp"
     assert captured[0]["backend"] is backend
-    # ...and attached to the parent through a SubAgentMiddleware, ahead of the shared
-    # tool-error middleware every subagent stack carries.
-    sub_middleware, tool_error = sub["middleware"]
+    # ...and attached to the parent through a SubAgentMiddleware, between the leading
+    # async-park hook and the shared tool-error middleware every subagent stack carries.
+    async_park, sub_middleware, tool_error = sub["middleware"]
+    assert async_park is factory._async_park_middleware
     assert isinstance(sub_middleware, factory.SubAgentMiddleware)
     assert tool_error is _tool_error_middleware
 
@@ -531,7 +544,9 @@ def test_build_deep_agent_passes_nested_subagents_through(monkeypatch: pytest.Mo
     # subagent now supplied so its tool node carries the shared middleware.
     subs = {s["name"]: s for s in main_call["subagents"]}
     assert set(subs) == {"general-purpose", "advisor"}
-    assert isinstance(subs["advisor"]["middleware"][0], factory.SubAgentMiddleware)
+    # The advisor's stack leads with the async-park hook, then its nested SubAgentMiddleware.
+    assert subs["advisor"]["middleware"][0] is factory._async_park_middleware
+    assert isinstance(subs["advisor"]["middleware"][1], factory.SubAgentMiddleware)
     assert _tool_error_middleware in subs["general-purpose"]["middleware"]
 
 
@@ -716,7 +731,7 @@ def test_deep_agent_per_turn_marking_sends_one_breakpoint_on_a_reused_thread() -
     # exactly one — the newest.
     model = _RecordingChatModel([AIMessage(content="first"), AIMessage(content="second")])
     kwargs = {"cache_control": {"type": "ephemeral"}}
-    config = {"configurable": {"thread_id": "t-deep-roll"}}
+    config: RunnableConfig = {"configurable": {"thread_id": "t-deep-roll"}}
 
     async def run_two_turns() -> list[BaseMessage]:
         agent = await build_deep_agent(

@@ -8,12 +8,14 @@ LangGraph chunks (the normalized event projection lives in ``stream_events``).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool
+from langgraph.types import Command
+from tai42_contract.agent.events import SuspendedFinal
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
@@ -26,9 +28,33 @@ from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_continuation
+from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
+
+# One shared, stateless park hook leading the tools-agent stack, so an async
+# ``ask_user`` parked inside a run interrupts its own graph and resumes by id. The
+# SAME hook class deep_agent mounts (the park driver is shared, not forked per agent
+# type); a fresh stateless instance here keeps the tools-agent import graph a leaf.
+_async_park_middleware = AsyncParkMiddleware()
+
+#: The type of the closure a face hands the compile seam to build a park identity
+#: against the FINAL (thread-id-resolved) run config — deferred so a keyless run's
+#: minted thread id is captured, never a pre-init ``None``.
+ParkBuilder = Callable[[dict[str, Any]], ParkIdentity | None]
+
+
+def _suspended_receipt(event: SuspendedFinal) -> dict[str, Any]:
+    """The suspended RECEIPT a parked run returns in place of an answer — the same
+    shape :meth:`Agent._drain` yields, so a park is a clean non-error outcome."""
+    return {
+        "status": "suspended",
+        "interaction_ids": event.interaction_ids,
+        "thread_id": event.thread_id,
+        "expiry_at": event.expiry_at,
+    }
 
 
 async def _compile_tools_agent(
@@ -77,6 +103,11 @@ async def _compile_tools_agent(
         system_prompt=system_prompt,
         checkpointer=checkpointer,
         middleware=[
+            # The park hook leads: it is the loop's first before_model hook, so it
+            # recognizes an async-ask park before any message-compacting hook (which
+            # compact through wrap_model_call, skipped on a park super-step) could
+            # evict its marked ToolMessage.
+            _async_park_middleware,
             SystemPurgeMiddleware(),
             *context_overflow_middlewares(system_prompt=system_prompt),
             LeadingUserMiddleware(),
@@ -162,6 +193,8 @@ async def ainvoke_tools_agent(
     system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
+    park_builder: ParkBuilder | None = None,
+    resume: Any = None,
 ) -> AgentInvokeResult:
     """Invoke the tools agent and return the user output, per-call usage
     aggregated from every AIMessage in the run state, and the structured response.
@@ -169,6 +202,13 @@ async def ainvoke_tools_agent(
     ``.structured`` holds the forced structured output when a ``response_format``
     was requested — validated against it, raising loudly if missing or
     non-conforming — and is ``None`` otherwise.
+
+    ``park_builder`` (given the FINAL thread-id-resolved run config) decides whether
+    the run is park-capable and, if so, captures the rebuild identity: the resume
+    continuation is bound around the drive, and a run that parks on an async
+    ``ask_user`` persists its durable index and returns a ``.suspended`` receipt
+    instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
+    prior park — in place of a fresh user turn.
     """
     agent, messages, config = await _build_agent_and_input(
         system_message,
@@ -182,7 +222,22 @@ async def ainvoke_tools_agent(
         user_content_kwargs=user_content_kwargs,
         response_format=response_format,
     )
-    state = await agent.ainvoke(messages, config)
+    park = park_builder(config) if park_builder is not None else None
+    agent_input: Any = Command(resume=resume) if resume is not None else messages
+    # The resume continuation is bound for the drive's duration so an async ``ask_user``
+    # a tool raises stamps its resume path onto the parked interaction (a no-op when the
+    # run is not park-capable / does not bind).
+    with park_continuation(park):
+        state = await agent.ainvoke(agent_input, config)
+        park_events = await finalize_drive(agent, config, None, park)
+    for event in park_events:
+        if isinstance(event, SuspendedFinal):
+            return AgentInvokeResult(
+                output="",
+                usage=aggregate_usage(state),
+                structured=None,
+                suspended=_suspended_receipt(event),
+            )
     structured = extract_structured_output(state, response_format) if response_format is not None else None
     return AgentInvokeResult(
         output=build_user_output(state),

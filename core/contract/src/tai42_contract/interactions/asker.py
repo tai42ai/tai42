@@ -1,22 +1,37 @@
 """The ``ask_user`` author surface — a typed-callable Protocol.
 
 ``AskUser`` is the engine-agnostic human-in-the-loop entry point: an awaitable
-called with a ``question`` (and an optional answer shape) that blocks until a
-human answers, returning the typed answer. An implementation persists the
-question, blocks on a reply channel, and raises on timeout — but the contract
-fixes only the call shape, not how the wait is realized.
+called with a ``question`` (and an optional answer shape). In ``mode="sync"`` it
+blocks until a human answers and returns the typed answer; in ``mode="async"``
+it PARKS the caller and returns a sentinel, and a later answer/expiry resumes
+work out of band. An implementation persists the question, blocks on (or parks
+against) a reply channel, and raises on timeout — but the contract fixes only
+the call shape, not how the wait is realized. ``timeout`` (sync) and
+``expiry_at`` (async) are two ways to bound the wait and are mutually
+exclusive; ``check_ask_timing`` enforces that, since a Protocol cannot.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
 
     from pydantic import BaseModel
 
     from tai42_contract.interactions.models import MediaItem
+
+
+def check_ask_timing(*, timeout: float | None, expiry_at: datetime | None) -> None:
+    """Reject a ``timeout``+``expiry_at`` combination the ask cannot honor.
+
+    A sync ``timeout`` and an async ``expiry_at`` bound the same wait two ways;
+    setting both is a caller error a Protocol cannot catch at runtime.
+    """
+    if timeout is not None and expiry_at is not None:
+        raise ValueError("timeout and expiry_at are mutually exclusive")
 
 
 @runtime_checkable
@@ -37,8 +52,12 @@ class AskUser(Protocol):
         sensitive: bool = False,
         audience: str | None = None,
         media: list[MediaItem | dict[str, Any]] | None = None,
+        mode: Literal["sync", "async"] = "sync",
+        expiry_at: datetime | None = None,
     ) -> Any:
-        """Ask a human ``question`` and block until the answer returns.
+        """Ask a human ``question``: in ``mode="sync"`` block until the answer
+        returns; in ``mode="async"`` park the caller and return a
+        ``SuspendedInteraction`` immediately.
 
         Returns the typed answer per ``answer_format`` (text->str, confirm->bool,
         select->chosen value, form->validated dict). Implementations raise a
@@ -101,8 +120,16 @@ class AskUser(Protocol):
         it is NOT forwarded to channel deliveries — the Studio inbox is where it
         renders. ``None`` (the default) attaches no media; a present list must be
         non-empty.
+
+        ``mode`` selects the wait discipline: ``"sync"`` (the default) blocks and
+        returns the typed answer; ``"async"`` PARKS the caller, returning a
+        ``SuspendedInteraction`` sentinel, and the answer/expiry resumes work out
+        of band. ``expiry_at`` is the async deadline — the moment a parked question
+        expires; async REQUIRES it (a park always carries a deadline) and it is
+        mutually exclusive with ``timeout`` (``check_ask_timing`` enforces the
+        exclusivity). ``None`` is valid only for a sync ask.
         """
         ...
 
 
-__all__ = ["AskUser"]
+__all__ = ["AskUser", "check_ask_timing"]

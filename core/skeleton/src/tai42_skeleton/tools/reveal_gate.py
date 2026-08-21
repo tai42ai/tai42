@@ -1,12 +1,20 @@
-"""The in-process secret carry-out slot shared by tool dispatch and preset bind.
+"""The in-process carry-out slots shared by tool dispatch and preset bind.
 
 The gate is armed for the duration of a ``TransformedTool`` (preset) in-process
 dispatch. The preset's forwarding fn re-enters the parent tool's ``run`` — hence its
-``convert_result`` — in-process, where a wrapped secret must survive to the dispatch's
-caller rather than being revealed as it is on a live MCP edge. ``convert_result`` stows
-the RAW wrapper-bearing value here so the dispatch returns it intact; the preset's
-output-schema guard reads the same stowed value so it validates the REVEALED result
-rather than the masked projection that flows back through the transform.
+``convert_result`` — in-process, where two kinds of return must survive to the
+dispatch's caller BY VALUE rather than being flattened into a ``ToolResult``:
+
+* a wrapped secret, which must survive intact to the dispatch's caller rather than
+  being revealed as it is on a live MCP edge — ``convert_result`` stows the RAW
+  wrapper-bearing value on the reveal slot so the dispatch returns it intact, and the
+  preset's output-schema guard reads the same stowed value so it validates the
+  REVEALED result rather than the masked projection that flows back through the
+  transform;
+* an async-park sentinel (``SuspendedInteraction``), which the turn engine recognizes
+  by TYPE — ``convert_result`` stows it on the park slot so the dispatch returns the
+  object unflattened, exactly as the direct-run path preserves it, and a later answer
+  is never stranded on a lost park.
 """
 
 from __future__ import annotations
@@ -16,13 +24,16 @@ from typing import Any
 
 
 class InprocessRevealGate:
-    """The armed in-process dispatch's secret carry-out slot."""
+    """The armed in-process dispatch's carry-out slots: a secret reveal payload and
+    an async-park sentinel."""
 
-    __slots__ = ("has_payload", "payload")
+    __slots__ = ("has_park", "has_payload", "park", "payload")
 
     def __init__(self) -> None:
         self.payload: Any = None
         self.has_payload = False
+        self.park: Any = None
+        self.has_park = False
 
 
 # Armed only inside a preset dispatch. ``None`` (the default) is the genuine-MCP-call
@@ -40,6 +51,18 @@ def stowed_reveal_payload() -> tuple[bool, Any]:
     if gate is None or not gate.has_payload:
         return False, None
     return True, gate.payload
+
+
+def stowed_park() -> tuple[bool, Any]:
+    """The current gate's stowed async-park sentinel as ``(has_park, park)``.
+
+    ``(False, None)`` when the gate is unarmed or the dispatch carried no park — the
+    caller then treats the return as an ordinary tool result.
+    """
+    gate = inprocess_reveal_gate.get()
+    if gate is None or not gate.has_park:
+        return False, None
+    return True, gate.park
 
 
 # Set when an UNARMED MCP-edge reveal exposed a secret in this task's result; read by

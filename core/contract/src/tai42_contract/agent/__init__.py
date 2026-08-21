@@ -21,6 +21,7 @@ from tai42_contract.agent.events import (
     RunUsage,
     StreamEvent,
     StructuredFinal,
+    SuspendedFinal,
     ToolCallStep,
     ToolResultStep,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "StreamEvent",
     "StructuredFinal",
     "SubAgentSpec",
+    "SuspendedFinal",
     "ToolCallStep",
     "ToolResultStep",
 ]

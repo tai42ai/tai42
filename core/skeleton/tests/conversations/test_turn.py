@@ -386,6 +386,27 @@ async def test_tool_target_reply_expr_yielding_null_is_silent(env, monkeypatch):
     assert channel.sends == []
 
 
+async def test_tool_target_suspended_interaction_ends_the_turn_silently(env, monkeypatch):
+    # A tool that async-parks the caller returns the generic SuspendedInteraction
+    # sentinel; the turn recognizes it by TYPE (never a reply_expr mapping) and ends
+    # silently — the parked continuation resumes work out of band.
+    from tai42_contract.interactions import SuspendedInteraction
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: SuspendedInteraction(interaction_id="i-async"))
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert record.answer is None
+    assert record.answer_status is None
+    assert channel.sends == []
+
+
 async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):
     # No reply_expr, so a non-null/non-string result is a turn error, not a silent drop.
     channel = FakeChannel()

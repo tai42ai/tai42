@@ -32,6 +32,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import request_identity
+from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import (
@@ -166,6 +167,8 @@ async def _claim_or_serialization_error(
     *,
     ticket: str | None = None,
     ticket_ttl: int | None = None,
+    continuation_due_ttl: int | None = None,
+    continuation_first_attempt_at_ms: int | None = None,
 ) -> bool | None:
     """Call ``record_answer``, converting a serializer blowup on an untrusted
     answer into a loud-400 signal. A pathological answer (e.g. a deeply-nested JSON
@@ -173,9 +176,22 @@ async def _claim_or_serialization_error(
     response is serialized — which happens at the top of ``record_answer`` before
     any Redis write, so catching it here leaves no partial state. Returns the
     claim result (``True``/``False``), or ``None`` to signal "serialization
-    failed → answer the caller with a 400"."""
+    failed → answer the caller with a 400".
+
+    ``continuation_due_ttl`` / ``continuation_first_attempt_at_ms`` are threaded to
+    ``record_answer`` so an async park's durable continuation-due record is enqueued
+    ATOMICALLY with the claim; a sync question passes ``None`` and enqueues nothing."""
     try:
-        return await store.record_answer(r, response, group_id, reply_ttl, ticket=ticket, ticket_ttl=ticket_ttl)
+        return await store.record_answer(
+            r,
+            response,
+            group_id,
+            reply_ttl,
+            ticket=ticket,
+            ticket_ttl=ticket_ttl,
+            continuation_due_ttl=continuation_due_ttl,
+            continuation_first_attempt_at_ms=continuation_first_attempt_at_ms,
+        )
     except (PydanticSerializationError, RecursionError):
         return None
 
@@ -236,10 +252,27 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
             answered_by=user_id or _NO_AUTH_ANSWERED_BY,
             answered_at=datetime.now(UTC),
         )
-        claimed = await _claim_or_serialization_error(store, r, response, state.group_id, _reply_ttl(state.request))
+        # An async park enqueues its durable continuation-due record atomically with
+        # the claim; a sync question passes no timing and enqueues nothing.
+        due_ttl, due_first_attempt_at_ms = (
+            continuation_due_timing(settings) if state.request.mode == "async" else (None, None)
+        )
+        claimed = await _claim_or_serialization_error(
+            store,
+            r,
+            response,
+            state.group_id,
+            _reply_ttl(state.request),
+            continuation_due_ttl=due_ttl,
+            continuation_first_attempt_at_ms=due_first_attempt_at_ms,
+        )
         if claimed is None:
             raise BadRequestError("answer payload could not be serialized")
         if not claimed:
             raise ConflictError("Interaction already answered")
+        # This door claimed the answer: if the question is an async park, fire its
+        # stored continuation ONCE (the shared post-claim seam both answer doors run,
+        # so the fire happens exactly once regardless of which door claimed).
+        await fire_continuation_after_claim(r, store, state.request, validated)
 
     return {"interaction_id": interaction_id, "status": "answered"}

@@ -596,7 +596,8 @@ class ConversationRecordStore:
 
     async def create_record(self, record: ConversationRecord, *, intake_token: str | None = None) -> None:
         """Persist a freshly minted record in the state it carries (always a create — the
-        ``message_id`` is a fresh uuid4). A non-terminal record carries NO expiry until it
+        ``message_id`` is a fresh uuid4, or a caller's stable idempotency id its caller
+        dedupes on before calling). A non-terminal record carries NO expiry until it
         reaches a terminal state; one created already terminal gets the retention TTL.
 
         An ``accepted`` record REQUIRES ``intake_token`` and is created already holding that

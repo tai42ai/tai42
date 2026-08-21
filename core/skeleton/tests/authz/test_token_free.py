@@ -186,10 +186,11 @@ _REFUSED_OUTSIDE_THE_MINIMAL_GRAMMAR = [
     '.policy | has("tier")',
 ]
 
-# Refused by the SOURCE-SHAPE gate on the raw text, before a token is read. The first four
+# Refused pre-lexically on the raw text, before a token is read (the source-shape gate, plus
+# the control-character gate for NUL/VT/DEL). The first four
 # are working fail-opens: a ``#`` comment ending in a backslash continues across the newline
 # for jq, so jq runs an identity predicate the scan would read as a safe primary.
-_REFUSED_BY_THE_SOURCE_SHAPE_GATE = [
+_REFUSED_BEFORE_ANY_TOKEN_IS_READ = [
     '# \\\n"a"\n.identity.suspended != true',
     "# \\\n1\n.identity.suspended != true",
     "# \\\ntrue\n.identity.suspended != true",
@@ -264,7 +265,7 @@ def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(condition:
     assert peak < _MAX_NESTING_DEPTH
 
 
-@pytest.mark.parametrize("condition", _REFUSED_BY_THE_SOURCE_SHAPE_GATE)
+@pytest.mark.parametrize("condition", _REFUSED_BEFORE_ANY_TOKEN_IS_READ)
 def test_a_condition_outside_the_accepted_source_shape_is_refused_before_it_is_lexed(condition: str) -> None:
     # The gate reads raw characters only, so it holds where the scan's lexer and jq's would
     # part company. The message is asserted to be the GATE's, not the parser's: a case that

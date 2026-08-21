@@ -260,8 +260,8 @@ def test_a_non_admin_key_fire_is_refused_the_secret_capability_even_when_the_tri
     ac_env, bound_app
 ) -> None:
     # An admin request that triggers a fire must NOT lend the fire its secret capability:
-    # a hook running under a NON-admin execution key would otherwise lift host env through
-    # ``mcp_tools_agent``'s ``inject_env``. Gate on, the capability is the firing key's OWN
+    # a hook running under a NON-admin execution key would otherwise lift host secrets through
+    # a secret-fenced primitive (e.g. a caller-chosen model endpoint). Gate on, the capability is the firing key's OWN
     # admin status — this key is scoped (not the admin discriminator), so it reads False
     # inside the bind regardless of the admin triggerer (the escalation guard), and the
     # triggerer's own capability is restored after the fire.

@@ -117,6 +117,24 @@ class RecordingTools:
     def __init__(self) -> None:
         self.client_tools: dict[str, StructuredTool] = {}
         self.tool_runners: dict[str, Callable[..., Any]] = {}
+        self.registered_tools: dict[str, Callable[..., Any]] = {}
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        """A no-op tool registrar mirroring ``AppTools.tool``: it records the decorated
+        callable by its bound name and returns it unchanged, so an agent module that
+        registers a platform tool at import (e.g. the hidden ``agent_resume`` continuation)
+        loads cleanly under the recording app. The real binding is exercised by the
+        skeleton; here the callable stays directly reachable through
+        ``registered_tools``."""
+
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            name = kwargs.get("name") or getattr(func, "__name__", repr(func))
+            self.registered_tools[name] = func
+            return func
+
+        if args and callable(args[0]):
+            return decorator(args[0])
+        return decorator
 
     async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
         if names is None:

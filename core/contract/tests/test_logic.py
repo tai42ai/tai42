@@ -31,6 +31,7 @@ from tai42_contract.agent.events import (
     ReasoningStep,
     StreamEvent,
     StructuredFinal,
+    SuspendedFinal,
 )
 from tai42_contract.connectors.errors import OperatorMisconfiguredError
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord, ConnectorRef
@@ -242,6 +243,29 @@ def test_drain_response_format_met_returns_structured():
     agent = _DummyAgent()
     result = asyncio.run(agent._drain(_agen([StructuredFinal(data={"ok": True})]), response_format=dict))  # pyright: ignore[reportPrivateUsage]
     assert result == {"ok": True}
+
+
+def test_drain_suspended_returns_receipt_without_raising():
+    # A park is a clean, non-error outcome: _drain returns the suspended RECEIPT dict and
+    # NEVER raises AgentInterruptedError.
+    agent = _DummyAgent()
+    events = [SuspendedFinal(interaction_ids=["i1", "i2"], thread_id="t", expiry_at="2030-01-01T00:00:00+00:00")]
+    result = asyncio.run(agent._drain(_agen(events)))  # pyright: ignore[reportPrivateUsage]
+    assert result == {
+        "status": "suspended",
+        "interaction_ids": ["i1", "i2"],
+        "thread_id": "t",
+        "expiry_at": "2030-01-01T00:00:00+00:00",
+    }
+
+
+def test_drain_suspended_takes_precedence_over_interrupt():
+    # If both a park and a HITL interrupt are drained, the park wins as a clean outcome
+    # (they never coexist in one pause, but the receipt-before-raise order is explicit).
+    agent = _DummyAgent()
+    events = [InterruptFinal(interrupt_id="x"), SuspendedFinal(interaction_ids=["i1"], thread_id="t")]
+    result = asyncio.run(agent._drain(_agen(events)))  # pyright: ignore[reportPrivateUsage]
+    assert result["status"] == "suspended"
 
 
 # === connectors/models.py — ConnectionRecord helpers ========================

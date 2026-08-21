@@ -6,10 +6,10 @@ producer (the ``ask_user`` helper in this package) and the consumer (the API SSE
 client as an argument: each caller opens it from the interactions settings via
 ``client_ctx(RedisClient, settings.redis)``.
 
-Requires Redis server >= 6.2: ``add`` extends the group's pending-deadline index
-with ``ZADD ... GT`` (extend-only), an option that exists only from 6.2. Against
-older servers this command errors loudly (a visible break, never a silent
-degrade).
+Requires Redis server >= 7.0: ``add`` sets-or-extends the group stream and
+``count_key`` TTLs with ``EXPIRE ... NX`` + ``EXPIRE ... GT`` (Redis 7.0+) and
+extends the pending-deadline index with ``ZADD ... GT`` (Redis 6.2+). Against an
+older server these commands error loudly (a visible break, never a silent degrade).
 
 Assumes a single-node Redis (not Redis Cluster): the phantom-purge Lua drops
 per-group index members read at runtime rather than from ``KEYS`` (the number of
@@ -23,9 +23,13 @@ Loud by contract — no swallowed errors, no silent fallback.
 from __future__ import annotations
 
 import asyncio
+import enum
+import json
+import math
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast, overload
+from typing import Any, Final, Literal, cast, overload
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
@@ -50,7 +54,7 @@ PruneResult = Literal["pruned", "answered", "gone"]
 # ``pending_key``. This script — run on every ``add`` — reads the groups whose
 # furthest question deadline has passed and, per expired group, drops it from BOTH
 # the pending index and the parallel deadline index. It leaves ``count_key``
-# untouched: the count shares the group's state ``idle_ttl`` (see ``add``), so a
+# untouched: the count is set-or-extended to the group's TTL (see ``add``), so a
 # surviving state always keeps a live count and a genuinely-dead group's count
 # expires on that same basis — death and revival stay symmetric, and a group that
 # revives after a purge cannot re-seed a torn count. Reading the expired set
@@ -103,6 +107,83 @@ return 1
 """
 
 
+# Atomic retry-claim for a durable continuation-due record. The reaper's
+# redelivery pass runs this per due member: it advances the record's next-attempt
+# score by an exponential backoff BEFORE returning the record to fire, so a
+# concurrent reaper pass reading the SAME member finds the score already pushed
+# past ``now`` and declines (returns nil) — one pass re-fires per backoff window.
+# At-least-once, not exactly-once: the fired continuation's consumer must be
+# idempotent (an at-least-once redelivery may fire the same continuation more than
+# once), so even a rare double-fire across passes is harmless. A member whose record
+# hash has vanished (TTL-expired past the retention horizon) is an orphan index
+# entry — reconciled off the index (ZREM) rather than re-firing a record that no
+# longer exists, and returns the ``'dropped'`` marker so the caller can surface a
+# LOUD terminal give-up (no further redelivery will ever fire that resume).
+#   KEYS[1] = continuation_due_index_key,  KEYS[2] = continuation_due_record_key
+#   ARGV[1] = interaction_id (member),  ARGV[2] = now_ms (due cutoff),
+#   ARGV[3] = backoff_base_ms,  ARGV[4] = backoff_cap_ms
+_CONTINUATION_RETRY_CLAIM_LUA = """
+-- interactions:continuation-retry-claim
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not score then return nil end
+if tonumber(score) > tonumber(ARGV[2]) then return nil end
+if redis.call('EXISTS', KEYS[2]) == 0 then
+    redis.call('ZREM', KEYS[1], ARGV[1])
+    return 'dropped'
+end
+local attempts = redis.call('HINCRBY', KEYS[2], 'attempts', 1)
+local delay = tonumber(ARGV[3]) * (2 ^ (attempts - 1))
+if delay > tonumber(ARGV[4]) then delay = tonumber(ARGV[4]) end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[2]) + delay, ARGV[1])
+return redis.call('HGETALL', KEYS[2])
+"""
+
+
+@dataclass(frozen=True)
+class ContinuationDue:
+    """A durable continuation-due record read back for redelivery — self-contained
+    and FLOW-BLIND: a registered tool NAME, the generic ``{interaction_id, answer}``
+    the continuation runs with, and the stored execution identity + key fingerprint.
+    Carries nothing engine/flow/session specific."""
+
+    interaction_id: str
+    tool: str
+    identity: str
+    fingerprint: str
+    answer: Any
+    attempts: int
+
+
+class ContinuationRetryDrop(enum.Enum):
+    """The sole non-record outcome of ``claim_continuation_retry``: the due member's
+    record TTL-expired past its retention horizon and the orphan index member was
+    reconciled off — a permanent, terminal drop no further redelivery can ever fire.
+    Distinct from ``None`` (not yet / no longer due — a benign no-op)."""
+
+    DROPPED = "dropped"
+
+
+# The reaper surfaces a loud terminal give-up when the claim returns this.
+CONTINUATION_DROPPED: Final = ContinuationRetryDrop.DROPPED
+
+
+def _continuation_due_mapping(tool: str, identity: str, fingerprint: str, answer: Any) -> dict[str, str]:
+    """The flow-blind continuation-due record fields: a registered tool NAME, the
+    stored execution identity + key fingerprint, the generic answer (JSON-encoded so
+    any answer shape — a scalar, the expiry sentinel, a form object — round-trips), and
+    a zeroed attempt count. Nothing engine/flow/session specific. Written into the SAME
+    MULTI as the resolving claim (``record_answer``), so the outbox enqueue commits
+    atomically with the ``answered`` state change — a crash can never leave a claimed
+    answer with no due-record."""
+    return {
+        "tool": tool,
+        "identity": identity,
+        "fingerprint": fingerprint,
+        "answer": json.dumps(answer),
+        "attempts": "0",
+    }
+
+
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
 
@@ -113,6 +194,33 @@ def _created_ms(request: InteractionRequest) -> int:
 
 def _timeout_ms(request: InteractionRequest) -> int:
     return int(request.timeout_at.timestamp() * 1000)
+
+
+def _expiry_ms(request: InteractionRequest) -> int:
+    # Only called for an async request whose ``expiry_at`` is set (guarded at the
+    # call site); a None here is a caller bug, never a silent 0.
+    if request.expiry_at is None:
+        raise ValueError("_expiry_ms called on a request with no expiry_at")
+    return int(request.expiry_at.timestamp() * 1000)
+
+
+# Fallback ``expiry_ttl_margin_seconds`` for a direct ``add`` caller (the helper
+# always passes a reaper-derived value); a park with an ``expiry_at`` within
+# ``idle_ttl`` never reaches this since its TTL floors to ``idle_ttl``.
+_DEFAULT_EXPIRY_TTL_MARGIN_SECONDS = 60
+
+
+def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int, expiry_margin_s: int) -> int:
+    """The TTL a question's own keys need. An async park with an ``expiry_at`` beyond
+    the idle horizon must survive to its expiry PLUS a reaper-pass margin, or its
+    state hash would expire before the reaper reads it — leaving the question
+    unanswerable in the ``idle_ttl``..``expiry_at`` gap and stranding the
+    continuation. Every other question (sync, or a park expiring within the idle
+    horizon) uses the flat ``idle_ttl``."""
+    if request.mode == "async" and request.expiry_at is not None:
+        horizon = math.ceil((_expiry_ms(request) - now_ms) / 1000) + expiry_margin_s
+        return max(idle_ttl, horizon)
+    return idle_ttl
 
 
 @overload
@@ -164,6 +272,36 @@ class InteractionStore:
         return f"{self._p}open"
 
     @property
+    def pending_expiry_key(self) -> str:
+        """Per-INTERACTION deadline index for async parks: member = interaction id,
+        score = ``expiry_at`` in ms. Distinct from ``pending_deadline_key`` (group
+        keyed, scored by sync ``timeout_at``, purged of expired GROUPS on every
+        ``add``): an async park's continuation must fire exactly once at expiry, so
+        it needs an interaction-level index the group phantom-purge never drops.
+        The expiry reaper scans it; ``record_answer``/``prune_pending`` remove a
+        member when the question leaves pending. Every async park carries an
+        ``expiry_at`` and so is a member; a sync question has no expiry and is never
+        indexed here."""
+        return f"{self._p}pending:expiry"
+
+    def continuation_due_key(self, interaction_id: str) -> str:
+        """The durable continuation-due record for one async park: a self-contained,
+        flow-blind hash (tool NAME, execution identity, key fingerprint, generic
+        answer, attempt count) written when the park resolves and cleared when its
+        continuation's ``run_tool`` returns. Its presence past a healthy fire's
+        window is the reaper's signal to redeliver."""
+        return f"{self._p}continuation:due:{interaction_id}"
+
+    @property
+    def continuation_due_index_key(self) -> str:
+        """Deadline index over the continuation-due records: member = interaction id,
+        score = the next-attempt time in ms. The redelivery reaper scans it for
+        members due at or before now; a member is dropped when its continuation's
+        ``run_tool`` returns (``clear_continuation_due``) or reconciled off when its
+        record hash has TTL-expired."""
+        return f"{self._p}continuation:due"
+
+    @property
     def _count_prefix(self) -> str:
         return f"{self._p}pending:count:"
 
@@ -184,13 +322,27 @@ class InteractionStore:
         ticket: str | None = None,
         ticket_ttl: int | None = None,
         open_member_reserved: bool = False,
+        continuation_fingerprint: str | None = None,
+        expiry_ttl_margin_seconds: int = _DEFAULT_EXPIRY_TTL_MARGIN_SECONDS,
     ) -> None:
         """Persist a new question: stream entry, state, pending index + deadline
         index + count, the open-index ZSET member, add-event, and refreshed TTLs.
-        The TTL refresh covers the group stream, the group's ``count_key``, and the
-        state hash of every interaction in the group (not just the new one) so a
-        still-open question can't expire out from under a group that is otherwise
-        active.
+        The TTL refresh gives this question's own state hash its own ``_key_ttl`` — it
+        SELF-COVERS, relying on no sibling to refresh it — and extends the shared group
+        stream and ``count_key`` to the greatest horizon across the group's parks, so a
+        still-open question always has a live group stream and count.
+
+        A key's TTL is its ``_key_ttl``: an async park whose ``expiry_at`` runs past
+        the ``idle_ttl`` horizon gets a TTL covering that expiry plus
+        ``expiry_ttl_margin_seconds`` (a reaper-pass margin the helper derives from
+        the reaper interval), so its state survives to be answered and reaped rather
+        than expiring mid-park. This question's own state hash takes its own
+        ``_key_ttl``; the shared group stream and ``count_key`` take a
+        SET-OR-EXTEND-TO-GREATER TTL (``EXPIRE ... NX`` to set the first horizon,
+        ``EXPIRE ... GT`` to raise it only when longer), so concurrent adds to the
+        same group converge both keys to the MAX horizon across all the group's
+        parks regardless of commit order and neither can be shrunk below a
+        co-grouped long park's horizon by a later short-horizon add.
 
         When ``open_member_reserved`` is True the open-index member has already
         been added by ``reserve_open_slot`` (the atomic concurrency guard), so this
@@ -217,20 +369,29 @@ class InteractionStore:
           UNLESS ``open_member_reserved`` (the atomic guard already added it) — the
           member is removed on answer (``record_answer``) or cleanup
           (``prune_pending``).
-        * ``count_key`` TTL is refreshed to ``idle_ttl`` on the same basis as the
-          group stream and every sibling state hash, so a surviving state always
-          has a live count. The phantom-purge Lua reconciles genuinely-dead groups
-          on the deadline index, so the count needs no shorter deadline of its own;
-          tying it to ``idle_ttl`` makes ``current is None`` at decrement a true
-          torn-index invariant violation rather than a silently-read zero.
+        * ``count_key`` TTL takes this park's ``_key_ttl`` via ``EXPIRE ... NX`` +
+          ``EXPIRE ... GT`` (set-or-extend-to-greater) on the same basis as the
+          group stream, so it converges to the MAX horizon across the group's parks
+          and a surviving state always has a live count — including a park whose
+          state outlives ``idle_ttl``. The phantom-purge Lua reconciles
+          genuinely-dead groups on the deadline index, so the count needs no shorter
+          deadline of its own; the extend-only refresh makes ``current is None`` at
+          decrement a true torn-index invariant violation rather than a silently-read
+          zero.
         * when ``ticket`` is given (external format): ``SET ticket_key
           interaction_id EX ticket_ttl``, mapping the callback capability to this
-          interaction. The ticket is never deleted; it expires on its TTL."""
+          interaction. The ticket is never deleted; it expires on its TTL.
+        * when the request is ``async`` (which always carries an ``expiry_at``):
+          ``ZADD pending_expiry_key {interaction_id: expiry_at_ms}`` — the
+          per-interaction deadline the expiry reaper keys on (a sync question sets no
+          member). ``continuation_fingerprint`` (the async fire's captured key
+          fingerprint, ``""`` for a gate-off fire) is denormalized onto the state
+          hash so the answer/expiry path rebinds the continuation under the same
+          authority the ask ran under."""
         group_key = self.group_key(request.group_id)
         state_key = self.state_key(request.interaction_id)
         count_key = self.count_key(request.group_id)
         state = InteractionState(status="pending", group_id=request.group_id, request=request)
-        siblings = await r.xrange(group_key)
         # Atomic phantom self-heal over the parallel deadline index, BEFORE the new
         # question is written (its deadline is in the future, so it is never a
         # purge target). redis-py's async ``eval`` stub types a non-awaitable
@@ -256,6 +417,18 @@ class InteractionStore:
         }
         if request.sensitive:
             state_mapping["sensitive"] = "1"
+        if request.mode == "async":
+            # Denormalized like ``sensitive`` so the atomic answer/expiry claim can write
+            # the durable continuation-due record from a few ``hget``s inside its WATCH
+            # loop, without deserializing the request. An async request always carries a
+            # continuation tool + identity (model-validated); the fingerprint is the
+            # captured fire key (``""`` for a gate-off fire, absent only pre-capture).
+            assert request.continuation_tool is not None
+            assert request.continuation_identity is not None
+            state_mapping["continuation_tool"] = request.continuation_tool
+            state_mapping["continuation_identity"] = request.continuation_identity
+            if continuation_fingerprint is not None:
+                state_mapping["continuation_fingerprint"] = continuation_fingerprint
         pipe = r.pipeline()
         pipe.zremrangebyscore(self.open_key, 0, _now_ms())
         pipe.xadd(
@@ -269,6 +442,11 @@ class InteractionStore:
         pipe.incr(count_key)
         pipe.zadd(self.pending_key, {request.group_id: _created_ms(request)})
         pipe.zadd(self.pending_deadline_key, {request.group_id: _timeout_ms(request)}, gt=True)
+        if request.mode == "async" and request.expiry_at is not None:
+            # The per-interaction expiry deadline the reaper scans; removed on any
+            # terminal exit (answer/expiry/prune). An async park always carries an
+            # ``expiry_at``, so this guard is always true for async.
+            pipe.zadd(self.pending_expiry_key, {request.interaction_id: _expiry_ms(request)})
         if not open_member_reserved:
             # The atomic guard (``reserve_open_slot``) already added this member;
             # re-adding here would double-count the open index.
@@ -287,19 +465,27 @@ class InteractionStore:
             maxlen=_EVENTS_MAXLEN,
             approximate=True,
         )
-        pipe.expire(group_key, idle_ttl)
-        pipe.expire(state_key, idle_ttl)
-        for _entry_id, fields in siblings:
-            sibling_id = as_str(fields.get("interaction_id") or fields.get(b"interaction_id"))
-            if sibling_id:
-                pipe.expire(self.state_key(sibling_id), idle_ttl)
-        # count_key's EXPIRE is issued LAST, after every state EXPIRE: an absolute
-        # expiry is (server time at command execution) + idle_ttl, and pipeline
-        # commands run in order, so issuing it last makes count_key outlive every
-        # state hash. A surviving pending state therefore always has a live count,
-        # so ``current is None`` at a decrement is a genuine torn-index invariant
-        # violation (raise-worthy), never a spurious miss at the expiry boundary.
-        pipe.expire(count_key, idle_ttl)
+        # Per-key TTLs from ``_key_ttl``: an async park beyond the idle horizon
+        # survives to its expiry (plus margin), every other key stays at idle_ttl.
+        # This park's own state hash takes its own horizon. The shared group stream
+        # and count_key take a SET-OR-EXTEND-TO-GREATER TTL: ``EXPIRE ... NX`` sets
+        # this horizon when the key has none yet (a group's first park — a bare
+        # ``GT`` treats a no-expiry key as infinity and would leave it unbounded),
+        # and ``EXPIRE ... GT`` raises an existing TTL only when this horizon is
+        # longer. Together a concurrent add to the same group can only push these
+        # keys LATER, so they converge to the MAX horizon across all the group's
+        # parks regardless of commit order and can never be shrunk below a co-grouped
+        # long park's horizon by a later short-horizon add. A surviving pending state
+        # therefore always has a live count, so ``current is None`` at a decrement is
+        # a genuine torn-index invariant violation (raise-worthy), never a spurious
+        # miss at the expiry boundary.
+        now_ms = _now_ms()
+        new_ttl = _key_ttl(request, idle_ttl, now_ms, expiry_ttl_margin_seconds)
+        pipe.expire(state_key, new_ttl)
+        pipe.expire(group_key, new_ttl, nx=True)
+        pipe.expire(group_key, new_ttl, gt=True)
+        pipe.expire(count_key, new_ttl, nx=True)
+        pipe.expire(count_key, new_ttl, gt=True)
         await pipe.execute()
 
     async def reserve_open_slot(self, r: Redis, request: InteractionRequest, limit: int) -> bool:
@@ -339,12 +525,26 @@ class InteractionStore:
         reply_ttl: int,
         ticket: str | None = None,
         ticket_ttl: int | None = None,
+        continuation_due_ttl: int | None = None,
+        continuation_first_attempt_at_ms: int | None = None,
     ) -> bool:
         """Atomically claim and record an answer: mark answered, remove the
         open-index member, decrement the group's pending count (drop the group
         from the index at zero), wake the caller, append the answered-event. The
         reply key gets a short TTL so a late answer to a timed-out question
         expires instead of resurrecting it.
+
+        DURABLE CONTINUATION OUTBOX: when the resolved interaction is an async park
+        (its denormalized ``continuation_tool`` field is present), the SAME MULTI also
+        writes the durable, FLOW-BLIND continuation-due record + its next-attempt index
+        member. The enqueue commits together with the ``answered`` state change, so a
+        crash can never leave a claimed answer with no due-record — closing the
+        dual-write window a post-claim persist would leave. Every resolution door funnels
+        through this claim, so all three (authenticated answer, callback answer, expiry
+        reaper) are covered by construction. The caller supplies the record TTL +
+        first-attempt score (``continuation_due_ttl`` / ``continuation_first_attempt_at_ms``);
+        an async park resolved without them is a caller bug and raises, never a silent
+        skip. A sync question (no ``continuation_tool``) writes no due-record.
 
         When ``ticket`` is given (the callback doors pass the resolved ticket +
         ``idle_ttl_seconds``): ``EXPIRE ticket_key ticket_ttl`` inside the MULTI,
@@ -387,11 +587,37 @@ class InteractionStore:
                         await pipe.reset()
                         return False
                     sensitive = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "sensitive"))) == "1"
+                    # An async park carries a denormalized continuation tool + identity
+                    # (+ fingerprint); their presence is the signal to enqueue the durable
+                    # continuation-due record in THIS claim's MULTI. Read them in the
+                    # immediate (pre-MULTI) phase — MULTI queues, it cannot read.
+                    continuation_tool = as_str(
+                        await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_tool"))
+                    )
+                    continuation_identity: str | None = None
+                    continuation_fingerprint: str | None = None
+                    if continuation_tool is not None:
+                        continuation_identity = as_str(
+                            await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_identity"))
+                        )
+                        continuation_fingerprint = as_str(
+                            await cast("Awaitable[str | None]", pipe.hget(state_key, "continuation_fingerprint"))
+                        )
+                        if continuation_due_ttl is None or continuation_first_attempt_at_ms is None:
+                            raise RuntimeError(
+                                f"async park {interaction_id!r} resolved without continuation-due timing "
+                                "(caller must pass continuation_due_ttl + continuation_first_attempt_at_ms)"
+                            )
+                        if continuation_identity is None:
+                            raise RuntimeError(
+                                f"async park {interaction_id!r} missing denormalized continuation identity"
+                            )
                     current = await pipe.get(count_key)
                     if current is None:
-                        # count_key shares the pending state's idle_ttl, so a live
-                        # (pending) state ALWAYS has a live count. A missing count
-                        # here is a torn index, not a zero — raise, never guess.
+                        # count_key is set-or-extended to cover the group's
+                        # longest-lived state, so a live (pending) state ALWAYS has a
+                        # live count. A missing count here is a torn index, not a
+                        # zero — raise, never guess.
                         raise RuntimeError(
                             f"pending count missing for group {group_id!r} with a live state {interaction_id!r}"
                         )
@@ -405,6 +631,9 @@ class InteractionStore:
                     pipe.hset(state_key, mapping=answered_mapping)
                     pipe.decr(count_key)
                     pipe.zrem(self.open_key, interaction_id)
+                    # Drop any async-expiry member so the reaper never re-fires an
+                    # answered question (a no-op for a sync question, never a member).
+                    pipe.zrem(self.pending_expiry_key, interaction_id)
                     if ticket is not None:
                         # ``ticket_ttl`` is guaranteed non-None here (guarded at
                         # the top); pin it for the type checker.
@@ -433,6 +662,22 @@ class InteractionStore:
                         pipe.zrem(self.pending_key, group_id)
                         pipe.zrem(self.pending_deadline_key, group_id)
                         pipe.delete(count_key)
+                    if continuation_tool is not None:
+                        # Enqueue the durable continuation-due outbox record ATOMICALLY
+                        # with the claim. Validated non-None in the read phase above; pin
+                        # for the type checker. The answer rides the record so a redelivery
+                        # survives even a sensitive park (whose body is dropped from the
+                        # answered state) and a since-expired state.
+                        assert continuation_identity is not None
+                        assert continuation_due_ttl is not None
+                        assert continuation_first_attempt_at_ms is not None
+                        due_key = self.continuation_due_key(interaction_id)
+                        due_mapping = _continuation_due_mapping(
+                            continuation_tool, continuation_identity, continuation_fingerprint or "", response.answer
+                        )
+                        pipe.hset(due_key, mapping=due_mapping)
+                        pipe.expire(due_key, continuation_due_ttl)
+                        pipe.zadd(self.continuation_due_index_key, {interaction_id: continuation_first_attempt_at_ms})
                     await pipe.execute()
                     return True
                 except WatchError:
@@ -476,9 +721,10 @@ class InteractionStore:
                         return "answered"
                     current = await pipe.get(count_key)
                     if current is None:
-                        # count_key shares the pending state's idle_ttl, so a live
-                        # (pending) state ALWAYS has a live count. A missing count
-                        # here is a torn index, not a zero — raise, never guess.
+                        # count_key is set-or-extended to cover the group's
+                        # longest-lived state, so a live (pending) state ALWAYS has a
+                        # live count. A missing count here is a torn index, not a
+                        # zero — raise, never guess.
                         raise RuntimeError(
                             f"pending count missing for group {group_id!r} with a live state {interaction_id!r}"
                         )
@@ -486,6 +732,9 @@ class InteractionStore:
                     pipe.multi()
                     pipe.delete(state_key)
                     pipe.zrem(self.open_key, interaction_id)
+                    # Drop any async-expiry member alongside the state (a no-op for
+                    # a sync question, never a member).
+                    pipe.zrem(self.pending_expiry_key, interaction_id)
                     pipe.decr(count_key)
                     if remaining <= 0:  # this was the group's last open question
                         pipe.zrem(self.pending_key, group_id)
@@ -513,6 +762,93 @@ class InteractionStore:
         the ticket never existed or has expired (lookup-by-exact-key IS the
         comparison — no user-supplied string is compared in Python)."""
         return as_str(await cast("Awaitable[str | bytes | None]", r.get(self.ticket_key(ticket))))
+
+    async def due_expiries(self, r: Redis, now: datetime) -> list[str]:
+        """The interaction ids of async parks whose ``expiry_at`` is at or before
+        ``now`` — the expiry reaper's work list. Reads the per-interaction expiry
+        index by score; a member is removed from it only when the question leaves
+        pending (answer/expiry/prune), so a lingering member for a
+        vanished/answered state is re-reconciled by the reaper (claim returns
+        no-op, the member is dropped)."""
+        cutoff = int(now.timestamp() * 1000)
+        raw = await r.zrangebyscore(self.pending_expiry_key, 0, cutoff)
+        return [as_str(member) for member in raw]
+
+    async def drop_expiry_member(self, r: Redis, interaction_id: str) -> None:
+        """Remove ``interaction_id`` from the expiry index — the reaper's cleanup for
+        a member whose state already vanished/answered (so the claim was a no-op),
+        keeping the index from re-listing a dead member every pass."""
+        await r.zrem(self.pending_expiry_key, interaction_id)
+
+    async def continuation_fingerprint(self, r: Redis, interaction_id: str) -> str | None:
+        """The async fire's captured key fingerprint stashed on the state hash
+        (``""`` for a gate-off fire), or ``None`` when the question carries none (a
+        sync question, or a state that has expired). The answer/expiry path passes
+        it to the execution-identity bind that runs the stored continuation."""
+        raw = await cast(
+            "Awaitable[str | bytes | None]", r.hget(self.state_key(interaction_id), "continuation_fingerprint")
+        )
+        return as_str(raw)
+
+    async def clear_continuation_due(self, r: Redis, interaction_id: str) -> None:
+        """Delete the durable continuation-due record + drop its index member once
+        ``run_tool`` has returned (the consumer durably applied the resume). Atomic
+        so a reaper pass never reads a half-cleared record. A no-op
+        on an already-cleared record (a redelivery the original fire raced to
+        completion), so double-clear is harmless."""
+        key = self.continuation_due_key(interaction_id)
+        pipe = r.pipeline()
+        pipe.delete(key)
+        pipe.zrem(self.continuation_due_index_key, interaction_id)
+        await pipe.execute()
+
+    async def due_continuations(self, r: Redis, now: datetime) -> list[str]:
+        """The interaction ids of continuation-due records whose next-attempt time is
+        at or before ``now`` — the redelivery reaper's work list. A member survives
+        until its continuation's ``run_tool`` returns (or its record TTL-expires and
+        the retry-claim reconciles the orphan member off)."""
+        cutoff = int(now.timestamp() * 1000)
+        raw = await r.zrangebyscore(self.continuation_due_index_key, 0, cutoff)
+        return [as_str(member) for member in raw]
+
+    async def claim_continuation_retry(
+        self, r: Redis, interaction_id: str, now: datetime, backoff_base_ms: int, backoff_cap_ms: int
+    ) -> ContinuationDue | ContinuationRetryDrop | None:
+        """Atomically claim a due continuation-due record for redelivery: advance its
+        next-attempt score by an exponential backoff (base doubled per prior attempt,
+        capped) and return the record to re-fire. Returns ``None`` when the member is
+        not (or no longer) due — already cleared or already re-claimed this window by a
+        racing reaper. Returns ``CONTINUATION_DROPPED`` when the member is an orphan
+        whose record hash TTL-expired past its retention horizon (which this reconciles
+        off the index): a permanent give-up the caller must surface loudly. redis-py's
+        async ``eval`` stub types a non-awaitable return; it is awaitable at runtime."""
+        raw = await cast(
+            "Awaitable[list[Any] | str | bytes | None]",
+            r.eval(
+                _CONTINUATION_RETRY_CLAIM_LUA,
+                2,
+                self.continuation_due_index_key,
+                self.continuation_due_key(interaction_id),
+                interaction_id,
+                str(int(now.timestamp() * 1000)),
+                str(backoff_base_ms),
+                str(backoff_cap_ms),
+            ),
+        )
+        if not raw:
+            return None
+        if raw in (b"dropped", "dropped"):
+            return CONTINUATION_DROPPED
+        it = iter(cast("list[Any]", raw))
+        fields = {as_str(k): as_str(v) for k, v in zip(it, it, strict=True)}
+        return ContinuationDue(
+            interaction_id=interaction_id,
+            tool=fields["tool"],
+            identity=fields["identity"],
+            fingerprint=fields["fingerprint"],
+            answer=json.loads(fields["answer"]),
+            attempts=int(fields["attempts"]),
+        )
 
     async def count_open(self, r: Redis) -> int:
         """The live open-question count: purge open-index members whose deadline
@@ -587,7 +923,11 @@ class InteractionStore:
                 state = self._state_from_raw(raw)
                 if state is None or state.status != "pending":
                     continue
-                if now >= state.request.timeout_at:
+                # An async park is NEVER pruned by this sync-deadline path: pruning
+                # it would drop its continuation on the floor. Its lifetime is
+                # governed by the expiry reaper (which fires the continuation) and
+                # the idle TTL — so it always shows in the inbox until then.
+                if state.request.mode != "async" and now >= state.request.timeout_at:
                     await self.prune_pending(r, req.interaction_id, group_id)
                     continue
                 backlog.append(req)

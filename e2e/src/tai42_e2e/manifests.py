@@ -183,7 +183,6 @@ _AGENT_ENTRIES: list[dict] = [
     {"title": "tai-agents-deep", "module": "tai42_agents.deep_agent", "include": ["deep_agent"]},
     {"title": "tai-agents-refine", "module": "tai42_agents.refine_agent", "include": ["refine_agent"]},
     {"title": "tai-agents-voting", "module": "tai42_agents.voting_agent", "include": ["voting_agent"]},
-    {"title": "tai-agents-mcp-tools", "module": "tai42_agents.mcp_tools_agent", "include": ["mcp_tools_agent"]},
     {
         "title": "tai-agents-retrieval",
         "module": "tai42_agents.retrieval_tools_agent",
@@ -474,6 +473,53 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
         env=env,
         run_backend=True,
         run_metrics=True,
+        auth=False,
+    )
+
+
+def build_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """REPLICAS, NO backend worker — the async ``ask_user`` park lifecycle home.
+
+    Two replicas give the cross-worker park/resume boundary: a flow parks on replica A
+    (the ``e2e_async_park_flow`` driver MCP-dispatched there binds a resume continuation
+    and calls ``ask_user(mode="async")``), and the park is resumed on replica B — either
+    by an answer through B's ``/answer`` door (which fires the stored continuation once it
+    claims) or by B's expiry reaper. ``e2e_async_resume`` (the stored continuation) runs on
+    both replicas, so whichever process resolves the park fires it. The expiry reaper
+    interval is pinned to 1s so the expiry leg resumes promptly rather than on the 30s
+    default. ``run_backend=False`` makes the module honestly ``backendless``. Auth off.
+
+    Carries the probe tools (the single-park driver + resume continuation, and the
+    multi-park super-step barrier driver + its shared continuation) plus the interactions
+    router (the ``/answer`` door) and the ``ask_user`` builtin."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": [
+            "tai42_skeleton.routers.health",
+            "tai42_skeleton.routers.tools",
+            "tai42_skeleton.routers.config",
+            "tai42_skeleton.routers.interactions",
+        ],
+        "extensions_modules": _EXTENSION_MODULES,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    # An async ask_user park has no blocking waiter, so its continuation only fires when
+    # the expiry reaper trips; pin the reaper cadence low so the expiry leg resumes in
+    # seconds rather than on the 30s default.
+    env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
+    return StackConfig(
+        name="async-park",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=False,
+        run_metrics=False,
         auth=False,
     )
 
@@ -1259,30 +1305,6 @@ def build_accounts_stack(res: StackResources, variants: Variants) -> StackConfig
     )
 
 
-def build_agents_authz_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The accounts access-control stack PLUS the agents surface — the profile where a
-    per-ROLE identity invokes an agent over the ``POST /api/agents/{name}/runs`` door.
-
-    Reuses ``build_accounts_stack`` (access control ON, the postgres accounts provider,
-    roles/sessions/invites, a seeded root key) and adds the agents router + the
-    ``mcp_tools_agent`` on the scripted LLM stub with the in-process ``memory``
-    checkpoint/store provider. The agents router makes ``agents`` a grantable feature
-    tag, so an ``editor`` role can hold ``agents:write`` and reach the run door — where
-    the middleware's per-role secret-capability stamp (admin vs non-admin) governs the
-    agent's ``inject_env`` / caller-endpoint fence end to end, the wiring a unit test
-    that sets the contextvar directly cannot exercise."""
-    from dataclasses import replace
-
-    base = build_accounts_stack(res, variants)
-    manifest = {**base.manifest}
-    manifest["routers_modules"] = [*base.manifest["routers_modules"], "tai42_skeleton.routers.agents"]
-    manifest["agents"] = [
-        {"title": "tai-agents-mcp-tools", "module": "tai42_agents.mcp_tools_agent", "include": ["mcp_tools_agent"]}
-    ]
-    env = {**base.env, **_llm_env(res), **_memory_agent_state_env()}
-    return replace(base, name="agents-authz", manifest=manifest, env=env)
-
-
 def build_oidc_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The accounts stack plus the two OIDC members, both pointed at the in-process
     signing issuer (``netfixtures.OAuthIdp``).
@@ -1448,6 +1470,58 @@ def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackCo
     env.update(_llm_env(res))
     return StackConfig(
         name="agents-redis",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=False,
+        run_metrics=True,
+        auth=False,
+    )
+
+
+def build_agent_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """REPLICAS + redis checkpoint, no backend — the AGENT async ``ask_user`` park lifecycle.
+
+    The agents-plugin counterpart to ``build_async_park_stack``: a real ``tools_agent`` run
+    parks on an async ``ask_user`` (raised by the ``e2e_agent_async_ask`` probe tool the model
+    calls) and is resumed on the OTHER replica — by an answer through B's ``/answer`` door or by
+    the 1s expiry reaper — through the agents plugin's own durable park index. The langgraph
+    checkpoint is the production-default ``redis`` provider on the module-capable checkpoint
+    Redis, so the paused graph crosses the worker boundary; the park index rides the plain
+    feature Redis (``TAI_AGENTS_REDIS_URL``). Loading ``tools_agent`` alone registers the hidden
+    ``agent_resume`` continuation the park fires (any park-capable agent module does through the
+    shared park machinery), and its simpler loop drives the run. Auth off, so the probe tool
+    binds the synthetic identity ``ask_user`` needs."""
+    if res.checkpoint_redis_url is None:
+        raise RuntimeError(
+            "build_agent_async_park_stack requires resources.checkpoint_redis_url; allocate_resources must run "
+            "with allocate_checkpoint_db=True (and TAI_E2E_CHECKPOINT_REDIS_URL must be set)"
+        )
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.agents"],
+        "extensions_modules": ["tai42_toolbox.extensions.prometheus", "tai42_toolbox.extensions.proxy"],
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "agents": [
+            {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env.update(_redis_agent_state_env(res))
+    env.update(_llm_env(res))
+    # The agents plugin's own durable park index (reverses a parked interaction id to its
+    # parked run) rides the plain feature Redis; the async ask refuses loudly without it.
+    env["TAI_AGENTS_REDIS_URL"] = res.redis_url
+    # An async ask_user park has no blocking waiter, so the expiry leg only resumes when the
+    # reaper trips; pin its cadence low so it resumes in seconds rather than on the 30s default.
+    env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
+    return StackConfig(
+        name="agent-async-park",
         topology=Topology.REPLICAS,
         manifest=manifest,
         env=env,
@@ -2233,8 +2307,8 @@ def build_off_stack(res: StackResources, variants: Variants) -> StackConfig:
 #
 # The FIRST manifest-level external MCP mount (``manifest.mcp: [TaiMCPConfig]``) — no
 # existing pattern to copy, ``manifests.py`` carries no ``mcp`` entries today. It mounts
-# the RELEASED PyPI package ``tai42-dynamic-postgres-mcp`` by LAUNCHING its
-# ``tai42-postgres-mcp`` console script as a stdio child, pointed at the harness postgres.
+# the RELEASED PyPI package ``tai42-mcp-dynamic-postgres`` by LAUNCHING its
+# ``tai42-mcp-dynamic-postgres`` console script as a stdio child, pointed at the harness postgres.
 # This is NOT the ``/api/sub-mcp`` composition router (which only re-exposes tools already
 # registered on this server) — the mounted server's tools are DISCOVERED at boot by the
 # app's MCP loader (each ``manifest.mcp`` entry is probed over the pooled FastMCP client)
@@ -2274,9 +2348,9 @@ def postgres_mcp_tool_name(verb: str) -> str:
 
 def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackConfig:
     """MULTIWORKER(1), no backend/metrics, auth off — the shipped
-    ``tai42-dynamic-postgres-mcp`` mounted as a product-level external MCP.
+    ``tai42-mcp-dynamic-postgres`` mounted as a product-level external MCP.
 
-    The manifest's single ``mcp`` entry launches the ``tai42-postgres-mcp`` console script
+    The manifest's single ``mcp`` entry launches the ``tai42-mcp-dynamic-postgres`` console script
     over stdio (``command`` = the absolute console-script path, so no PATH is needed in the
     child's launch env). The child is a DYNAMIC/codegen MCP: at startup it introspects the
     connected schema and generates per-table CRUD tools (``<verb>_<schema>_<table>``), which
@@ -2312,7 +2386,7 @@ def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackCo
                 "title": POSTGRES_MCP_TITLE,
                 "config": {
                     "type": "stdio",
-                    "command": venv_console_script("tai42-postgres-mcp"),
+                    "command": venv_console_script("tai42-mcp-dynamic-postgres"),
                     "env": child_env,
                 },
             }

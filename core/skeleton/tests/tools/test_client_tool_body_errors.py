@@ -150,3 +150,38 @@ def test_cancelled_error_passes_through_untouched():
                 await runnable(q="x")
 
     asyncio.run(run())
+
+
+def test_suspended_interaction_becomes_the_reserved_park_marker():
+    # An async ask_user parks the caller and returns a SuspendedInteraction sentinel.
+    # Inside a graph the tool task must COMPLETE (so ask_user runs exactly once, never
+    # replayed on resume), so the in-process seam converts the sentinel to the reserved
+    # contract marker the in-graph park middleware recognizes — never the raw sentinel.
+    from datetime import UTC, datetime
+
+    from tai42_contract.interactions import (
+        SUSPENDED_INTERACTION_MARKER_KEY,
+        SuspendedInteraction,
+        read_suspended_interaction_marker,
+    )
+
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate({})):
+
+            @app.tools.tool(force=True)
+            async def parks(q: str):
+                """A tool that async-parks and returns the suspension sentinel."""
+                return SuspendedInteraction(interaction_id="i1", expiry_at=deadline)
+
+            tool_obj = await app.tools.get_tool("parks")
+            runnable = app._tool_binding._client_runnable(tool_obj)
+
+            result = await runnable(q="x")
+            assert isinstance(result, dict)
+            assert SUSPENDED_INTERACTION_MARKER_KEY in result
+            marker = read_suspended_interaction_marker(result)
+            assert marker == {"interaction_id": "i1", "expiry_at": deadline.isoformat()}
+
+    asyncio.run(run())

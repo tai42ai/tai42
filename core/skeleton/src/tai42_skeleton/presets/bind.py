@@ -33,13 +33,14 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.secrets import SECRET_PLACEHOLDER, unwrap_secrets
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     validate_against_json_schema,
 )
 
-from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_reveal_payload
+from tai42_skeleton.tools.reveal_gate import secret_was_revealed, stowed_park, stowed_reveal_payload
 
 if TYPE_CHECKING:
     from tai42_contract.app import TaiApp
@@ -108,6 +109,16 @@ async def preset_bind(
 
     async def _enforce_output_schema(**kwargs: Any) -> Any:
         result = await forward(**kwargs)
+        # A park sentinel is a SUSPEND signal, not the tool's output: an async
+        # ask_user parked the caller and the dispatch's reveal gate stowed the
+        # ``SuspendedInteraction`` RAW (the value that flowed back through the
+        # transform is its flattened ToolResult). Output-schema validation must NOT
+        # apply to the park — recognized on the gate by TYPE, it passes through
+        # untouched so the dispatch returns the sentinel object intact, exactly as
+        # the other dispatch paths preserve it; the real ANSWER is validated on resume.
+        has_park, park = stowed_park()
+        if has_park and isinstance(park, SuspendedInteraction):
+            return result
         # Under the armed in-process reveal gate a secret-bearing return is stowed
         # RAW while ``result.structured_content`` carries only the masked projection;
         # validate the REVEALED value (an in-memory reveal for validation only —

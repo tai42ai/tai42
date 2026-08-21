@@ -152,6 +152,10 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/schedules"),
     ("GET", "/api/schedules/server-datetime"),
     ("POST", "/api/conversations/{route_name}/thread/messages"),
+    # The send door declares the transient channel-delivery UnavailableError (503,
+    # retryable, carrying the medium's retry_after); it is not reload-gated, so it
+    # carries that 503 alone.
+    ("POST", "/api/notifications"),
 }
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {

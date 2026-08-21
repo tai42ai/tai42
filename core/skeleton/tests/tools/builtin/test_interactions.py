@@ -93,6 +93,8 @@ async def test_ask_user_forwards_arguments_and_returns_answer(monkeypatch: pytes
                 "recipient": None,
                 "audience": None,
                 "media": None,
+                "mode": "sync",
+                "expiry_at": None,
             },
         )
     ]
@@ -119,6 +121,8 @@ async def test_ask_user_defaults_forwarded(monkeypatch: pytest.MonkeyPatch) -> N
                 "recipient": None,
                 "audience": None,
                 "media": None,
+                "mode": "sync",
+                "expiry_at": None,
             },
         )
     ]
@@ -154,6 +158,19 @@ async def test_ask_user_forwards_media(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result == "ok"
     assert helper.calls[0][1]["media"] == media
+
+
+async def test_ask_user_forwards_mode_and_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    helper = _RecordingHelper(answer="ok")
+    monkeypatch.setattr(builtin_interactions, "_ask_user", helper)
+
+    expiry = datetime.now(UTC) + timedelta(hours=1)
+    await builtin_interactions.ask_user("Ping?", mode="async", expiry_at=expiry)
+
+    assert helper.calls[0][1]["mode"] == "async"
+    assert helper.calls[0][1]["expiry_at"] == expiry
 
 
 async def test_ask_user_propagates_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

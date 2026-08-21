@@ -63,6 +63,7 @@ from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.app.epoch import mark_current_request_drain_exempt
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
+from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.form_schema import channel_form_fields
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
@@ -659,6 +660,11 @@ async def _record_callback_answer(
         answered_by=_EXTERNAL_ANSWERED_BY,
         answered_at=datetime.now(UTC),
     )
+    # An async park enqueues its durable continuation-due record atomically with the
+    # claim; a sync question passes no timing and enqueues nothing.
+    due_ttl, due_first_attempt_at_ms = (
+        continuation_due_timing(settings) if state.request.mode == "async" else (None, None)
+    )
     claimed = await _claim_or_serialization_error(
         store,
         r,
@@ -667,11 +673,16 @@ async def _record_callback_answer(
         _reply_ttl(state.request),
         ticket=ticket,
         ticket_ttl=settings.idle_ttl_seconds,
+        continuation_due_ttl=due_ttl,
+        continuation_first_attempt_at_ms=due_first_attempt_at_ms,
     )
     if claimed is None:
         return _callback_json({"error": "answer payload could not be serialized"}, 400)
     if not claimed:
         return _callback_json({"data": {"status": "already_answered"}}, 200)
+    # This door claimed the answer: fire an async park's stored continuation ONCE
+    # (the shared post-claim seam both answer doors run).
+    await fire_continuation_after_claim(r, store, state.request, answer)
     return _callback_json({"data": {"interaction_id": interaction_id, "status": "answered"}}, 200)
 
 

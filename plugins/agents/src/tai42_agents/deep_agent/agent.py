@@ -27,16 +27,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
-from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal
+from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import get_park_completion_tool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.runtime import build_agent_input
+from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.park import (
+    ParkIdentity,
+    build_park_identity,
+    finalize_drive,
+    park_continuation,
+)
+from tai42_agents._internal.park.driver import _collect_pending_interrupts
+from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
     reject_blank_memory_keys,
@@ -287,12 +296,47 @@ class DeepAgent(Agent):
             assert rendered_user is not None
             agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
-        return await self._drain(
-            self._astream_built(
-                agent, agent_input, config, interrupt_on, response_format=response_format, structured_strategy=strategy
+        # The run face returns the park RECEIPT to its caller and resumes out of band, so it
+        # binds the resume continuation: an async ask_user this run drives parks through it. No
+        # completion tool is bound here, so a resumed run's final text is delivered nowhere —
+        # its side effects are the product; a caller needing the answer must invoke through a
+        # completion-bound door. A run carrying live tools, a non-durable checkpoint, or an
+        # unconfigured park index is not park-capable — build_park_identity returns None and the
+        # async ask refuses loudly pre-persist.
+        park = build_park_identity(
+            agent_name=self.tool_name,
+            config=config,
+            checkpoint_provider=checkpoint_provider,
+            has_live_tools=bool(tools),
+            rebuild_kwargs=self._rebuild_kwargs(
+                tool_names=tool_names,
+                subagents=subagents,
+                skills=skills,
+                inline_skills=coerced_inline_skills,
+                rendered_system=rendered_system,
+                interrupt_on=interrupt_on,
+                response_format=response_format,
+                llm_provider=llm_provider,
+                store_provider=store_provider,
+                llm_kwargs=llm_kwargs,
+                langgraph_config=langgraph_config,
             ),
-            response_format=response_format,
+            recursion_limit=recursion_limit,
+            bind=True,
         )
+        with park_continuation(park):
+            return await self._drain(
+                self._astream_built(
+                    agent,
+                    agent_input,
+                    config,
+                    interrupt_on,
+                    response_format=response_format,
+                    structured_strategy=strategy,
+                    park=park,
+                ),
+                response_format=response_format,
+            )
 
     async def append_thread_messages(
         self,
@@ -450,20 +494,64 @@ class DeepAgent(Agent):
             assert user_message is not None
             agent_input = build_agent_input(user_message, user_content_kwargs=user_content_kwargs)
 
+        # The streaming face returns its stream to a caller that cannot receive a late
+        # answer, so it binds a resume path — and lets an async ask park — ONLY when a
+        # completion tool is bound in context (the conversation turn binds one to deliver
+        # the resumed answer). The completion tool is stored on the park entry and fired
+        # with the final answer on a clean terminal drive. A run carrying live tools or
+        # neutral (live) subagents is not rebuildable, so it never parks; with no
+        # completion bound, an async ask refuses loudly pre-persist.
+        completion_tool = get_park_completion_tool()
+        park: ParkIdentity | None = None
+        park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
+        if completion_tool is not None and park_rebuildable:
+            park = build_park_identity(
+                agent_name=self.tool_name,
+                config=config,
+                checkpoint_provider=checkpoint_provider,
+                has_live_tools=bool(tools),
+                rebuild_kwargs=self._rebuild_kwargs(
+                    tool_names=tool_names,
+                    subagents=[s for s in (subagents or []) if isinstance(s, DeepSubAgentSpec)],
+                    skills=skills,
+                    inline_skills=coerced_inline_skills,
+                    rendered_system=system_message,
+                    interrupt_on=interrupt_on,
+                    response_format=response_format,
+                    llm_provider=llm_provider,
+                    store_provider=store_provider,
+                    llm_kwargs=llm_kwargs,
+                    langgraph_config=langgraph_config,
+                ),
+                recursion_limit=recursion_limit,
+                completion_tool=completion_tool,
+                bind=True,
+            )
+
         saw_structured = False
         saw_interrupt = False
-        async for event in self._astream_built(
-            agent, agent_input, config, interrupt_on, response_format=response_format, structured_strategy=strategy
-        ):
-            if isinstance(event, StructuredFinal):
-                saw_structured = True
-            elif isinstance(event, InterruptFinal):
-                saw_interrupt = True
-            yield event
+        saw_suspended = False
+        with park_continuation(park):
+            async for event in self._astream_built(
+                agent,
+                agent_input,
+                config,
+                interrupt_on,
+                response_format=response_format,
+                structured_strategy=strategy,
+                park=park,
+            ):
+                if isinstance(event, StructuredFinal):
+                    saw_structured = True
+                elif isinstance(event, InterruptFinal):
+                    saw_interrupt = True
+                elif isinstance(event, SuspendedFinal):
+                    saw_suspended = True
+                yield event
         # A requested response_format that produced no StructuredFinal fails loudly.
-        # A pending interrupt means the run paused rather than finished, so (as in
-        # _drain) the interrupt takes precedence and the raise is skipped.
-        if response_format is not None and not saw_structured and not saw_interrupt:
+        # A pending interrupt OR an async park means the run paused rather than finished,
+        # so (as in _drain) the pause takes precedence and the raise is skipped.
+        if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
             raise RuntimeError("agent run requested a response_format but produced no structured output")
 
     async def _astream_built(
@@ -474,26 +562,29 @@ class DeepAgent(Agent):
         interrupt_on: dict[str, Any] | None,
         response_format: Any = None,
         structured_strategy: Any = None,
+        park: ParkIdentity | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Project a built agent's run into contract events, then one
-        :class:`InterruptFinal` per pending interrupt.
+        """Project a built agent's run into contract events, then one terminal
+        park/interrupt event per pending pause.
 
         The shared streaming core behind both faces, so a thread poisoned by an
-        aborted turn is repaired here before the run. A graph can only pause when
-        ``interrupt_on`` is configured, so the paused-state read is skipped
-        otherwise. The raw ``response_format`` is handed to the projection for
-        validation; ``structured_strategy`` is the exact ``ToolStrategy`` the graph
-        was compiled with, so the synthetic tool names it suppresses match by
-        identity.
+        aborted turn is repaired here before the run. After the drive stops the
+        pending interrupt is classified — an async-ask :class:`SuspendedFinal` park
+        (whose durable index is persisted) or a HITL :class:`InterruptFinal` — by
+        :func:`~tai42_agents._internal.park.finalize_drive`, which skips the state
+        read entirely unless the run can pause (``interrupt_on`` set, or the run is
+        park-capable and binds). The raw ``response_format`` is handed to the
+        projection for validation; ``structured_strategy`` is the exact
+        ``ToolStrategy`` the graph was compiled with, so the synthetic tool names it
+        suppresses match by identity.
         """
         await _repair_dangling_tool_calls(agent, config)
         async for event in aproject_agent_events(
             agent, agent_input, config, response_format=response_format, structured_strategy=structured_strategy
         ):
             yield event
-        if interrupt_on:
-            for interrupt in await self._pending_interrupts(agent, config):
-                yield interrupt
+        for event in await finalize_drive(agent, config, interrupt_on, park):
+            yield event
 
     async def _resolve_and_build(
         self,
@@ -578,6 +669,136 @@ class DeepAgent(Agent):
         )
         config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
         return agent, config
+
+    @staticmethod
+    def _rebuild_kwargs(
+        *,
+        tool_names: Sequence[str],
+        subagents: list[DeepSubAgentSpec] | None,
+        skills: list[str] | None,
+        inline_skills: list[InlineSkill],
+        rendered_system: str,
+        interrupt_on: dict[str, Any] | None,
+        response_format: Any,
+        llm_provider: str | None,
+        store_provider: str | None,
+        llm_kwargs: dict[str, Any] | None,
+        langgraph_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """The JSON-serializable subset of a run's inputs that determines graph
+        compilation — the identity a cross-worker resume recompiles the same graph from.
+
+        Every value is a ``DeepAgentInput`` field name (subagents/inline_skills dumped to
+        JSON, the system message already RENDERED so resume never re-renders differently),
+        so :meth:`aresume_park` reconstructs the run inputs with
+        ``ToolInput.model_validate``. The checkpoint provider is pinned separately by
+        :func:`~tai42_agents._internal.park.build_park_identity` (the resolved durable
+        one), so it is deliberately absent here."""
+        return {
+            "tool_names": list(tool_names),
+            "subagents": [spec.model_dump(mode="json") for spec in (subagents or [])],
+            "skills": list(skills) if skills else None,
+            "inline_skills": [skill.model_dump(mode="json") for skill in inline_skills],
+            "system_message": rendered_system,
+            "interrupt_on": interrupt_on,
+            "response_format": response_format,
+            "llm_provider": llm_provider,
+            "store_provider": store_provider,
+            "llm_kwargs": llm_kwargs,
+            "langgraph_config": langgraph_config,
+        }
+
+    async def aresume_park(
+        self,
+        *,
+        rebuild_kwargs: dict[str, Any],
+        thread_id: str,
+        recursion_limit: int | None,
+        resume_map: dict[str, dict[str, Any]],
+    ) -> Any:
+        """Rebuild the parked graph from its stored identity and resume its park interrupts BY
+        ID with all answers — the deep-agent resume face the ``agent_resume`` continuation
+        drives.
+
+        ``resume_map`` is ``{interrupt_id: {interaction_id: answer}}`` over every park interrupt
+        the super-step suspended on — one key for a single park, several for parallel subagent
+        parks. Recompiles the same graph on the same ``thread_id`` + durable checkpoint provider
+        from ``rebuild_kwargs``, asserts each stored park interrupt is still pending (else raises,
+        so the caller releases the drive lease and the reaper redelivers), then drives one
+        ``Command(resume=resume_map)`` under the drive wrapper — a re-park re-persists a fresh
+        index (carrying the completion tool the driver rebound) and returns the suspended
+        receipt, completion returns the final value."""
+        validated = DeepAgentInput.model_validate(rebuild_kwargs)
+        response_format = validated.response_format
+        interrupt_on = validated.interrupt_on
+        strategy = as_tool_strategy(response_format)
+
+        client_tools = (
+            await tai42_app.tools.get_client_tools(list(validated.tool_names)) if validated.tool_names else []
+        )
+        internal_subagents = await resolve_subagent_specs(validated.subagents)
+        coerced_inline_skills = [
+            s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (validated.inline_skills or [])
+        ]
+        agent = await self._resolve_and_build(
+            tools=client_tools,
+            subagents=internal_subagents,
+            skills=validated.skills,
+            inline_skills=coerced_inline_skills or None,
+            system_message=validated.system_message or "",
+            response_format=strategy,
+            interrupt_on=interrupt_on,
+            llm_provider=validated.llm_provider,
+            checkpoint_provider=validated.checkpoint_provider,
+            store_provider=validated.store_provider,
+            llm_kwargs=validated.llm_kwargs,
+        )
+        config = self._run_config(validated.langgraph_config, thread_id, None, recursion_limit)
+
+        snapshot = await agent.aget_state(config, subgraphs=True)
+        pending_ids = {iid for iid, _ in _collect_pending_interrupts(snapshot)}
+        missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
+        if missing:
+            if pending_ids:
+                # The graph is still parked, but not on every interrupt this super-step resumes
+                # — a corrupted routing, or a graph that advanced past one. Raise.
+                raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
+            # No interrupt pending at all: the super-step already drove to a CLEAN TERMINAL, so
+            # this is an idempotent re-drive after a crash between the terminal drive and the
+            # index finalize. Re-produce the SAME terminal output from the persisted state —
+            # never re-invoke a resolved graph — so the completion handoff re-fires under its
+            # stable id and the delivery ledger dedupes it to one delivery.
+            if response_format is not None:
+                return extract_structured_output(snapshot.values, response_format)
+            return build_user_output(snapshot.values)
+
+        # Bind again so a re-park on resume re-persists a fresh index (resume re-enters
+        # through the agent's own bound entrypoint); the completion tool the driver
+        # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
+        # park-capable by construction.
+        park = build_park_identity(
+            agent_name=self.tool_name,
+            config=config,
+            checkpoint_provider=validated.checkpoint_provider,
+            has_live_tools=False,
+            rebuild_kwargs=rebuild_kwargs,
+            recursion_limit=recursion_limit,
+            completion_tool=get_park_completion_tool(),
+            bind=True,
+        )
+        with park_continuation(park):
+            return await self._drain(
+                self._astream_built(
+                    agent,
+                    Command(resume=resume_map),
+                    config,
+                    interrupt_on,
+                    response_format=response_format,
+                    structured_strategy=strategy,
+                    park=park,
+                ),
+                response_format=response_format,
+            )
 
     @staticmethod
     async def _pending_interrupts(agent: Any, config: dict[str, Any]) -> list[InterruptFinal]:

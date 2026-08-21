@@ -51,6 +51,39 @@ def order(monkeypatch) -> list[str]:
     return ran
 
 
+async def test_startup_registers_the_completion_tool(monkeypatch):
+    # The completion continuation (``conversation_deliver``) is force-registered at startup so
+    # the tool the turn engine binds always resolves. The hook runs cleanly under a bound app;
+    # its ``tool(...)`` call carries the exact name, hidden meta and force flag.
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app.instance import app as skeleton_app
+    from tai42_skeleton.conversations.turn import COMPLETION_TOOL_NAME, deliver_agent_completion
+
+    calls: list = []
+    original_tool = skeleton_app.tools.tool
+
+    def _record_tool(func, **kwargs):
+        calls.append((func, kwargs))
+        return func
+
+    with tai42_app.bound(skeleton_app):
+        from tai42_skeleton.routers import conversations as router
+
+        monkeypatch.setattr(skeleton_app.tools, "tool", _record_tool)
+        try:
+            await router._register_conversation_completion_tool()
+        finally:
+            monkeypatch.setattr(skeleton_app.tools, "tool", original_tool)
+
+    assert len(calls) == 1
+    func, kwargs = calls[0]
+    assert func is deliver_agent_completion
+    assert kwargs["name"] == COMPLETION_TOOL_NAME == "conversation_deliver"
+    assert kwargs["force"] is True
+    assert kwargs["meta"] == {"tai42/hidden": True}
+
+
 async def test_startup_redrives_intake_then_delivery(monkeypatch, order):
     # Intake re-drive FIRST: it gives every stranded ``accepted`` record a terminal outcome
     # the delivery re-drive then picks up. The sweep is established separately (post-swap).

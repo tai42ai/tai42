@@ -30,10 +30,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.constants import START
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
-from tai42_contract.access_control.context import (
-    reset_request_secret_capability,
-    set_request_secret_capability,
-)
 from tai42_contract.app import tai42_app
 from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 
@@ -43,7 +39,6 @@ from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 from tai42_agents._internal import append as append_mod
 from tai42_agents._internal import recovery as rec
 from tai42_agents.deep_agent.agent import DeepAgent
-from tai42_agents.mcp_tools_agent import McpToolsAgent
 from tai42_agents.refine_agent.agent import RefineAgent
 from tai42_agents.retrieval_tools_agent.agent import RetrievalToolsAgent
 from tai42_agents.tools_agent import ToolsAgent
@@ -54,7 +49,6 @@ _THREAD_AGENTS = [
     ("tools_agent", ToolsAgent),
     ("deep_agent", DeepAgent),
     ("retrieval_tools_agent", RetrievalToolsAgent),
-    ("mcp_tools_agent", McpToolsAgent),
 ]
 _NON_THREAD_AGENTS = [
     ("vqa_agent", VqaAgent),
@@ -472,151 +466,6 @@ class TestRetrievalAgentAppend:
         agent = tai42_app.agents.get_agent("retrieval_tools_agent")
         with pytest.raises(ValueError, match="requires a thread_id"):
             asyncio.run(agent.append_thread_messages(thread_id=None, messages=_PRIOR))  # type: ignore[arg-type]
-
-
-# --------------------------------------------------------------------------
-# mcp_tools_agent — the shared base-tool compile path; a run reads the append
-# with the MCP client stubbed (the checkpoint write never opens a server)
-# --------------------------------------------------------------------------
-
-
-class _FakeMcpClient:
-    """A no-op async context manager standing in for ``fastmcp.Client`` so a run's
-    tool-loading never opens a real server."""
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        self._config = config
-
-    async def __aenter__(self) -> _FakeMcpClient:
-        return self
-
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-
-class TestMcpToolsAgentAppend:
-    def _base_seams(self, monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemorySaver) -> None:
-        from tai42_agents._internal import base_tool_agent as bta
-
-        monkeypatch.setattr(
-            bta,
-            "llm_provider_settings",
-            lambda: SimpleNamespace(llm="p", checkpoint="c", checkpoint_conn_string=None),
-        )
-        monkeypatch.setattr(bta, "llm_settings", lambda: SimpleNamespace(with_fallbacks=lambda k: dict(k)))
-        monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: False))
-        monkeypatch.setattr(bta, "context_overflow_middlewares", lambda system_prompt=None: [])
-        monkeypatch.setattr(bta, "init_langgraph_config", _strip_callbacks)
-
-        async def get_llm(*, provider: str, **k: Any) -> Any:
-            return model
-
-        async def get_checkpointer(*, provider: str, conn_string: Any) -> Any:
-            return saver
-
-        monkeypatch.setattr(bta, "get_llm_async", get_llm)
-        monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=get_checkpointer))
-
-    def _run_seams(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tai42_agents import mcp_tools_agent as mcp_mod
-
-        async def fake_tools(client: Any) -> list[Any]:
-            return []
-
-        monkeypatch.setattr(mcp_mod, "Client", _FakeMcpClient)
-        monkeypatch.setattr(mcp_mod, "mcp_tools_to_lc_tools", fake_tools)
-
-    def _read(self, saver: InMemorySaver, model: BaseChatModel, thread_id: str) -> list[BaseMessage]:
-        graph = create_agent(model, tools=[], checkpointer=saver)
-        snapshot = asyncio.run(graph.aget_state(_thread(thread_id)))
-        return list(snapshot.values.get("messages", []))
-
-    def test_role_mapping_persists_to_checkpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        saver = InMemorySaver()
-        model = ScriptedChatModel([AIMessage(content="reply")])
-        self._base_seams(monkeypatch, model, saver)
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        asyncio.run(agent.append_thread_messages(thread_id="t-mcp-map", messages=_PRIOR))
-        _assert_role_mapping(self._read(saver, model, "t-mcp-map"))
-
-    def test_run_sees_appended_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        saver = InMemorySaver()
-        model = ScriptedChatModel([AIMessage(content="reply")])
-        self._base_seams(monkeypatch, model, saver)
-        self._run_seams(monkeypatch)
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        asyncio.run(agent.append_thread_messages(thread_id="t-mcp-run", messages=_PRIOR))
-        out = asyncio.run(agent.run(mcp_config={"mcpServers": {}}, user_message="new turn", thread_id="t-mcp-run"))
-        assert out == "reply"
-        _assert_run_saw_prior(model)
-
-    def test_operator_opened_thread_leads_user_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        saver = InMemorySaver()
-        model = ScriptedChatModel([AIMessage(content="reply")])
-        self._base_seams(monkeypatch, model, saver)
-        self._run_seams(monkeypatch)
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        asyncio.run(agent.append_thread_messages(thread_id="t-mcp-op", messages=_OPERATOR_OPENER))
-        asyncio.run(agent.run(mcp_config={"mcpServers": {}}, user_message="client turn", thread_id="t-mcp-op"))
-        _assert_leads_user_first(model)
-
-    def test_invalid_role_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        with pytest.raises(ValueError, match="role 'system'"):
-            asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "system", "content": "x"}]))
-
-    def test_blank_content_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        with pytest.raises(ValueError, match="blank content"):
-            asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "user", "content": "  "}]))
-
-    def test_missing_thread_id_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        with pytest.raises(ValueError, match="requires a thread_id"):
-            asyncio.run(agent.append_thread_messages(thread_id=None, messages=_PRIOR))  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("endpoint_key", ["base_url", "api_key"])
-    def test_endpoint_llm_kwargs_refused_without_secret_capability(self, endpoint_key: str) -> None:
-        # The append face accepts ``llm_kwargs``, so the caller-chosen-endpoint fence
-        # holds here too: a caller with no secret capability is refused loudly before
-        # the checkpoint write.
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        with pytest.raises(PermissionError, match=f"llm_kwargs .*{endpoint_key}.* is restricted"):
-            asyncio.run(
-                agent.append_thread_messages(
-                    thread_id="t-mcp-fence", messages=_PRIOR, llm_kwargs={endpoint_key: "http://evil"}
-                )
-            )
-
-    def test_endpoint_llm_kwargs_permitted_with_secret_capability(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A secret-capable caller may set a caller-chosen model endpoint on the append
-        # face: the fence passes and the append persists.
-        saver = InMemorySaver()
-        model = ScriptedChatModel([AIMessage(content="reply")])
-        self._base_seams(monkeypatch, model, saver)
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        token = set_request_secret_capability(True)
-        try:
-            asyncio.run(
-                agent.append_thread_messages(
-                    thread_id="t-mcp-fence-ok", messages=_PRIOR, llm_kwargs={"base_url": "http://own"}
-                )
-            )
-        finally:
-            reset_request_secret_capability(token)
-        _assert_role_mapping(self._read(saver, model, "t-mcp-fence-ok"))
-
-    def test_non_endpoint_llm_kwargs_open_for_any_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # ``llm_kwargs`` naming no endpoint key capture nothing, so the append face
-        # does not fence them: a caller with no secret capability appends fine.
-        saver = InMemorySaver()
-        model = ScriptedChatModel([AIMessage(content="reply")])
-        self._base_seams(monkeypatch, model, saver)
-        agent = tai42_app.agents.get_agent("mcp_tools_agent")
-        asyncio.run(
-            agent.append_thread_messages(thread_id="t-mcp-open", messages=_PRIOR, llm_kwargs={"temperature": 0})
-        )
-        _assert_role_mapping(self._read(saver, model, "t-mcp-open"))
 
 
 # --------------------------------------------------------------------------

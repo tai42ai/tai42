@@ -40,7 +40,7 @@ from langchain_core.tools import StructuredTool
 
 # A node may overwrite a reduced channel by returning ``Overwrite(value=...)``;
 # the ``updates`` stream then yields the wrapper, so it must be unwrapped.
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 from tai42_contract.agent.events import (
     MessageDelta,
     MessageFinal,
@@ -52,7 +52,8 @@ from tai42_contract.agent.events import (
 )
 from tai42_kit.llm.runtime import validate_structured_output
 
-from tai42_agents._internal.base_tool_agent import _build_agent_and_input
+from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
+from tai42_agents._internal.park import finalize_drive, park_continuation
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
@@ -130,6 +131,8 @@ async def astream_tools_agent_events(
     system_content_kwargs: dict[str, Any] | None = None,
     user_content_kwargs: dict[str, Any] | None = None,
     response_format: Any = None,
+    park_builder: ParkBuilder | None = None,
+    resume: Any = None,
 ) -> AsyncIterator[StreamEvent]:
     """Run the tools agent and yield a normalized :class:`StreamEvent` stream.
 
@@ -141,6 +144,13 @@ async def astream_tools_agent_events(
     conversation; omit it for a one-shot run. A ``response_format`` forces the
     run's structured output, which the projection surfaces as a terminal
     :class:`StructuredFinal`.
+
+    ``park_builder`` (given the FINAL thread-id-resolved run config) decides park
+    capability and captures the rebuild identity: the resume continuation is bound
+    around the drive, and a run that parks on an async ``ask_user`` persists its
+    durable index and ends the stream with a terminal :class:`SuspendedFinal`.
+    ``resume`` drives ``Command(resume=...)`` — answering a prior park — in place of
+    a fresh user turn.
 
     Cancellation (``asyncio.CancelledError``) propagates out unchanged so the
     caller can do its own abort bookkeeping.
@@ -162,10 +172,15 @@ async def astream_tools_agent_events(
         user_content_kwargs=user_content_kwargs,
         response_format=strategy,
     )
-    async for event in aproject_agent_events(
-        agent, messages, config, response_format=response_format, structured_strategy=strategy
-    ):
-        yield event
+    park = park_builder(config) if park_builder is not None else None
+    agent_input: Any = Command(resume=resume) if resume is not None else messages
+    with park_continuation(park):
+        async for event in aproject_agent_events(
+            agent, agent_input, config, response_format=response_format, structured_strategy=strategy
+        ):
+            yield event
+        for event in await finalize_drive(agent, config, None, park):
+            yield event
 
 
 async def aproject_agent_events(

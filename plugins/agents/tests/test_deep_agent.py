@@ -834,11 +834,13 @@ class _FakeCompiledGraph:
         for chunk in self._chunks:
             yield chunk
 
-    async def aget_state(self, config: Any) -> SimpleNamespace:
-        # A faithful StateSnapshot exposes both ``values`` (read by the turn-start
-        # repair) and ``interrupts`` (read by the interrupt projection); an empty
-        # message log means a non-poisoned thread, so the repair is a no-op.
-        return SimpleNamespace(values={}, interrupts=self._interrupts)
+    async def aget_state(self, config: Any, subgraphs: bool = False) -> SimpleNamespace:
+        # A faithful StateSnapshot exposes ``values`` (read by the turn-start repair),
+        # ``interrupts`` (read by the interrupt projection), and ``tasks`` (each task's
+        # ``interrupts`` are what the drive finalizer walks, descending into subgraphs). An
+        # empty message log means a non-poisoned thread, so the repair is a no-op.
+        task = SimpleNamespace(interrupts=self._interrupts, state=None)
+        return SimpleNamespace(values={}, interrupts=self._interrupts, tasks=[task])
 
 
 def _scripted_chunks() -> list[tuple[str, Any]]:

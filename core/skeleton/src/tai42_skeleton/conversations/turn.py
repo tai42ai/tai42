@@ -4,6 +4,14 @@ One inbound message (channel door :func:`accept`, authed API door
 :func:`submit_api_message`) resolves to its route, runs that route's agent IN-PROCESS under
 the route's execution key, and persists the produced answer as a durable record the delivery
 executor sends back.
+
+A route targets a TOOL or an AGENT, and the two kinds deliver a PARKED target's resumed answer
+by different paths — the canonical statement of this asymmetry, cited (not restated) at both
+park branches below. A parked tool target resumes out of band and its resuming consumer owns
+delivery-back: the consumer sends its late reply through its own send steps, so the platform
+binds no completion tool and ends the turn silently. A parked agent target has no self-delivery,
+so the platform binds the completion tool for the run and posts the resumed answer back into
+this thread.
 """
 
 from __future__ import annotations
@@ -17,12 +25,12 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 from uuid import uuid4
 
 from tai42_contract.agent import Agent
-from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal
+from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
     AnswerStatus,
@@ -35,6 +43,11 @@ from tai42_contract.conversations import (
     PairCodeInvalidError,
     Person,
     PersonAddress,
+)
+from tai42_contract.interactions import (
+    SuspendedInteraction,
+    reset_park_completion_tool,
+    set_park_completion_tool,
 )
 from tai42_kit.utils.data import run_jq_bounded
 
@@ -57,6 +70,16 @@ from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
 
 logger = logging.getLogger(__name__)
+
+# The registered name of the hidden completion-delivery tool. The conversation door binds it
+# (``set_park_completion_tool``) around an agent turn, so an async ``ask_user`` may park with a
+# path back to this thread; a resumed run's driver fires it with ``{thread_id, result}`` and it
+# mints the answered record + spawns delivery. Must equal the registered tool name.
+COMPLETION_TOOL_NAME = "conversation_deliver"
+
+# Recorded as the sending principal on a completion-delivered record — a namespaced system
+# sentinel (no operator answered by hand) that cannot collide with a looked-up user id.
+_COMPLETION_PRINCIPAL = "system:agent-resume"
 
 # Strong references to in-flight turn tasks so one is not GC'd before it persists.
 _TURN_TASKS: set[asyncio.Task] = set()
@@ -318,12 +341,29 @@ def _serialize_structured(data: object) -> str:
     return json.dumps(data, default=str)
 
 
-async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str:
-    """Run the agent to its terminal event and return the answer text. A structured final
-    is serialized; an interrupt is not answerable by a background turn and is raised."""
+#: Internal sentinel: the agent turn parked on an async ``ask_user`` instead of answering.
+#: Its resumed answer is delivered out of band by the completion continuation
+#: (:data:`COMPLETION_TOOL_NAME`), so the turn produces no reply now.
+class _AgentParked:
+    __slots__ = ()
+
+
+_AGENT_PARKED = _AgentParked()
+
+
+async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _AgentParked:
+    """Run the agent to its terminal event and return the answer text, or the
+    :data:`_AGENT_PARKED` sentinel when the agent parked on an async ``ask_user``. A
+    structured final is serialized; an interrupt is not answerable by a background turn and
+    is raised."""
     structured: StructuredFinal | None = None
     message: MessageFinal | None = None
     async for event in agent.astream(user_message=text, thread_id=thread_id):
+        if isinstance(event, SuspendedFinal):
+            # The agent parked on an async ask_user. The conversation door bound a completion
+            # tool around the run, so its resumed answer is delivered out of band into this
+            # thread — the turn produces no reply now.
+            return _AGENT_PARKED
         if isinstance(event, InterruptFinal):
             raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")
         if isinstance(event, StructuredFinal):
@@ -337,21 +377,23 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str:
     return ""
 
 
-async def _run_agent_turn(
-    route: ConversationRoute, text: str, thread_id: str, client_address: str
-) -> tuple[Literal["answered", "error"], str, str | None]:
-    """Run one agent turn as the route's execution key and return ``(answer_status, answer,
-    error_detail)``. The identity is bound for the turn's duration and the run authorized
-    against it before the agent runs. A denied run, a mid-turn error or an empty answer
-    becomes a client-safe ``error`` outcome; its detail is returned, never delivered.
+async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, client_address: str) -> _ToolOutcome:
+    """Run one agent turn as the route's execution key and return its resolved outcome. The
+    identity is bound for the turn's duration and the run authorized against it before the
+    agent runs. A denied run, a mid-turn error or an empty answer becomes a client-safe
+    ``error`` outcome; a run that PARKS on an async ``ask_user`` becomes a silent outcome —
+    its resumed answer delivers out of band through the completion continuation.
 
     The turn-scoped bridge context is established around the agent invocation, so an
     in-process builtin the agent calls (``set_conversation_mode``) reads the CURRENT
     conversation's thread from it — the same contextvar propagation the bound execution
-    identity relies on."""
+    identity relies on. The completion continuation (:data:`COMPLETION_TOOL_NAME`) is bound
+    for the run's duration too: it is the deferred-response delivery path that lets an async
+    ask_user PARK here (a run with none bound refuses the ask loudly pre-persist), and a
+    resumed run's final answer fires it to post the reply back into this thread."""
     agent = _agent_registry().get(route.target_name)
     if agent is None:
-        return ("error", _ERROR_ANSWER_TEXT, f"agent {route.target_name!r} is not registered")
+        return _tool_error(f"agent {route.target_name!r} is not registered")
     turn_context = BridgeTurnContext(
         thread_id=thread_id,
         route_name=route.route_name,
@@ -365,16 +407,24 @@ async def _run_agent_turn(
                 route.execution_key, bound_fingerprint=route.execution_key_fingerprint
             ) as identity:
                 await authorize_execution_agent_run(identity, route.target_name)
-                answer = await _drain_answer(agent, text, thread_id)
+                # An agent target has no self-delivery — per the module docstring's park-delivery
+                # paths, the platform binds the completion tool so a resumed run posts back here.
+                completion_token = set_park_completion_tool(COMPLETION_TOOL_NAME)
+                try:
+                    answer = await _drain_answer(agent, text, thread_id)
+                finally:
+                    reset_park_completion_tool(completion_token)
     except PermissionDenied as exc:
-        return ("error", _ERROR_ANSWER_TEXT, f"turn denied: {exc}")
+        return _tool_error(f"turn denied: {exc}")
     except Exception as exc:
         # A failed turn becomes a logged error OUTCOME, not a swallowed error.
         logger.error("conversations: turn for route %r failed", route.route_name, exc_info=exc)
-        return ("error", _ERROR_ANSWER_TEXT, f"turn error: {exc}")
+        return _tool_error(f"turn error: {exc}")
+    if isinstance(answer, _AgentParked):
+        return _SilentOutcome()
     if not answer.strip():
-        return ("error", _ERROR_ANSWER_TEXT, "agent produced an empty answer")
-    return ("answered", answer, None)
+        return _tool_error("agent produced an empty answer")
+    return _ResolvedOutcome(answer_status="answered", answer=answer, error=None)
 
 
 def _agent_registry() -> dict[str, Agent]:
@@ -477,6 +527,12 @@ async def _run_tool_turn(
     except Exception as exc:
         logger.error("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
         return _tool_error(f"turn error: {exc}")
+    if isinstance(result, SuspendedInteraction):
+        # The tool parked the caller on an async ask (a generic contract sentinel —
+        # the turn learns nothing of the driver's resume state): produce no reply and
+        # end the turn silently. No completion tool is bound — per the module docstring's
+        # park-delivery paths, a tool target's resuming consumer owns delivery-back.
+        return _SilentOutcome()
     try:
         reply = await _tool_reply(route, result)
     except Exception as exc:
@@ -655,8 +711,7 @@ async def _target_outcome(
         return await _manual_target_outcome(route, intake, text)
     if route.target_kind == "tool":
         return await _run_tool_turn(route, text, intake.client_address, person, params)
-    answer_status, answer, error_detail = await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
-    return _ResolvedOutcome(answer_status=answer_status, answer=answer, error=error_detail)
+    return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
 
 
 async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:
@@ -1317,6 +1372,98 @@ async def operator_send(
     return message_id
 
 
+# -- resumed-answer delivery (the completion continuation) -------------------
+
+
+class CompletionDeliveryError(RuntimeError):
+    """The resumed answer of an async-parked agent turn could not be delivered — its thread
+    could not be reversed to a live route + address. Raised loudly so the completion
+    continuation's at-least-once seam retains and retries rather than dropping the answer."""
+
+
+async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
+    """Reverse a parked bridge ``thread_id`` to the ``(route, client_address)`` a resumed
+    answer is delivered against.
+
+    A route-keyed thread (``bridge:{route_name}:{address}``) carries both directly. A LINKED
+    person's aggregated thread (``bridge:@person:{id}``) has no single address, so the reply
+    returns to where they LAST wrote from — the newest record's route + client_address. A
+    thread outside the reserved namespace, an unknown/deleted route, or an empty person
+    thread raises loudly rather than delivering to a guessed target."""
+    if thread_id.startswith(PERSON_THREAD_PREFIX):
+        person_id = thread_id[len(PERSON_THREAD_PREFIX) :]
+        person = await _person_store().get_by_id(person_id)
+        if person is None:
+            raise CompletionDeliveryError(f"no person for parked thread {thread_id!r}")
+        person_routes = sorted({route for address in person.addresses for route in address.routes})
+        newest = await _store().list_person_thread_records(
+            person_routes, thread_id, offset=0, limit=1, newest_first=True
+        )
+        if not newest.records:
+            raise CompletionDeliveryError(f"person thread {thread_id!r} holds no record to infer a send target from")
+        record = newest.records[0]
+        route_name, client_address = record.route_name, record.client_address
+    elif thread_id.startswith(BRIDGE_THREAD_PREFIX):
+        remainder = thread_id[len(BRIDGE_THREAD_PREFIX) :]
+        route_name, _, client_address = remainder.partition(":")
+        if not route_name or not client_address:
+            raise CompletionDeliveryError(f"parked thread {thread_id!r} is not a route-keyed bridge thread")
+    else:
+        raise CompletionDeliveryError(f"thread {thread_id!r} is not a reserved bridge thread")
+    route = await get_conversations_manager().get_route(route_name)
+    if route is None:
+        raise CompletionDeliveryError(f"route {route_name!r} for parked thread {thread_id!r} no longer exists")
+    return route, client_address
+
+
+async def deliver_agent_completion(thread_id: str, result: Any, completion_id: str) -> dict[str, str | None]:
+    """Deliver a resumed agent turn's FINAL answer back into its originating thread.
+
+    The completion continuation the conversation door bound around a parked agent turn: a
+    resumed run's driver fires it with ``{thread_id, result, completion_id}`` when the run
+    drives to a clean terminal out of band. It reverses the thread to its route + address,
+    mints the answer as an already-``answered`` record keyed by ``completion_id``, and hands it
+    to the SAME delivery machine a produced answer takes — never appending to the agent's memory
+    (the resumed run already recorded the answer in its own checkpoint).
+
+    ``completion_id`` is the stable idempotency id of the resolved super-step: the delivery
+    record is keyed by it, so a lease-lapse re-drive that fires the completion a second time
+    with the same id finds the record already committed and is a benign no-op — the durable
+    record commit is the exactly-once point. A blank resumed answer delivers the SAME
+    client-safe error reply the fresh-turn path delivers for an empty answer, so it is not a
+    silent non-delivery. Returns ``{"message_id": completion_id}`` for the delivered (or already
+    delivered) record. An unresolvable thread raises :class:`CompletionDeliveryError` loudly."""
+    existing = await _store().get_record(completion_id)
+    if existing is not None:
+        # A redelivered completion for a super-step whose durable record already committed (a
+        # lease-lapse re-drive): the exactly-once point is passed, so this is a benign no-op.
+        return {"message_id": completion_id}
+    text = _serialize_structured(result)
+    # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
+    # replies for an empty answer, so the client sees a consistent outcome either way. It rides
+    # the operator record as an ``answered`` reply (an operator record is always answered) — the
+    # text is the reply, there is no client turn to mark ``error`` against.
+    answer = text if text.strip() else _ERROR_ANSWER_TEXT
+    route, client_address = await _resolve_completion_target(thread_id)
+    record = _new_record(
+        route=route,
+        message_id=completion_id,
+        thread_id=thread_id,
+        client_address=client_address,
+        caller_principal=_COMPLETION_PRINCIPAL,
+        provider_message_id=None,
+        inbound_text="",
+        delivery_status=DeliveryStatus.PENDING_DELIVERY,
+        answer_status="answered",
+        answer=answer,
+        origin="operator",
+    )
+    await _store().create_record(record)
+    await _refresh_thread_mode_ttl(thread_id)
+    spawn_delivery(completion_id)
+    return {"message_id": completion_id}
+
+
 # -- turn scheduling under the caps ------------------------------------------
 
 
@@ -1548,11 +1695,14 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
 
 
 __all__ = [
+    "COMPLETION_TOOL_NAME",
     "ApiSubmitResult",
+    "CompletionDeliveryError",
     "ConversationRouteResolutionError",
     "OperatorAppendError",
     "UnauthenticatedApiCallerError",
     "accept",
+    "deliver_agent_completion",
     "operator_send",
     "redrive_accepted",
     "submit_api_message",

@@ -84,7 +84,7 @@ def test_top_level_recursion_limit_is_preserved() -> None:
     # ``recursion_limit`` is a standard ``RunnableConfig`` top-level key; the
     # builder copies the incoming mapping by value, so an overlaid limit (a falsy
     # ``0`` too) survives onto the returned config the graph is invoked with. This
-    # is the seam the tools/retrieval/mcp agents honor the parameter through.
+    # is the seam the tools/retrieval agents honor the parameter through.
     result = init_langgraph_config({"recursion_limit": 0})
     assert result["recursion_limit"] == 0
 

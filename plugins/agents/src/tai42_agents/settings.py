@@ -8,7 +8,30 @@ unlimited.
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
+
+
+class AgentsParkRedisSettings(RedisConnectionSettings):
+    """The agents plugin's OWN durable Redis, holding the async-park index that
+    reverses a parked interaction id back to its parked agent run.
+
+    Independent of the checkpoint provider (a park checkpointed to postgres still
+    needs a durable, cross-worker index to find it), and independent of the
+    interactions store. Connection values read from ``TAI_AGENTS_REDIS_*``
+    (``TAI_AGENTS_REDIS_URL`` ...), or the shared ``TAI_DEFAULT_REDIS_URL``; absent
+    means no durable park index, so a park-capable run is refused loudly rather than
+    parked into a store that cannot record it."""
+
+    model_config = SettingsConfigDict(env_prefix="TAI_AGENTS_")
+
+    redis_url: str | None = None
+    redis_max_connections: int | None = 10
+
+
+@settings_cache
+def agents_park_redis_settings() -> AgentsParkRedisSettings:
+    return AgentsParkRedisSettings()
 
 
 class AgentsLimitsSettings(TaiBaseSettings):

@@ -128,6 +128,11 @@ class _PostOnlyVerifier:
     async def verify(self, body, headers, config):
         return None
 
+    def replay_defense(self, body, headers, config):
+        from tai42_contract.webhooks import FreshnessWindow
+
+        return FreshnessWindow()
+
 
 async def _seed_bound_question(fake, settings, ticket: str, verifier: dict) -> str:
     from datetime import UTC, datetime, timedelta

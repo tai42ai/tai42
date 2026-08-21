@@ -474,20 +474,37 @@ def test_run_keyless_does_not_pin_thread_id(
     assert captured["config"] == {"configurable": {}}
 
 
-# The ABC ``run`` parameters this agent's runtime cannot honor — ALL seven the guard
-# is handed. Each is rejected loudly on BOTH faces rather than silently dropped, so
-# dropping any one from the guard call site fails a test here. ``resume=False`` pins
-# the falsy-but-present case (a value parameter is set whenever it is not ``None``,
-# so a falsy value still raises rather than slipping through a truthiness gate).
+def test_run_honors_a_caller_driven_resume(monkeypatch: pytest.MonkeyPatch, app_tools: Any) -> None:
+    """A ``run`` given ``resume`` (no ``user_message``) drives the caller's
+    ``Command(resume=...)`` map through to the runtime and returns its output — the
+    resumable path an async ``ask_user`` park opens."""
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:
+        captured.update(kwargs)
+        return AgentInvokeResult(output="resumed answer", usage=CallUsage(0, 0, None))
+
+    monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
+    agent = _get_agent()
+    resume_map = {"int1": {"i1": "the answer"}}
+    result = asyncio.run(agent.run(resume=resume_map, thread_id="t-resume"))
+    assert result == "resumed answer"
+    assert captured["resume"] == resume_map
+
+
+# The ABC ``run`` parameters this agent's runtime cannot honor — ALL the guard is
+# handed. Each is rejected loudly on BOTH faces rather than silently dropped, so
+# dropping any one from the guard call site fails a test here.
 # ``response_format`` is NOT here — it is honored (forces structured output).
+# ``resume`` is NOT here either — an async ``ask_user`` park makes a run resumable, so
+# a caller-driven ``Command(resume=...)`` is honored (see
+# ``test_run_honors_a_caller_driven_resume``).
 _UNHONORED_CASES = [
     ("subagents", [SubAgentSpec(name="helper")]),
     ("strategy", "react"),
     ("interrupt_on", {"some_tool": {}}),
     ("skills", ["research"]),
     ("inline_skills", [{"name": "s", "content": "c"}]),
-    ("resume", "answer"),
-    ("resume", False),
     ("store_provider", "redis"),
 ]
 

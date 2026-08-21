@@ -1458,6 +1458,13 @@ class _FakeVerifier:
         if self._raise is not None:
             raise self._raise
 
+    def replay_defense(self, body, headers, config):
+        # The callback door is replay-safe by its single-use ticket + atomic answer
+        # claim, so it never consults this; present only to satisfy the verifier contract.
+        from tai42_contract.webhooks import FreshnessWindow
+
+        return FreshnessWindow()
+
 
 @pytest.fixture
 def verifier_registry():

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,10 +23,18 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError
-from tai42_contract.interactions import MediaItem
+from tai42_contract.interactions import (
+    MediaItem,
+    SuspendedInteraction,
+    reset_resume_continuation_tool,
+    set_resume_continuation_tool,
+)
 
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import InteractionStore, InteractionTimeoutError, ask_user
+from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
@@ -76,6 +85,10 @@ def wired(monkeypatch, fake_redis, fake_client_ctx):
     monkeypatch.setattr(router, "interactions_settings", lambda: settings)
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    # The detached continuation fire clears its durable due-record through the
+    # continuation module's own client seam — point it at the same fake.
+    monkeypatch.setattr(continuation_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(continuation_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
     return SimpleNamespace(settings=settings, store=store, fake=fake_redis)
 
@@ -901,3 +914,57 @@ async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch)
             await ask_user("q", channel="silent", timeout=0.05)
     finally:
         app._channel_registry.reset()
+
+
+# -- async-park callback-door parity ------------------------------------------
+
+
+@pytest.fixture
+def async_driver():
+    # A bound resuming driver: the resume continuation tool + the execution identity
+    # the park's continuation is later rebound as. Both are reset after the test.
+    tool_token = set_resume_continuation_tool("resume_tool")
+    id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
+    yield
+    reset_execution_identity(id_token)
+    reset_resume_continuation_tool(tool_token)
+
+
+async def test_async_park_callback_door_answerable_through_reaper_margin(
+    monkeypatch, wired, fake_channel, async_driver
+):
+    # Door parity for an async park: the channel-delivery callback ticket carries the
+    # SAME reaper margin the state hash does, so the public callback door and the
+    # authenticated /answer door stay answerable through the identical
+    # (expiry_at, expiry_at + park_ttl_margin) window — never one door rejecting a
+    # late answer the other still accepts. ``idle_ttl`` is shrunk below the expiry
+    # horizon so the state's own ``_key_ttl`` is exactly ``expiry_at + margin`` (not
+    # floored to idle_ttl), and the reaper interval fixes margin = 2*ceil(45) = 90s.
+    # The continuation is stubbed — this exercises the door, not the resume.
+    _tune(monkeypatch, wired, idle_ttl_seconds=10, expiry_reaper_interval_seconds=45)
+    resumed: list[Any] = []
+
+    async def _stub(identity, fingerprint, tool, interaction_id, answer):
+        resumed.append(answer)
+
+    monkeypatch.setattr(continuation_module, "_run_continuation", _stub)
+
+    expiry = datetime.now(UTC) + timedelta(seconds=200)
+    result = await ask_user("Approve?", channel="fake", mode="async", expiry_at=expiry)
+    assert isinstance(result, SuspendedInteraction)
+    ticket = _ticket(fake_channel.deliveries[0])
+
+    # Into the window: PAST expiry_at (200s) but WITHIN the reaper margin
+    # (expiry_at + 90 = 290s). Without the margin on the ticket, ``resolve_ticket``
+    # would now return None and the callback door would 404 — while the state hash,
+    # and therefore the authenticated door, is still live.
+    wired.fake.advance(245)
+    assert await wired.store.get_state(wired.fake, result.interaction_id) is not None
+
+    resp = await router.callback(_make_request("POST", path_params={"ticket": ticket}, body=b'{"answer": "yes"}'))
+    assert resp.status_code == 200
+    assert json.loads(bytes(resp.body))["data"]["status"] == "answered"
+    # The claim fired the stored continuation once, on its detached task.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert resumed == ["yes"]
