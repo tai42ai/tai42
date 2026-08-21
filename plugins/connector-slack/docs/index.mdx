@@ -1,0 +1,107 @@
+---
+title: "Slack connector"
+description: "Set up the Slack OAuth app, user-token scopes, and credentials for the Slack MCP connector."
+---
+
+Registers the `slack` connector: one OAuth connection per alias against Slack's
+hosted MCP server at `https://mcp.slack.com/mcp`. The plugin is pure descriptor
+data and ships no package; the runtime's connector engine runs the OAuth flow,
+seals the tokens, and reaches the MCP server over Streamable HTTP.
+
+## Install
+
+Install the descriptor into the running server with the CLI:
+
+```bash
+tai plugins install tai42/connector-slack \
+  --env CONNECTORS_SLACK_CLIENT_ID=... \
+  --secret CONNECTORS_SLACK_CLIENT_SECRET
+```
+
+Or add the provider by hand as a manifest `connectors:` entry:
+
+```yaml manifest.yml
+connectors:
+  - id: slack
+    display_name: Slack
+    description: Connect a Slack workspace over Slack's hosted MCP server.
+    icon_url: https://raw.githubusercontent.com/tai42ai/tai42/main/plugins/connector-slack/icon.png
+    kind: oauth
+    origin: system
+    category: communication
+    oauth:
+      authorize: https://slack.com/oauth/v2_user/authorize
+      token: https://slack.com/api/oauth.v2.user.access
+      revoke: null
+    client_id_env: CONNECTORS_SLACK_CLIENT_ID
+    client_secret_env: CONNECTORS_SLACK_CLIENT_SECRET
+    sub_services:
+      slack:
+        id: slack
+        display_name: Slack
+        description: Read and post across channels, DMs, and search.
+        scopes:
+          - search:read
+          - channels:read
+          - channels:history
+          - groups:read
+          - groups:history
+          - im:read
+          - im:history
+          - mpim:read
+          - mpim:history
+          - users:read
+          - reactions:read
+          - chat:write
+        mcp_server:
+          type: http
+          url: https://mcp.slack.com/mcp
+```
+
+## Create the Slack app
+
+Create a Slack app and configure OAuth. The app must be **directory-published or
+internal** to your workspace — Slack refuses an unlisted app on this flow, and
+there is no dynamic client registration. These are USER-token endpoints:
+
+- authorize: `https://slack.com/oauth/v2_user/authorize`
+- token: `https://slack.com/api/oauth.v2.user.access`
+
+Add this exact redirect URI, where `{origin}` is your deployment's public origin
+(or `CONNECTORS_OAUTH_BRIDGE_URL` when you run a shared bridge):
+
+```
+{origin}/oauth-bridge.html
+```
+
+Then set the client credentials on the API process:
+
+```bash
+CONNECTORS_SLACK_CLIENT_ID=...
+CONNECTORS_SLACK_CLIENT_SECRET=...
+```
+
+The engine-wide `CONNECTORS_*` settings — the key-encryption key
+(`CONNECTORS_KEK`), the state HMAC key (`CONNECTORS_STATE_HMAC_KEY`), and the
+redirect-URI allowlist (or `CONNECTORS_OAUTH_BRIDGE_URL`) — are shared by every
+connector and are described in [Connectors](/concepts/connectors). The origin
+you registered with Slack must appear in the redirect-URI allowlist, and it must
+be https for anything but a local host.
+
+## Verify the rotating-token response (before release)
+
+<Warning>
+Slack's official documentation confirms this descriptor's flow: the
+`oauth.v2.user.access` endpoint returns the user token at the **top level**
+(`access_token`, `token_type: "user"`) — not nested under `authed_user` like the
+bot `oauth.v2.access` response — and `/oauth/v2_user/authorize` is the user-token
+authorize endpoint. The one detail Slack's docs do not show in an explicit
+example is the rotation-enabled response body, so before release run one manual
+Connect against a rotation-enabled Slack dev app and confirm a top-level
+`refresh_token` and `expires_in` are present, as the OAuth 2.0 spec requires.
+</Warning>
+
+## See also
+
+- [Connectors](/concepts/connectors) — the model, the token lifecycle, and the shared engine settings.
+- [Connect an OAuth provider](/guides/connect-an-oauth-provider) — the end-to-end walkthrough.
