@@ -11,8 +11,7 @@
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "skip-changelog": true,
-      "release-as": "3.4.1"
+      "skip-changelog": true
     },
     "core/cli": {
       "package-name": "tai42-cli",
@@ -79,7 +78,6 @@
       "package-name": "tai42-backend-arq",
       "component": "tai42-backend-arq",
       "skip-changelog": true,
-      "release-as": "2.0.0",
       "extra-files": [
         {
           "type": "yaml",
@@ -97,7 +95,6 @@
       "package-name": "tai42-backend-celery",
       "component": "tai42-backend-celery",
       "skip-changelog": true,
-      "release-as": "2.0.0",
       "extra-files": [
         {
           "type": "yaml",
@@ -115,7 +112,6 @@
       "package-name": "tai42-backend-rq",
       "component": "tai42-backend-rq",
       "skip-changelog": true,
-      "release-as": "2.0.0",
       "extra-files": [
         {
           "type": "yaml",
@@ -184,7 +180,6 @@
       "package-name": "tai42-channel-web",
       "component": "tai42-channel-web",
       "skip-changelog": true,
-      "release-as": "2.0.0",
       "extra-files": [
         {
           "type": "yaml",
