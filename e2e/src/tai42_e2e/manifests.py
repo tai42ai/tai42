@@ -579,6 +579,10 @@ TELEGRAM_UNLISTED_RECIPIENT = "990009"
 SLACK_DEFAULT_RECIPIENT = "C0DEFAULT0"
 SLACK_ALLOWED_RECIPIENTS = ("C0ALLOWED1", "C0ALLOWED2")
 SLACK_UNLISTED_RECIPIENT = "C0UNLISTED"
+# The app's own bot user id (``U…``): the bridge's ``our_identity`` and the self-message
+# filter. Required at boot by the slack channel; distinct from any inbound event ``user``
+# the stubbed Events API replies carry (they set none), so no test inbound is self-filtered.
+SLACK_BOT_USER_ID = "U0BOTUSER0"
 TWILIO_FROM = "+15559999999"
 TWILIO_DEFAULT_RECIPIENT = "+15550000100"
 TWILIO_ALLOWED_RECIPIENTS = ("+15550000200", "+15550000300")
@@ -653,6 +657,7 @@ def _slack_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
     return {
         "CHANNEL_SLACK_BOT_TOKEN": "xoxb-e2e-slack-token",
         "CHANNEL_SLACK_SIGNING_SECRET": secrets.token_hex(16),
+        "CHANNEL_SLACK_BOT_USER_ID": SLACK_BOT_USER_ID,
         "CHANNEL_SLACK_API_BASE_URL": _require_stub(res.slack_api_base_url, "slack"),
         "CHANNEL_SLACK_REDIS_URL": res.redis_url,
         "CHANNEL_SLACK_DEFAULT_RECIPIENT": SLACK_DEFAULT_RECIPIENT,
