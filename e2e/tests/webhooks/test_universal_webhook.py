@@ -65,8 +65,15 @@ async def test_github_verifier_locks_topic(replicas_stack: TaiStack, uniq: Calla
     good_sig = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
     path = f"/universal_webhook/{topic}"
 
-    # A correctly signed POST is accepted and the record appears.
-    accepted = await api_b.request_raw("POST", path, headers={"X-Hub-Signature-256": good_sig}, content=body)
+    # A correctly signed POST carrying a delivery id is accepted and the record appears.
+    # The verifier's replay defense keys on X-GitHub-Delivery, so a signed delivery with
+    # no id is refused; a unique id per delivery clears the seen-set.
+    accepted = await api_b.request_raw(
+        "POST",
+        path,
+        headers={"X-Hub-Signature-256": good_sig, "X-GitHub-Delivery": uniq("del")},
+        content=body,
+    )
     assert accepted.status_code == 200
     wait_for(lambda: _has_record(replicas_stack, rkey), deadline=5.0, message="signed delivery did not fire the tool")
     baseline = len(replicas_stack.records(rkey))
@@ -105,13 +112,28 @@ async def test_shared_secret_verifier_locks_topic(replicas_stack: TaiStack, uniq
     )
     await api_a.put(
         f"/api/hooks/topics/{topic}/verifier",
-        json={"verifier": "shared_secret", "config": {"header": "X-E2E-Secret", "secret_env": "E2E_GH_WEBHOOK_SECRET"}},
+        json={
+            "verifier": "shared_secret",
+            "config": {
+                "header": "X-E2E-Secret",
+                "secret_env": "E2E_GH_WEBHOOK_SECRET",
+                "id_header": "X-E2E-Delivery-Id",
+            },
+        },
     )
 
     path = f"/universal_webhook/{topic}"
 
-    # A delivery carrying the correct secret header is accepted and the record appears.
-    accepted = await api_b.request_raw("POST", path, headers={"X-E2E-Secret": secret}, json={"delivery": "ok"})
+    # A delivery carrying the correct secret header and a unique delivery id is accepted
+    # and the record appears. The static bearer secret carries no freshness, so the
+    # verifier's replay defense keys on the configured id_header; a delivery with no id
+    # under it is refused.
+    accepted = await api_b.request_raw(
+        "POST",
+        path,
+        headers={"X-E2E-Secret": secret, "X-E2E-Delivery-Id": uniq("del")},
+        json={"delivery": "ok"},
+    )
     assert accepted.status_code == 200
     wait_for(
         lambda: _has_record(replicas_stack, rkey), deadline=5.0, message="a correctly-secreted delivery did not fire"
