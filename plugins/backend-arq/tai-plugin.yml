@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: backend-arq
 package: tai42-backend-arq
-version: 2.0.1
+version: 2.0.2
 description: >-
   arq execution backend for the TAI ecosystem — worker runtime and Redis-hash
   scheduling over arq.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/backend-arq
-contract: '>=3.0,<4'
+contract: '>=4.0,<5'
 categories:
   - execution
 tags:

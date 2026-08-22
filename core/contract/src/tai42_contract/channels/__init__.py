@@ -24,10 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
-    MEDIA_MAX_ITEMS,
-    MEDIA_TOTAL_URI_CHARS,
     AnswerFormat,
     MediaItem,
+    check_media_list,
 )
 
 
@@ -256,18 +255,11 @@ class ChannelNotification(BaseModel):
     @field_validator("media")
     @classmethod
     def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
-        # None means no media; a present-but-empty list is a caller bug. The item-count
-        # and summed-URI caps mirror InteractionRequest._check_media — the same
-        # wire-contract bound on the durable record and the frame it is replayed in.
-        if value is None:
-            return value
-        if not value:
-            raise ValueError("media must be a non-empty list when present")
-        if len(value) > MEDIA_MAX_ITEMS:
-            raise ValueError(f"media carries at most {MEDIA_MAX_ITEMS} items, got {len(value)}")
-        total = sum(len(item.url) for item in value)
-        if total > MEDIA_TOTAL_URI_CHARS:
-            raise ValueError(f"media total url length must be at most {MEDIA_TOTAL_URI_CHARS} characters, got {total}")
+        # None means no media; the shared list-level caps (non-empty, item count, summed
+        # URI) are the same wire-contract bound on the notify REQUEST as on the ask
+        # REQUEST — the channel refuses anything beyond its own native envelope.
+        if value is not None:
+            check_media_list(value)
         return value
 
     @field_validator("options")

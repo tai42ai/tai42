@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -33,16 +34,16 @@ class MediaKind(StrEnum):
     LINK = "link"
 
 
-# Caps on the media attached to one question. They bound the durable record and
-# the SSE frame it is replayed in — a wire-contract property, not an operator
-# preference — so they are constants, never settings. MEDIA_MAX_ITEMS bounds the
-# item count; MEDIA_URL_MAX_CHARS is a sane single-URL length; MEDIA_DATA_URI_MAX_CHARS
-# bounds an inline data: URI (~512 KiB of text, ~384 KiB decoded); MEDIA_CAPTION_MAX_CHARS
-# bounds the alt-text/label; MEDIA_TOTAL_URI_CHARS is the per-question budget for the
-# summed URI text across all items — the backlog replays the whole pending index to every
-# client on every reconnect, so a per-question ceiling bounds a bytes x pending x clients
-# amplification the per-item cap alone does not.
-MEDIA_MAX_ITEMS = 8
+# Caps on the media attached to one question. They bound the ask/notify REQUEST
+# (the input a tool submits), never a replay — a wire-contract property, not an
+# operator preference — so they are constants, never settings. MEDIA_MAX_ITEMS is a
+# loose platform abuse guard on the item count: each channel refuses anything beyond
+# its own native envelope, so this ceiling only stops a pathological ask.
+# MEDIA_URL_MAX_CHARS is a sane single-URL length; MEDIA_DATA_URI_MAX_CHARS bounds an
+# inline data: URI (~512 KiB of text, ~384 KiB decoded); MEDIA_CAPTION_MAX_CHARS
+# bounds the alt-text/label; MEDIA_TOTAL_URI_CHARS is the per-request budget for the
+# summed URI text across all items.
+MEDIA_MAX_ITEMS = 50
 MEDIA_URL_MAX_CHARS = 8192
 MEDIA_DATA_URI_MAX_CHARS = 524_288
 MEDIA_CAPTION_MAX_CHARS = 1000
@@ -56,7 +57,30 @@ QUESTION_MAX_CHARS = 8192
 
 _DATA_IMAGE_PREFIX = "data:image/"
 
+# URL path segment under which the skeleton serves media stored by reference.
+# An ``image`` url of the form ``{MEDIA_ROUTE_PREFIX}{id}`` (relative, same origin)
+# is a stored-media reference — a valid image url. Shared by the skeleton (the
+# serve route) and the channels (absolute-url minting).
+MEDIA_ROUTE_PREFIX = "/api/interactions/media/"
+
+# Loopback hosts for which an http (non-TLS) served-media base URL is admitted —
+# every other host must be https. ``InteractionsSettings.public_base_url``'s
+# validator imports this set: an http served reference validated here is minted
+# from that base, so the two admit exactly the same hosts.
+LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 _DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
+
+# A stored-media id: the urlsafe-base64 (no padding) of 32 random bytes, 43 chars.
+_MEDIA_ID = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def _is_media_route_url(value: str) -> bool:
+    # A same-origin reference to media the skeleton serves: the fixed route prefix
+    # followed by a well-formed 43-char stored-media id and nothing else.
+    if not value.startswith(MEDIA_ROUTE_PREFIX):
+        return False
+    return _MEDIA_ID.fullmatch(value[len(MEDIA_ROUTE_PREFIX) :]) is not None
 
 
 def _label_is_numberish(label: str) -> bool:
@@ -126,14 +150,35 @@ def _is_absolute_web_url(value: str, *, schemes: tuple[str, ...]) -> bool:
     return _is_valid_host(host, bracketed="[" in split.netloc)
 
 
+def _is_served_media_url(value: str) -> bool:
+    # An absolute served-media reference: a well-formed absolute http(s) URL (host,
+    # port and userinfo judged by ``_is_absolute_web_url``) whose path is exactly
+    # ``MEDIA_ROUTE_PREFIX`` + a 43-char stored-media id, with no query or fragment.
+    # http is admitted only when the host is a loopback host (``LOCAL_HTTP_HOSTS``),
+    # because such a base is minted from ``InteractionsSettings.public_base_url``,
+    # whose validator restricts http to those same hosts; https keeps any valid host.
+    if not _is_absolute_web_url(value, schemes=("http", "https")):
+        return False
+    split = urlsplit(value)
+    if split.scheme == "http" and split.hostname not in LOCAL_HTTP_HOSTS:
+        return False
+    if split.query or split.fragment or not split.path.startswith(MEDIA_ROUTE_PREFIX):
+        return False
+    return _MEDIA_ID.fullmatch(split.path[len(MEDIA_ROUTE_PREFIX) :]) is not None
+
+
 class MediaItem(BaseModel):
     """One media item shown WITH a question — display-only, never part of the answer.
 
     ``kind`` selects how it renders: an ``image`` inline, a ``link`` as a labelled
-    anchor. ``url`` is the source — an ``image`` must be an absolute ``https`` URL or a
-    ``data:image/*`` URI (remote images are https-only: the inbox CSP ``img-src`` admits
-    ``https:``/``data:`` but not ``http:``, so an ``http:`` image would be an unrenderable
-    record), while a ``link`` must be an absolute ``http(s)`` URL (anchors are not governed
+    anchor. ``url`` is the source — an ``image`` must be an absolute ``https`` URL, a
+    ``data:image/*`` URI, a same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to
+    media the skeleton serves by id, or an absolute ``http(s)`` served reference of
+    that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a channel send mints from
+    ``public_base_url`` (remote images are https-only: the inbox CSP
+    ``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an
+    ``http:`` remote image would be an unrenderable record), while a ``link`` must be an
+    absolute ``http(s)`` URL (anchors are not governed
     by ``img-src``; the human clicks through). A remote url names a host directly —
     an ASCII DNS name, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply
     punycode); an embedded ``user@`` credential form is rejected as it spoofs the
@@ -185,6 +230,17 @@ class MediaItem(BaseModel):
                 raise ValueError(
                     f"image media data: URI must be at most {MEDIA_DATA_URI_MAX_CHARS} characters, got {len(self.url)}"
                 )
+        elif _is_media_route_url(self.url):
+            # A same-origin reference to media the skeleton serves by id; the id
+            # charset+length is the whole check (no host, relative path).
+            pass
+        elif _is_served_media_url(self.url):
+            # An absolute served reference a channel send mints from public_base_url;
+            # http is allowed only here (that base is loopback-restricted at settings).
+            if len(self.url) > MEDIA_URL_MAX_CHARS:
+                raise ValueError(
+                    f"image media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
+                )
         elif _is_absolute_web_url(self.url, schemes=("https",)):
             if len(self.url) > MEDIA_URL_MAX_CHARS:
                 raise ValueError(
@@ -193,6 +249,21 @@ class MediaItem(BaseModel):
         else:
             raise ValueError("image media url must be an absolute https URL or a data:image/* URI")
         return self
+
+
+def check_media_list(items: Sequence[MediaItem]) -> None:
+    """List-level media caps every door that accepts media shares: a present media
+    list is non-empty, holds at most ``MEDIA_MAX_ITEMS`` items, and its summed url text
+    is within ``MEDIA_TOTAL_URI_CHARS``. Raises ``ValueError`` loudly; per-item shape is
+    ``MediaItem``'s own concern. Callers run this on the RAW validated items before any
+    store write, so an over-cap ask/notify is refused before a substitution stores bytes."""
+    if not items:
+        raise ValueError("media must be a non-empty list when present")
+    if len(items) > MEDIA_MAX_ITEMS:
+        raise ValueError(f"media carries at most {MEDIA_MAX_ITEMS} items, got {len(items)}")
+    total = sum(len(item.url) for item in items)
+    if total > MEDIA_TOTAL_URI_CHARS:
+        raise ValueError(f"media total url length must be at most {MEDIA_TOTAL_URI_CHARS} characters, got {total}")
 
 
 class InteractionRequest(BaseModel):
@@ -270,15 +341,7 @@ class InteractionRequest(BaseModel):
     @classmethod
     def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
         if value is not None:
-            if not value:
-                raise ValueError("media must be a non-empty list when present")
-            if len(value) > MEDIA_MAX_ITEMS:
-                raise ValueError(f"media carries at most {MEDIA_MAX_ITEMS} items, got {len(value)}")
-            total = sum(len(item.url) for item in value)
-            if total > MEDIA_TOTAL_URI_CHARS:
-                raise ValueError(
-                    f"media total url length must be at most {MEDIA_TOTAL_URI_CHARS} characters, got {total}"
-                )
+            check_media_list(value)
         return value
 
     @field_validator("created_at", "timeout_at")

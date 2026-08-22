@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: backend-celery
 package: tai42-backend-celery
-version: 2.0.1
+version: 2.0.2
 description: >-
   Celery execution backend for the TAI ecosystem — worker/beat/flower runtime,
   prefork-pool turnover on worker-bus ops, and RedBeat scheduling.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/backend-celery
-contract: '>=3.0,<4'
+contract: '>=4.0,<5'
 categories:
   - execution
 tags:

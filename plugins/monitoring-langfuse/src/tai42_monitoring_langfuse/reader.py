@@ -15,10 +15,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any
+from typing import Any, TypeGuard
 
 from langfuse.api.commons.errors import NotFoundError
 from tai42_contract.monitoring import (
@@ -29,18 +30,17 @@ from tai42_contract.monitoring import (
     MonitoringObservation,
     MonitoringReadNotSupportedError,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
     SpanKind,
     SpanWindowItem,
     TraceNotFoundError,
+    preview,
 )
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
 
 logger = logging.getLogger(__name__)
-
-# Concurrency bound for hydrating the per-trace bodies in list_traces.
-_HYDRATE_CONCURRENCY = 8
 
 # Natural aggregation per measure when the caller names a measure without one.
 _DEFAULT_AGGREGATION: dict[str, str] = {
@@ -83,6 +83,22 @@ _TRACE_SORT_FIELDS = {"timestamp", "total_cost", "name", "id", "latency", "total
 _METRIC_ROW_LIMIT_MAX = 1000
 # get_many has no native sort -> every span-window sort is client-side.
 _SPAN_SORT_FIELDS = {"start", "end", "duration", "name", "id"}
+
+# The trace.list field groups a row summary needs: core attributes, io (input,
+# output, metadata) and metrics (latency, total_cost). Observation bodies are
+# never listed — get_trace is the only body door.
+_LIST_FIELDS = "core,io,metrics"
+# Buffer added to a page's newest timestamp so a trace/observation exactly at the
+# upper bound is caught by the backend's exclusive upper bound.
+_WINDOW_EPSILON = timedelta(seconds=1)
+# Max trace.list pages walked to cover a metric-sorted page's ranked ids before
+# raising loudly — the ranked ids scatter across the whole window, so a wide
+# window with the ranked traces at its far end could otherwise page unbounded.
+_METRIC_LIST_PAGE_BUDGET = 20
+# Max observation pages walked to collect a page's error ids before raising
+# loudly — errors are rare so the window normally resolves in one call; a wide
+# window with many errors could otherwise page unbounded.
+_ERROR_PAGE_BUDGET = 20
 
 
 class LangfuseReader:
@@ -339,13 +355,20 @@ class LangfuseReader:
         page: int | None = None,
         filter: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
-    ) -> list[MonitoringTrace]:
+    ) -> list[MonitoringTraceSummary]:
+        """Run SUMMARIES for one page — never per-trace bodies.
+
+        A page costs ≤3 backend calls (native sort) / ≤3 + a bounded trace.list
+        walk (metric sort): the list surface for the rows, one metrics query for
+        the page's token totals, and one paged observations query for the page's
+        error status. ``get_trace`` remains the only body door.
+        """
         client = await self._active_client()
         source = self._m.active_source()
 
         kind, payload = _trace_sort(order_by)
         if kind == "metric":
-            ranked_ids = await self._metric_ranked_ids(
+            rows = await self._metric_sorted_rows(
                 client,
                 source,
                 payload,
@@ -356,7 +379,7 @@ class LangfuseReader:
                 filter=filter,
             )
         else:
-            ranked_ids = await self._native_ranked_ids(
+            rows = await self._native_rows(
                 client,
                 source,
                 payload,
@@ -366,9 +389,11 @@ class LangfuseReader:
                 page=page,
                 filter=filter,
             )
-        return await self._hydrate_traces(client, ranked_ids)
+        if not rows:
+            return []
+        return await self._summarize(client, source, rows, filter)
 
-    async def _native_ranked_ids(
+    async def _native_rows(
         self,
         client: Any,
         source: str,
@@ -379,8 +404,33 @@ class LangfuseReader:
         limit: int | None,
         page: int | None,
         filter: MonitoringFilter | None,
-    ) -> list[str]:
-        """Server-side top-N via trace.list for the native sort fields."""
+    ) -> list[Any]:
+        """The page's summary rows via one server-side trace.list (native sort)."""
+        return await self._list_page(
+            client,
+            source,
+            order_by=native_sort,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            limit=limit,
+            page=page,
+            filter=filter,
+        )
+
+    async def _list_page(
+        self,
+        client: Any,
+        source: str,
+        *,
+        order_by: str,
+        from_timestamp: datetime | None,
+        to_timestamp: datetime | None,
+        limit: int | None,
+        page: int | None,
+        filter: MonitoringFilter | None,
+    ) -> list[Any]:
+        """One trace.list call, returning its ``TraceWithDetails`` summary rows
+        with the core/io/metrics field groups (no observation bodies)."""
         advanced = _trace_advanced_filter(filter)
         # Langfuse's advanced ``filter`` JSON overrides the native
         # fromTimestamp/toTimestamp params, so time bounds must ride in the JSON too.
@@ -394,8 +444,9 @@ class LangfuseReader:
                 to_timestamp=to_timestamp,
                 limit=limit,
                 page=page,
-                order_by=native_sort,
+                order_by=order_by,
                 environment=source,
+                fields=_LIST_FIELDS,
                 name=filter.name if filter else None,
                 user_id=filter.user_id if filter else None,
                 session_id=filter.session_id if filter else None,
@@ -404,7 +455,74 @@ class LangfuseReader:
                 request_options=self._request_options(),
             )
         )
-        return [s.id for s in (summaries.data or [])]
+        return list(summaries.data or [])
+
+    async def _metric_sorted_rows(
+        self,
+        client: Any,
+        source: str,
+        measure_dir: tuple[str, str],
+        *,
+        from_timestamp: datetime | None,
+        to_timestamp: datetime | None,
+        limit: int | None,
+        page: int | None,
+        filter: MonitoringFilter | None,
+    ) -> list[Any]:
+        """The page's rows for a metric sort: globally rank the ids via the
+        metrics API, then walk trace.list (newest-first) over the same window to
+        collect their summary rows, in rank order. Never a per-id trace.get.
+
+        The ranked ids can sit anywhere in the window, so the walk is bounded by
+        ``_METRIC_LIST_PAGE_BUDGET`` pages; a page whose ranked ids are not all
+        found within that budget raises loudly rather than returning a short row
+        set that reads as a complete page.
+        """
+        ranked_ids = await self._metric_ranked_ids(
+            client,
+            source,
+            measure_dir,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            limit=limit,
+            page=page,
+            filter=filter,
+        )
+        if not ranked_ids:
+            return []
+
+        wanted = set(ranked_ids)
+        found: dict[str, Any] = {}
+        list_page = 1
+        while wanted - found.keys():
+            if list_page > _METRIC_LIST_PAGE_BUDGET:
+                raise MonitoringReadNotSupportedError(
+                    "metric-sorted listing could not resolve the page within the bounded window; narrow the time range"
+                )
+            batch = await self._list_page(
+                client,
+                source,
+                order_by="timestamp.desc",
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                limit=_PAGE_SIZE,
+                page=list_page,
+                filter=filter,
+            )
+            for row in batch:
+                if row.id in wanted:
+                    found[row.id] = row
+            if len(batch) < _PAGE_SIZE:
+                break
+            list_page += 1
+
+        missing = wanted - found.keys()
+        if missing:
+            raise MonitoringReadNotSupportedError(
+                "metric-sorted listing could not locate every ranked row within the bounded window; "
+                "narrow the time range"
+            )
+        return [found[trace_id] for trace_id in ranked_ids]
 
     async def _metric_ranked_ids(
         self,
@@ -467,26 +585,160 @@ class LangfuseReader:
         start = ((page or 1) - 1) * limit
         return [row["id"] for row in rows][start : start + limit]
 
-    async def _hydrate_traces(self, client: Any, ranked_ids: list[str]) -> list[MonitoringTrace]:
-        """Hydrate each id's full body concurrently (bounded), preserving input order.
+    async def _summarize(
+        self, client: Any, source: str, rows: list[Any], filter: MonitoringFilter | None
+    ) -> list[MonitoringTraceSummary]:
+        """Build the page's summaries from the list rows plus two batched, window-
+        scoped enrichments: token totals (one metrics query) and error status (one
+        paged observations query). Order is preserved."""
+        timestamps = [row.timestamp for row in rows if row.timestamp is not None]
+        if not timestamps:
+            return [self._to_summary(row, {}, set()) for row in rows]
 
-        A body that fails to load is kept in place with ``fetch_error`` set, not dropped.
-        """
-        semaphore = asyncio.Semaphore(_HYDRATE_CONCURRENCY)
+        # Token window is keyed on trace timestamp (the metrics traces view filters
+        # on it); the status window is keyed on OBSERVATION start time, which lags
+        # the trace timestamp by up to the trace's own latency — so its upper bound
+        # follows the latest estimated trace end, not just the newest timestamp.
+        t_min = min(timestamps)
+        t_max = max(timestamps)
+        page_ids = [row.id for row in rows]
+        estimated_ends = [
+            row.timestamp + timedelta(seconds=row.latency)
+            for row in rows
+            if row.timestamp is not None and _nonneg_number(getattr(row, "latency", None))
+        ]
+        # A row with no latency is still in flight: its observations can extend to
+        # the present, so the error window's upper bound must reach now.
+        if any(not _nonneg_number(getattr(row, "latency", None)) for row in rows):
+            estimated_ends.append(datetime.now(UTC))
+        obs_end = (max(estimated_ends) if estimated_ends else t_max) + _WINDOW_EPSILON
 
-        async def _hydrate(trace_id: str) -> MonitoringTrace:
-            async with semaphore:
-                try:
-                    trace = await asyncio.to_thread(
-                        partial(client.api.trace.get, trace_id, request_options=self._request_options())
+        tokens_by_id, error_ids = await asyncio.gather(
+            self._tokens_for_window(client, source, t_min, t_max + _WINDOW_EPSILON, page_ids, filter),
+            self._error_trace_ids(client, source, t_min, obs_end),
+        )
+        return [self._to_summary(row, tokens_by_id, error_ids) for row in rows]
+
+    async def _tokens_for_window(
+        self, client: Any, source: str, t0: datetime, t1: datetime, page_ids: list[str], filter: MonitoringFilter | None
+    ) -> dict[str, float]:
+        """Per-trace summed token totals over the page window via ONE metrics
+        traces-view query (dimension id, measure totalTokens). The page filter's
+        view-supported clauses narrow the metrics population; correctness comes
+        from the per-id join, so the unsupported clauses are dropped, not raised.
+        A trace absent from the result carries no usage.
+
+        The metrics view caps at ``_METRIC_ROW_LIMIT_MAX`` rows: if the cap is hit
+        AND a page id is uncovered, the token join cannot tell "no usage" from
+        "truncated" — it raises loudly rather than reporting a silent None. If rows
+        come back yet none carry a recognised token measure, the query shape is
+        wrong — it raises rather than reporting every trace as usage-less."""
+        query: dict[str, Any] = {
+            "view": "traces",
+            "metrics": [{"measure": "totalTokens", "aggregation": "sum"}],
+            "dimensions": [{"field": "id"}],
+            "filters": [_environment_clause(source), *_metric_population_filter(filter)],
+            "fromTimestamp": t0.isoformat(),
+            "toTimestamp": t1.isoformat(),
+            "config": {"row_limit": _METRIC_ROW_LIMIT_MAX},
+        }
+        response = await asyncio.to_thread(
+            partial(
+                client.api.legacy.metrics_v1.metrics,
+                query=json.dumps(query),
+                request_options=self._request_options(),
+            )
+        )
+        rows = list(getattr(response, "data", []) or [])
+        tokens_by_id: dict[str, float] = {}
+        # A trace whose summed measure is null IS covered by the result (no usage),
+        # so coverage is the set of ids carrying the measure column, not just those
+        # with a non-null value — otherwise a null-sum page id reads as truncated.
+        covered_ids: set[str] = set()
+        for raw in rows:
+            key = _measure_key(raw, "totalTokens")
+            if key is None:
+                continue
+            trace_id = raw.get("id")
+            if trace_id is None:
+                continue
+            covered_ids.add(trace_id)
+            value = _measure_value(raw[key])
+            if value is not None:
+                tokens_by_id[trace_id] = value
+        if rows and not covered_ids:
+            raise MonitoringReadNotSupportedError("token totals came back without a recognised total-tokens measure")
+        if len(rows) >= _METRIC_ROW_LIMIT_MAX:
+            uncovered = [tid for tid in page_ids if tid not in covered_ids]
+            if uncovered:
+                raise MonitoringReadNotSupportedError(
+                    "token totals could not be resolved within the bounded window; narrow the time range"
+                )
+        return tokens_by_id
+
+    async def _error_trace_ids(self, client: Any, source: str, t0: datetime, t1: datetime) -> set[str]:
+        """The (source-scoped) trace ids with an ERROR-level observation whose
+        start falls in the window, drained across pages up to ``_ERROR_PAGE_BUDGET``.
+
+        Errors are rare, so the window normally resolves in one call. Exceeding the
+        budget, or a full page returned without a page count to bound the walk,
+        raises loudly — it never stops quietly on a partial result."""
+        ids: set[str] = set()
+        page = 1
+        while True:
+            response = await asyncio.to_thread(
+                partial(
+                    client.api.legacy.observations_v1.get_many,
+                    from_start_time=t0,
+                    to_start_time=t1,
+                    level="ERROR",
+                    environment=source,
+                    limit=_PAGE_SIZE,
+                    page=page,
+                    request_options=self._request_options(),
+                )
+            )
+            data = response.data or []
+            for obs in data:
+                if obs.trace_id:
+                    ids.add(obs.trace_id)
+            meta = getattr(response, "meta", None)
+            total_pages = getattr(meta, "total_pages", None) if meta else None
+            if total_pages is None:
+                if len(data) >= _PAGE_SIZE:
+                    raise MonitoringReadNotSupportedError(
+                        "error status could not be resolved within the bounded window; narrow the time range"
                     )
-                except Exception as exc:
-                    logger.exception("trace hydration failed for %s", trace_id)
-                    return MonitoringTrace(id=trace_id, fetch_error=f"hydration failed: {exc}")
-                return self._map_trace(trace.model_dump())
+                break
+            if page >= total_pages:
+                break
+            if page >= _ERROR_PAGE_BUDGET:
+                raise MonitoringReadNotSupportedError(
+                    "error status could not be resolved within the bounded window; narrow the time range"
+                )
+            page += 1
+        return ids
 
-        # gather preserves input order regardless of completion order.
-        return list(await asyncio.gather(*(_hydrate(trace_id) for trace_id in ranked_ids)))
+    @staticmethod
+    def _to_summary(row: Any, tokens_by_id: dict[str, float], error_ids: set[str]) -> MonitoringTraceSummary:
+        latency = getattr(row, "latency", None)
+        latency_ms = latency * 1000.0 if _nonneg_number(latency) else None
+        tokens = tokens_by_id.get(row.id)
+        cost = getattr(row, "total_cost", None)
+        return MonitoringTraceSummary(
+            id=row.id,
+            timestamp=row.timestamp,
+            name=getattr(row, "name", None),
+            tags=list(getattr(row, "tags", None) or []),
+            input_preview=preview(getattr(row, "input", None)),
+            output_preview=preview(getattr(row, "output", None)),
+            latency_ms=latency_ms,
+            # trace.list with the metrics field group returns real costs; -1 marks
+            # a backend that could not compute one — surface it as None, not -1.
+            total_cost=cost if _nonneg_number(cost) else None,
+            total_tokens=int(tokens) if tokens is not None else None,
+            status="error" if row.id in error_ids else "ok",
+        )
 
     @classmethod
     def _map_trace(cls, raw: dict[str, Any]) -> MonitoringTrace:
@@ -536,6 +788,52 @@ def _pick(raw: dict[str, Any], *keys: str) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _nonneg_number(value: Any) -> TypeGuard[float]:
+    """A real, non-negative number — the -1 sentinel a backend returns for an
+    uncomputed metric is excluded."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+
+
+def _measure_key(row: dict[str, Any], measure: str) -> str | None:
+    """The row's column for a summed measure. The backend names the output column
+    by measure + aggregation (e.g. ``sum_totalTokens`` / ``totalTokens_sum``) and
+    the exact key varies, so match by substring with an exact-key fast path.
+    ``None`` when no column matches — presence is decided by the column, never by
+    its value (a null sum is a real measure cell, not a missing column)."""
+    if measure in row:
+        return measure
+    needle = measure.lower()
+    for key in row:
+        if isinstance(key, str) and needle in key.lower():
+            return key
+    return None
+
+
+def _measure_value(cell: Any) -> float | None:
+    """Parse a metrics measure cell to a non-negative finite float. Numbers and
+    numeric strings (ClickHouse-backed sums serialise as strings) become floats;
+    ``None`` and the empty string mean no usage and become ``None``. A bool, an
+    unparseable string, or a non-finite/negative value is not a token sum —
+    ``None`` (a token sum is a non-negative finite number)."""
+    if isinstance(cell, bool):
+        return None
+    if isinstance(cell, (int, float)):
+        number = float(cell)
+    elif isinstance(cell, str):
+        text = cell.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def _environment_clause(source: str) -> dict[str, Any]:
@@ -621,14 +919,26 @@ def _trace_advanced_filter(filter: MonitoringFilter | None) -> list[dict[str, An
     return clauses
 
 
-def _trace_metric_filter(filter: MonitoringFilter | None) -> list[dict[str, Any]]:
-    """The metric-rank filter array. The metrics ``traces`` view accepts only
-    ``name`` / ``userId`` / ``sessionId`` / ``tags`` (column ``tags``, NOT
-    ``traceTags``) / ``metadata``; ``level`` / ``model`` / cost / token / latency
-    are unsupported and raise rather than being dropped.
-    """
-    if filter is None:
-        return []
+def _metrics_supported_clauses(filter: MonitoringFilter) -> list[dict[str, Any]]:
+    """The metrics ``traces`` view's supported filter clauses: ``name`` /
+    ``userId`` / ``sessionId`` / ``tags`` (column ``tags``, NOT ``traceTags``) /
+    ``metadata``."""
+    clauses: list[dict[str, Any]] = []
+    if filter.name is not None:
+        clauses.append({"column": "name", "operator": "=", "value": filter.name, "type": "string"})
+    if filter.user_id is not None:
+        clauses.append({"column": "userId", "operator": "=", "value": filter.user_id, "type": "string"})
+    if filter.session_id is not None:
+        clauses.append({"column": "sessionId", "operator": "=", "value": filter.session_id, "type": "string"})
+    if filter.tags:
+        clauses.append({"column": "tags", "operator": "any of", "value": filter.tags, "type": "arrayOptions"})
+    clauses += _metadata_clauses(filter.metadata)
+    return clauses
+
+
+def _metrics_unsupported_clauses(filter: MonitoringFilter) -> list[str]:
+    """The names of ``filter`` clauses the metrics ``traces`` view has no column
+    for: ``level`` / ``model`` and the cost / token / latency ranges."""
     unsupported: list[str] = []
     if filter.level is not None:
         unsupported.append("level")
@@ -644,23 +954,37 @@ def _trace_metric_filter(filter: MonitoringFilter | None) -> list[dict[str, Any]
     ):
         if value is not None:
             unsupported.append(name)
+    return unsupported
+
+
+def _trace_metric_filter(filter: MonitoringFilter | None) -> list[dict[str, Any]]:
+    """The metric-SORT rank filter array. The metrics ``traces`` view accepts only
+    ``name`` / ``userId`` / ``sessionId`` / ``tags`` (column ``tags``, NOT
+    ``traceTags``) / ``metadata``; ``level`` / ``model`` / cost / token / latency
+    are unsupported and RAISE here — on the sort path the clause decides the rank,
+    so a dropped clause would misrank the page.
+    """
+    if filter is None:
+        return []
+    unsupported = _metrics_unsupported_clauses(filter)
     if unsupported:
         raise MonitoringReadNotSupportedError(
             f"metric sort cannot filter on {unsupported}; the metrics traces view "
             "has no such column — sort by timestamp to use these filters"
         )
+    return _metrics_supported_clauses(filter)
 
-    clauses: list[dict[str, Any]] = []
-    if filter.name is not None:
-        clauses.append({"column": "name", "operator": "=", "value": filter.name, "type": "string"})
-    if filter.user_id is not None:
-        clauses.append({"column": "userId", "operator": "=", "value": filter.user_id, "type": "string"})
-    if filter.session_id is not None:
-        clauses.append({"column": "sessionId", "operator": "=", "value": filter.session_id, "type": "string"})
-    if filter.tags:
-        clauses.append({"column": "tags", "operator": "any of", "value": filter.tags, "type": "arrayOptions"})
-    clauses += _metadata_clauses(filter.metadata)
-    return clauses
+
+def _metric_population_filter(filter: MonitoringFilter | None) -> list[dict[str, Any]]:
+    """The token-join filter array. It narrows the metrics POPULATION only —
+    per-trace correctness comes from joining the result by trace id, not from this
+    filter — so the clauses the metrics ``traces`` view has no column for
+    (``level`` / ``model`` and the cost / token / latency ranges) are DROPPED here
+    rather than raised, unlike the metric-SORT path. Keeps the view's supported
+    clauses: ``name`` / ``userId`` / ``sessionId`` / ``tags`` / ``metadata``."""
+    if filter is None:
+        return []
+    return _metrics_supported_clauses(filter)
 
 
 # --- sorting -------------------------------------------------------------------

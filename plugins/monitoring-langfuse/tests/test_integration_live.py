@@ -18,6 +18,7 @@ from tai42_contract.monitoring import (
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
     ProjectConfig,
     SpanKind,
@@ -101,12 +102,12 @@ async def test_reader_list_and_get_trace_execute(backend):
     now = datetime.now(UTC)
     traces = await backend.reader.list_traces(from_timestamp=now - timedelta(hours=1), limit=3)
     assert isinstance(traces, list)
-    loadable = [t for t in traces if not t.fetch_error]
-    if not loadable:
-        pytest.skip("no loadable trace in the last hour to round-trip get_trace")
-    first = loadable[0]
-    assert isinstance(first, MonitoringTrace)
+    if not traces:
+        pytest.skip("no trace in the last hour to round-trip get_trace")
+    first = traces[0]
+    assert isinstance(first, MonitoringTraceSummary)
     full = await backend.reader.get_trace(first.id)
+    assert isinstance(full, MonitoringTrace)
     assert full.id == first.id
 
 
@@ -146,14 +147,14 @@ async def test_list_traces_sort_fields_execute(backend, field):
 
 async def test_list_traces_cost_sort_monotonic(backend):
     # total_cost is the only metric sort whose value is returned, so its ordering
-    # is the one we can assert. Top-cost traces can come back as fetch_error markers.
+    # is the one we can assert.
     now = datetime.now(UTC)
     result = await backend.reader.list_traces(
         order_by=OrderBy(field="total_cost", direction="desc"),
         from_timestamp=now - timedelta(days=14),
         limit=5,
     )
-    costs = [t.total_cost for t in result if not t.fetch_error and t.total_cost is not None]
+    costs = [t.total_cost for t in result if t.total_cost is not None]
     if len(costs) < 2:
         pytest.skip("need >=2 comparable cost traces to assert an order")
     assert costs == sorted(costs, reverse=True)

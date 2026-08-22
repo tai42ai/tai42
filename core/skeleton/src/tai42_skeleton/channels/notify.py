@@ -32,13 +32,19 @@ from tai42_contract.channels import (
     NOTIFICATION_ADDRESS_MAX_CHARS,
     NOTIFICATION_MESSAGE_MAX_CHARS,
     Channel,
+    ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
 )
-from tai42_contract.interactions.models import MediaItem
+from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_kit.clients import client_ctx
+from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.notifications_sink import record_notification
+from tai42_skeleton.interactions.media import substitute_media
+from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.store import InteractionStore
 
 
 class SenderIdentityNotAllowedError(Exception):
@@ -120,8 +126,9 @@ async def notify_user(
     ``NotImplementedError`` when a channel cannot notify or does not advertise the
     ``media``/``template``/``options`` capability; ``ChannelDeliveryError`` when a channel
     send fails; ``ChannelInputError`` when a channel permanently refuses the input's shape
-    (an input it cannot render by nature — retrying cannot succeed). Every failure
-    propagates loudly — nothing is swallowed.
+    (an input it cannot render by nature — retrying cannot succeed) or a ``data:`` image is
+    given for a channel send with no ``INTERACTIONS_PUBLIC_BASE_URL`` to mint its absolute
+    url. Every failure propagates loudly — nothing is swallowed.
     """
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message must be a non-blank string")
@@ -179,6 +186,29 @@ async def notify_user(
         raise NotImplementedError(f"channel {channel!r} does not support template notifications")
     if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
+    if media is not None:
+        # The operation door hands this seam the request model's ``media`` as plain dicts
+        # (``model_dump`` of the validated body), so coerce each to ``MediaItem`` ONCE up
+        # front before any ``.kind``/``.url`` inspection — the contract shape validation
+        # raising loudly on bad input (a ``ValueError`` the operation door maps to a 400).
+        # The coerced items feed the data: scan, the public-base-url check and substitution.
+        media = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
+    if media is not None and any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in media):
+        # A ``data:`` image cannot reach a channel as inline bytes — a vendor fetches an
+        # ABSOLUTE url from its own servers. Store it by reference and swap the url for an
+        # absolute served reference BEFORE the notification is built. The absolute url needs
+        # the public base url; its absence is a loud channel-input refusal naming the
+        # setting (the operation door maps it to a 400), never a silent drop.
+        settings = interactions_settings()
+        if settings.public_base_url is None:
+            raise ChannelInputError(
+                "a data: image on a channel notification requires INTERACTIONS_PUBLIC_BASE_URL to be set"
+            )
+        store = InteractionStore(settings.key_prefix)
+        async with client_ctx(RedisClient, settings.redis) as r:
+            media = await substitute_media(
+                store, r, media, settings.idle_ttl_seconds, base_url=settings.public_base_url
+            )
     # Construct (and thereby validate) the notification BEFORE the in-app feed record.
     # The contract's exclusivity validators (media+template, options+template) and the
     # present-but-empty ``media``/``options`` validators raise here as a pydantic

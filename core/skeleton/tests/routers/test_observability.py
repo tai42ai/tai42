@@ -26,6 +26,7 @@ from tai42_contract.monitoring import (
     MonitoringObservation,
     MonitoringReadNotSupportedError,
     MonitoringTrace,
+    MonitoringTraceSummary,
     TraceNotFoundError,
 )
 
@@ -94,7 +95,7 @@ class _FakeReader:
         self.summary_rows: list[MetricsRow] = []
         self.series_rows: list[MetricsRow] = []
         self.model_rows: list[MetricsRow] = []
-        self.traces: list[MonitoringTrace] = []
+        self.summaries: list[MonitoringTraceSummary] = []
         self.traces_by_id: dict[str, MonitoringTrace] = {}
         self.query_error: Exception | None = None
         self.list_error: Exception | None = None
@@ -112,11 +113,11 @@ class _FakeReader:
 
     async def list_traces(
         self, *, from_timestamp=None, to_timestamp=None, limit=None, page=None, filter=None, order_by=None
-    ) -> list[MonitoringTrace]:
+    ) -> list[MonitoringTraceSummary]:
         self.list_calls.append({"limit": limit, "page": page, "filter": filter, "order_by": order_by})
         if self.list_error is not None:
             raise self.list_error
-        return self.traces
+        return self.summaries
 
     async def get_trace(self, trace_id: str) -> MonitoringTrace:
         if self.get_trace_error is not None:
@@ -148,6 +149,11 @@ def _obs(**kw) -> MonitoringObservation:
 
 def _trace(**kw) -> MonitoringTrace:
     return MonitoringTrace(**kw)
+
+
+def _summary(**kw) -> MonitoringTraceSummary:
+    kw.setdefault("status", "ok")
+    return MonitoringTraceSummary(**kw)
 
 
 # -- GET /api/observability/metrics ------------------------------------------
@@ -256,21 +262,18 @@ async def test_metrics_bad_granularity_400():
 
 async def test_runs_list_and_derive_shape():
     reader = _install(_FakeReader())
-    obs = [
-        _obs(
-            id="o1",
-            trace_id="t1",
-            type="LLM",
-            name="call",
-            level="DEFAULT",
-            model="gpt-4o",
-            usage={"input": 100, "output": 50},
-            start=_T0,
-            end=_T1,
+    reader.summaries = [
+        _summary(
+            id="t1",
+            timestamp=_T0,
+            tags=["a"],
+            total_cost=0.3,
+            latency_ms=2000.0,
+            total_tokens=150,
+            status="ok",
+            input_preview={"q": "hi"},
+            output_preview="done",
         )
-    ]
-    reader.traces = [
-        _trace(id="t1", timestamp=_T0, tags=["a"], total_cost=0.3, observations=obs, input={"q": "hi"}, output="done")
     ]
 
     resp = await router.list_runs(_req(""))
@@ -278,6 +281,8 @@ async def test_runs_list_and_derive_shape():
     data = _json(resp)["data"]
     assert data["page"] == 1
     assert data["nextPage"] is None
+    # The row carries no model field; latency/tokens/status/previews come straight
+    # from the summary (an "ok" status projects as "success").
     assert data["items"][0] == {
         "id": "t1",
         "traceId": "t1",
@@ -287,17 +292,14 @@ async def test_runs_list_and_derive_shape():
         "cost": 0.3,
         "latencyMs": 2000,
         "totalTokens": 150,
-        "model": "gpt-4o",
         "inputPreview": {"q": "hi"},
         "outputPreview": "done",
-        "fetchError": None,
     }
 
 
-async def test_runs_error_status_derived_from_observation_level():
+async def test_runs_error_status_from_summary():
     reader = _install(_FakeReader())
-    obs = [_obs(id="o1", trace_id="t1", level="ERROR", start=_T0, end=_T1)]
-    reader.traces = [_trace(id="t1", timestamp=_T0, total_cost=0.0, observations=obs)]
+    reader.summaries = [_summary(id="t1", timestamp=_T0, total_cost=0.0, status="error")]
     resp = await router.list_runs(_req(""))
     assert _json(resp)["data"]["items"][0]["status"] == "error"
 
@@ -380,7 +382,7 @@ async def test_runs_paging_sub_one_is_400():
 
 async def test_runs_next_page_when_full():
     reader = _install(_FakeReader())
-    reader.traces = [_trace(id="t1"), _trace(id="t2")]
+    reader.summaries = [_summary(id="t1"), _summary(id="t2")]
     resp = await router.list_runs(_req(_q(pageSize="1", page="1")))
     assert _json(resp)["data"]["nextPage"] == 2
 
@@ -420,7 +422,6 @@ async def test_get_trace_maps_full_detail():
     resp = await router.get_run_trace(_req("", trace_id="t1"))
     assert resp.status_code == 200
     data = _json(resp)["data"]
-    assert data["availability"] == "full"
     assert data == {
         "traceId": "t1",
         "timestamp": _T0.isoformat(),
@@ -429,8 +430,6 @@ async def test_get_trace_maps_full_detail():
         "input": {"q": "hi"},
         "output": "done",
         "metadata": {"m": 1},
-        "availability": "full",
-        "fetchError": None,
         "spans": [
             {
                 "id": "o1",
@@ -538,7 +537,6 @@ async def test_export_trace_json_download():
     assert resp.headers["Content-Disposition"] == 'attachment; filename="trace-t1.json"'
     body = json.loads(bytes(resp.body))
     assert body["traceId"] == "t1"
-    assert body["availability"] == "partial"  # no spans
 
 
 async def test_export_trace_unknown_404():
@@ -549,7 +547,7 @@ async def test_export_trace_unknown_404():
 
 async def test_export_runs_json_download():
     reader = _install(_FakeReader())
-    reader.traces = [_trace(id="t1", timestamp=_T0, total_cost=0.2, observations=[])]
+    reader.summaries = [_summary(id="t1", timestamp=_T0, total_cost=0.2)]
 
     resp = await router.export_runs(_req(_q(format="json")))
     assert resp.media_type == "application/json"
@@ -562,14 +560,14 @@ async def test_export_runs_json_download():
 async def test_export_runs_csv_download_and_injection_guard():
     reader = _install(_FakeReader())
     # An output preview whose leading char a spreadsheet reads as a formula.
-    reader.traces = [_trace(id="t1", timestamp=_T0, total_cost=0.2, output="=SUM(A1)", observations=[])]
+    reader.summaries = [_summary(id="t1", timestamp=_T0, total_cost=0.2, output_preview="=SUM(A1)")]
 
     resp = await router.export_runs(_req(""))  # csv is the default
     assert resp.media_type == "text/csv"
     assert resp.headers["Content-Disposition"] == 'attachment; filename="runs.csv"'
     text = bytes(resp.body).decode()
     header = text.splitlines()[0]
-    expected_header = "traceId,createdAt,status,fetchError,cost,latencyMs,totalTokens,model,inputPreview,outputPreview"
+    expected_header = "traceId,createdAt,status,cost,latencyMs,totalTokens,inputPreview,outputPreview"
     assert header.startswith(expected_header)
     # The formula-leading preview is prefixed with a quote (CSV-injection guard).
     assert "'=SUM(A1)" in text

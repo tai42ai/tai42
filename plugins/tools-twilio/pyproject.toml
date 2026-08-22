@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-twilio"
-version = "1.0.4"
+version = "1.0.5"
 description = "Twilio provisioning tools for the TAI ecosystem: manifest-loaded REST tools that list a Twilio account's incoming phone numbers, read a number's inbound-message webhook, and set a number's inbound-message webhook URL."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract these tools register through — the tai42_app
     # handle and the tool facet.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=4.0,<5",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Twilio REST module wires to.
     "tai42-kit[curl]>=3.5,<4",

@@ -20,6 +20,7 @@ from tai42_contract.monitoring import (
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
     ProjectConfig,
     Span,
@@ -182,7 +183,7 @@ class NoOpReader:
         page: int | None = None,
         filter: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
-    ) -> list[MonitoringTrace]:
+    ) -> list[MonitoringTraceSummary]:
         return []
 
 

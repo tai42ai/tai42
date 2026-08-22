@@ -27,7 +27,7 @@ dependencies = [
     # the session models, the SandboxPolicy, the error family, PluginItemKind.SANDBOX,
     # and the tai42_app.sandboxes facet. The floor names the contract minor that
     # first ships the sandbox contract module.
-    "tai42-contract>=3.1,<4",
+    "tai42-contract>=4.1,<5",
     # TaiBaseSettings + settings cache and the sandbox lifecycle base. The floor
     # names the first kit minor carrying `tai42_kit.sandbox` (ManagedSandbox,
     # ManagedSandboxSession, SandboxDispatchSettings, the conformance suite), which

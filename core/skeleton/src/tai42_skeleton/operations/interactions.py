@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import jsonschema
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_core import PydanticSerializationError
 from tai42_contract.interactions import (
     AnswerFormat,
@@ -276,3 +276,140 @@ async def answer_interaction(interaction_id: str, answer: Any) -> dict:
         await fire_continuation_after_claim(r, store, state.request, validated)
 
     return {"interaction_id": interaction_id, "status": "answered"}
+
+
+def _add_data(request: InteractionRequest) -> dict:
+    """The add-frame shape shared by the paged list door and the live stream tail — the
+    client shape of one pending question."""
+    # A verifier config rides ``format_payload`` server-side; STRIP it from the
+    # client frame (the browser never needs the verifier name / secret_env) and
+    # in its place emit ``server_verified`` so the UI renders a non-actionable
+    # "awaiting a verified server callback" card instead of a dead confirm link.
+    format_payload = request.format_payload
+    server_verified = False
+    if format_payload is not None and "verifier" in format_payload:
+        format_payload = {k: v for k, v in format_payload.items() if k != "verifier"}
+        server_verified = True
+
+    data = {
+        "interaction_id": request.interaction_id,
+        "group_id": request.group_id,
+        "question": request.question,
+        "answer_format": request.answer_format.value,
+        "format_payload": format_payload,
+        "created_at": request.created_at.isoformat(),
+        "timeout_at": request.timeout_at.isoformat(),
+        # Rides every add frame (list door + live tail) so the UI can label the
+        # answered state of a sensitive question, whose body is never persisted.
+        "sensitive": request.sensitive,
+    }
+    if server_verified:
+        data["server_verified"] = True
+    if request.channel is not None:
+        data["channel"] = request.channel
+    # Attribution, additive and absent-when-None (the channel/media idiom). The
+    # feed is the channel operator's own authed surface already scoped by the
+    # audience read-gate, so ``recipient`` (a delivery address) rides as-is,
+    # unmasked. ``recipient``/``origin`` are display/binding-only; ``audience`` IS
+    # the isolation axis, emitted here purely for display — the feed is already
+    # audience-gated at the read query, so echoing it grants no extra reach.
+    if request.recipient is not None:
+        data["recipient"] = request.recipient
+    if request.origin is not None:
+        data["origin"] = request.origin
+    if request.audience is not None:
+        data["audience"] = request.audience
+    # Display-only media rides the add frame as plain JSON dicts when present
+    # (absent — no key — when the question has none); ``exclude_none`` keeps a
+    # caption-less item lean, and the client treats a missing caption as absent.
+    if request.media is not None:
+        data["media"] = [item.model_dump(mode="json", exclude_none=True) for item in request.media]
+    return data
+
+
+#: The largest page the pending-list door serves. A larger ``page_size`` is capped to it —
+#: valid data, not an error — so one read can never ask for an unbounded slice.
+MAX_INTERACTIONS_PAGE_SIZE = 200
+
+#: The highest page number the pending-list door serves. A page past it names a rank the
+#: index cannot be sliced at; it is a malformed window and is refused as one.
+MAX_INTERACTIONS_PAGE = 1_000_000
+
+
+class InteractionWindowQuery(BaseModel):
+    """The ``?page=``/``?pageSize=`` window the pending-list door takes.
+
+    Spec metadata only — the door parses its query at the HTTP edge."""
+
+    page: int = Field(default=1, ge=1, le=MAX_INTERACTIONS_PAGE, description="1-based page number, pending order.")
+    page_size: int = Field(
+        default=50,
+        ge=1,
+        alias="pageSize",
+        description=f"Items per page. A larger value is capped to {MAX_INTERACTIONS_PAGE_SIZE}, never refused.",
+    )
+
+
+def _page_bounds(page: int, page_size: int) -> tuple[int, int]:
+    """The ``(offset, limit)`` a page/pageSize pair names. Both must be at least 1 and
+    ``page`` at most :data:`MAX_INTERACTIONS_PAGE`; a page size above the cap is capped,
+    never refused."""
+    if page < 1 or page_size < 1:
+        raise BadRequestError(f"page and page_size must be >= 1, got page={page} page_size={page_size}")
+    if page > MAX_INTERACTIONS_PAGE:
+        raise BadRequestError(f"page must be <= {MAX_INTERACTIONS_PAGE}, got page={page}")
+    limit = min(page_size, MAX_INTERACTIONS_PAGE_SIZE)
+    return (page - 1) * limit, limit
+
+
+def _next_page(page: int, limit: int, total: int) -> int | None:
+    """The next page number, or ``None`` on the last page, read from the filtered total."""
+    return page + 1 if page * limit < total else None
+
+
+@operation(
+    name="list_interactions",
+    summary="List pending interactions",
+    tags=["interactions"],
+    errors=[BadRequestError],
+    request_model=InteractionWindowQuery,
+)
+async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
+    """The pending questions the inbox shows, one page at a time — the initial-load
+    surface a client reads BEFORE applying the live stream
+    (``GET /api/interactions/stream``).
+
+    Order is the store's pending order (each group's most-recent question ``created_at``,
+    then stream order within a group). A RESTRICTED caller sees ONLY questions addressed
+    to its identity — the audience filter runs BEFORE paging so ``total`` is honest; an
+    UNRESTRICTED caller sees every pending question. A ``page`` or ``page_size`` below 1,
+    or a ``page`` above the served maximum, is a 400; a ``page_size`` above the cap is
+    capped, never refused. The pending read reconciles phantom/abandoned questions as it
+    goes (phantom-group prune, abandoned past-deadline prune, answered/missing skip). Returns
+    ``{"items", "total", "page", "page_size", "next_page", "truncated"}`` — ``items``
+    carry the same shape as the stream's add frames, and ``truncated`` is always
+    ``false`` (the pending index is the whole set, sliced in memory)."""
+    offset, limit = _page_bounds(page, page_size)
+    # OFF gate: with no store configured nothing is pending — the honest empty page
+    # (the malformed-window 400 above still applies, so the door is no configured oracle).
+    if not interactions_store_configured():
+        return {"items": [], "total": 0, "page": page, "page_size": limit, "next_page": None, "truncated": False}
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    _user_id, restricted = request_identity()
+    async with client_ctx(RedisClient, settings.redis) as r:
+        pending = await store.pending(r)
+    if restricted is not None:
+        # A restricted caller sees only its own addressed questions; filter BEFORE
+        # paging so the total counts what the caller may actually see.
+        pending = [req for req in pending if req.audience == restricted]
+    total = len(pending)
+    window = pending[offset : offset + limit]
+    return {
+        "items": [_add_data(req) for req in window],
+        "total": total,
+        "page": page,
+        "page_size": limit,
+        "next_page": _next_page(page, limit, total),
+        "truncated": False,
+    }

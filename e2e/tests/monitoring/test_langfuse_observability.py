@@ -46,6 +46,23 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
         message="observability reader never served langfuse-sourced runs",
     )
 
+    # The list row is a SUMMARY: status / tokens / latency are first-class, and no
+    # trace body (observations/spans) nor per-observation model rides on the row.
+    runs = await api.get("/api/observability/runs")
+    row = runs["items"][0]
+    assert row["status"] in ("success", "error")
+    assert "totalTokens" in row
+    assert "latencyMs" in row
+    assert "model" not in row
+    assert "observations" not in row
+    assert "spans" not in row
+
+    # DETAIL leg: the body door (get_trace) still serves the full trace with its
+    # observations — the list summary and the detail are distinct read paths.
+    detail = await api.get(f"/api/observability/runs/{row['traceId']}/trace")
+    assert detail["traceId"] == row["traceId"]
+    assert "spans" in detail
+
 
 async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     monitoring_stack: TaiStack, llm_stub: LlmStub, uniq: Callable[[str], str]
@@ -63,8 +80,8 @@ async def test_agent_run_trace_reaches_langfuse_and_serves_back(
     api = monitoring_stack.api()
 
     # READ side: the observability run list exposes each trace's input via
-    # ``inputPreview`` (a bounded, whole-leaf copy — the short user message is kept
-    # intact). The run-list HTTP filter has no name/input clause, so match the marker
+    # ``inputPreview`` (a server-bounded preview string — the short user message is
+    # kept intact). The run-list HTTP filter has no name/input clause, so match the marker
     # client-side over the served items: its presence proves THIS agent run's trace
     # reached Langfuse and is served back through the platform read path only.
     async def marker_run_served() -> bool:

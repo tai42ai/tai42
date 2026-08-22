@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-celery"
-version = "2.0.1"
+version = "2.0.2"
 description = "Celery execution backend for the TAI ecosystem — worker/beat/flower runtime, prefork-pool turnover on worker-bus ops, and RedBeat scheduling."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the backend registers through — the Backend ABC,
     # CallbackSchema, Manifest, ExtensionKind, and the tai42_app handle.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=4.0,<5",
     # TaiBaseSettings + settings cache, pooled Redis client, schedule
     # normalization, signature helpers, and the jq compiler (callback conditions).
     # The floor names the first release carrying `tai42_kit.backend`

@@ -128,11 +128,12 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
     assert "'" not in reason
 
 
-# ------------------------------------------------------ doc-only Field filter
-# A doc-only pydantic ``Field(...)`` change (description/title/examples) is
+# ------------------------------------------------------ doc-only call filter
+# A doc-only change to a known decorator/constructor call (``Field``, ``Typer``,
+# ``Option``/``Argument``) confined to that callee's documentation keywords is
 # metadata, not API surface — griffe flags it ATTRIBUTE_CHANGED_VALUE, the filter
-# drops it. Every non-doc change stays breaking, and any non-Field or unparseable
-# expression keeps griffe's classification (breaking-by-default).
+# drops it. Every non-doc change stays breaking, and any unknown callee or
+# unparseable expression keeps griffe's classification (breaking-by-default).
 
 
 @pytest.mark.parametrize(
@@ -151,10 +152,17 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
             "pydantic.Field(default=1, description='a')",
             "pydantic.Field(default=1, description='b')",
         ),
+        # The tai42-cli 3.4.0 incident: only the Typer help text changed.
+        (
+            "typer.Typer(name='interactions', help='...old...', no_args_is_help=True)",
+            "typer.Typer(name='interactions', help='...new...', no_args_is_help=True)",
+        ),
+        # A typer ``Option`` help-only edit is documentation.
+        ("Option(None, '--flag', help='old')", "Option(None, '--flag', help='new')"),
     ],
 )
-def test_doc_only_field_change_is_not_breaking(old: str, new: str):
-    assert api_gate._is_doc_only_field_change(old, new) is True
+def test_doc_only_call_change_is_not_breaking(old: str, new: str):
+    assert api_gate._is_doc_only_call_change(old, new) is True
 
 
 @pytest.mark.parametrize(
@@ -164,7 +172,7 @@ def test_doc_only_field_change_is_not_breaking(old: str, new: str):
         ("Field(default=None, gt=0)", "Field(default=5, gt=0)"),
         # A constraint (gt) change is real surface.
         ("Field(default=None, gt=0)", "Field(default=None, gt=1)"),
-        # Non-Field attribute value changes keep griffe's classification.
+        # Unknown-callee attribute value changes keep griffe's classification.
         ("some_call(a=1)", "some_call(a=2)"),
         ("42", "43"),
         # A description edit paired with a real default change is still breaking.
@@ -174,10 +182,20 @@ def test_doc_only_field_change_is_not_breaking(old: str, new: str):
         ),
         # An unparseable expression is a parse failure -> still breaking, no crash.
         ("Field(", "Field("),
+        # A Typer help edit that ALSO flips a behaviour keyword is real surface.
+        (
+            "typer.Typer(name='interactions', help='old', no_args_is_help=True)",
+            "typer.Typer(name='interactions', help='new', no_args_is_help=False)",
+        ),
+        # A Typer ``name`` change is real surface, not documentation.
+        (
+            "typer.Typer(name='old', help='same')",
+            "typer.Typer(name='new', help='same')",
+        ),
     ],
 )
-def test_non_doc_field_change_stays_breaking(old: str, new: str):
-    assert api_gate._is_doc_only_field_change(old, new) is False
+def test_non_doc_call_change_stays_breaking(old: str, new: str):
+    assert api_gate._is_doc_only_call_change(old, new) is False
 
 
 # ----------------------------------------------------- additive collection growth

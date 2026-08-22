@@ -45,6 +45,7 @@ from tai42_kit.settings import require
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
+from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore, PruneResult
@@ -499,35 +500,41 @@ async def ask_user(
     else:
         format_payload = _build_payload(fmt, options, schema)
 
-    request = InteractionRequest(
-        interaction_id=interaction_id,
-        group_id=group,
-        question=question,
-        answer_format=fmt,
-        format_payload=format_payload,
-        reply_to=reply_to,
-        created_at=created_at,
-        timeout_at=timeout_at,
-        sensitive=sensitive,
-        channel=channel,
-        recipient=recipient,
-        audience=audience,
-        # Origin of the raising run (a background tool-run id), read from the
-        # contextvar the run binds; None outside a bound tool run.
-        origin=get_interaction_origin(),
-        # dicts here are coerced to ``MediaItem`` by the model's own validation —
-        # the single source of media validation, which raises before any persist.
-        media=media,  # type: ignore[arg-type]
-        # Async park: the sentinel-returning discipline plus the generic
-        # continuation resolved above (both None for a sync ask). The model's own
-        # validator enforces continuation-iff-async.
-        mode=mode,
-        continuation_tool=continuation_tool,
-        continuation_identity=continuation_identity,
-        expiry_at=expiry_at,
-    )
-
     async with client_ctx(RedisClient, settings.redis) as r:
+        # A data:image is decoded once and stored BY REFERENCE before the request is
+        # built, so the durable record carries a same-origin served reference
+        # (``MEDIA_ROUTE_PREFIX{id}``) the inbox renders, never the inline bytes. The
+        # media keys start at ``idle_ttl`` and ``add`` extends them to the group
+        # horizon (an async park's own longer horizon included). https/link items pass
+        # through unchanged. ``substitute_media`` coerces every item through
+        # ``MediaItem`` — the media validation that raises before any store. dicts and
+        # MediaItem inputs are both accepted.
+        stored_media = await substitute_media(store, r, media, settings.idle_ttl_seconds) if media is not None else None
+        request = InteractionRequest(
+            interaction_id=interaction_id,
+            group_id=group,
+            question=question,
+            answer_format=fmt,
+            format_payload=format_payload,
+            reply_to=reply_to,
+            created_at=created_at,
+            timeout_at=timeout_at,
+            sensitive=sensitive,
+            channel=channel,
+            recipient=recipient,
+            audience=audience,
+            # Origin of the raising run (a background tool-run id), read from the
+            # contextvar the run binds; None outside a bound tool run.
+            origin=get_interaction_origin(),
+            media=stored_media,
+            # Async park: the sentinel-returning discipline plus the generic
+            # continuation resolved above (both None for a sync ask). The model's own
+            # validator enforces continuation-iff-async.
+            mode=mode,
+            continuation_tool=continuation_tool,
+            continuation_identity=continuation_identity,
+            expiry_at=expiry_at,
+        )
         # Concurrency guard (all formats). ``reserve_open_slot`` prunes stale open
         # members, refuses at the cap, and reserves this question's open-index
         # member in ONE atomic step — so a concurrent burst admits exactly

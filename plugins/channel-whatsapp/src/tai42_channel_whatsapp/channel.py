@@ -262,21 +262,13 @@ async def _send_body_and_media(phone_number_id: str, target: str, notification: 
     """Send the freeform body (with any ``link`` items appended) then each
     ``image`` item as its own image message; return every ``wamid`` in send order.
 
-    A ``data:`` image URL is refused loudly BEFORE anything is sent — Meta's
-    link-sourced image send takes a public URL only, so a data URI would fail
-    Meta-side; refusing here names the constraint. A part that fails mid-send
-    raises naming the wamids already delivered (partial delivery stays visible).
+    Each image is its own message, so there is no native per-send image cap here — the
+    platform guard bounds the item count. A part that fails mid-send raises naming the
+    wamids already delivered (partial delivery stays visible).
     """
     media = notification.media or []
     images = [item for item in media if item.kind == MediaKind.IMAGE]
     links = [item for item in media if item.kind == MediaKind.LINK]
-
-    for image in images:
-        if image.url.startswith("data:"):
-            raise ChannelInputError(
-                f"WhatsApp cannot send a data: image URL ({image.url[:32]}...); a link-sourced image "
-                "requires a public https URL"
-            )
 
     body = notification.message
     if links:

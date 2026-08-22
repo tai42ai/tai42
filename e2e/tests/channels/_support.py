@@ -71,39 +71,40 @@ def tool_content_text(result: CallToolResult) -> str:
     return json.dumps([block.model_dump(mode="json") for block in (result.content or [])])
 
 
-async def find_add(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
-    """Stream the interactions backlog on ``port`` until an add frame whose payload
-    carries ``question`` appears; return the frame's whole parsed ``data`` object."""
+async def _pending_items(stack: TaiStack, port: int, *, timeout: float = 3.0) -> list[dict]:
+    """One read of the paged pending-list door on ``port`` — every pending item."""
     import httpx
 
-    url = f"http://{stack.host}:{port}/api/interactions/stream"
+    url = f"http://{stack.host}:{port}/api/interactions"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params={"page": 1, "pageSize": 200})
+        resp.raise_for_status()
+        return list(resp.json()["data"]["items"])
+
+
+async def find_add(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
+    """Poll the paged pending-list door on ``port`` until an item whose payload carries
+    ``question`` appears; return the whole parsed item object."""
+    import httpx
 
     async def probe() -> dict | None:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            try:
-                async with client.stream("GET", url) as response:
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        while "\n\n" in buffer:
-                            frame, buffer = buffer.split("\n\n", 1)
-                            for line in frame.splitlines():
-                                if line.startswith("data:") and question in line:
-                                    return json.loads(line[len("data:") :].strip())
-                            if "backlog_done" in frame:
-                                return None
-            except httpx.HTTPError:
-                return None
+        try:
+            items = await _pending_items(stack, port, timeout=2.0)
+        except httpx.HTTPError:
+            return None
+        for item in items:
+            if question in json.dumps(item):
+                return item
         return None
 
-    found = await wait_for_async(probe, deadline=deadline, message=f"add frame for {question!r} never appeared")
+    found = await wait_for_async(probe, deadline=deadline, message=f"list item for {question!r} never appeared")
     assert found is not None
     return found
 
 
 async def find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> str:
-    """Stream the interactions backlog on ``port`` until a pending interaction
-    whose payload carries ``question`` appears; return its id."""
+    """Poll the paged pending-list door on ``port`` until a pending interaction whose
+    payload carries ``question`` appears; return its id."""
     data = await find_add(stack, port, question, deadline=deadline)
     found = data.get("interaction_id") or data.get("id")
     assert found is not None
@@ -111,26 +112,9 @@ async def find_pending(stack: TaiStack, port: int, question: str, *, deadline: f
 
 
 async def is_pending(stack: TaiStack, port: int, question: str) -> bool:
-    """Whether a pending interaction carrying ``question`` is in the backlog on
-    ``port`` right now (one backlog read, no wait)."""
-    import httpx
-
-    url = f"http://{stack.host}:{port}/api/interactions/stream"
-    async with httpx.AsyncClient(timeout=3.0) as client, client.stream("GET", url) as response:
-        buffer = ""
-        async for chunk in response.aiter_text():
-            buffer += chunk
-            while "\n\n" in buffer:
-                frame, buffer = buffer.split("\n\n", 1)
-                for line in frame.splitlines():
-                    if line.startswith("data:") and question in line:
-                        return True
-                if "backlog_done" in frame:
-                    return False
-    # The backlog stream ended without a ``backlog_done`` sentinel — a server-side
-    # fault, not "not pending". Raise loudly rather than report a false absence
-    # that a zero-pending assertion could then pass on vacuously.
-    raise AssertionError(f"interactions stream on port {port} closed before backlog_done; pending state unknown")
+    """Whether a pending interaction carrying ``question`` is in the paged list on
+    ``port`` right now (one read, no wait)."""
+    return any(question in json.dumps(item) for item in await _pending_items(stack, port))
 
 
 def count_correlation_keys(stack: TaiStack, prefix: str) -> int:

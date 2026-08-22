@@ -31,6 +31,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("POST", "/api/connectors/oauth/complete"),  # browser OAuth callback
     ("GET", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
     ("POST", "/api/interactions/callback/{ticket}"),  # unauthenticated external answer door
+    ("GET", "/api/interactions/media/{media_id}"),  # unauthenticated served-media capability url (browser/vendor)
     ("POST", "/api/conversations/{route_name}/messages"),  # authed client/adapter door, not an operator function
     ("GET", "/api/plugins/{name}/studio/{path:path}"),  # studio SPA asset serving
     ("GET", "/api/login/methods"),  # public pre-auth login screen (browser)
