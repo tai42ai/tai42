@@ -276,6 +276,20 @@ class OrderBy(BaseModel):
     direction: Literal["asc", "desc"] = "desc"
 
 
+class RunAttribution(BaseModel):
+    """The generic identity a run's trace is tagged with at the shared chokepoint.
+
+    A pure key/value attribution envelope — every field is generic and optional
+    where a door legitimately lacks it. ``tags`` are the flow kwargs the operator
+    defines per delivery, carried verbatim with no platform interpretation;
+    ``metadata`` are attribution key/values. There is NO tenant/client/domain
+    field: attribution only, never a multi-tenant qualifier.
+    """
+
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class MonitoringFilter(BaseModel):
     """Vendor-neutral filter set for ``list_traces`` / ``list_spans_in_window``.
 

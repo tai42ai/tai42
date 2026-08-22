@@ -212,6 +212,30 @@ class ConnectorRef(BaseModel):
         return check_slug(value)
 
 
+# --- Resolved facade credential -----------------------------------------
+
+
+class ResolvedConnectionAuth(BaseModel):
+    """The credential a connection injects, resolved for one caller.
+
+    Returned by the ``AppConnectors.resolve_connection_auth`` facade accessor so an
+    in-process plugin reads a skeleton-resolved credential without importing the
+    skeleton. Carries THREE channels — an OAuth ``access_token`` plus static
+    ``env`` (stdio) / ``headers`` (http) — because a connection populates whichever
+    its kind uses. All values are :class:`~pydantic.SecretStr`, kept out of
+    repr/logs/tracebacks. The accessor returns ``None`` when the connection injects
+    nothing.
+    """
+
+    # The resolved OAuth token — the ONLY channel an OAuth resolution populates
+    # (with ``env``/``headers`` empty); dropping it silently injects nothing.
+    access_token: SecretStr | None = None
+    # Static no-auth values merged into the request at call time: ``env`` for a
+    # stdio sub-service, ``headers`` for an http one; both empty for OAuth.
+    env: dict[str, SecretStr] = Field(default_factory=dict)
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
+
+
 # --- Wire models (/api/connectors/*) ------------------------------------
 
 

@@ -25,6 +25,7 @@ from tai42_contract.monitoring.models import (
     MonitoringTrace,
     OrderBy,
     ProjectConfig,
+    RunAttribution,
     Span,
     SpanKind,
     SpanWindowItem,
@@ -32,10 +33,15 @@ from tai42_contract.monitoring.models import (
 )
 from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
-from tai42_contract.monitoring.writer import MonitoringWriter
+from tai42_contract.monitoring.writer import (
+    RUN_ATTRIBUTION_TRACE_NAME,
+    MonitoringWriter,
+    attribute_run,
+)
 
 __all__ = [
     "DEFAULT_LEVEL",
+    "RUN_ATTRIBUTION_TRACE_NAME",
     "MetricsFilter",
     "MetricsResult",
     "MetricsRow",
@@ -51,9 +57,11 @@ __all__ = [
     "MonitoringWriter",
     "OrderBy",
     "ProjectConfig",
+    "RunAttribution",
     "Span",
     "SpanKind",
     "SpanWindowItem",
     "TraceContext",
     "TraceNotFoundError",
+    "attribute_run",
 ]

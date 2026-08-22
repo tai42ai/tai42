@@ -154,6 +154,38 @@ def test_preset_body_defaults():
     assert body.description == ""
     assert body.fixed_kwargs == {}
     assert body.extensions == []
+    assert body.output_schema is None
+    assert body.input_schema is None
+
+
+def test_preset_body_round_trips_input_schema():
+    # input_schema must survive a body dump/reload like output_schema — dropping it
+    # would silently un-enforce the structured input on reload.
+    from tai42_contract.presets import PresetBody
+
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+    body = PresetBody(base_tool="sandbox_exec", input_schema=schema)
+    again = PresetBody(**body.model_dump())
+    assert again == body
+    assert again.input_schema == schema
+
+
+def test_preset_input_schema_support_carries_payload_arg():
+    from tai42_contract.presets import PresetInputSchemaSupport
+
+    support = PresetInputSchemaSupport(payload_arg="argv")
+    assert support.payload_arg == "argv"
+    assert PresetInputSchemaSupport(**support.model_dump()) == support
+
+
+def test_preset_store_create_preset_threads_input_schema():
+    # create_preset carries the optional input_schema alongside output_schema, both
+    # defaulting to None (no schema declared).
+    from tai42_contract.presets import PresetStore
+
+    sig = inspect.signature(PresetStore.create_preset)
+    assert sig.parameters["input_schema"].default is None
+    assert sig.parameters["output_schema"].default is None
 
 
 # -- Preset errors -------------------------------------------------------------
@@ -207,17 +239,26 @@ def test_preset_store_is_runtime_checkable():
 def test_preset_store_save_version_editable_fields_carry_forward_by_default():
     # The carry-forward sentinel expressed at the signature level: fixed_kwargs /
     # extensions default to None (= carry the active value forward), while
-    # output_schema uses the distinct CARRY_FORWARD sentinel (its cleared state is
-    # None, so None cannot double as "not provided"). description is now an editable
-    # per-version field defaulting to None (= carry forward, explicit string sets
-    # it). base_tool is never an argument — it always carries.
+    # output_schema / input_schema use the distinct CARRY_FORWARD sentinel (their
+    # cleared state is None, so None cannot double as "not provided"). description is
+    # now an editable per-version field defaulting to None (= carry forward, explicit
+    # string sets it). base_tool is never an argument — it always carries.
     from tai42_contract.presets import CARRY_FORWARD, PresetStore
 
     sig = inspect.signature(PresetStore.save_version)
-    assert list(sig.parameters) == ["self", "name", "fixed_kwargs", "extensions", "output_schema", "description"]
+    assert list(sig.parameters) == [
+        "self",
+        "name",
+        "fixed_kwargs",
+        "extensions",
+        "output_schema",
+        "input_schema",
+        "description",
+    ]
     for field in ("fixed_kwargs", "extensions"):
         assert sig.parameters[field].default is None, f"{field} must default to the carry-forward sentinel"
     assert sig.parameters["output_schema"].default is CARRY_FORWARD
+    assert sig.parameters["input_schema"].default is CARRY_FORWARD
     assert sig.parameters["description"].default is None
     assert "base_tool" not in sig.parameters
 

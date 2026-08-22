@@ -20,12 +20,12 @@ import tai42_contract
 
 from ._helpers import protocol_members  # stdlib-only helper, no application package
 
-# The frozen facade surface: the 63 (sub-protocol, member) pairs over 60
-# distinct flat names, grouped into the 20 sub-protocols. This is the
+# The frozen facade surface: the 73 (sub-protocol, member) pairs over 70
+# distinct flat names, grouped into the 22 sub-protocols. This is the
 # contract's own source of truth — no external lookup needed. Three leaf names
 # are shared: ``store`` (versioning + presets) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (60) is three
-# fewer than the pair count (63).
+# (webhook_verifiers + channels), so the distinct-name union (70) is three
+# fewer than the pair count (73).
 EXPECTED_FACADE = {
     # tools (12)
     "tool",
@@ -47,12 +47,18 @@ EXPECTED_FACADE = {
     # backends (2)
     "register_backend",
     "backend",
+    # sandboxes (4)
+    "register_sandbox",
+    "sandbox",
+    "require_sandbox",
+    "sandbox_policy",
     # storage (2)
     "register_storage",
     "resource_manager",
-    # connectors (2)
+    # connectors (3)
     "register_connector",
     "token_store",
+    "resolve_connection_auth",
     # accounts (1)
     "active_provider",
     # webhook_verifiers (2)
@@ -67,6 +73,9 @@ EXPECTED_FACADE = {
     # monitoring (2)
     "register_monitoring",
     "active",
+    # sandboxes and interactions expose the facade seams a plugin reads without
+    # importing the skeleton; ``ask_user`` is the interactions facet's one member.
+    "ask_user",
     # extensions (2)
     "extension",
     "available_extensions",
@@ -105,9 +114,13 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (3) — `store` shared with versioning above
+    # presets (7) — `store` shared with versioning above
     "bind",
     "register_write_validator",
+    "register_input_schema_support",
+    "input_schema_support",
+    "register_registration_tier",
+    "registration_tier",
 }
 
 
@@ -166,9 +179,11 @@ def test_facade_partition_against_frozen_surface():
         AppConversations,
         AppExtensions,
         AppHttp,
+        AppInteractions,
         AppLifecycle,
         AppMonitoring,
         AppPresets,
+        AppSandboxes,
         AppStorage,
         AppSubApp,
         AppTools,
@@ -180,6 +195,7 @@ def test_facade_partition_against_frozen_surface():
         AppTools,
         AppAgents,
         AppBackends,
+        AppSandboxes,
         AppStorage,
         AppConnectors,
         AppAccounts,
@@ -188,6 +204,7 @@ def test_facade_partition_against_frozen_surface():
         AppConversations,
         AppMonitoring,
         AppExtensions,
+        AppInteractions,
         AppHttp,
         AppClients,
         AppLifecycle,
@@ -207,20 +224,21 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 63 (sub-protocol, member) pairs over 60 distinct names — ``store`` is
+    # 73 (sub-protocol, member) pairs over 70 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 60, f"union={len(union)}"
-    assert total == 63 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 70, f"union={len(union)}"
+    assert total == 73 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_twenty_namespaces():
+def test_taiapp_exposes_twenty_two_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
         "tools",
         "agents",
         "backends",
+        "sandboxes",
         "storage",
         "connectors",
         "accounts",
@@ -229,6 +247,7 @@ def test_taiapp_exposes_twenty_namespaces():
         "conversations",
         "monitoring",
         "extensions",
+        "interactions",
         "http",
         "clients",
         "lifecycle",

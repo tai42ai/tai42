@@ -25,7 +25,12 @@ from tai42_contract.presets.errors import (
     PresetNotFoundError,
     PresetVersionNotFoundError,
 )
-from tai42_contract.presets.models import CARRY_FORWARD, CarryForward, PresetBody
+from tai42_contract.presets.models import (
+    CARRY_FORWARD,
+    CarryForward,
+    PresetBody,
+    PresetInputSchemaSupport,
+)
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
 #: A per-base-tool write validator: given the FULL body about to persist, returns
@@ -50,13 +55,14 @@ class PresetStore(Protocol):
         spec: PresetSpec,
         extensions: Sequence[Sequence[ExtensionElement]],
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> DocumentRecord:
         """Create a versioned preset. ``spec`` carries ``name``/``description``/
         ``base_tool``/``fixed_kwargs``; ``extensions`` (the combos list) and the
-        optional ``output_schema`` ride alongside — all of them land in the
-        persisted :class:`PresetBody`. Raise :class:`PresetExistsError` on a
-        duplicate name, :class:`PresetNameConflictError` if the name collides with
-        a base tool."""
+        optional ``output_schema`` / ``input_schema`` ride alongside — all of them
+        land in the persisted :class:`PresetBody`. Raise :class:`PresetExistsError`
+        on a duplicate name, :class:`PresetNameConflictError` if the name collides
+        with a base tool."""
         ...
 
     async def save_version(
@@ -65,6 +71,7 @@ class PresetStore(Protocol):
         fixed_kwargs: dict[str, Any] | None = None,
         extensions: Sequence[Sequence[ExtensionElement]] | None = None,
         output_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
     ) -> DocumentVersion:
         """Append a new version from the editable body fields.
@@ -75,10 +82,11 @@ class PresetStore(Protocol):
         one UNIFORM sentinel: omitted/``None`` = carry the active value forward
         unchanged; an explicit empty list (``extensions=[]``) = deliberately CLEAR
         that field. An explicitly provided empty list is a value, never "not
-        provided". ``output_schema`` follows the SAME rule but with a distinct
-        :data:`CARRY_FORWARD` sentinel (its cleared state is ``None``, so ``None``
-        cannot double as "not provided"): omitted = carry forward, an explicit
-        ``None`` = clear, an explicit dict = wins. ``description`` is editable per
+        provided". ``output_schema`` and ``input_schema`` each follow the SAME rule
+        but with a distinct :data:`CARRY_FORWARD` sentinel (their cleared state is
+        ``None``, so ``None`` cannot double as "not provided"): omitted = carry
+        forward, an explicit ``None`` = clear, an explicit dict = wins.
+        ``description`` is editable per
         version: ``None`` = carry the active description forward, an explicit
         non-empty string = set it. The RESULTING description — explicit or carried
         — is validated non-empty (raising :class:`ValueError`, surfaced as a 400),
@@ -149,6 +157,7 @@ __all__ = [
     "PresetBody",
     "PresetError",
     "PresetExistsError",
+    "PresetInputSchemaSupport",
     "PresetNameConflictError",
     "PresetNotFoundError",
     "PresetSpec",

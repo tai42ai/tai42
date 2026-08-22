@@ -324,6 +324,7 @@ class Manifest(BaseModel):
     backend_module: str | None = None
     storage_module: str | None = None
     monitoring_module: str | None = None
+    sandbox_module: str | None = None
     static_dir: str | None = None
 
     # Names the installed Python packages that ship a Studio plugin. A discovery

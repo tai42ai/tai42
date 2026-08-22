@@ -42,7 +42,7 @@ def _spec_kwargs(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def test_kind_enum_has_the_fifteen_kinds():
+def test_kind_enum_has_the_sixteen_kinds():
     from tai42_contract.plugins import PluginItemKind
 
     assert {k.value for k in PluginItemKind} == {
@@ -61,6 +61,7 @@ def test_kind_enum_has_the_fifteen_kinds():
         "router",
         "middleware",
         "mcp-server",
+        "sandbox",
     }
 
 
