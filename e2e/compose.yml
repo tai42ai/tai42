@@ -305,13 +305,58 @@ services:
   # a throwaway loopback engine; the deployment shares certs over a named volume
   # to in-cluster consumers instead.
   #
-  # Rootless-dind posture (NOT --privileged): the nested user namespace +
-  # inner-bridge iptables need seccomp/apparmor unconfined on the ENGINE only.
+  # Engine posture — privileged, and why session isolation is UNAFFECTED.
+  # The engine runs `docker:28-dind-rootless`: dockerd itself runs ROOTLESS
+  # (uid 1000) inside this container via rootlesskit, so inner sessions remain
+  # rootless-contained. rootlesskit must create a nested user namespace and then
+  # program the inner bridge (tuntap/slirp + iptables); in a containerized
+  # environment that setup needs `privileged: true` — WITHOUT it rootlesskit
+  # cannot mount sysfs or create tap0 and the daemon never becomes usable.
+  # `privileged` makes the CONTAINER privileged; dockerd inside it is still
+  # rootless. Privilege does NOT widen what an inner SESSION can reach: by design,
+  # session isolation from the deployment is enforced by (a) the `sandbox-ctrl`
+  # NETWORK SPLIT — this engine is OFF the datastore network — and (b) the
+  # INNER-BRIDGE EGRESS FIREWALL below (RFC1918 + link-local/metadata DROP), NOT by
+  # the engine container's privilege level. seccomp/apparmor stay unconfined for the
+  # nested userns + inner-bridge iptables. (Also, docker's own dind-rootless
+  # guidance requires the OUTER container to be privileged; the previous
+  # "NOT --privileged" posture never actually booted the rootless daemon.)
+  #
+  # NOTE — the egress firewall below does NOT currently install in this rootless
+  # topology: its `nsenter -t <dockerd_pid> -n` runs as the rootless user (uid 1000),
+  # which lacks CAP_SYS_ADMIN over the rootlesskit CHILD userns that owns dockerd's
+  # netns, so the DROP rules are never programmed. A session can therefore still
+  # reach RFC1918 peers on `sandbox-ctrl` (the `test_rfc1918_control_plane_blocked`
+  # negative fails). The installer must run as root (`nsenter -n` succeeds as root in
+  # this privileged container). Separately, when the drops ARE installed, the rootless
+  # daemon here NATs inner sessions out via `rootlesskit --net=vpnkit`, whose internal
+  # path rides RFC1918 (192.168.65/24) — so a blanket RFC1918 DROP also breaks public
+  # egress + DNS. Both issues are shared with the distribution reference compose and
+  # need a coordinated fix (root installer + drop only the deployment's own subnet +
+  # link-local, not all RFC1918). Tracked in the mission report, not fixed here.
+  #
+  # HOST PREREQUISITE (Ubuntu 23.10+/kernel 6.x): rootlesskit's userns creation is
+  # mediated by the host's `kernel.apparmor_restrict_unprivileged_userns`. When
+  # that is 1 (the distro default), the daemon fails to boot with
+  # `[rootlesskit:parent] error: failed to start the child: fork/exec
+  # /proc/self/exe: operation not permitted` — no container-level setting
+  # (privileged/seccomp/apparmor=unconfined included) overrides it, because the
+  # restriction targets the genuinely-unprivileged (uid 1000) rootless daemon at
+  # the HOST kernel. The CI runner / deployment node must permit unprivileged
+  # userns for rootlesskit — either `sysctl kernel.apparmor_restrict_unprivileged_userns=0`
+  # or an AppArmor profile granting `userns` for /usr/local/bin/rootlesskit (the
+  # rootlesskit hint prints the exact profile). This is a standard rootless-dind
+  # host requirement, not a compose setting.
   sandbox-engine:
     # tag 28-dind-rootless, pinned by digest so the engine base cannot float
     # across a pull — byte-identical to the reference compose's pin.
     image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
     profiles: ["sandbox"]
+    # The CONTAINER is privileged so rootlesskit can create the nested userns and
+    # program the inner bridge (sysfs mount + tap0). dockerd still runs ROOTLESS
+    # inside; session isolation is network+firewall enforced (see block above),
+    # so this does not weaken the four isolation negatives.
+    privileged: true
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
