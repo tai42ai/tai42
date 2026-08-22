@@ -31,12 +31,15 @@ from tai42_contract.backup import BackupSectionInfo
 from tai42_contract.channels import Channel
 from tai42_contract.clients import BaseClient
 from tai42_contract.config import ConfigManager
+from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.interactions.asker import AskUser
 from tai42_contract.monitoring import Monitoring
-from tai42_contract.presets import PresetStore, PresetWriteValidator
+from tai42_contract.presets import PresetInputSchemaSupport, PresetStore, PresetWriteValidator
+from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
 from tai42_contract.sub_mcp import SubMcpAppRouter
 from tai42_contract.versioning import VersionedStore
@@ -111,6 +114,61 @@ class AppBackends(Protocol):
 
     @property
     def backend(self) -> Backend | None: ...
+
+
+@runtime_checkable
+class AppSandboxes(Protocol):
+    """The sandbox-provider namespace (``app.sandboxes``)."""
+
+    def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
+        """Register the :class:`Sandbox` provider (decorator form, returning the class
+        unchanged). One provider backs the slot; a second registration is a conflict
+        the runtime rejects loudly."""
+        ...
+
+    @property
+    def sandbox(self) -> Sandbox | None:
+        """The registered provider, or ``None`` — status/introspection ONLY. Never
+        gate execution on this nullable read; acquire through :meth:`require_sandbox`,
+        the every-door guarantee (a ``None`` property is how per-consumer checks
+        drift)."""
+        ...
+
+    def require_sandbox(self) -> Sandbox:
+        """The ONE raising acquisition chokepoint: return the registered provider or
+        raise :class:`~tai42_contract.sandbox.SandboxUnavailableError` (naming
+        ``TAI_MCP_SANDBOX`` and ``sandbox_module``) when none is registered. EVERY
+        consumer acquires through here."""
+        ...
+
+    def sandbox_policy(self) -> SandboxPolicy:
+        """The skeleton-resolved :class:`~tai42_contract.sandbox.SandboxPolicy` — the
+        plugin-reachable READ of the SAME policy the skeleton binds to the kit at the
+        session-create chokepoint.
+
+        Available REGARDLESS of whether a provider is registered (it reads operator
+        config, not a provider). Mirrors the ``ask_user`` / ``resolve_connection_auth``
+        facade accessors that let an in-process plugin read a skeleton-resolved value
+        without importing the skeleton; a consumer building a policied spec reads the
+        network default and ``scrub_transcript`` here. Implemented in the skeleton,
+        which resolves the policy once and returns the SAME value it binds to the kit."""
+        ...
+
+
+@runtime_checkable
+class AppInteractions(Protocol):
+    """The interactions namespace (``app.interactions``) — the ``ask_user`` facade."""
+
+    @property
+    def ask_user(self) -> AskUser:
+        """The bound, :class:`~tai42_contract.interactions.AskUser`-typed ``ask_user``
+        callable, so an in-process plugin asks a human without importing the skeleton:
+        ``await tai42_app.interactions.ask_user(question, ..., mode="async",
+        expiry_at=...)``. The return shape is the ``AskUser`` contract's:
+        ``mode="sync"`` returns the typed answer, ``mode="async"`` returns a
+        ``SuspendedInteraction``. A facade EXPOSURE of the skeleton helper through the
+        already-typed Protocol — no new ask semantics."""
+        ...
 
 
 @runtime_checkable
@@ -293,6 +351,25 @@ class AppConnectors(Protocol):
     @property
     def token_store(self) -> ConnectorTokenStore:
         """The connector token store (single-namespace, keyed by ``connection_id``)."""
+        ...
+
+    def resolve_connection_auth(
+        self, connection_id: str, provider_id: str, sub_service: str
+    ) -> ResolvedConnectionAuth | None:
+        """Resolve the credential a connection injects, for the CURRENT caller.
+
+        The facade accessor an in-process plugin uses to read a skeleton-resolved
+        credential (OAuth token / static env / static headers) without importing the
+        skeleton — refreshing an expired OAuth token under the connection lock.
+        Returns ``None`` when the connection injects nothing.
+
+        GUARANTEE (enforced by the skeleton implementation): (1) it RAISES a loud
+        constant-message error when NO execution identity is bound — it fails close
+        BEFORE resolving, so an identity-less door never gets creds injected; and
+        (2) ``connection_id`` is a REFERENCE supplied by operator settings, NEVER
+        session-supplied, so a session can neither reach an identity-less door's
+        creds nor name another connection. The contract carries no logic — the
+        skeleton owns the fail-close enforcement."""
         ...
 
 
@@ -552,6 +629,36 @@ class AppPresets(Protocol):
         create / save-version / rollback — and in the dry-run ``validate`` verdict,
         so a body its base tool cannot accept is a loud 400 that never persists. A
         base tool with no registered validator gets no extra check."""
+        ...
+
+    def register_input_schema_support(self, base_tool: str, support: PresetInputSchemaSupport) -> None:
+        """Declare that ``base_tool`` ACCEPTS a per-preset input schema (one per base
+        tool; duplicate registration raises).
+
+        A base-tool plugin calls this through the ``tai42_app`` handle when its tool
+        module loads. A preset that sets an ``input_schema`` over a base tool with no
+        registered support is a loud authoring error at the shared preset-authoring
+        chokepoint, never a silently-ignored schema."""
+        ...
+
+    def input_schema_support(self, base_tool: str) -> PresetInputSchemaSupport | None:
+        """The input-schema support ``base_tool`` declared, or ``None`` if it declared
+        none (its typed schema is fixed)."""
+        ...
+
+    def register_registration_tier(self, base_tool: str, tier: RouteAction) -> None:
+        """Declare the authz character required to AUTHOR (create/save/rollback/rename)
+        a preset over ``base_tool`` (one per base tool; duplicate registration raises).
+
+        Default authoring is the presets' own ``write`` action; a base tool with no
+        declaration keeps that default. A base tool declaring ``fenced`` requires the
+        admin fence to author a preset over it. The shared preset-authoring chokepoint
+        reads this and enforces it BEFORE any store write on every authoring door."""
+        ...
+
+    def registration_tier(self, base_tool: str) -> RouteAction | None:
+        """The authoring authz tier ``base_tool`` declared, or ``None`` if it declared
+        none (authoring keeps the presets' default ``write`` action)."""
         ...
 
     @property

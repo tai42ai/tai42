@@ -207,6 +207,7 @@ class PluginItemKind(StrEnum):
     ROUTER = "router"
     MIDDLEWARE = "middleware"
     MCP_SERVER = "mcp-server"
+    SANDBOX = "sandbox"
 
 
 class ManifestBinding(BaseModel):
@@ -279,6 +280,7 @@ KIND_MANIFEST_BINDINGS: Mapping[PluginItemKind, ManifestBinding] = MappingProxyT
         PluginItemKind.ROUTER: ManifestBinding(field="routers_modules", mode="module_list", payload="module"),
         PluginItemKind.MIDDLEWARE: ManifestBinding(field="middlewares_modules", mode="module_list", payload="module"),
         PluginItemKind.MCP_SERVER: ManifestBinding(field="mcp", mode="mcp_entry", payload="data"),
+        PluginItemKind.SANDBOX: ManifestBinding(field="sandbox_module", mode="scalar_module", payload="module"),
     }
 )
 

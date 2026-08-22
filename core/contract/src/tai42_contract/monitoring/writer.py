@@ -3,12 +3,15 @@
 FAIL-SAFE INVARIANT
 -------------------
 The EMIT methods (``start_span``, ``record_span``, ``create_event``,
-``update_current_span``, ``trace_attributes``) and the ``Span``-handle methods
+``update_current_span``, ``trace_attributes``) and the
+``Span``-handle methods
 (``Span.update``, ``Span.set_trace_metadata``) catch their own errors and LOG —
 they MUST NOT raise into application code. A monitoring outage cannot be allowed
 to break a flow. So call sites need NO ``try/except`` around them. (The one
 precondition that DOES raise is ``record_span`` with no ``trace_id`` — a caller
-bug, not a backend outage.)
+bug, not a backend outage.) The module-level :func:`attribute_run` helper is
+fail-safe by construction: it only composes ``current_trace_id`` and
+``trace_attributes``, inheriting the latter's catch-and-log guarantee.
 
 The NON-emit methods are NOT fail-safe and propagate errors loudly:
 ``flush`` / ``shutdown`` (fork-safety must not be silently skipped),
@@ -32,17 +35,22 @@ downstream/parent span in flows/agents).
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.monitoring.models import (
     DEFAULT_LEVEL,
     MonitoringLevel,
+    RunAttribution,
     Span,
     SpanKind,
     TraceContext,
 )
+
+# The stable trace ``name`` every run-attribution stamp carries, so attributed
+# runs group under one neutral name regardless of the door that drove them.
+RUN_ATTRIBUTION_TRACE_NAME = "run"
 
 
 @runtime_checkable
@@ -198,3 +206,27 @@ class MonitoringWriter(Protocol):
         child inherits dead background threads otherwise.
         """
         ...
+
+
+def attribute_run(writer: MonitoringWriter, attribution: RunAttribution) -> AbstractContextManager[None]:
+    """Return the context manager that stamps ``attribution`` on the ambient
+    trace for the WRAPPED block.
+
+    A free function composing ``writer`` over :meth:`MonitoringWriter.trace_attributes`,
+    kept off the Protocol so structural writers conform without inheriting it. The
+    caller ENTERS the returned manager AROUND the whole run so the run's spans are
+    created INSIDE the attribution scope. It RETURNS the manager rather than
+    entering it — a one-shot enter/exit here would tear the scope down before any
+    span exists and silently no-op the stamp. Guarded by
+    :meth:`MonitoringWriter.current_trace_id`: a no-op manager outside a trace.
+    Fail-safe by construction — the stamp's fail-safety is
+    :meth:`MonitoringWriter.trace_attributes`'s (it catches + logs on enter/exit,
+    never raises).
+    """
+    if writer.current_trace_id() is None:
+        return nullcontext()
+    return writer.trace_attributes(
+        name=RUN_ATTRIBUTION_TRACE_NAME,
+        tags=attribution.tags,
+        metadata=attribution.metadata,
+    )

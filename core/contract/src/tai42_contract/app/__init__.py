@@ -29,9 +29,11 @@ from .facets import (
     AppConversations,
     AppExtensions,
     AppHttp,
+    AppInteractions,
     AppLifecycle,
     AppMonitoring,
     AppPresets,
+    AppSandboxes,
     AppStorage,
     AppSubApp,
     AppVersioning,
@@ -56,6 +58,9 @@ class TaiApp(Protocol):
     def backends(self) -> AppBackends: ...
 
     @property
+    def sandboxes(self) -> AppSandboxes: ...
+
+    @property
     def storage(self) -> AppStorage: ...
 
     @property
@@ -78,6 +83,9 @@ class TaiApp(Protocol):
 
     @property
     def extensions(self) -> AppExtensions: ...
+
+    @property
+    def interactions(self) -> AppInteractions: ...
 
     @property
     def http(self) -> AppHttp: ...
@@ -134,9 +142,11 @@ __all__ = [
     "AppConversations",
     "AppExtensions",
     "AppHttp",
+    "AppInteractions",
     "AppLifecycle",
     "AppMonitoring",
     "AppPresets",
+    "AppSandboxes",
     "AppStorage",
     "AppSubApp",
     "AppTools",
