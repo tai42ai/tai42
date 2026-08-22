@@ -203,11 +203,11 @@ class RouteMetadata:
     mounted: bool = False
     # Who registered the route (:class:`RouteOwner`): ``core`` for a native/operator
     # route, ``plugin`` for a declared plugin route. The cross-owner collision check
-    # keys on it, and the verifier's declared-public tier grants only a ``plugin``
-    # owner's public route.
+    # keys on it.
     owner: RouteOwner = CORE_OWNER
     # Whether the route answers UNAUTHENTICATED — the negation of ``authed``, kept as
-    # the explicit declared flag the verifier's declared-public tier reads.
+    # the explicit declared flag the verifier's declared-public tier reads to grant the
+    # public resource id regardless of owner.
     public: bool = False
 
 
@@ -527,6 +527,11 @@ class RouteRegistry:
         for entry in self._committed_shapes:
             if method not in entry.methods or not overlap(concrete, entry.shape):
                 continue
+            # Strict ``>`` keeps the FIRST-registered entry on an equal-specificity,
+            # same-owner, same-method overlap, and this MUST equal Starlette's first-match:
+            # the declared-public tier reads this match, so the authed route of such an
+            # overlap must be registered before the public one, else an authed route resolves
+            # public.
             if best is None or _shape_specificity(entry.shape) > _shape_specificity(best.shape):
                 best = entry
         return best.meta if best is not None else None

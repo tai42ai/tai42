@@ -1,12 +1,13 @@
 """The interactions auth boundary, pinned with access control ENABLED.
 
 A small ASGI app mounts the interactions routes behind the real three-middleware
-stack (Authentication -> AuthContext -> ResourceGuard). The verifier's tier-1
-mapping is seeded via ``AccessControlSettings(path_patterns=...)`` (the mechanism
-the deploy docs prescribe) and tier 2 as ``ac:route:`` entries. The pin needs no
-authenticated identity: it asserts the two callback doors and the served-media door
-reach the handlers with NO credentials, and that ``/stream`` and ``/answer`` are
-rejected without auth.
+stack (Authentication -> AuthContext -> ResourceGuard). The two callback doors and
+the served-media door are public through the verifier's declared-public tier: they
+are registered ``authed=False`` and the tier publics them straight from that
+declaration, with NO per-deployment route row or path pattern (the pattern table is
+empty). The pin needs no authenticated identity: it asserts those doors reach the
+handlers with NO credentials, and that the ``authed=True`` ``/stream`` and
+``/answer`` stay gated (rejected without auth).
 """
 
 from __future__ import annotations
@@ -21,33 +22,53 @@ from starlette.testclient import TestClient
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
+from tai42_skeleton.app.route_registry import CORE_OWNER, RouteAction, RouteRegistry
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
 
 from .._fakes.interactions_redis import FakeRedis as InteractionsFake
 from ._auth_boundary import wire_store_from_route_strings
 
-# tier 1: path -> template key; tier 2 (Redis ``ac:route:``): template -> resource id.
-_PATH_PATTERNS = {
-    r"/api/interactions/callback/[^/]+": "interactions-callback",
-    r"/api/interactions/media/[^/]+": "interactions-media",
-    r"/api/interactions/stream": "interactions",
-    r"/api/interactions/[^/]+/answer": "interactions",
-}
 
-
-class _AcFake:
-    """Minimal redis surface the verifier's route fetch uses: ``get`` over the
-    ``ac:route:`` tier-2 map."""
-
-    def __init__(self, strings: dict) -> None:
-        self._strings = strings
+class _VersionRedis:
+    """The verifier's plain-Redis policy-version read: ``get`` on the version key
+    answers ``None`` (version 0). No route/pattern data flows through redis — the
+    public grant comes from the registry declaration, not a stored row."""
 
     async def get(self, key):
-        return self._strings.get(key)
+        return None
 
-    async def hgetall(self, key):
-        return {}
+
+def _record(
+    registry: RouteRegistry, path: str, methods: list[str], *, public: bool, action: RouteAction | None = None
+) -> None:
+    registry.record(
+        path=path,
+        methods=methods,
+        name=None,
+        handler=router.callback,
+        summary="s",
+        tags=["t"],
+        authed=not public,
+        action=action,
+        request_model=None,
+        response_model=None,
+        owner=CORE_OWNER,
+        public=public,
+    )
+
+
+def _interactions_registry() -> RouteRegistry:
+    """The interactions doors as production registers them: the callback and served-media
+    doors ``authed=False`` (declared public), the studio surfaces ``authed=True`` (gated).
+    The authed ``answer`` is recorded BEFORE the public ``callback`` so the equal-specificity
+    same-owner overlap on ``/api/interactions/callback/answer`` resolves to the authed route."""
+    registry = RouteRegistry()
+    _record(registry, "/api/interactions/stream", ["GET"], public=False, action="read")
+    _record(registry, "/api/interactions/{interaction_id}/answer", ["POST"], public=False, action="write")
+    _record(registry, "/api/interactions/media/{media_id}", ["GET"], public=True)
+    _record(registry, "/api/interactions/callback/{ticket}", ["GET", "POST"], public=True)
+    return registry
 
 
 @pytest.fixture(autouse=True)
@@ -60,21 +81,21 @@ def _interactions_store_configured(monkeypatch):
 
 @pytest.fixture
 def boundary_client(monkeypatch):
-    ac_settings = AccessControlSettings(path_patterns=_PATH_PATTERNS)
-    ac_fake = _AcFake(
-        {
-            "interactions-callback": ac_settings.public_resource_id,
-            "interactions-media": ac_settings.public_resource_id,
-            "interactions": "interactions-protected",
-        }
-    )
+    # An EMPTY pattern table: the public grant provably flows from the authed=False
+    # DECLARATION (the declared-public tier), not a pattern row.
+    ac_settings = AccessControlSettings(path_patterns={})
+    assert ac_settings.compiled_patterns == []
 
     @asynccontextmanager
-    async def ac_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
-        yield ac_fake
+    async def version_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield _VersionRedis()
 
-    monkeypatch.setattr(verifier_module, "client_ctx", ac_ctx)
-    wire_store_from_route_strings(monkeypatch, ac_fake._strings)
+    monkeypatch.setattr(verifier_module, "client_ctx", version_ctx)
+    # The declared-public tier reads the route registry; seed it with the interactions
+    # doors so the public grant flows from their registration. The authed doors resolve
+    # to nothing (gated) against an empty policy store.
+    monkeypatch.setattr(verifier_module, "route_registry", _interactions_registry())
+    wire_store_from_route_strings(monkeypatch, {})
 
     # The callback handlers must not reach real Redis — a resolve of an unknown
     # ticket returning 404 is the "handler was reached" signal.

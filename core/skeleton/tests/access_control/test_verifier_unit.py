@@ -773,14 +773,26 @@ async def test_plugin_studio_asset_is_public(monkeypatch):
         assert await v.resolve_resource_ids(path, method="GET") == [settings.public_resource_id]
 
 
-async def test_plugin_list_and_bare_studio_not_public_via_pattern(monkeypatch):
-    # Only the /studio/<asset> door is public: the authed /api/plugins LIST and a bare
-    # /api/plugins/{name}/studio (no asset) do NOT match the pattern.
+async def test_plugin_list_not_public_and_bare_studio_publics_harmlessly(monkeypatch):
+    # The authed /api/plugins LIST is genuinely non-public and stays []: it carries no
+    # ``public`` declaration, matches no always-public pattern, and the declared-public
+    # tier's ``route_registry.match`` resolves it to the authed LIST route (not public).
+    #
+    # The bare /api/plugins/{name}/studio (no asset) now resolves ['public'] via the
+    # owner-agnostic declared-public tier: ``route_registry.match`` reports the CORE
+    # studio-asset route ``/api/plugins/{name}/studio/{path:path}`` (public=True) as the
+    # owner of that concrete path, because the shape algebra lets the terminal
+    # ``{path:path}`` swallow an EMPTY tail. This grant is HARMLESS: no handler serves the
+    # bare path — Starlette requires the ``/`` before ``{path:path}`` so it never routes
+    # ``/api/plugins/x/studio`` to the asset handler (it 404s), and the trailing-slash
+    # form routes with ``path=""`` which the handler 404s (not in the integrity set, not a
+    # file). A public grant on a path that serves no data is inert; the security invariant
+    # "no non-public route serving data is reachable unauthenticated" is unaffected.
     settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     assert await v.resolve_resource_ids("/api/plugins", method="GET") == []
-    assert await v.resolve_resource_ids("/api/plugins/x/studio", method="GET") == []
+    assert await v.resolve_resource_ids("/api/plugins/x/studio", method="GET") == [settings.public_resource_id]
 
 
 async def test_studio_asset_public_alone_despite_protected_route_row(monkeypatch):

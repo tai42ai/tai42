@@ -1,5 +1,5 @@
-"""The verifier's declared-public plugin-route tier: a declared-public plugin route
-answers unauthenticated, per method, and never opens a reserved prefix."""
+"""The verifier's declared-public tier: a route DECLARED public answers
+unauthenticated, per method, regardless of owner, and never opens a reserved prefix."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.verifier import AccessControlVerifier
-from tai42_skeleton.app.route_registry import RouteOwner, RouteRegistry
+from tai42_skeleton.app.route_registry import CORE_OWNER, RouteOwner, RouteRegistry
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-_OWNER = RouteOwner(kind="plugin", owner_ref="acme/one", item_name="web")
+_PLUGIN_OWNER = RouteOwner(kind="plugin", owner_ref="acme/one", item_name="web")
 
 
 async def _handler(request: Request) -> Response:
@@ -30,7 +30,9 @@ def _reset_reserved_memo():
     verifier_module.reset_registered_reserved_paths()
 
 
-def _record(registry: RouteRegistry, path: str, methods: list[str], *, public: bool) -> None:
+def _record(
+    registry: RouteRegistry, path: str, methods: list[str], *, public: bool, owner: RouteOwner = _PLUGIN_OWNER
+) -> None:
     registry.record(
         path=path,
         methods=methods,
@@ -42,7 +44,7 @@ def _record(registry: RouteRegistry, path: str, methods: list[str], *, public: b
         action=None if public else "write",
         request_model=None,
         response_model=None,
-        owner=_OWNER,
+        owner=owner,
         public=public,
     )
 
@@ -91,25 +93,37 @@ async def test_declared_public_tier_never_opens_a_reserved_prefix(monkeypatch) -
     assert ids == []
 
 
-async def test_core_public_route_is_not_granted_by_the_plugin_tier(monkeypatch) -> None:
+async def test_core_public_route_is_granted_by_the_declared_public_tier(monkeypatch) -> None:
     settings = AccessControlSettings()
     v = AccessControlVerifier(settings, providers=[])
     registry = RouteRegistry()
-    # A core-owned public /api route is not a PLUGIN route: the tier does not grant it
-    # (it falls through to the normal resolution).
-    registry.record(
-        path="/api/core/thing",
-        methods=["GET"],
-        name=None,
-        handler=_handler,
-        summary="s",
-        tags=["t"],
-        authed=False,
-        action=None,
-        request_model=None,
-        response_model=None,
-        public=True,
-    )
+    # The tier is owner-agnostic: a core-owned authed=False /api route is granted the
+    # public id by DECLARATION, with no route row and no path pattern.
+    _record(registry, "/api/core/thing", ["GET"], public=True, owner=CORE_OWNER)
     _wire(monkeypatch, registry, FakeAccessControlPg())
     ids = await v.resolve_resource_ids("/api/core/thing", "GET")
+    assert ids == [settings.public_resource_id]
+
+
+async def test_core_public_templated_route_needs_no_path_pattern(monkeypatch) -> None:
+    settings = AccessControlSettings()
+    # An empty pattern table proves the grant flows from the declaration alone, not a row.
+    assert settings.compiled_patterns == []
+    v = AccessControlVerifier(settings, providers=[])
+    registry = RouteRegistry()
+    _record(registry, "/api/core/item/{item_id}", ["GET"], public=True, owner=CORE_OWNER)
+    _wire(monkeypatch, registry, FakeAccessControlPg())
+    ids = await v.resolve_resource_ids("/api/core/item/abc123", "GET")
+    assert ids == [settings.public_resource_id]
+
+
+async def test_authed_route_stays_gated_regardless_of_owner(monkeypatch) -> None:
+    settings = AccessControlSettings()
+    v = AccessControlVerifier(settings, providers=[])
+    registry = RouteRegistry()
+    # A core-owned authed route is not declared public: the tier does not match it and,
+    # with no route row, it resolves to nothing (gated) — the owner-agnostic mirror.
+    _record(registry, "/api/core/thing", ["POST"], public=False, owner=CORE_OWNER)
+    _wire(monkeypatch, registry, FakeAccessControlPg())
+    ids = await v.resolve_resource_ids("/api/core/thing", "POST")
     assert ids == []
