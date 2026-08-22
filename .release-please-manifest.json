@@ -1,8 +1,8 @@
 {
-  "core/contract": "3.0.0",
+  "core/contract": "4.0.0",
   "core/kit": "3.5.0",
-  "core/cli": "3.3.1",
-  "core/skeleton": "6.0.0",
+  "core/cli": "3.4.0",
+  "core/skeleton": "7.0.0",
   "plugins/accounts-oidc": "1.0.4",
   "plugins/accounts-postgres": "2.1.1",
   "plugins/agents": "3.0.1",
@@ -12,8 +12,8 @@
   "plugins/channel-slack": "1.1.1",
   "plugins/channel-telegram": "1.2.1",
   "plugins/channel-twilio": "1.1.1",
-  "plugins/channel-web": "2.0.1",
-  "plugins/channel-whatsapp": "1.2.1",
+  "plugins/channel-web": "2.1.0",
+  "plugins/channel-whatsapp": "1.3.0",
   "plugins/config-k8s": "1.0.4",
   "plugins/connector-atlassian": "2.0.0",
   "plugins/connector-github": "1.0.0",
@@ -21,7 +21,7 @@
   "plugins/connector-slack": "1.0.0",
   "plugins/identity-oidc": "1.0.4",
   "plugins/identity-redis": "1.0.4",
-  "plugins/monitoring-langfuse": "1.0.4",
+  "plugins/monitoring-langfuse": "2.0.0",
   "plugins/storage-github": "1.0.4",
   "plugins/storage-local": "1.0.4",
   "plugins/storage-s3": "1.0.4",
@@ -32,5 +32,5 @@
   "plugins/tools-whatsapp": "1.0.4",
   "plugins/webhook-verifier-github": "1.1.1",
   "plugins/webhook-verifier-stripe": "1.1.1",
-  "e2e": "3.0.0"
+  "e2e": "4.0.0"
 }
