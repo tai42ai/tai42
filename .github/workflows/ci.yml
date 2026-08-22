@@ -522,8 +522,18 @@ jobs:
           # at its static IP); without it that negative skips instead of asserting.
           SANDBOX_DOCKER_BLOCKED_ADDR: 10.111.0.9:9000
         run: |
+          # Ubuntu-24.04 runners ship kernel.apparmor_restrict_unprivileged_userns=1,
+          # which blocks rootlesskit from clone()-ing the user namespace the rootless
+          # dind daemon needs — it exits(1) with "fork/exec /proc/self/exe: operation
+          # not permitted". Relax it on the runner so the engine boots; the daemon
+          # still runs fully rootless, so the isolation negatives below are unaffected.
+          # Tolerant of kernels without the knob.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           mkdir -p .sandbox-certs && chmod 0777 .sandbox-certs
-          docker compose --profile sandbox up -d --wait sandbox-engine
+          # The daemon boots detached, so on a failed --wait its exit reason never
+          # reaches the run log — dump the engine's own logs before failing.
+          docker compose --profile sandbox up -d --wait sandbox-engine \
+            || { echo "::group::sandbox-engine logs"; docker compose --profile sandbox logs sandbox-engine; echo "::endgroup::"; exit 1; }
           uv run --no-sync pytest -x -q --timeout=120 tests/sandbox_docker
           docker compose --profile sandbox down -v
       - name: Upload diagnostics
