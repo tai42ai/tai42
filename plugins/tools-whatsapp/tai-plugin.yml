@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: tools-whatsapp
 package: tai42-tools-whatsapp
-version: 1.0.4
+version: 1.0.5
 description: >-
   WhatsApp provisioning tools for the TAI ecosystem: manifest-loaded Meta Graph
   tools that register a WhatsApp message template, list the account's message
