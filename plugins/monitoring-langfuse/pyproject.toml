@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the plugin registers through — the Monitoring
     # protocols, the neutral data models, and the tai42_app handle.
-    "tai42-contract>=2.0,<4",
+    "tai42-contract>=3.0,<4",
     # TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.5,<4",
     # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private
