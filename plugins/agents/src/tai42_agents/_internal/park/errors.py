@@ -59,14 +59,30 @@ class AgentParkMarkerError(RuntimeError):
     resume never silently substitutes a partial or wrong answer."""
 
 
-class ParkExpiryExceedsRetentionError(RuntimeError):
-    """A parked ask's expiry deadline outlives the checkpoint retention horizon.
+class WorkspaceLeaseHeldError(RuntimeError):
+    """Another worker holds the per-workspace drive lease for a threaded run.
 
-    The paused graph lives only as long as its checkpoint: under a bounded (redis idle-TTL)
-    retention, a deadline beyond ``now + retention`` — or a park with NO deadline at all —
-    would let the checkpoint be swept before the ask resolves, leaving an unresumable park.
-    Raised at park-persist time so the whole super-step fails with zero park-index state
-    written, never a park that silently cannot be resumed."""
+    A durable-workspace agent (``claude_code`` / ``langchain_deep_agent``) serializes the
+    turns of one ``thread_id`` across workers on a shared Redis lease — the workspace volume
+    is NOT idempotent under concurrent drives (two sessions writing one volume corrupt each
+    other). Raised (constant message, never the workspace path) when ``SET NX`` finds the
+    lease already held, so a second concurrent turn busy-errors loudly rather than starting a
+    corrupting second session."""
+
+    def __init__(self, workspace_key: str) -> None:
+        self.workspace_key = workspace_key
+        super().__init__("another worker is already driving this agent workspace; retry after it releases")
+
+
+class ParkExpiryExceedsRetentionError(RuntimeError):
+    """A parked ask's expiry deadline outlives the run's retention horizon.
+
+    A parked run lives only as long as EVERY store backing it — its LangGraph checkpoint,
+    and (for a durable-workspace engine) its sandbox volume. The caller-computed retention
+    bound is the nearest such horizon; under a bounded one, a deadline beyond it — or a park
+    with NO deadline at all — would let a backing store be swept before the ask resolves,
+    leaving an unresumable park. Raised at park-persist time so the whole super-step fails
+    with zero park-index state written, never a park that silently cannot be resumed."""
 
     def __init__(self, interaction_id: str, expiry_at: str | None, horizon: datetime) -> None:
         self.interaction_id = interaction_id
@@ -74,7 +90,7 @@ class ParkExpiryExceedsRetentionError(RuntimeError):
         self.horizon = horizon
         deadline = "no expiry deadline" if expiry_at is None else f"expiry_at {expiry_at!r}"
         super().__init__(
-            f"parked interaction {interaction_id!r} has {deadline}, which exceeds the checkpoint "
-            f"retention horizon {horizon.isoformat()}: the paused graph would be swept before the "
+            f"parked interaction {interaction_id!r} has {deadline}, which exceeds the run's "
+            f"retention horizon {horizon.isoformat()}: a backing store would be swept before the "
             "ask resolves"
         )

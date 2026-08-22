@@ -1,5 +1,5 @@
 """Tool-error recovery wired into the three agents that build their own graphs
-outside the tools-agent choke point: ``deep_agent``, ``refine_agent``, and
+outside the tools-agent choke point: ``langchain_deep_agent``, ``refine_agent``, and
 ``retrieval_tools_agent``.
 
 Each agent gets the SAME two mechanisms as the tools agent, from the one shared
@@ -102,7 +102,7 @@ async def _collect(agen: AsyncIterator[Any]) -> list[Any]:
 
 
 # --------------------------------------------------------------------------
-# deep_agent — real deepagents graph, driven through the run face
+# langchain_deep_agent — real deepagents graph, driven through the run face
 # --------------------------------------------------------------------------
 
 
@@ -110,7 +110,7 @@ class TestDeepAgentRecovery:
     def _seams(
         self, monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemorySaver, store: InMemoryStore
     ) -> None:
-        from tai42_agents.deep_agent import agent as dagent
+        from tai42_agents.langchain_deep_agent import agent as dagent
 
         monkeypatch.setattr(
             dagent,
@@ -136,9 +136,9 @@ class TestDeepAgentRecovery:
         monkeypatch.setattr(dagent, "init_langgraph_config", _strip_callbacks)
 
     async def _graph(self, saver: InMemorySaver, store: InMemoryStore, model: BaseChatModel) -> Any:
-        from tai42_agents.deep_agent.factory import build_deep_agent
+        from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
-        return await build_deep_agent(
+        return await build_langchain_deep_agent(
             llm=model, store=store, checkpointer=saver, tools=[_raising_tool(RuntimeError("x"))]
         )
 
@@ -157,7 +157,9 @@ class TestDeepAgentRecovery:
         asyncio.run(seed())
         self._seams(monkeypatch, model, saver, store)
         asyncio.run(
-            tai42_app.agents.get_agent("deep_agent").run(tools=[], user_message="second", thread_id="t-deep-repair")
+            tai42_app.agents.get_agent("langchain_deep_agent").run(
+                tools=[], user_message="second", thread_id="t-deep-repair"
+            )
         )
 
         async def read() -> list[BaseMessage]:
@@ -179,7 +181,7 @@ class TestDeepAgentRecovery:
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             out = asyncio.run(
-                tai42_app.agents.get_agent("deep_agent").run(
+                tai42_app.agents.get_agent("langchain_deep_agent").run(
                     tools=[_raising_tool(ToolException("tool said no"))], user_message="hi", thread_id="t-deep-tool"
                 )
             )
@@ -197,7 +199,7 @@ class TestDeepAgentRecovery:
 
         with pytest.raises(RuntimeError, match="infra down"):
             asyncio.run(
-                tai42_app.agents.get_agent("deep_agent").run(
+                tai42_app.agents.get_agent("langchain_deep_agent").run(
                     tools=[_raising_tool(RuntimeError("infra down"))], user_message="hi", thread_id="t-deep-rt"
                 )
             )
@@ -209,7 +211,9 @@ class TestDeepAgentRecovery:
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
             asyncio.run(
-                tai42_app.agents.get_agent("deep_agent").run(tools=[], user_message="hello", thread_id="t-deep-fresh")
+                tai42_app.agents.get_agent("langchain_deep_agent").run(
+                    tools=[], user_message="hello", thread_id="t-deep-fresh"
+                )
             )
 
         assert not any("repairing dangling tool_calls" in r.getMessage() for r in caplog.records)
@@ -219,15 +223,15 @@ class TestDeepAgentRecovery:
     ) -> Any:
         """A real deep agent whose ``worker`` subagent owns ``tool`` and runs on its
         own scripted model — the parent reaches it through the ``task`` tool."""
-        from tai42_agents.deep_agent import factory as fac
-        from tai42_agents.deep_agent.spec import ResolvedSubAgentSpec
+        from tai42_agents.langchain_deep_agent import factory as fac
+        from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
         async def get_llm(*, provider: str, **k: Any) -> Any:
             return worker
 
         monkeypatch.setattr(fac, "get_llm_async", get_llm)
         spec = ResolvedSubAgentSpec(name="worker", description="w", system_prompt="sp", tools=[tool], llm_provider="w")
-        return await fac.build_deep_agent(
+        return await fac.build_langchain_deep_agent(
             llm=parent, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[spec]
         )
 
@@ -272,8 +276,8 @@ class TestDeepAgentRecovery:
     ) -> None:
         # Two levels deep: the leaf subagent (built via ``_compile_nested_subagent``)
         # owns the failing tool, so this pins the nested-build wiring specifically.
-        from tai42_agents.deep_agent import factory as fac
-        from tai42_agents.deep_agent.spec import ResolvedSubAgentSpec
+        from tai42_agents.langchain_deep_agent import factory as fac
+        from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
         parent = ScriptedChatModel([self._task_call_to("mid"), AIMessage(content="parent done")])
         mid = ScriptedChatModel([self._task_call_to("leaf"), AIMessage(content="mid done")])
@@ -296,7 +300,7 @@ class TestDeepAgentRecovery:
         )
 
         async def build() -> Any:
-            return await fac.build_deep_agent(
+            return await fac.build_langchain_deep_agent(
                 llm=parent, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[mid_spec]
             )
 
@@ -323,7 +327,7 @@ class TestDeepAgentRecovery:
         # tool it calls raising ToolException must convert INSIDE the GP subagent — the
         # warning names the real failing tool (not the parent ``task``), the GP returns a
         # useful result, and the parent turn completes.
-        from tai42_agents.deep_agent.factory import build_deep_agent
+        from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
         model = ScriptedChatModel(
             [
@@ -334,7 +338,7 @@ class TestDeepAgentRecovery:
             ]
         )
         agent = asyncio.run(
-            build_deep_agent(
+            build_langchain_deep_agent(
                 llm=model,
                 store=InMemoryStore(),
                 checkpointer=InMemorySaver(),
@@ -353,13 +357,13 @@ class TestDeepAgentRecovery:
         assert not any("'task'" in r.getMessage() for r in caplog.records)
 
     def test_general_purpose_subagent_runtime_error_aborts(self) -> None:
-        from tai42_agents.deep_agent.factory import build_deep_agent
+        from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
         model = ScriptedChatModel(
             [self._task_call_to("general-purpose"), _tool_call("failing", "c1"), AIMessage(content="unreached")]
         )
         agent = asyncio.run(
-            build_deep_agent(
+            build_langchain_deep_agent(
                 llm=model,
                 store=InMemoryStore(),
                 checkpointer=InMemorySaver(),
@@ -374,8 +378,8 @@ class TestDeepAgentRecovery:
     ) -> None:
         # At every nesting depth the leaf's own auto-added general-purpose subagent
         # carries the shared middleware — pinned by introspecting the nested build.
-        from tai42_agents.deep_agent import factory as fac
-        from tai42_agents.deep_agent.spec import ResolvedSubAgentSpec
+        from tai42_agents.langchain_deep_agent import factory as fac
+        from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
         captured: dict[str, Any] = {}
 

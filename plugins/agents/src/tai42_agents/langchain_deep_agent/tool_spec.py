@@ -1,7 +1,7 @@
-"""JSON-facing subagent spec for the ``deep_agent`` tool.
+"""JSON-facing subagent spec for the ``langchain_deep_agent`` tool.
 
 :class:`DeepSubAgentSpec` is the JSON authoring shape mirroring the core
-:class:`~tai42_agents.deep_agent.spec.ResolvedSubAgentSpec` (whose live
+:class:`~tai42_agents.langchain_deep_agent.spec.ResolvedSubAgentSpec` (whose live
 ``StructuredTool`` field cannot cross the tool boundary): ``tools`` are tool names
 resolved through ``tai42_app.tools.get_client_tools``, and ``subagents`` nests one
 level deep. ``response_format`` is a JSON Schema dict passed through unchanged.
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.app import tai42_app
 
 from tai42_agents._internal.reject import reject_untitled_response_format
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 
 class DeepSubAgentSpec(BaseModel):

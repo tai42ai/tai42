@@ -38,14 +38,18 @@ needs different behavior monkeypatches the exact seam it calls.
 from __future__ import annotations
 
 import mimetypes
-from collections.abc import Awaitable, Callable, Iterator
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
 from langchain_core.tools import StructuredTool
 from tai42_contract.agent import Agent
 from tai42_contract.app import tai42_app
+from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
+from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
+from tests._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
 
 
 class RecordingAgents:
@@ -54,11 +58,15 @@ class RecordingAgents:
     def __init__(self) -> None:
         self.registry: dict[str, Agent] = {}
         self.tags: dict[str, set[str]] = {}
+        self.meta: dict[str, dict[str, Any]] = {}
 
-    def agent(self, name: str, tags: set[str] | None = None) -> Callable[[type[Agent]], type[Agent]]:
+    def agent(
+        self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> Callable[[type[Agent]], type[Agent]]:
         def decorator(agent_cls: type[Agent]) -> type[Agent]:
             self.registry[name] = agent_cls()
             self.tags[name] = tags or set()
+            self.meta[name] = meta or {}
             return agent_cls
 
         return decorator
@@ -220,15 +228,136 @@ class RecordingStorage:
         self.resource_manager = RecordingResourceManager()
 
 
+class RecordingSandboxes:
+    """An ``AppSandboxes`` impl backing the durable-workspace engines' sandbox seam.
+
+    Holds a bound :class:`~tests._sandbox_fake.FakeSandbox` (a real subprocess-backed provider
+    over temp workspaces) so ``require_sandbox()`` returns a provider that actually creates
+    sessions and ``sandbox_policy()`` returns the permissive resolved policy the shared
+    spec-builder reads. A test that exercises the HARD sandbox dependency clears ``provider``
+    (or monkeypatches ``require_sandbox``) so the every-door chokepoint raises."""
+
+    def __init__(self) -> None:
+        self.provider: FakeSandbox | None = make_fake_sandbox()
+        self.policy: SandboxPolicy = permissive_sandbox_policy()
+
+    def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
+        return cls
+
+    @property
+    def sandbox(self) -> Sandbox | None:
+        return self.provider
+
+    def require_sandbox(self) -> Sandbox:
+        if self.provider is None:
+            raise SandboxUnavailableError("no sandbox provider is registered (TAI_MCP_SANDBOX / sandbox_module)")
+        return self.provider
+
+    def sandbox_policy(self) -> SandboxPolicy:
+        return self.policy
+
+
+class RecordingInteractions:
+    """An ``AppInteractions`` facade whose ``ask_user`` records each call and returns a scripted
+    answer (sync) — the deep agent reaches the human only through parking tools, so this stays a
+    minimal stub the facet needs to be present."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.answer: Any = None
+
+    @property
+    def ask_user(self) -> Callable[..., Awaitable[Any]]:
+        async def _ask_user(question: Any, **kwargs: Any) -> Any:
+            self.calls.append({"question": question, **kwargs})
+            return self.answer
+
+        return _ask_user
+
+
+class RecordingConnectors:
+    """An ``AppConnectors`` facade whose ``resolve_connection_auth`` returns a
+    per-``connection_id`` :class:`~tai42_contract.connectors.ResolvedConnectionAuth` from a
+    mutable map (default: unconfigured → ``None``, injecting nothing). A test that exercises the
+    identity-less fail-close sets ``raise_unbound`` so the accessor raises like the real seam."""
+
+    def __init__(self) -> None:
+        self.resolved: dict[str, ResolvedConnectionAuth | None] = {}
+        self.raise_unbound = False
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def resolve_connection_auth(
+        self, connection_id: str, provider_id: str, sub_service: str
+    ) -> ResolvedConnectionAuth | None:
+        self.calls.append((connection_id, provider_id, sub_service))
+        if self.raise_unbound:
+            raise RuntimeError("resolve_connection_auth: no execution identity is bound (fail-close)")
+        return self.resolved.get(connection_id)
+
+
 class RecordingApp:
     agents = RecordingAgents()
     monitoring = RecordingMonitoringFacet()
     tools = RecordingTools()
     storage = RecordingStorage()
+    sandboxes = RecordingSandboxes()
+    interactions = RecordingInteractions()
+    connectors = RecordingConnectors()
 
+
+# The durable ``langchain_deep_agent`` reads a REQUIRED digest-pinned ``session_image`` from
+# this operator env var; set it once for the whole test process (never read by any other agent)
+# so its settings validate whenever a run/astream drive acquires a session. ``setdefault`` leaves
+# a real env override in place.
+os.environ.setdefault("TAI_AGENTS_LANGCHAIN_DEEP_SESSION_IMAGE", "registry.example/lean@sha256:" + "a" * 64)
+
+# ``claude_code`` and ``langchain_deep_agent`` DECLARE their ``crash_resume`` setting to the
+# skeleton at registration (``meta={"tai42/crash_resume": <setting>}``), so their operator
+# settings are read as the decorator runs at module import — mirroring the host, which imports an
+# agent module only after the operator env is present. Seed the REQUIRED ``claude_code`` model
+# credential + digest ``session_image`` so that registration-time read validates in-process; a
+# real env override wins via ``setdefault``.
+os.environ.setdefault("TAI_AGENTS_CLAUDE_API_KEY", "test-anthropic-key")
+os.environ.setdefault("TAI_AGENTS_CLAUDE_SESSION_IMAGE", "registry.example/claude@sha256:" + "c" * 64)
 
 APP = RecordingApp()
 tai42_app.bind(APP)
+
+
+@pytest.fixture(autouse=True)
+def _reset_sandbox_facets() -> Iterator[None]:
+    """Restore the bound sandbox/connector facets to their defaults around each test, so a test
+    that clears the provider or scripts a connection auth never leaks into the next."""
+    APP.sandboxes.provider = make_fake_sandbox()
+    APP.sandboxes.policy = permissive_sandbox_policy()
+    APP.connectors.resolved.clear()
+    APP.connectors.raise_unbound = False
+    APP.connectors.calls.clear()
+    APP.interactions.calls.clear()
+    APP.interactions.answer = None
+    yield
+    provider = APP.sandboxes.provider
+    if provider is not None:
+        provider.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _route_workspace_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the shared cross-worker workspace lease at a fresh in-memory fakeredis, so a threaded
+    run/astream drive serializes on a real SET-NX / compare-and-delete without a live Redis."""
+    import contextlib
+
+    from fakeredis import aioredis
+
+    from tai42_agents._internal.park import lease as lease_mod
+
+    redis = aioredis.FakeRedis(decode_responses=True)
+
+    @contextlib.asynccontextmanager
+    async def _fake_lease_client() -> AsyncIterator[Any]:
+        yield redis
+
+    monkeypatch.setattr(lease_mod, "_lease_client", _fake_lease_client)
 
 
 @pytest.fixture

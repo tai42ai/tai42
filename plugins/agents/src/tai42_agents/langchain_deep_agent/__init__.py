@@ -8,17 +8,17 @@ Public surface:
 
 * :class:`ResolvedSubAgentSpec` — declarative subagent spec carrying resolved live tools.
 * :class:`InlineSkill` — a skill authored inline (name + ``SKILL.md`` content).
-* :func:`build_deep_agent` — build a compiled deep agent from resolved pieces.
+* :func:`build_langchain_deep_agent` — build a compiled deep agent from resolved pieces.
 * :func:`build_backend` — the composite skills + scratch backend.
 * :data:`SKILLS_ROOT` — mount point for skills read live from the template provider.
 """
 
 from __future__ import annotations
 
-from tai42_agents.deep_agent.agent import DeepAgent
-from tai42_agents.deep_agent.backend import SKILLS_ROOT, build_backend
-from tai42_agents.deep_agent.factory import build_deep_agent
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.agent import DeepAgent
+from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT, build_backend
+from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 __all__ = [
     "SKILLS_ROOT",
@@ -26,5 +26,5 @@ __all__ = [
     "InlineSkill",
     "ResolvedSubAgentSpec",
     "build_backend",
-    "build_deep_agent",
+    "build_langchain_deep_agent",
 ]

@@ -40,8 +40,8 @@ from tai42_agents._internal.park.errors import (
     AgentResumeParkEntryNotFoundError,
     ParkExpiryExceedsRetentionError,
 )
-from tai42_agents.deep_agent import agent as agent_mod
-from tai42_agents.deep_agent.tool_spec import DeepSubAgentSpec
+from tai42_agents.langchain_deep_agent import agent as agent_mod
+from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -67,15 +67,25 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+# A park deadline comfortably WITHIN the durable-workspace retention horizon (session_ttl,
+# 24h by default): the deep agent's run now acquires a persistent workspace whose idle-reap TTL
+# bounds the park's retention to min(checkpoint, workspace) (§B3.1), so a full-run park must
+# carry an ask deadline within it — a None-deadline ("wait forever") park is now correctly
+# refused because the workspace would reap first.
+_WITHIN_HORIZON = datetime.now(UTC) + timedelta(hours=1)
+_WITHIN_HORIZON_ISO = _WITHIN_HORIZON.isoformat()
+
+
 class _CountingAsk:
-    def __init__(self, interaction_id: str) -> None:
+    def __init__(self, interaction_id: str, expiry_at: datetime | None = _WITHIN_HORIZON) -> None:
         self.calls = 0
         self._interaction_id = interaction_id
+        self._expiry_at = expiry_at
 
     def tool(self) -> StructuredTool:
         def ask() -> dict[str, Any]:
             self.calls += 1
-            return suspended_interaction_marker(self._interaction_id, None)
+            return suspended_interaction_marker(self._interaction_id, self._expiry_at)
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -107,7 +117,7 @@ def fake_park_redis(monkeypatch: pytest.MonkeyPatch) -> aioredis.FakeRedis:
 def test_build_park_identity_captures_a_durable_rebuildable_run(fake_park_redis: Any) -> None:
     config = {"configurable": {"thread_id": "t1"}}
     park = build_park_identity(
-        agent_name="deep_agent",
+        agent_name="langchain_deep_agent",
         config=config,
         checkpoint_provider="redis",
         has_live_tools=False,
@@ -116,16 +126,18 @@ def test_build_park_identity_captures_a_durable_rebuildable_run(fake_park_redis:
         bind=True,
     )
     assert park is not None
-    # The resolved durable provider is pinned into the rebuild identity.
-    assert park.checkpoint_provider == "redis"
+    # The provider-free identity carries no checkpoint provider itself: the resolved durable
+    # provider and the recursion limit are pinned INTO the rebuild identity instead.
     assert park.rebuild_kwargs["checkpoint_provider"] == "redis"
+    assert park.rebuild_kwargs["recursion_limit"] == 50
+    assert not hasattr(park, "checkpoint_provider")
     assert park.thread_id == "t1"
     assert park.bind is True
 
 
 def test_build_park_identity_refuses_non_durable_checkpoint(fake_park_redis: Any) -> None:
     park = build_park_identity(
-        agent_name="deep_agent",
+        agent_name="langchain_deep_agent",
         config={"configurable": {"thread_id": "t1"}},
         checkpoint_provider="memory",
         has_live_tools=False,
@@ -138,7 +150,7 @@ def test_build_park_identity_refuses_non_durable_checkpoint(fake_park_redis: Any
 
 def test_build_park_identity_refuses_live_tools(fake_park_redis: Any) -> None:
     park = build_park_identity(
-        agent_name="deep_agent",
+        agent_name="langchain_deep_agent",
         config={"configurable": {"thread_id": "t1"}},
         checkpoint_provider="redis",
         has_live_tools=True,
@@ -151,7 +163,7 @@ def test_build_park_identity_refuses_live_tools(fake_park_redis: Any) -> None:
 
 def test_build_park_identity_refuses_non_serializable_rebuild(fake_park_redis: Any) -> None:
     park = build_park_identity(
-        agent_name="deep_agent",
+        agent_name="langchain_deep_agent",
         config={"configurable": {"thread_id": "t1"}},
         checkpoint_provider="redis",
         has_live_tools=False,
@@ -165,7 +177,7 @@ def test_build_park_identity_refuses_non_serializable_rebuild(fake_park_redis: A
 def test_build_park_identity_refuses_unconfigured_park_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(drv, "agents_park_redis_settings", lambda: SimpleNamespace(redis_url=None))
     park = build_park_identity(
-        agent_name="deep_agent",
+        agent_name="langchain_deep_agent",
         config={"configurable": {"thread_id": "t1"}},
         checkpoint_provider="redis",
         has_live_tools=False,
@@ -179,51 +191,42 @@ def test_build_park_identity_refuses_unconfigured_park_redis(monkeypatch: pytest
 # ---- expiry-vs-retention gate ---------------------------------------------
 
 
-def _park_identity(provider: str = "redis") -> drv.ParkIdentity:
+def _park_identity(retention_bound: datetime | None = None) -> drv.ParkIdentity:
+    """A directly-constructed provider-free identity: the caller passes the retention bound
+    (a datetime, or ``None`` for keep-forever) that the generalized persist gate reads."""
     return drv.ParkIdentity(
-        agent_name="deep_agent",
-        checkpoint_provider=provider,
+        agent_name="langchain_deep_agent",
         thread_id="t-gate",
-        recursion_limit=50,
         rebuild_kwargs={},
         bind=True,
+        retention_bound=retention_bound,
     )
-
-
-class _BoundedTtl:
-    checkpoint_ttl_minutes = 60
-
-
-class _KeepForever:
-    checkpoint_ttl_minutes = None
 
 
 def _iso_in(minutes: float) -> str:
     return (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat()
 
 
-def test_park_persist_allows_expiry_within_retention(fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(drv, "llm_provider_settings", lambda: _BoundedTtl)
+def _bound_in(minutes: float) -> datetime:
+    return datetime.now(UTC) + timedelta(minutes=minutes)
 
+
+def test_park_persist_allows_expiry_within_retention(fake_park_redis: Any) -> None:
     async def go() -> None:
         interactions = {"i1": _iso_in(30), "i2": _iso_in(10)}
-        await drv._persist_park_index(_park_identity(), [("int1", interactions)])
+        await drv.persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert await idx.read_park_entry("i1") is not None
         assert await idx.read_park_entry("i2") is not None
 
     asyncio.run(go())
 
 
-def test_park_persist_refuses_expiry_beyond_retention_all_or_nothing(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(drv, "llm_provider_settings", lambda: _BoundedTtl)
-
+def test_park_persist_refuses_expiry_beyond_retention_all_or_nothing(fake_park_redis: Any) -> None:
     async def go() -> None:
-        # ``i2``'s deadline outlives the 60-minute retention horizon.
+        # ``i2``'s deadline outlives the 60-minute retention bound.
         interactions = {"i1": _iso_in(30), "i2": _iso_in(120)}
         with pytest.raises(ParkExpiryExceedsRetentionError) as excinfo:
-            await drv._persist_park_index(_park_identity(), [("int1", interactions)])
+            await drv.persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i2"
         # All-or-nothing: not a single index key was written.
         assert await idx.read_park_entry("i1") is None
@@ -232,16 +235,12 @@ def test_park_persist_refuses_expiry_beyond_retention_all_or_nothing(
     asyncio.run(go())
 
 
-def test_park_persist_refuses_mixed_within_and_beyond_all_or_nothing(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(drv, "llm_provider_settings", lambda: _BoundedTtl)
-
+def test_park_persist_refuses_mixed_within_and_beyond_all_or_nothing(fake_park_redis: Any) -> None:
     async def go() -> None:
         # Offender first, a valid sibling after it: the whole super-step still fails with no writes.
         interactions = {"i_bad": _iso_in(9999), "i_ok": _iso_in(5)}
         with pytest.raises(ParkExpiryExceedsRetentionError) as excinfo:
-            await drv._persist_park_index(_park_identity(), [("int1", interactions)])
+            await drv.persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i_bad"
         assert await idx.read_park_entry("i_bad") is None
         assert await idx.read_park_entry("i_ok") is None
@@ -249,16 +248,12 @@ def test_park_persist_refuses_mixed_within_and_beyond_all_or_nothing(
     asyncio.run(go())
 
 
-def test_park_persist_refuses_missing_expiry_under_bounded_retention(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(drv, "llm_provider_settings", lambda: _BoundedTtl)
-
+def test_park_persist_refuses_missing_expiry_under_bounded_retention(fake_park_redis: Any) -> None:
     async def go() -> None:
         # A park with no deadline under a bounded retention is unresumable — refuse it loudly.
         interactions: dict[str, Any] = {"i1": _iso_in(10), "i2": None}
         with pytest.raises(ParkExpiryExceedsRetentionError) as excinfo:
-            await drv._persist_park_index(_park_identity(), [("int1", interactions)])
+            await drv.persist_park(_park_identity(_bound_in(60)), [("int1", interactions)])
         assert excinfo.value.interaction_id == "i2"
         assert excinfo.value.expiry_at is None
         assert await idx.read_park_entry("i1") is None
@@ -267,16 +262,12 @@ def test_park_persist_refuses_missing_expiry_under_bounded_retention(
     asyncio.run(go())
 
 
-def test_park_persist_allows_any_expiry_under_keep_forever_redis(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(drv, "llm_provider_settings", lambda: _KeepForever)
-
+def test_park_persist_allows_any_expiry_under_keep_forever_redis(fake_park_redis: Any) -> None:
     async def go() -> None:
-        # ``checkpoint_ttl_minutes is None`` = keep-forever: a far-future deadline and a
-        # deadline-less park both pass.
+        # A ``None`` retention bound = keep-forever: a far-future deadline and a deadline-less
+        # park both pass.
         interactions: dict[str, Any] = {"i1": _iso_in(10_000_000), "i2": None}
-        await drv._persist_park_index(_park_identity(), [("int1", interactions)])
+        await drv.persist_park(_park_identity(None), [("int1", interactions)])
         assert await idx.read_park_entry("i1") is not None
         assert await idx.read_park_entry("i2") is not None
 
@@ -288,9 +279,9 @@ def test_park_persist_records_multiple_parks_as_one_superstep(fake_park_redis: A
         # Two distinct park interrupts (parallel subagent parks) persist into ONE super-step:
         # each entry carries ITS interaction's own interrupt, both share the super-step id, and
         # the barrier covers the union.
-        # Postgres retention is keep-forever, so the None-expiry parks pass the retention gate.
+        # A keep-forever (None) bound lets the None-expiry parks pass the retention gate.
         parks = [("intA", {"iA": None}), ("intB", {"iB": None})]
-        await drv._persist_park_index(_park_identity("postgres"), parks)
+        await drv.persist_park(_park_identity(None), parks)
         entry_a = await idx.read_park_entry("iA")
         entry_b = await idx.read_park_entry("iB")
         assert entry_a is not None
@@ -309,9 +300,10 @@ def test_park_persist_records_multiple_parks_as_one_superstep(fake_park_redis: A
 
 def test_park_persist_allows_any_expiry_under_postgres_keep_forever(fake_park_redis: Any) -> None:
     async def go() -> None:
-        # Postgres carries no TTL on its saver — keep-forever; retention settings are not even read.
+        # A keep-forever run (postgres checkpoint) computes a ``None`` retention bound, so any
+        # deadline passes — the generalized gate reads the bound off the identity, not a provider.
         interactions: dict[str, Any] = {"i1": _iso_in(10_000_000), "i2": None}
-        await drv._persist_park_index(_park_identity("postgres"), [("int1", interactions)])
+        await drv.persist_park(_park_identity(None), [("int1", interactions)])
         assert await idx.read_park_entry("i1") is not None
         assert await idx.read_park_entry("i2") is not None
 
@@ -321,8 +313,8 @@ def test_park_persist_allows_any_expiry_under_postgres_keep_forever(fake_park_re
 def test_persist_superstep_is_atomic_all_or_nothing(fake_park_redis: Any) -> None:
     async def go() -> None:
         entries: dict[str, dict[str, Any]] = {
-            "iA": {"agent_name": "deep_agent", "thread_id": "t", "superstep_id": "s"},
-            "iB": {"agent_name": "deep_agent", "thread_id": "t", "superstep_id": "s"},
+            "iA": {"agent_name": "langchain_deep_agent", "thread_id": "t", "superstep_id": "s"},
+            "iB": {"agent_name": "langchain_deep_agent", "thread_id": "t", "superstep_id": "s"},
         }
         expected: dict[str, Any] = {"iA": None, "iB": None}
 
@@ -365,7 +357,7 @@ def test_park_entry_ttl_scales_to_the_ask_deadline(fake_park_redis: Any) -> None
         # survive to it — else a valid in-window answer would find no entry and storm to give-up.
         far = (datetime.now(UTC) + timedelta(days=40)).isoformat()
         near = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-        await drv._persist_park_index(_park_identity("postgres"), [("int1", {"i_far": far, "i_near": near})])
+        await drv.persist_park(_park_identity(None), [("int1", {"i_far": far, "i_near": near})])
 
         margin = idx._BARRIER_TTL_MARGIN_SECONDS
         far_ttl = await fake_park_redis.ttl(idx._park_key("i_far"))
@@ -390,13 +382,13 @@ async def _write_park(entry_ids: list[str], interrupt_id: str = "int1", thread_i
     superstep_id = idx.compute_superstep_id(entry_ids)
     entries = {
         interaction_id: {
-            "agent_name": "deep_agent",
+            "agent_name": "langchain_deep_agent",
             "thread_id": thread_id,
-            "checkpoint_provider": "redis",
-            "recursion_limit": 50,
             "superstep_id": superstep_id,
             "interrupt_id": interrupt_id,
-            "rebuild_kwargs": {},
+            # Engine facts (checkpoint provider, recursion limit) ride inside rebuild_kwargs,
+            # never top-level entry fields, on the provider-free index.
+            "rebuild_kwargs": {"checkpoint_provider": "redis", "recursion_limit": 50},
         }
         for interaction_id in entry_ids
     }
@@ -640,7 +632,7 @@ class _LlmSettings:
 def _wire_real_build(
     monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemorySaver, store: InMemoryStore
 ) -> None:
-    """Keep the REAL build_deep_agent but inject the scripted model + a SHARED
+    """Keep the REAL build_langchain_deep_agent but inject the scripted model + a SHARED
     checkpointer/store, so the park run and its resume read one durable checkpoint."""
 
     async def fake_get_llm_async(provider: str, **kwargs: Any) -> Any:
@@ -669,7 +661,7 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
     _wire_real_build(monkeypatch, model, saver, store)
     app_tools.client_tools["ask"] = ask.tool()
 
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> Any:
         receipt = await agent.run(tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-int")
@@ -677,7 +669,7 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
             "status": "suspended",
             "interaction_ids": ["i1"],
             "thread_id": "t-int",
-            "expiry_at": None,
+            "expiry_at": _WITHIN_HORIZON_ISO,
         }
         assert ask.calls == 1
         assert await idx.read_park_entry("i1") is not None
@@ -706,7 +698,7 @@ def test_agent_resume_rejects_a_no_longer_pending_interrupt(
     _wire_real_build(monkeypatch, model, saver, store)
     app_tools.client_tools["ask"] = ask.tool()
 
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> None:
         await agent.run(tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-stale")
@@ -810,7 +802,7 @@ def _two_parallel_subagent_park_setup(
 
     def ask(who: str) -> dict[str, Any]:
         ask_calls["n"] += 1
-        return suspended_interaction_marker(id_for_who[who], None)
+        return suspended_interaction_marker(id_for_who[who], _WITHIN_HORIZON)
 
     app_tools.client_tools["ask"] = StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -833,7 +825,7 @@ def _two_parallel_subagent_park_setup(
     _wire_real_build(monkeypatch, model, saver, store)
 
     subagent = DeepSubAgentSpec(name="asker", description="asks the user", system_prompt="ask", tools=["ask"])
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
     assert isinstance(agent, agent_mod.DeepAgent)
     return agent, subagent, ask_calls
 

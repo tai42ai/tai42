@@ -199,7 +199,7 @@ from tai42_contract.app import tai42_app
 
 
 class _StubAgents:
-    def agent(self, name, tags=None):
+    def agent(self, name, tags=None, meta=None):
         def decorator(agent_cls):
             return agent_cls
 

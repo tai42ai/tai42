@@ -15,29 +15,38 @@ suspension marker + ``SuspendedFinal`` vocabulary.
 
 from __future__ import annotations
 
-# Importing registers the hidden ``agent_resume`` continuation tool: any park-capable
-# agent module imports the park package, so the tool the platform fires to resume a park
-# is registered exactly once (module import is cached) no matter which agent loads.
-# Imported for its registration side effect.
-from tai42_agents._internal.park import resume_tool as _resume_tool  # noqa: F401
 from tai42_agents._internal.park.driver import (
     AGENT_RESUME_TOOL_NAME,
     DURABLE_CHECKPOINT_PROVIDERS,
     ParkIdentity,
     agent_resume,
+    assert_park_capable,
     build_park_identity,
     finalize_drive,
     park_continuation,
+    persist_park,
+)
+from tai42_agents._internal.park.lease import (
+    LEASE_HEADROOM_SECONDS,
+    WSLOCK_KEY_PREFIX,
+    workspace_lease,
 )
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
+from tai42_agents._internal.park.resume_tool import register_agent_resume_tool
 
 __all__ = [
     "AGENT_RESUME_TOOL_NAME",
     "DURABLE_CHECKPOINT_PROVIDERS",
+    "LEASE_HEADROOM_SECONDS",
+    "WSLOCK_KEY_PREFIX",
     "AsyncParkMiddleware",
     "ParkIdentity",
     "agent_resume",
+    "assert_park_capable",
     "build_park_identity",
     "finalize_drive",
     "park_continuation",
+    "persist_park",
+    "register_agent_resume_tool",
+    "workspace_lease",
 ]

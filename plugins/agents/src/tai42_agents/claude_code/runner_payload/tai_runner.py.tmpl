@@ -1,0 +1,227 @@
+"""In-session runner: the ONLY code that imports ``claude_agent_sdk``.
+
+Shipped as package DATA (``.tmpl``), ``put_file``'d into ``.runner/payload/`` and run as
+``python -m tai_runner`` inside the session where the SDK is installed. It speaks the versioned
+JSONL protocol (see ``tai42_agents.claude_code.protocol``) with the adapter over stdin/stdout;
+stderr is diagnostics only.
+
+Discipline (mirrors the adapter side): a single stdout writer lock serializes whole JSON lines
+(never byte-interleaved), replies route by ``call_id`` / ``ask_id``, and every in-process
+tool-handler throw is CAUGHT and turned into an error frame so the MCP server cannot degrade a
+fatal into a limp-to-max-turns.
+
+This file is NEVER imported in the plugin server process (it imports the SDK, absent there); it
+runs only inside the session. It is excluded from the server import graph and coverage.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+from typing import Any
+
+import claude_agent_sdk
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    create_sdk_mcp_server,
+    tool,
+)
+
+PROTOCOL_VERSION = 1
+
+
+class _Wire:
+    """The stdin reader + single-writer stdout for the JSONL protocol."""
+
+    def __init__(self) -> None:
+        self._write_lock = asyncio.Lock()
+        self._pending_answers: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_tools: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._stop = asyncio.Event()
+
+    async def emit(self, frame: dict[str, Any]) -> None:
+        line = json.dumps({"v": PROTOCOL_VERSION, **frame}) + "\n"
+        async with self._write_lock:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    def route(self, raw: dict[str, Any]) -> None:
+        kind = raw.get("type")
+        if kind == "answer":
+            fut = self._pending_answers.pop(raw["ask_id"], None)
+            if fut is not None and not fut.done():
+                fut.set_result(raw)
+        elif kind == "tool_result":
+            fut = self._pending_tools.pop(raw["call_id"], None)
+            if fut is not None and not fut.done():
+                fut.set_result(raw)
+        elif kind == "stop":
+            self._stop.set()
+
+    async def await_answer(self, ask_id: str) -> dict[str, Any]:
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_answers[ask_id] = fut
+        return await fut
+
+    async def await_tool_result(self, call_id: str) -> dict[str, Any]:
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_tools[call_id] = fut
+        return await fut
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
+
+
+async def _connect_stdin() -> asyncio.StreamReader:
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    return reader
+
+
+async def _stdin_pump(reader: asyncio.StreamReader, wire: _Wire) -> None:
+    while True:
+        line = await reader.readline()
+        if not line:
+            return
+        try:
+            wire.route(json.loads(line.decode("utf-8")))
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+
+def _build_mcp_server(wire: _Wire, ask_id_seq: list[int], proxy_tool_names: list[str]) -> Any:
+    """One in-process SDK MCP server exposing ask_user + one proxy tool per requested name."""
+
+    @tool("ask_user", "Ask a human a question and block for the answer.", {"question": str, "mode": str})
+    async def ask_user(args: dict[str, Any]) -> dict[str, Any]:
+        ask_id_seq[0] += 1
+        ask_id = f"ask-{ask_id_seq[0]}"
+        await wire.emit(
+            {"type": "ask", "ask_id": ask_id, "question": args["question"], "mode": args.get("mode", "sync")}
+        )
+        reply = await wire.await_answer(ask_id)
+        if reply.get("is_error"):
+            return {"content": [{"type": "text", "text": str(reply.get("answer"))}], "is_error": True}
+        return {"content": [{"type": "text", "text": json.dumps(reply.get("answer"))}]}
+
+    proxy_tools = [ask_user]
+    for name in proxy_tool_names:
+
+        async def _proxy(args: dict[str, Any], _name: str = name) -> dict[str, Any]:
+            call_id = f"call-{_name}-{id(args)}"
+            await wire.emit({"type": "tool_call", "call_id": call_id, "tool_name": _name, "arguments": args})
+            reply = await wire.await_tool_result(call_id)
+            text = json.dumps(reply.get("result"))
+            return {"content": [{"type": "text", "text": text}], "is_error": bool(reply.get("is_error"))}
+
+        proxy_tools.append(tool(name, f"Proxy platform tool {name}.", {})(_proxy))
+
+    return create_sdk_mcp_server(name="tai42", version="1.0.0", tools=proxy_tools)
+
+
+def _build_options(payload: dict[str, Any], wire: _Wire, ask_id_seq: list[int]) -> ClaudeAgentOptions:
+    env = dict(payload.get("env", {}))
+    for name in payload.get("env_passthrough", []):
+        if name in os.environ:
+            env[name] = os.environ[name]
+    server = _build_mcp_server(wire, ask_id_seq, payload.get("proxy_tool_names", []))
+    kwargs: dict[str, Any] = {
+        "cwd": payload["cwd"],
+        "setting_sources": payload.get("setting_sources", ["project"]),
+        "system_prompt": payload.get("system_prompt", ""),
+        "permission_mode": payload.get("permission_mode"),
+        "mcp_servers": {"tai42": server},
+        "agents": payload.get("agents", {}),
+        "max_turns": payload.get("max_turns"),
+        "include_partial_messages": payload.get("include_partial_messages", True),
+        "env": env,
+    }
+    if payload.get("model"):
+        kwargs["model"] = payload["model"]
+    if payload.get("resume"):
+        kwargs["resume"] = payload["resume"]
+    return ClaudeAgentOptions(**{k: v for k, v in kwargs.items() if v is not None})
+
+
+async def _map_message(wire: _Wire, message: Any) -> dict[str, Any] | None:
+    """Emit event frames for one SDK message; return a terminal result payload for a
+    ResultMessage, else None."""
+    if isinstance(message, AssistantMessage):
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                await wire.emit({"type": "event", "event": {"kind": "text", "text": block.text}})
+            elif isinstance(block, ThinkingBlock):
+                await wire.emit({"type": "event", "event": {"kind": "thinking", "text": block.thinking}})
+            elif isinstance(block, ToolUseBlock):
+                await wire.emit(
+                    {"type": "event", "event": {"kind": "tool_use", "id": block.id, "name": block.name, "input": block.input}}
+                )
+            elif isinstance(block, ToolResultBlock):
+                await wire.emit(
+                    {
+                        "type": "event",
+                        "event": {"kind": "tool_result", "id": block.tool_use_id, "content": block.content, "is_error": bool(block.is_error)},
+                    }
+                )
+    elif isinstance(message, ResultMessage):
+        return {
+            "type": "result",
+            "terminal_reason": "completed" if not message.is_error else "error",
+            "subtype": message.subtype,
+            "session_id": message.session_id,
+            "usage": message.usage,
+            "result": message.result,
+            "is_structured": not isinstance(message.result, str),
+        }
+    return None
+
+
+async def _drive(payload: dict[str, Any], prompt: dict[str, Any], wire: _Wire) -> None:
+    ask_id_seq = [0]
+    options = _build_options(payload, wire, ask_id_seq)
+    async with ClaudeSDKClient(options=options) as client:
+        session_id = ""
+        await client.query(prompt.get("text", ""))
+        terminal: dict[str, Any] | None = None
+        async for message in client.receive_response():
+            if isinstance(message, SystemMessage) and not session_id:
+                session_id = getattr(message, "session_id", "") or message.data.get("session_id", "")
+                await wire.emit({"type": "hello", "sdk_version": claude_agent_sdk.__version__, "session_id": session_id})
+            if wire.stopped:
+                await client.interrupt()
+            result = await _map_message(wire, message)
+            if result is not None:
+                terminal = result
+        if terminal is not None:
+            await wire.emit(terminal)
+
+
+async def _main() -> None:
+    wire = _Wire()
+    reader = await _connect_stdin()
+    # The first line is the start frame; every later line (answer/tool_result/stop) flows
+    # through the pump, which routes it to the blocked handler by id.
+    start = json.loads((await reader.readline()).decode("utf-8"))
+    pump = asyncio.create_task(_stdin_pump(reader, wire))
+    try:
+        await _drive(start["options"], start["prompt"], wire)
+    except Exception as exc:  # noqa: BLE001 - a runner throw must reach the adapter as a fatal
+        await wire.emit({"type": "fatal", "message": f"runner error: {type(exc).__name__}"})
+    finally:
+        pump.cancel()
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())
