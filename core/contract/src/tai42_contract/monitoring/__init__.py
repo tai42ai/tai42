@@ -15,6 +15,7 @@ from tai42_contract.monitoring.errors import (
 )
 from tai42_contract.monitoring.models import (
     DEFAULT_LEVEL,
+    TRACE_PREVIEW_MAX_CHARS,
     MetricsFilter,
     MetricsResult,
     MetricsRow,
@@ -23,12 +24,14 @@ from tai42_contract.monitoring.models import (
     MonitoringLevel,
     MonitoringObservation,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
     ProjectConfig,
     Span,
     SpanKind,
     SpanWindowItem,
     TraceContext,
+    preview,
 )
 from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
@@ -36,6 +39,7 @@ from tai42_contract.monitoring.writer import MonitoringWriter
 
 __all__ = [
     "DEFAULT_LEVEL",
+    "TRACE_PREVIEW_MAX_CHARS",
     "MetricsFilter",
     "MetricsResult",
     "MetricsRow",
@@ -48,6 +52,7 @@ __all__ = [
     "MonitoringReadNotSupportedError",
     "MonitoringReader",
     "MonitoringTrace",
+    "MonitoringTraceSummary",
     "MonitoringWriter",
     "OrderBy",
     "ProjectConfig",
@@ -56,4 +61,5 @@ __all__ = [
     "SpanWindowItem",
     "TraceContext",
     "TraceNotFoundError",
+    "preview",
 ]

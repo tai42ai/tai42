@@ -19,7 +19,6 @@ rejects it, so an unsupported extra dimension cannot break the core tiles.
 
 from __future__ import annotations
 
-import ast
 import json
 import logging
 import re
@@ -32,6 +31,7 @@ from tai42_contract.monitoring import (
     MonitoringFilter,
     MonitoringLevel,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
 )
 
@@ -388,113 +388,29 @@ async def _safe_query(reader: MonitoringReader, f: MetricsFilter) -> MetricsResu
 
 
 # ---------------------------------------------------------------------------
-# Run-list input/output previews
-# ---------------------------------------------------------------------------
-
-# Structural bounds for the run-list previews: keep the row payload small while
-# staying VALID JSON (truncate at the structure level, not mid-string), so the
-# UI can always render the preview as a parsed tree. The full value lives in the
-# trace drill-in.
-_PREVIEW_STR = 240  # max chars per string leaf
-_PREVIEW_ITEMS = 20  # max entries per object / array
-_PREVIEW_DEPTH = 6  # max nesting depth
-_PREVIEW_PARSE_MAX = 20_000  # do not structurally parse strings larger than this
-
-
-def _maybe_json(text: str) -> Any:
-    """Parse a string that is itself an object/array — JSON first, then a Python
-    ``repr`` (single quotes, ``True``/``False``/``None``) via ``literal_eval`` —
-    else ``None``. Lets a stringified structure be bounded structurally (and
-    rendered as a tree) instead of char-clipped into garbage."""
-    s = text.strip()
-    # Size gate: parsing happens before structural bounding, so a multi-MB
-    # stringified payload would be fully materialized just to keep 20 items.
-    # Over the cap, skip parsing — the caller char-clips the raw string instead.
-    if len(s) < 2 or len(s) > _PREVIEW_PARSE_MAX or s[0] not in "{[":
-        return None
-    try:
-        return json.loads(s)
-    except ValueError:
-        pass
-    try:
-        # literal_eval is safe — only Python literals, no code execution.
-        return ast.literal_eval(s)
-    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return None
-
-
-def _preview(value: Any, depth: int = 0) -> Any:
-    """A structurally-bounded copy of a (possibly nested) value for the run list:
-    long strings clipped, objects/arrays capped, deep nesting elided — small but
-    still valid JSON the client can render as a tree."""
-    if isinstance(value, str):
-        parsed = _maybe_json(value)
-        if isinstance(parsed, (dict, list)):
-            return _preview(parsed, depth)
-        return value if len(value) <= _PREVIEW_STR else value[:_PREVIEW_STR] + "…"
-    if isinstance(value, dict):
-        if depth >= _PREVIEW_DEPTH:
-            return {"…": "…"}
-        out: dict[str, Any] = {}
-        for i, (k, v) in enumerate(value.items()):
-            if i >= _PREVIEW_ITEMS:
-                out["…"] = f"+{len(value) - _PREVIEW_ITEMS} more"
-                break
-            out[str(k)] = _preview(v, depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        if depth >= _PREVIEW_DEPTH:
-            return ["…"]
-        items = [_preview(v, depth + 1) for v in list(value)[:_PREVIEW_ITEMS]]
-        if len(value) > _PREVIEW_ITEMS:
-            items.append(f"+{len(value) - _PREVIEW_ITEMS} more")
-        return items
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return str(value)  # dates, etc. — JSON-safe fallback
-
-
-# ---------------------------------------------------------------------------
 # Trace → run / trace mapping
 # ---------------------------------------------------------------------------
 
 
-def derive_run(trace: MonitoringTrace) -> dict[str, Any]:
-    """A run-list row derived from a complete trace.
+def derive_run(row: MonitoringTraceSummary) -> dict[str, Any]:
+    """A run-list row projected from a trace SUMMARY.
 
-    ``total_cost`` is first-class on the trace; status / latency / tokens / model
-    are derived best-effort from the observations (the contract has no
-    first-class per-run latency/token/status). A trace the backend kept but could
-    not load (``fetch_error`` set) carries no observations — surfaced via
-    ``fetchError`` so it does not read as an empty *success*."""
-    obs = trace.observations or []
-    starts = [o.start for o in obs if o.start]
-    ends = [o.end for o in obs if o.end]
-    latency_ms: int | None = None
-    if starts and ends:
-        latency_ms = int((max(ends) - min(starts)).total_seconds() * 1000)
-
-    has_error = any((o.level or "").upper() == "ERROR" for o in obs)
-    tokens = 0
-    for o in obs:
-        if isinstance(o.usage, dict):
-            for key in ("input", "output"):
-                tokens += int(_num(o.usage.get(key)))
-    model = next((o.model for o in obs if o.model), None)
-
+    Every list field is first-class on the summary: the input/output previews are
+    the backend's server-bounded JSON values, latency / tokens / status come from
+    its batched aggregates. ``status`` maps ``error`` -> ``error`` and ``ok`` ->
+    ``success``; a malformed backend row never reaches here — it fails the page
+    loudly at the reader."""
     return {
-        "id": trace.id,
-        "traceId": trace.id,
-        "createdAt": trace.timestamp.isoformat() if trace.timestamp else None,
-        "tags": list(trace.tags or []),
-        "status": "error" if has_error else "success",
-        "cost": trace.total_cost,
-        "latencyMs": latency_ms,
-        "totalTokens": tokens or None,
-        "model": model,
-        "inputPreview": _preview(trace.input),
-        "outputPreview": _preview(trace.output),
-        "fetchError": trace.fetch_error,
+        "id": row.id,
+        "traceId": row.id,
+        "createdAt": row.timestamp.isoformat() if row.timestamp else None,
+        "tags": list(row.tags or []),
+        "status": "error" if row.status == "error" else "success",
+        "cost": row.total_cost,
+        "latencyMs": int(row.latency_ms) if row.latency_ms is not None else None,
+        "totalTokens": row.total_tokens,
+        "inputPreview": row.input_preview,
+        "outputPreview": row.output_preview,
     }
 
 
@@ -522,12 +438,7 @@ def _map_span(o: MonitoringObservation) -> dict[str, Any]:
 
 
 def map_trace(trace: MonitoringTrace) -> dict[str, Any]:
-    """The single-run detail view: trace attributes plus every span.
-
-    ``availability`` is ``unavailable`` when the backend kept the trace but could
-    not load it (``fetch_error``), ``full`` when spans loaded, else ``partial``."""
-    spans = [_map_span(o) for o in (trace.observations or [])]
-    availability = "unavailable" if trace.fetch_error else "full" if spans else "partial"
+    """The single-run detail view: trace attributes plus every span."""
     return {
         "traceId": trace.id,
         "timestamp": trace.timestamp.isoformat() if trace.timestamp else None,
@@ -536,7 +447,5 @@ def map_trace(trace: MonitoringTrace) -> dict[str, Any]:
         "input": trace.input,
         "output": trace.output,
         "metadata": trace.metadata,
-        "availability": availability,
-        "fetchError": trace.fetch_error,
-        "spans": spans,
+        "spans": [_map_span(o) for o in (trace.observations or [])],
     }

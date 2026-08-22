@@ -18,6 +18,7 @@ from tai42_contract.monitoring.models import (
     MetricsResult,
     MonitoringFilter,
     MonitoringTrace,
+    MonitoringTraceSummary,
     OrderBy,
     SpanKind,
     SpanWindowItem,
@@ -82,11 +83,12 @@ class MonitoringReader(Protocol):
         page: int | None = None,
         filter: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
-    ) -> list[MonitoringTrace]:
-        """List complete traces (each with its full observation set) matching
-        the filters. An individual trace that cannot be fetched is kept in place
-        with ``fetch_error`` set (not skipped), so one bad trace neither fails
-        the batch nor silently vanishes.
+    ) -> list[MonitoringTraceSummary]:
+        """List run SUMMARIES matching the filters: one row per trace, built from
+        the backend's list surface plus its batched aggregates — never a
+        per-trace body. ``get_trace`` is the only body door. A malformed backend
+        row fails the page loudly (never kept as a partial row nor silently
+        skipped).
 
         ``from_timestamp`` / ``to_timestamp`` bound the trace timestamp to the
         half-open window ``[from, to)``; either may be omitted for an open end.

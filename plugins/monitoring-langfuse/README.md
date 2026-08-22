@@ -101,11 +101,15 @@ raises (a silently mis-scoped block could leak traces across projects).
 - **Fork safety**: `writer.shutdown()` fully evicts every cached SDK client (not
   just a flush), so a forked child rebuilds a clean client on first use.
 - **Reader**: `async` per the contract; the synchronous Langfuse API client is
-  dispatched off the event loop, and `list_traces` hydrates trace bodies
-  concurrently (bounded, order-preserving). A trace body that fails to load is
-  kept in place with `fetch_error` set, never dropped. `get_trace` returns the
-  trace or raises `TraceNotFoundError`; a transient failure (e.g. a timeout)
-  propagates as-is — it is never mapped to "not found".
+  dispatched off the event loop. `list_traces` returns row SUMMARIES, never
+  trace bodies. For the native (timestamp) sort a page costs one trace-list call
+  for the row attributes and previews, one metrics query for the page's token
+  totals, and one bounded error-observations query for the page's error status —
+  no per-trace body fetch. A metric sort (cost/latency/tokens) adds one ranking
+  metrics query and a bounded trace-list walk in place of that single list call.
+  `get_trace` is the only body door; it returns the trace or raises
+  `TraceNotFoundError`, and a transient failure (e.g. a timeout) propagates
+  as-is — it is never mapped to "not found".
 - **Metric sorts**: `list_traces` ordered by `total_cost` / `latency` /
   `total_tokens` ranks globally through the Langfuse metrics API (trace.list
   cannot sort on aggregates) and requires `from_timestamp` + `limit`;
