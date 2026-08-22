@@ -3,6 +3,8 @@
 Thin wrapper over the authed ``/api/sandbox`` route. The identity command reports
 whether a sandbox provider is installed along with the resolved security-as-config
 policy (the empty state still carries the policy, so it reads as identity, not error).
+The command is read-only — it inspects the resolved policy and never mutates
+provider state.
 """
 
 from __future__ import annotations

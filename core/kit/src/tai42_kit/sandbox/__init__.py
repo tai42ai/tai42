@@ -7,7 +7,9 @@ running ``exec`` / file transfers against them — by subclassing
 around that (the session ledger, TTL bookkeeping, generic ``reap`` /
 ``destroy_session``, orphan recovery, and the SESSION-CREATE POLICY CHOKEPOINT
 that enforces the operator-resolved :class:`SandboxPolicy` before any provider
-primitive runs) lives here.
+primitive runs) lives here. A session is either ephemeral — its workspace dies
+with it — or persistent, binding a durable workspace volume that survives the
+reap; the tier is chosen per session spec and honored uniformly across providers.
 
 It lives in kit and not the skeleton because a provider plugin may not import the
 skeleton, and not the contract because the contract carries no logic. Kit is the
