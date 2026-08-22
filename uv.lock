@@ -5338,7 +5338,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "2.0.1"
+version = "2.1.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5381,7 +5381,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "1.2.1"
+version = "1.3.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5424,7 +5424,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "3.3.1"
+version = "3.4.0"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5512,7 +5512,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "3.0.0"
+version = "4.0.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5546,7 +5546,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "3.0.0"
+version = "4.0.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5938,7 +5938,7 @@ wheels = [
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "1.0.4"
+version = "2.0.0"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "langchain" },
@@ -5983,7 +5983,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "6.0.0"
+version = "7.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
