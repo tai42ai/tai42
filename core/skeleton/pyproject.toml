@@ -35,7 +35,7 @@ dependencies = [
     "tai42-kit[llm,jq,uvicorn,redis,postgres]>=3.6,<4",
     # The `tai` command client. The server owns no console script; it contributes
     # its local/runtime commands to the CLI through the `tai.commands` entry point.
-    "tai42-cli>=3.5,<4",
+    "tai42-cli>=3.6,<4",
     # Direct third-party deps imported by the orchestrator + copied-in impl.
     "click>=8.3",
     # The local commands the skeleton contributes are Typer apps. Typer builds on

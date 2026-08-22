@@ -11,7 +11,7 @@ icon: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/connector-slack
-contract: '>=4.0,<5'
+contract: '>=4.1,<5'
 categories:
   - connectors
 tags:
