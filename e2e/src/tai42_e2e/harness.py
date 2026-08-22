@@ -278,6 +278,9 @@ def seed_route_rows(resources: StackResources, rows: Sequence[tuple[str, str, st
 # declared-public tier resolves them public straight from the route registration, so they
 # need NO carve-out here (the ``studio_authed`` catch-all may cover them; the
 # declared-public tier short-circuits above the route table).
+#
+# Dropping the explicit callback/media entries from this published map (they moved to the
+# declared-public tier) is a BREAKING change to this exported constant, so it ships as a major.
 STUDIO_PATH_PATTERNS: dict[str, str] = {
     r"/api/(?!plugins/[^/]+/studio/).*": "studio_authed",
     r"/(?!api(?:/|$)).*": "public_spa",
