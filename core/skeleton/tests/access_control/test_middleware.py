@@ -606,13 +606,19 @@ async def test_h5_unauthenticated_route_walk(monkeypatch):
             continue
         sent = await _drive(mw, _http_scope(path=path, user=UnauthenticatedUser(), auth=AuthCredentials()))
         status = _status(sent)
-        if matches_always_public_route_pattern(path, settings):
-            # A public asset door (e.g. the plugin studio bundles) is served public by
-            # design even though it sits under /api.
-            assert status == 200, f"public asset door {path} not served public: {status}"
+        if meta.public or matches_always_public_route_pattern(path, settings):
+            # A DECLARED-PUBLIC door is served public by design even though it sits under
+            # /api: the interactions callback and served-media doors declare
+            # ``public=True`` (registered ``authed=False``), and the verifier's
+            # owner-agnostic declared-public tier grants them the public id by that
+            # declaration regardless of owner; the plugin studio bundles resolve public
+            # via the always-public route pattern. Carving these out is NOT a weakening —
+            # the deny invariant below still holds for every NON-public /api route.
+            assert status == 200, f"declared-public door {path} not served public: {status}"
         elif under_prefix(path, "/api") or under_prefix(path, "/mcp"):
-            # Every control-plane GET route terminal-denies unauthenticated — never the
-            # shell, never data.
+            # THE security invariant: every NON-public control-plane GET route
+            # terminal-denies an unauthenticated caller — never the shell, never data.
+            # No non-public /api route is reachable unauthenticated.
             assert status in (401, 403), f"control-plane {path} leaked unauthenticated: {status}"
         else:
             # Non-/api routes either serve the public shell or deny — never a 5xx leak.

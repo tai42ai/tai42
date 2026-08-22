@@ -131,7 +131,9 @@ async def check_spa_shell_public() -> None:
       control; a publicly declared non-API GET must be a consciously reviewed decision.
 
     ``/api``/``/mcp`` routes (concrete and templated alike) are excluded: ``serve_spa``
-    404s them, so the shell tier can never reach them regardless of auth or templating.
+    404s them, so the shell tier can never reach them regardless of auth or templating. A
+    declared-public ``/api`` GET is granted by the verifier's owner-agnostic declared-public
+    tier from its ``authed=False`` registration, never by this non-/api audit.
     The fallback state and the derived + acknowledged surfaces are printed so drift and the
     public-by-declaration vs shell-fallback split stay reviewable in ops logs. The audit's
     exhaustiveness is what lets the runtime fallback (concrete-match only) rely on it for

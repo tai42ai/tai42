@@ -214,18 +214,24 @@ class AccessControlVerifier(TokenVerifier):
         if matches_always_public_route_pattern(path, self.settings) and not self._is_reserved_prefix(path):
             return [self.settings.public_resource_id]
 
-        # Declared-public plugin-route tier (per-method, deny-safe): a request that
-        # resolves to a PLUGIN route whose tai-plugin.yml declared it public answers
-        # UNAUTHENTICATED. Per-method by construction — a sibling method not declared
-        # public produces no match and falls through to the normal gate below. Sits
-        # below the always-public prefix/pattern tiers and ABOVE the route-table store
-        # lookup: unique ownership + declaration IS the source of truth, so no row is
-        # ever written to ``access_control_routes`` for a declared-public route. The
-        # control plane can never enter it: the mount-map build refuses a public route
-        # under any reserved prefix, and ``_is_reserved_prefix`` drops it here too.
+        # Declared-public route tier (per-method, deny-safe): a request that resolves
+        # to a registered route DECLARED public — ``authed=False`` at registration,
+        # whatever its owner (a core native/operator route such as the interactions
+        # callback and served-media doors, or a plugin route whose tai-plugin.yml
+        # declared it) — answers UNAUTHENTICATED with no per-deployment route row or
+        # pattern. Per-method by construction: a sibling method not declared public
+        # produces no match and falls through to the normal gate below. Sits below the
+        # always-public prefix/pattern tiers and ABOVE the route-table store lookup: the
+        # code-side declaration IS the source of truth, so no row is ever written to
+        # ``access_control_routes`` for it and an operator's later protected pin never
+        # gets consulted (the tier short-circuits). The control plane can never enter
+        # it: the mount-map build refuses a public route under any reserved prefix, and
+        # ``_is_reserved_prefix`` drops it here too. ``match`` indexes ``/api`` shapes
+        # only, so a public non-/api door (webhook/trigger/health/SPA) is granted by the
+        # acknowledged/prefix/shell tiers below instead, never here.
         if method is not None and not self._is_reserved_prefix(path):
             matched = route_registry.match(path, method)
-            if matched is not None and matched.owner.kind == "plugin" and matched.public:
+            if matched is not None and matched.public:
                 return [self.settings.public_resource_id]
 
         # Read the current policy version once (a single cheap GET) and thread it
