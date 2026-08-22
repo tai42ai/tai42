@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-toolbox"
-version = "1.0.4"
+version = "1.0.5"
 description = "Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded generic tools and tool extensions (a tool extension extends a single tool)."
 readme = "README.md"
 requires-python = ">=3.13"
