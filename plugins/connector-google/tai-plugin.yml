@@ -1,7 +1,7 @@
 spec_version: 1
 namespace: tai42
 name: connector-google
-version: 2.0.0
+version: 2.0.1
 display_name: Google
 description: >-
   Google Workspace OAuth connector provider (Gmail, Calendar, Drive, Docs,
