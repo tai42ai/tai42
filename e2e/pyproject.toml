@@ -35,12 +35,12 @@ dependencies = [
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=1.0,<2",
-    "tai42-agents>=4.0,<5",
+    "tai42-agents>=3.0,<4",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.
-    "tai42-sandbox-docker>=1.0,<2",
-    "tai42-sandbox-local>=1.0,<2",
+    "tai42-sandbox-docker>=1.1,<2",
+    "tai42-sandbox-local>=1.1,<2",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=1.0,<2",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
