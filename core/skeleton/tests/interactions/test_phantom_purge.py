@@ -8,7 +8,7 @@ atomicity (re-read inside the script), the GT extend-only guarantee (a shorter
 later deadline never shortens), the count-key ``idle_ttl`` refresh basis, and the
 invariant that the purge never rescores ``pending_key`` (scored by each group's
 most-recent question ``created_at``) so it stays in creation-timestamp order and
-the reconnect backlog order is unchanged.
+the pending read order is unchanged.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ async def test_unrelated_add_purges_expired_phantom_group(fake_redis):
 
     assert "gdead" not in fake_redis._zsets.get(store.pending_key, {})
     assert "gdead" not in fake_redis._zsets.get(store.pending_deadline_key, {})
-    # The count key is left to its ``idle_ttl`` (the purge no longer touches it):
+    # The count key is left to its ``idle_ttl`` (the purge leaves it untouched):
     # a surviving state keeps a live count, so death/revival stay symmetric.
     assert store.count_key("gdead") in fake_redis._strings
     # The live group is untouched.
@@ -180,7 +180,7 @@ async def test_pending_key_stays_creation_ordered_not_deadline(fake_redis):
         )
         await store.add(fake_redis, req, idle_ttl=100)
 
-    # The reconnect backlog replays pending_key in SCORE (creation) order.
+    # The pending read returns pending_key in SCORE (creation) order.
     assert await fake_redis.zrange(store.pending_key, 0, -1) == ["g0", "g1", "g2"]
     # The parallel deadline index carries the reversed (deadline) order — proving
     # the two indexes are distinct and pending_key was never rescored.

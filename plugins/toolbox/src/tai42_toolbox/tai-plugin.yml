@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: toolbox
 package: tai42-toolbox
-version: 1.0.4
+version: 1.0.5
 description: >-
   Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded
   generic tools and tool extensions (a tool extension extends a single tool).
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/toolbox
-contract: '>=3.0,<4'
+contract: '>=4.0,<5'
 categories:
   - utilities
   - productivity

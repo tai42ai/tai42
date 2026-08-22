@@ -3,17 +3,19 @@
 
 Covers hashes, strings (incr/decr/set with EX), streams (xadd/xrange/xrevrange/
 xread), sorted sets (zadd with ``GT``, zrem/zremrangebyscore/zcard/zrange/
-zrangebyscore), lists (lpush/rpush/lrange/ltrim) with a blocking ``blpop``, key TTLs with ``EXPIRE``
-``NX``/``GT`` options (an injectable clock so expiry is driven explicitly, never
-by wall-clock), a scripted ``eval`` emulating the store's atomic
-pending-deadline purge, and a pipeline honoring the watch/multi transaction
-shape ``record_answer`` / ``prune_pending`` rely on. Values are strings, matching
-the pooled ``RedisClient``'s ``decode_responses=True`` default.
+zrangebyscore), sets (sadd/smembers), lists (lpush/rpush/lrange/ltrim) with a
+blocking ``blpop``, key TTLs with ``EXPIRE`` ``NX``/``GT`` options and ``TTL``
+(an injectable clock so expiry is driven explicitly, never by wall-clock), a
+scripted ``eval`` emulating the store's atomic pending-deadline purge, and a
+pipeline honoring the watch/multi transaction shape ``record_answer`` /
+``prune_pending`` rely on. Values are strings, matching the pooled
+``RedisClient``'s ``decode_responses=True`` default.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 
 from redis.exceptions import WatchError
 
@@ -94,6 +96,12 @@ class _FakePipeline:
     def set(self, *a, **k):
         return self._dispatch("set", a, k)
 
+    def sadd(self, *a, **k):
+        return self._dispatch("sadd", a, k)
+
+    def srem(self, *a, **k):
+        return self._dispatch("srem", a, k)
+
     def zadd(self, *a, **k):
         return self._dispatch("zadd", a, k)
 
@@ -118,6 +126,9 @@ class _FakePipeline:
     def delete(self, *a, **k):
         return self._dispatch("delete", a, k)
 
+    def eval(self, *a, **k):
+        return self._dispatch("eval", a, k)
+
     async def execute(self) -> list:
         # A watched key changed since ``watch`` → abort, running no queued command.
         for key, version in self._watched.items():
@@ -138,6 +149,7 @@ class FakeRedis:
         self._streams: dict[str, list[tuple[str, dict]]] = {}
         self._zsets: dict[str, dict[str, float]] = {}
         self._lists: dict[str, list[str]] = {}
+        self._sets: dict[str, set[str]] = {}
         # Absolute expiry (in ``self.time`` units) per key; expiry is lazily
         # enforced on read. Tests advance ``self.time`` to drive TTL.
         self._ttls: dict[str, float] = {}
@@ -163,7 +175,7 @@ class FakeRedis:
         return False
 
     def _drop(self, key: str) -> None:
-        for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists):
+        for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets):
             store.pop(key, None)
         self._ttls.pop(key, None)
         self._bump(key)
@@ -320,7 +332,9 @@ class FakeRedis:
 
     def _expire(self, key, ttl, nx=False, gt=False) -> bool:
         # Mirror redis: EXPIRE on a missing key is a no-op returning False.
-        if not any(key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists)):
+        if not any(
+            key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
+        ):
             return False
         new_exp = self.time + ttl
         current = self._ttls.get(key)  # None == no expiry, treated as infinity
@@ -339,12 +353,39 @@ class FakeRedis:
         removed = 0
         for key in keys:
             present = any(
-                key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists)
+                key in store
+                for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
             )
             if present:
                 self._drop(key)
                 removed += 1
         return removed
+
+    def _sadd(self, key, *members) -> int:
+        self._expired(key)
+        s = self._sets.setdefault(key, set())
+        added = 0
+        for member in members:
+            if str(member) not in s:
+                s.add(str(member))
+                added += 1
+        self._bump(key)
+        return added
+
+    def _srem(self, key, *members) -> int:
+        self._expired(key)
+        s = self._sets.get(key, set())
+        removed = 0
+        for member in members:
+            if str(member) in s:
+                s.discard(str(member))
+                removed += 1
+        self._bump(key)
+        return removed
+
+    def _smembers(self, key) -> set[str]:
+        self._expired(key)
+        return set(self._sets.get(key, set()))
 
     # -- direct (non-pipeline) async surface ---------------------------------
 
@@ -392,9 +433,14 @@ class FakeRedis:
         return self._zrangebyscore(key, min_score, max_score)
 
     async def eval(self, script, numkeys, *keys_and_args):
+        return self._eval(script, numkeys, *keys_and_args)
+
+    def _eval(self, script, numkeys, *keys_and_args):
         """Emulate the store's server-side Lua scripts, recognized by their marker
         comments. Signature-compatible with ``redis.eval(script, numkeys, *keys,
-        *args)``.
+        *args)``. Synchronous so the pipeline dispatcher (which reaches ``_``-prefixed
+        command impls) can queue ``pipe.eval`` alongside the other write commands, the
+        way the add pipeline commits the media set-or-extend eval.
 
         * ``interactions:pending-deadline-purge`` — RE-READS the deadline index at
           eval time (the atomicity the deterministic revive test relies on) before
@@ -406,7 +452,10 @@ class FakeRedis:
           continuation record, advances its exponential backoff, and returns the
           record hash as a flat ``[k, v, ...]`` array (matching Lua ``HGETALL``);
           ``nil`` when not due or already re-claimed, and the ``'dropped'`` marker
-          on an orphan member whose record TTL-expired (reconciled off the index)."""
+          on an orphan member whose record TTL-expired (reconciled off the index).
+        * ``interactions:media-set-or-extend`` — reads the group media index, SADDs
+          the add's new ids, then set-or-extends (EXPIRE NX then GT) the index and every
+          member ``media:{id}`` key to the group horizon, all in one call."""
         keys = keys_and_args[:numkeys]
         args = keys_and_args[numkeys:]
         if "interactions:pending-deadline-purge" in script:
@@ -430,6 +479,23 @@ class FakeRedis:
                 return 0
             self._zadd(open_key, {member: score})
             return 1
+        if "interactions:media-set-or-extend" in script:
+            index_key = keys[0]
+            ttl, prefix = float(args[0]), str(args[1])
+            new_ids = [str(a) for a in args[2:]]
+            members = set(self._smembers(index_key))
+            for media_id in new_ids:
+                if media_id not in members:
+                    self._sadd(index_key, media_id)
+                    members.add(media_id)
+            if members:
+                self._expire(index_key, ttl, nx=True)
+                self._expire(index_key, ttl, gt=True)
+                for media_id in members:
+                    media_key = prefix + media_id
+                    self._expire(media_key, ttl, nx=True)
+                    self._expire(media_key, ttl, gt=True)
+            return len(members)
         if "interactions:continuation-retry-claim" in script:
             index_key, record_key = keys[0], keys[1]
             member = str(args[0])
@@ -455,6 +521,30 @@ class FakeRedis:
                 flat.extend((field, value))
             return flat
         raise NotImplementedError("FakeRedis.eval only emulates the interactions Lua scripts")
+
+    async def sadd(self, key, *members) -> int:
+        return self._sadd(key, *members)
+
+    async def srem(self, key, *members) -> int:
+        return self._srem(key, *members)
+
+    async def smembers(self, key) -> set[str]:
+        return self._smembers(key)
+
+    async def ttl(self, key) -> int:
+        # Mirror redis TTL: -2 for a missing key, -1 for a key with no expiry, else
+        # the whole seconds remaining (ceil, floor 0) so a live media key reports a
+        # positive cache lifetime.
+        self._expired(key)
+        present = any(
+            key in store for store in (self._hashes, self._strings, self._streams, self._zsets, self._lists, self._sets)
+        )
+        if not present:
+            return -2
+        exp = self._ttls.get(key)
+        if exp is None:
+            return -1
+        return max(0, math.ceil(exp - self.time))
 
     async def zcard(self, key) -> int:
         return len(self._zsets.get(key, {}))

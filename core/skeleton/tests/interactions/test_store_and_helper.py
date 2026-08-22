@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.interactions import (
+    MEDIA_ROUTE_PREFIX,
     AnswerFormat,
     InteractionRequest,
     InteractionResponse,
@@ -48,7 +49,7 @@ def _request(interaction_id: str, group_id: str, store: InteractionStore) -> Int
 
 async def test_audience_round_trips_through_store(fake_redis):
     # The ``audience`` identity rides the persisted contract model: add -> get_state
-    # and the backlog both preserve it, and it defaults to None (unaddressed) when
+    # and the pending list both preserve it, and it defaults to None (unaddressed) when
     # the field is absent from the stored record.
     store = InteractionStore("t:")
     addressed = _request("i1", "g1", store).model_copy(update={"audience": "alice"})
@@ -64,14 +65,183 @@ async def test_audience_round_trips_through_store(fake_redis):
     assert got_none is not None
     assert got_none.request.audience is None
 
-    backlog = {req.interaction_id: req.audience for req in await store.backlog(fake_redis)}
-    assert backlog == {"i1": "alice", "i2": None}
+    pending = {req.interaction_id: req.audience for req in await store.pending(fake_redis)}
+    assert pending == {"i1": "alice", "i2": None}
+
+
+async def test_answered_removed_events_carry_audience(fake_redis):
+    # The answered/removed events carry the question's audience so the tail-only SSE
+    # filters those frames directly (no record left to read). An addressed question's
+    # event names its audience; an unaddressed one omits the field (None).
+    store = InteractionStore("t:")
+    addressed = _request("i1", "g1", store).model_copy(update={"audience": "alice"})
+    unaddressed = _request("i2", "g2", store)
+    await store.add(fake_redis, addressed, idle_ttl=100)
+    await store.add(fake_redis, unaddressed, idle_ttl=100)
+
+    await store.record_answer(
+        fake_redis,
+        InteractionResponse(interaction_id="i1", answer="x", answered_by="t", answered_at=datetime.now(UTC)),
+        "g1",
+        reply_ttl=60,
+    )
+    assert await store.prune_pending(fake_redis, "i2", "g2") == "pruned"
+
+    events = await fake_redis.xrange(store.events_key)
+    terminal = {
+        f["interaction_id"]: f for _id, f in events if f["type"] in ("interaction.answered", "interaction.removed")
+    }
+    assert terminal["i1"]["type"] == "interaction.answered"
+    assert terminal["i1"]["audience"] == "alice"
+    assert terminal["i2"]["type"] == "interaction.removed"
+    assert "audience" not in terminal["i2"]  # unaddressed -> no audience field
+
+
+async def test_add_indexes_media_and_extends_to_group_horizon(fake_redis):
+    # A question referencing served media joins the group's media index, and its media
+    # key TTL is set-or-extended to the group horizon so the bytes never expire before
+    # the durable record that points at them.
+    store = InteractionStore("t:")
+    media_id = "z" * 43
+    key = store.media_key(media_id)
+    await fake_redis.hset(key, mapping={"mime": "image/png", "b64": "AA=="})
+    fake_redis._expire(key, 10)  # a short bootstrap TTL, as substitute_media sets
+    ref = MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + media_id)
+    req = _request("i1", "g1", store).model_copy(update={"media": [ref]})
+
+    await store.add(fake_redis, req, idle_ttl=100)
+
+    assert media_id in await fake_redis.smembers(store.media_index_key("g1"))
+    # The media key TTL rose from the bootstrap 10 to the group horizon (idle_ttl 100).
+    assert await fake_redis.ttl(key) == 100
+    assert await fake_redis.ttl(store.media_index_key("g1")) == 100
+
+
+async def test_answer_drops_media_from_index_leaving_key_to_ttl(fake_redis):
+    # A terminal answer removes the question's media ids from the group's media index so
+    # the index cannot grow without bound; the media key itself is left to expire on its
+    # own TTL (removal/answer paths never delete media).
+    store = InteractionStore("t:")
+    media_id = "z" * 43
+    key = store.media_key(media_id)
+    await fake_redis.hset(key, mapping={"mime": "image/png", "b64": "AA=="})
+    ref = MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + media_id)
+    req = _request("i1", "g1", store).model_copy(update={"media": [ref]})
+    await store.add(fake_redis, req, idle_ttl=100)
+    assert media_id in await fake_redis.smembers(store.media_index_key("g1"))
+
+    await store.record_answer(
+        fake_redis,
+        InteractionResponse(interaction_id="i1", answer="x", answered_by="t", answered_at=datetime.now(UTC)),
+        "g1",
+        reply_ttl=60,
+    )
+
+    assert media_id not in await fake_redis.smembers(store.media_index_key("g1"))
+    # The media key survives — left to expire on its group TTL, never deleted on answer.
+    assert await fake_redis.ttl(key) == 100
+
+
+async def test_prune_drops_media_from_index_leaving_key_to_ttl(fake_redis):
+    # The prune terminal path mirrors the answer path: the abandoned question's media ids
+    # leave the group index, the media key is left to its own TTL.
+    store = InteractionStore("t:")
+    media_id = "y" * 43
+    key = store.media_key(media_id)
+    await fake_redis.hset(key, mapping={"mime": "image/png", "b64": "AA=="})
+    ref = MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + media_id)
+    req = _request("i1", "g1", store).model_copy(update={"media": [ref]})
+    await store.add(fake_redis, req, idle_ttl=100)
+
+    assert await store.prune_pending(fake_redis, "i1", "g1") == "pruned"
+
+    assert media_id not in await fake_redis.smembers(store.media_index_key("g1"))
+    assert await fake_redis.ttl(key) == 100  # media key left to expire by TTL
+
+
+async def test_no_media_add_extends_a_prior_questions_media_ttl(fake_redis):
+    # A later co-grouped question with NO media of its own still extends every existing
+    # member media key to the group's new (longer) horizon, so a long-lived group never
+    # loses the bytes an earlier question points at.
+    store = InteractionStore("t:")
+    media_id = "w" * 43
+    key = store.media_key(media_id)
+    await fake_redis.hset(key, mapping={"mime": "image/png", "b64": "AA=="})
+    ref = MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + media_id)
+    q1 = _request("i1", "g1", store).model_copy(update={"media": [ref]})
+    await store.add(fake_redis, q1, idle_ttl=100)
+    assert await fake_redis.ttl(key) == 100
+
+    # A second question in the same group with a longer horizon and no media.
+    q2 = _request("i2", "g1", store)
+    await store.add(fake_redis, q2, idle_ttl=200)
+
+    assert await fake_redis.ttl(key) == 200  # q2's add raised q1's media TTL to the new horizon
+
+
+async def test_add_denormalizes_media_ids_onto_the_state_hash(fake_redis):
+    # A question's served-media ids ride the state hash as a comma-joined ``media_ids``
+    # field, so a terminal claim drops them from the group index without deserializing the
+    # request. A question with no stored media writes no field at all.
+    store = InteractionStore("t:")
+    id_a, id_b = "a" * 43, "b" * 43
+    refs = [
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + id_a),
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + id_b),
+    ]
+    with_media = _request("i1", "g1", store).model_copy(update={"media": refs})
+    without_media = _request("i2", "g2", store)
+
+    await store.add(fake_redis, with_media, idle_ttl=100)
+    await store.add(fake_redis, without_media, idle_ttl=100)
+
+    assert await fake_redis.hget(store.state_key("i1"), "media_ids") == f"{id_a},{id_b}"
+    assert await fake_redis.hget(store.state_key("i2"), "media_ids") is None
+
+
+async def test_no_media_add_makes_no_extra_round_trip(fake_redis, monkeypatch):
+    # A no-media add issues exactly two server round trips: the phantom-purge eval and the
+    # batched write pipeline. The media set-or-extend eval is queued INTO that write
+    # pipeline, so it commits with the question and makes no separate SMEMBERS or media
+    # round trip of its own.
+    store = InteractionStore("t:")
+    round_trips = {"n": 0}
+    real_eval = fake_redis.eval
+    real_smembers = fake_redis.smembers
+    real_pipeline = fake_redis.pipeline
+
+    async def counting_eval(*a, **k):
+        round_trips["n"] += 1
+        return await real_eval(*a, **k)
+
+    async def counting_smembers(*a, **k):
+        round_trips["n"] += 1
+        return await real_smembers(*a, **k)
+
+    def counting_pipeline():
+        pipe = real_pipeline()
+        real_execute = pipe.execute
+
+        async def counting_execute():
+            round_trips["n"] += 1
+            return await real_execute()
+
+        pipe.execute = counting_execute
+        return pipe
+
+    monkeypatch.setattr(fake_redis, "eval", counting_eval)
+    monkeypatch.setattr(fake_redis, "smembers", counting_smembers)
+    monkeypatch.setattr(fake_redis, "pipeline", counting_pipeline)
+
+    await store.add(fake_redis, _request("i1", "g1", store), idle_ttl=100)
+
+    assert round_trips["n"] == 2
 
 
 async def test_media_round_trips_through_store(fake_redis):
     # Display-only media rides the persisted contract model: the store serializes and
     # deserializes it generically (model_dump_json write -> model_validate_json read),
-    # so add -> get_state and the backlog both preserve it, and it defaults to None
+    # so add -> get_state and the pending list both preserve it, and it defaults to None
     # when the field is absent.
     store = InteractionStore("t:")
     media = [
@@ -91,8 +261,8 @@ async def test_media_round_trips_through_store(fake_redis):
     assert got_none is not None
     assert got_none.request.media is None
 
-    backlog = {req.interaction_id: req.media for req in await store.backlog(fake_redis)}
-    assert backlog == {"i1": media, "i2": None}
+    pending = {req.interaction_id: req.media for req in await store.pending(fake_redis)}
+    assert pending == {"i1": media, "i2": None}
 
 
 async def test_write_read_mark_cycle(fake_redis):

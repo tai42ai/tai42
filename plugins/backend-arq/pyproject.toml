@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-arq"
-version = "2.0.1"
+version = "2.0.2"
 description = "arq execution backend for the TAI ecosystem — worker runtime and Redis-hash scheduling over arq."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the plugin registers through — the Backend ABC,
     # CallbackSchema, the Manifest model, and the tai42_app handle.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=4.0,<5",
     # TaiBaseSettings + settings cache, schedule normalization, signature
     # helpers; the jq extra backs the callback condition/expression evaluation.
     # The floor names the first release carrying `tai42_kit.backend`

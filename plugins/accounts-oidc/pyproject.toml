@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-accounts-oidc"
-version = "1.0.4"
+version = "1.0.5"
 description = "OIDC/OAuth2 login accounts provider for the TAI ecosystem: an installable plugin that registers itself as the \"accounts-oidc\" accounts provider (session-based login via an external identity provider, sessions in Redis, SSO code hand-back)."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the accounts
     # ABC, the login-method models, and the dual-registry registration function.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=4.0,<5",
     # The Redis client (session/state/SSO-code storage), the api-key hash used to
     # store session tokens at rest, AND the OIDC/JWT helper (tai42_kit.net.jwt:
     # discovery, JWKS cache, id_token verification). httpx — the token-exchange

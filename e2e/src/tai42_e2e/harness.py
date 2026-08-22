@@ -273,12 +273,16 @@ def seed_route_rows(resources: StackResources, rows: Sequence[tuple[str, str, st
 # (``ACCESS_CONTROL_PATH_PATTERNS``): a request-path regex names a route TEMPLATE. Tier two
 # (the PG route store seeded by ``seed_studio_auth``): each template resolves to a resource
 # id. ``studio_authed`` (every other ``/api`` route) carries a negative lookahead excluding
-# the two public ``/api`` shapes so the registry listing stays authed.
+# the public ``/api`` shapes so the registry listing stays authed. The interactions
+# callback and served-media doors are both ``authed=False`` capability urls (an external
+# answer sink; a browser/vendor ``<img>`` fetch carrying no token) — each is carved out
+# of the authed catch-all and resolved to the public marker.
 STUDIO_PATH_PATTERNS: dict[str, str] = {
-    r"/api/(?!plugins/[^/]+/studio/)(?!interactions/callback(?:/|$)).*": "studio_authed",
+    r"/api/(?!plugins/[^/]+/studio/)(?!interactions/callback(?:/|$))(?!interactions/media(?:/|$)).*": "studio_authed",
     r"/(?!api(?:/|$)).*": "public_spa",
     r"/api/plugins/[^/]+/studio/.*": "public_assets",
     r"/api/interactions/callback(?:/.*)?": "public_callback",
+    r"/api/interactions/media(?:/.*)?": "public_media",
 }
 
 # The single protected resource id the Studio's ``*``-scope key is authorized
@@ -290,7 +294,7 @@ def seed_studio_auth(infra: Infra, resources: StackResources, *, api_key: str) -
     """Seed the browser-e2e studio stack's auth: a ``*``-scope root key pinned to
     ``api_key`` (the value Playwright pastes at ``/login``), and the tier-two
     route→resource table the ``STUDIO_PATH_PATTERNS`` templates resolve through —
-    ``studio_authed`` → the ``studio`` resource, the public SPA/asset/callback
+    ``studio_authed`` → the ``studio`` resource, the public SPA/asset/callback/media
     templates → the public marker, and the readiness probes pinned public.
     Returns the raw root token."""
     raw = seed_root_identity(infra, resources, user_id="studio-root", scopes=["*"], raw=api_key)
@@ -304,6 +308,7 @@ def seed_studio_auth(infra: Infra, resources: StackResources, *, api_key: str) -
             ("public_spa", "public", None),
             ("public_assets", "public", None),
             ("public_callback", "public", None),
+            ("public_media", "public", None),
         ],
     )
     return raw
@@ -359,13 +364,16 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
             # The interactions callback door a channel adapter forwards an ask_user reply
             # to (a server-side loopback POST that carries no token).
             ("bridge-callback", "public", r"^/api/interactions/callback(?:/.*)?$"),
+            # The served-media capability door: an ``authed=False`` reference url a browser
+            # ``<img>`` (or a vendor fetch) loads with no token, so it must resolve public.
+            ("bridge-media", "public", r"^/api/interactions/media(?:/.*)?$"),
             # Everything else (the authed conversation-route CRUD, the message door, key
             # mint, schedules) → e2e-all, excluding the public shapes so deny-wins never
             # re-protects them.
             (
                 "bridge-protected",
                 "e2e-all",
-                r"^/(?!health$)(?!metrics$)(?!ready$)(?!api/channels/)(?!api/interactions/callback).*$",
+                r"^/(?!health$)(?!metrics$)(?!ready$)(?!api/channels/)(?!api/interactions/callback)(?!api/interactions/media).*$",
             ),
         ],
     )
@@ -374,12 +382,13 @@ def seed_bridge_authz(infra: Infra, resources: StackResources) -> str:
 
 def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
     """Seed the Stripe payments stack's auth before boot: a root ``*``-scope key plus a
-    route table that pins the two unauthenticated payment doors public.
+    route table that pins the unauthenticated payment doors public.
 
-    Both doors are unauthenticated by nature — the Stripe webhook ingress carries no
-    platform API key (the topic's ``stripe`` verifier checks its signature) and the bridge
-    callback door authenticates with the question's own ``X-TAI-Bridge-Secret`` verifier —
-    so both must resolve to ``public`` or the access-control guard would 403 them before the
+    These doors are unauthenticated by nature — the Stripe webhook ingress carries no
+    platform API key (the topic's ``stripe`` verifier checks its signature), the bridge
+    callback door authenticates with the question's own ``X-TAI-Bridge-Secret`` verifier,
+    and the served-media capability url is a tokenless ``<img>``/vendor fetch — so each must
+    resolve to ``public`` or the access-control guard would 403 it before the
     signature/header check runs. Every other path — ``/mcp`` included — maps to the
     ``e2e-all`` scope the root satisfies; the readiness probes stay public so boot's
     readiness wait is not itself denied. Every public shape is excluded from the protected
@@ -397,12 +406,15 @@ def seed_payments_authz(infra: Infra, resources: StackResources) -> str:
             # The interaction callback door the bridge POSTs the answer to (its own
             # X-TAI-Bridge-Secret verifier is the authentication).
             ("payments-callback", "public", r"^/api/interactions/callback(?:/.*)?$"),
+            # The served-media capability door: an ``authed=False`` reference url a browser
+            # ``<img>`` (or a vendor fetch) loads with no token, so it must resolve public.
+            ("payments-media", "public", r"^/api/interactions/media(?:/.*)?$"),
             # Everything else (the verifier bind, hook register, preset create, the MCP edge)
             # → e2e-all, excluding the public shapes so deny-wins never re-protects them.
             (
                 "payments-protected",
                 "e2e-all",
-                r"^/(?!health$)(?!metrics$)(?!ready$)(?!universal_webhook/)(?!api/interactions/callback).*$",
+                r"^/(?!health$)(?!metrics$)(?!ready$)(?!universal_webhook/)(?!api/interactions/callback)(?!api/interactions/media).*$",
             ),
         ],
     )

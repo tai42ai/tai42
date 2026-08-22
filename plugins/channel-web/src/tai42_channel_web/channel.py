@@ -29,8 +29,8 @@ import math
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.interactions.models import MediaItem
 
 from tai42_channel_web.store import (
     QuestionRecord,
@@ -234,12 +234,6 @@ class WebChannel:
             return [entry_id]
 
         media = notification.media or []
-        for item in media:
-            if item.kind is MediaKind.IMAGE and item.url.startswith("data:"):
-                raise ChannelInputError(
-                    f"web channel cannot render a data: image URL ({item.url[:32]}...); the page renders an "
-                    "image only from an absolute https source"
-                )
         frame_media = [_media_frame_item(item) for item in media]
         async with transcript_order(identity, address):
             entry_id = await append_media(identity, address, notification.message, frame_media, notification.options)

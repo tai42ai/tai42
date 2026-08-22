@@ -1,9 +1,8 @@
-"""``tai interactions`` — stream and answer pending interactions.
+"""``tai interactions`` — list, stream and answer pending interactions.
 
-The interactions surface is stream/answer only — there is no GET list route. The
-pending backlog arrives as the SSE stream's first frames, so ``list`` connects to
-the stream, prints the backlog frames up to the ``backlog_done`` marker, and exits;
-``stream`` tails the inbox live; ``answer`` posts a human answer.
+``list`` reads one page of the pending questions from ``GET /api/interactions``;
+``stream`` tails the inbox live (a tail-only add/answered/removed feed, no backlog);
+``answer`` posts a human answer.
 """
 
 from __future__ import annotations
@@ -22,26 +21,37 @@ from tai42_cli.commands._common import (
 
 app = typer.Typer(
     name="interactions",
-    help="Stream and answer pending interactions.",
+    help="List, stream and answer pending interactions.",
     no_args_is_help=True,
 )
 
 
 @app.command("list")
-@covers(("GET", "/api/interactions/stream"))
-def list_interactions(ctx: typer.Context) -> None:
-    """Print the pending-interaction backlog (the stream's initial frames), then exit.
+@covers(("GET", "/api/interactions"))
+def list_interactions(
+    ctx: typer.Context,
+    page: Annotated[int | None, typer.Option("--page", help="Page number (1-based).")] = None,
+    page_size: Annotated[int | None, typer.Option("--page-size", help="Items per page (capped at 200).")] = None,
+) -> None:
+    """Print one page of pending interactions.
 
-    Example: ``tai interactions list``
+    Example: ``tai interactions list --page 1 --page-size 50``
     """
     ctx_obj = app_context(ctx)
-    stream_frames(ctx_obj, "GET", "/api/interactions/stream", until_empty=True)
+    params: dict[str, str] = {}
+    if page is not None:
+        params["page"] = str(page)
+    if page_size is not None:
+        params["pageSize"] = str(page_size)
+    with ctx_obj.client() as client:
+        data = client.get("/api/interactions", params=params or None)
+    emit_result(ctx_obj, data)
 
 
 @app.command("stream")
 @covers(("GET", "/api/interactions/stream"))
 def stream_interactions(ctx: typer.Context) -> None:
-    """Tail the interactions inbox live (backlog then add/answered/removed events).
+    """Tail the interactions inbox live (add/answered/removed events).
 
     Example: ``tai interactions stream``
     """

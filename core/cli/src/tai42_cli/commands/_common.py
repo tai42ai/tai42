@@ -302,7 +302,6 @@ def stream_frames(
     *,
     json_body: Any | None = None,
     params: Mapping[str, Any] | None = None,
-    until_empty: bool = False,
 ) -> None:
     """Stream an SSE run to stdout frame by frame — never buffering the whole run.
 
@@ -311,9 +310,7 @@ def stream_frames(
     as ``{"event": <type>, "data": <payload>}`` so the operator can tell, say, an
     answered interaction from a removed one; a frame with no event type (the runs
     stream, whose type rides inside its JSON) is rendered as its ``data`` payload
-    unchanged. With ``until_empty`` the stream is consumed only up to the first
-    empty-object frame (the interactions backlog's ``backlog_done`` marker) and
-    then closed, so a backlog listing returns instead of tailing forever.
+    unchanged.
 
     A frame is the MOST attacker-influenced data the CLI prints, so its control
     characters (terminal escapes) are stripped before it reaches the terminal — the
@@ -321,7 +318,7 @@ def stream_frames(
     legitimate payloads are unaffected.
     """
     with ctx_obj.client() as client:
-        for line in _iter_stream(client.stream(method, path, json=json_body, params=params), until_empty=until_empty):
+        for line in _iter_stream(client.stream(method, path, json=json_body, params=params)):
             print(strip_control(line), flush=True)
 
 
@@ -342,15 +339,8 @@ def _render_frame(event: str | None, data: str) -> str:
     return json.dumps({"event": event, "data": payload})
 
 
-def _iter_stream(frames: Iterator[tuple[str | None, str]], *, until_empty: bool) -> Iterator[str]:
+def _iter_stream(frames: Iterator[tuple[str | None, str]]) -> Iterator[str]:
     for event, data in frames:
-        if until_empty:
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, Mapping) and not payload:
-                return
         yield _render_frame(event, data)
 
 

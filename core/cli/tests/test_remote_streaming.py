@@ -75,25 +75,28 @@ def test_streamed_frame_control_chars_are_stripped(monkeypatch: pytest.MonkeyPat
     assert "hello[31minjectedworld" in result.output  # inert printable remainder survives
 
 
-def test_interactions_list_consumes_backlog_then_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Two backlog add frames, then the empty ``backlog_done`` marker frame; the
-    # list command must print the backlog and stop at the marker.
-    frames = [
-        {"interaction_id": "i1", "question": "one?"},
-        {"interaction_id": "i2", "question": "two?"},
-        {},
-    ]
+def test_interactions_list_gets_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``list`` reads ONE page from the paged GET door (not the stream); the page window
+    # options ride the query string and the page prints.
+    page = {
+        "items": [{"interaction_id": "i1", "question": "one?"}],
+        "total": 1,
+        "page": 2,
+        "page_size": 25,
+        "next_page": None,
+        "truncated": False,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/interactions/stream"
-        return sse_response(frames)
+        assert request.method == "GET"
+        assert request.url.path == "/api/interactions"
+        assert request.url.params.get("page") == "2"
+        assert request.url.params.get("pageSize") == "25"
+        return httpx.Response(200, json={"data": page})
 
-    result = run_cli(monkeypatch, handler, ["interactions", "list"])
+    result = run_cli(monkeypatch, handler, ["interactions", "list", "--page", "2", "--page-size", "25"])
     assert result.exit_code == 0, result.output
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 2
-    assert json.loads(lines[0])["interaction_id"] == "i1"
-    assert json.loads(lines[1])["interaction_id"] == "i2"
+    assert "i1" in result.output
 
 
 def _typed_sse_body(frames: list[tuple[str, dict]]) -> bytes:
@@ -123,29 +126,6 @@ def test_interactions_stream_distinguishes_event_types(monkeypatch: pytest.Monke
     assert answered["data"] == removed["data"] == payload
 
 
-def test_interactions_list_stops_at_backlog_done_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The backlog_done marker also arrives as an ``event:`` line plus ``{}`` data;
-    # the list must print the backlog and stop at the marker, ignoring any live tail.
-    body = _typed_sse_body(
-        [
-            ("interaction.add", {"interaction_id": "i1", "question": "one?"}),
-            ("interaction.backlog_done", {}),
-            ("interaction.add", {"interaction_id": "i2", "question": "live tail"}),
-        ]
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
-
-    result = run_cli(monkeypatch, handler, ["interactions", "list"])
-    assert result.exit_code == 0, result.output
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 1
-    frame = json.loads(lines[0])
-    assert frame["event"] == "interaction.add"
-    assert frame["data"]["interaction_id"] == "i1"
-
-
 def test_framed_event_control_chars_are_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
     # A terminal escape smuggled into a typed frame must still be stripped, and the
     # event type must survive so the frame stays attributable.
@@ -170,19 +150,3 @@ def test_interactions_answer_posts_json_value(monkeypatch: pytest.MonkeyPatch) -
     result = run_cli(monkeypatch, handler, ["interactions", "answer", "i1", "--answer", '"yes"'])
     assert result.exit_code == 0, result.output
     assert "answered" in result.output
-
-
-def test_interactions_list_tolerates_non_json_frame_before_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A frame whose ``data`` is not JSON cannot be the empty-object backlog marker,
-    # so the ``until_empty`` listing prints it verbatim and keeps consuming until the
-    # real ``{}`` marker arrives, then stops.
-    body = 'data: plain text line\n\ndata: {}\n\ndata: {"live": "tail"}\n\n'
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/interactions/stream"
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
-
-    result = run_cli(monkeypatch, handler, ["interactions", "list"])
-    assert result.exit_code == 0, result.output
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    assert lines == ["plain text line"]
