@@ -22,7 +22,7 @@ options = start["options"]
 # A plain text answer: hello (init) + one text event + a completed terminal.
 MESSAGE = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "event", "event": {"kind": "text", "text": "hello world"}})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": {"input_tokens": 3, "output_tokens": 5}, "result": "hello world", "is_structured": False})
@@ -32,7 +32,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # A structured terminal.
 STRUCTURED = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": None, "result": {"answer": 42}, "is_structured": True})
 """
@@ -41,7 +41,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # A sync ask: emit ask, block for the answer, echo it back as text, terminate.
 SYNC_ASK = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "ask", "ask_id": "a1", "question": "color?", "mode": "sync"})
 ans = readline()
 emit({"type": "event", "event": {"kind": "text", "text": "answer=" + str(ans.get("answer"))}})
@@ -53,7 +53,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # A proxied tool call: emit tool_call, block for tool_result, echo it back, terminate.
 TOOL_CALL = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tool_names"][0], "arguments": {"x": 1}})
 res = readline()
 echo = "tool=" + str(res.get("result")) + ",err=" + str(res.get("is_error"))
@@ -66,7 +66,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # A tool call naming a tool OUTSIDE the granted allowlist — the adapter must reject it loudly.
 TOOL_CALL_UNGRANTED = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "tool_call", "call_id": "c1", "tool_name": "not_granted", "arguments": {}})
 res = readline()
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1", "result": "x", "is_structured": False})
@@ -77,7 +77,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1", 
 # on an ephemeral run -> echo the error flag and terminate).
 ASYNC_ASK = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "ask", "ask_id": "a1", "question": "deploy?", "mode": "async"})
 frame = readline()
 if frame.get("type") == "stop":
@@ -100,7 +100,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1", 
 # silent stop.
 FATAL = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "fatal", "message": "runner blew up mid-drive"})
 """
 )
@@ -109,7 +109,7 @@ emit({"type": "fatal", "message": "runner blew up mid-drive"})
 # refuse the resume loudly rather than silently drive a mismatched SDK session.
 MESSAGE_SESSION_OTHER = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-2"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-2"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-2",
       "usage": None, "result": "hi", "is_structured": False})
 """
@@ -119,7 +119,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-2",
 # mapping to ReasoningStep / ToolCallStep / ToolResultStep is exercised, then terminates.
 EVENTS_RICH = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "event", "event": {"kind": "thinking", "text": "pondering"}})
 emit({"type": "event", "event": {"kind": "thinking", "text": "   "}})
 emit({"type": "event", "event": {"kind": "tool_use", "name": "grep", "input": {"q": "x"}, "id": "u1"}})
@@ -136,7 +136,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 ENV_CRED_ECHO = (
     _PREAMBLE
     + """import os
-emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 body = "static=" + os.environ.get("SERVICE_TOKEN", "MISSING") + ",conn=" + os.environ.get("CONN_KEY", "MISSING")
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": None, "result": body, "is_structured": False})
@@ -156,7 +156,7 @@ try:
     body = open(os.environ["HOME"] + "/.creds/GH_TOKEN").read().strip()
 except OSError:
     body = "MISSING"
-emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": None, "result": body, "is_structured": False})
 """
@@ -166,7 +166,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # idempotence record is written on a resumed super-step's clean terminal.
 RESUME_ONCE = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": {"input_tokens": 1, "output_tokens": 1}, "result": "done-once", "is_structured": False})
 """
@@ -176,7 +176,7 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 # redelivery so a re-drive (instead of the durable-record short-circuit) would be observable.
 RESUME_REDRIVE = (
     _PREAMBLE
-    + """emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": None, "result": "re-driven", "is_structured": False})
 """
@@ -193,7 +193,7 @@ home = os.environ["HOME"]
 os.makedirs(home, exist_ok=True)
 token = os.environ.get("ANTHROPIC_API_KEY", "")
 open(home + "/transcript.jsonl", "w", encoding="utf-8").write("token=" + token + "\\n")
-emit({"type": "hello", "sdk_version": "0.1.0", "session_id": "sess-1"})
+emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
 emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
       "usage": None, "result": "ok", "is_structured": False})
 """

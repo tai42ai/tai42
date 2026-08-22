@@ -14,7 +14,7 @@ import types
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, get_type_hints
 
 from fastmcp.server.dependencies import without_injected_parameters
 from fastmcp.tools.base import Tool, ToolResult
@@ -135,6 +135,29 @@ def _declares_own_output_schema(func: Callable[..., Any]) -> bool:
     return schema is not None and not schema.get("x-fastmcp-wrap-result")
 
 
+def _resolved_signature(func: Callable[..., Any]) -> inspect.Signature:
+    """``func``'s signature with every annotation resolved to a CONCRETE type.
+
+    A base tool declared under ``from __future__ import annotations`` carries its
+    return and parameter annotations as STRING forward-refs (e.g. ``"ExecResult"``).
+    When ``_baked_partial`` copies that raw signature onto a makefun-built partial, the
+    partial's globals do not contain those names, so the downstream schema parse
+    (``_derive_output_schema`` → pydantic's ``TypeAdapter``) evaluates the string in the
+    wrong namespace and raises a bare ``NameError``. Resolving the hints here against the
+    ORIGINAL function's own module globals turns the strings into real types the partial
+    can advertise in any namespace. ``include_extras`` keeps ``Annotated`` metadata; an
+    unannotated parameter keeps its empty annotation. An unresolvable hint raises loudly."""
+    hints = get_type_hints(func, include_extras=True)
+    signature = inspect.signature(func)
+    parameters = [
+        param.replace(annotation=hints.get(param.name, param.annotation)) for param in signature.parameters.values()
+    ]
+    return signature.replace(
+        parameters=parameters,
+        return_annotation=hints.get("return", signature.return_annotation),
+    )
+
+
 def _baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
     """A typed partial of a transformed tool's underlying function with its hidden
     baked args applied — the callable an extension branch wraps.
@@ -157,7 +180,7 @@ def _baked_partial(tool_obj: TransformedTool) -> Callable[..., Any]:
             )
         baked[key] = transform.default
 
-    signature = inspect.signature(base_fn)
+    signature = _resolved_signature(base_fn)
     remaining = [p for p in signature.parameters.values() if p.name not in baked]
     presented = signature.replace(parameters=remaining)
 

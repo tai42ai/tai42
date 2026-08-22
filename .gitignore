@@ -25,6 +25,9 @@ tai-e2e-studio-*/
 .env
 .env.*
 !.env.example
+# filled real-vendor e2e credentials live only on the creds host, never tracked
+REAL_E2E_CREDENTIALS.env
+!REAL_E2E_CREDENTIALS.env.example
 
 # coverage / tool caches
 .coverage

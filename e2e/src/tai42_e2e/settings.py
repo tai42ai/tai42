@@ -200,6 +200,11 @@ REAL_SERVICES: dict[str, RealService] = {
         required_env=("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"),
         inbound=True,
     ),
+    # ONE seam gates BOTH agents' real legs off the single ``.env`` ``ANTHROPIC_API_KEY``: it is
+    # exactly ``claude_code``'s metered API-key auth mode AND exactly the key
+    # ``langchain_deep_agent``'s server-side Anthropic model call needs. No vendor callback, so no
+    # ``E2E_PUBLIC_BASE_URL`` (``inbound=False``).
+    "claude_agent": RealService(required_env=("ANTHROPIC_API_KEY",), inbound=False),
     "marketplace-github": RealService(required_env=("MP_GITHUB_TOKEN",), inbound=False),
     # Real pypi.org is public — no operator credential; the real leg only repoints
     # the index env keys, so there is nothing to loud-fail on.
@@ -277,6 +282,10 @@ class HarnessSettings(BaseSettings):
     # Opt in to the fleet-consistency suite (boots the multi-worker / REPLICAS stacks
     # under the app worker bus). When false, tests/fleet is skipped at collection.
     fleet: bool = Field(default=False)
+
+    # Opt in to the docker-sandbox suite (requires a live rootless-dind engine, so it runs
+    # on CI / an engine host only). When false, tests/sandbox_docker is skipped at collection.
+    sandbox_docker: bool = Field(default=False)
 
     # The REAL/MOCK switch: a comma-separated list of external seams
     # (``TAI_E2E_REAL=slack,llm,stripe``) whose leg runs against the live vendor

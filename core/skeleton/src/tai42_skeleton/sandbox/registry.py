@@ -32,13 +32,20 @@ class SandboxHolder:
     def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
         """Instantiate and store ``cls`` as the provider, binding the resolved policy.
 
-        A second registration within one boot is a genuine conflict (two modules
-        claiming the scalar slot) — fail loudly rather than last-write-win. The
-        resolved :class:`SandboxPolicy` is bound onto the instance via the kit
+        The scalar slot holds exactly one provider. Re-registering the SAME provider
+        (identified by module + qualname) is tolerated (last-write-wins): the importer's
+        ``find_spec`` + submodule reload legitimately imports one provider module twice,
+        and the reload re-executes the class body — a distinct class OBJECT that names the
+        same provider — so a same-provider re-register is benign and re-instantiates +
+        re-binds the policy rather than raising. A DIFFERENT provider arriving while one
+        is bound is a genuine conflict (two modules claiming the scalar slot) and fails
+        loudly. The resolved :class:`SandboxPolicy` is bound onto the instance via the kit
         ``bind_policy`` so the kit session-create chokepoint holds it; a provider that
-        does not extend :class:`ManagedSandbox` cannot carry the bind and is refused
-        here rather than silently unenforced."""
-        if self._sandbox is not None:
+        does not extend :class:`ManagedSandbox` cannot carry the bind and is refused here
+        rather than silently unenforced."""
+        if self._sandbox is not None and (
+            (type(self._sandbox).__module__, type(self._sandbox).__qualname__) != (cls.__module__, cls.__qualname__)
+        ):
             raise RuntimeError(
                 f"a sandbox provider is already registered ({type(self._sandbox).__module__}."
                 f"{type(self._sandbox).__qualname__}); the scalar sandbox slot holds exactly one"

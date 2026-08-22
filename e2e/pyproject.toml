@@ -35,7 +35,12 @@ dependencies = [
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=1.0,<2",
-    "tai42-agents>=3.0,<4",
+    "tai42-agents>=4.0,<5",
+    # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
+    # provider and the in-process local provider. Workspace siblings, floated at
+    # their checkouts by the source overrides below.
+    "tai42-sandbox-docker>=1.0,<2",
+    "tai42-sandbox-local>=1.0,<2",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=1.0,<2",
     # The accounts + OIDC providers the accounts/oidc auth stacks load: the
@@ -107,6 +112,11 @@ dependencies = [
     # (console script ``tai42-mcp-dynamic-postgres``). A released PyPI package, never a
     # workspace sibling — it carries no [tool.uv.sources] override.
     "tai42-mcp-dynamic-postgres>=0.5,<0.6",
+    # The Claude Agent SDK the agents_claude harness drives the claude_code agent
+    # runner through. An external PyPI package (never a workspace sibling), pinned
+    # to the exact version the agents plugin's CLAUDE_AGENT_SDK_VERSION and the
+    # PLAN_6 session image declare, so the harness and the SUT agree byte-for-byte.
+    "claude-agent-sdk==0.2.144",
 ]
 
 [project.urls]
@@ -192,6 +202,8 @@ tai42-skeleton = { workspace = true }
 tai42-toolbox = { workspace = true }
 tai42-tools-stripe = { workspace = true }
 tai42-agents = { workspace = true }
+tai42-sandbox-docker = { workspace = true }
+tai42-sandbox-local = { workspace = true }
 tai42-identity-redis = { workspace = true }
 tai42-accounts-postgres = { workspace = true }
 tai42-accounts-oidc = { workspace = true }

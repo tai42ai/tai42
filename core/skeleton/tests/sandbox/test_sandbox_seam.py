@@ -69,11 +69,38 @@ def test_require_returns_the_registered_provider() -> None:
     assert holder.require() is holder.sandbox
 
 
-def test_second_registration_is_a_loud_conflict() -> None:
+def test_same_provider_reregistration_is_tolerated(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The importer's find_spec + submodule reload imports one provider module twice; the
+    # reload re-executes the class body, so the second registration is a DISTINCT class
+    # object that names the same provider (same module + qualname). It must be benign:
+    # re-bind and leave exactly one bound provider of that provider.
+    resolved = SandboxPolicy(egress="internal", isolation="vm", scrub_transcript=True, durable=False)
+    monkeypatch.setattr("tai42_skeleton.sandbox.registry.resolve_sandbox_policy", lambda: resolved)
+
+    # A distinct class OBJECT that mimics a reload of _FakeSandbox (same module + qualname).
+    class reloaded(_FakeSandbox):
+        pass
+
+    reloaded.__qualname__ = _FakeSandbox.__qualname__
+    reloaded.__module__ = _FakeSandbox.__module__
+    assert reloaded is not _FakeSandbox
+    holder = SandboxHolder()
+    holder.register_sandbox(_FakeSandbox)
+    first = holder.sandbox
+    holder.register_sandbox(reloaded)
+    assert isinstance(holder.sandbox, reloaded)
+    assert holder.sandbox is not first
+    assert holder.sandbox._policy == resolved  # pyright: ignore[reportPrivateUsage]
+
+
+def test_different_class_registration_is_a_loud_conflict() -> None:
+    class _OtherSandbox(_FakeSandbox):
+        pass
+
     holder = SandboxHolder()
     holder.register_sandbox(_FakeSandbox)
     with pytest.raises(RuntimeError, match="already registered"):
-        holder.register_sandbox(_FakeSandbox)
+        holder.register_sandbox(_OtherSandbox)
 
 
 def test_register_rejects_a_non_managed_provider() -> None:
