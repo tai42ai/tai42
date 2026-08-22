@@ -32,43 +32,25 @@ pytestmark = pytest.mark.backendless
 
 
 async def _find_pending(stack: TaiStack, question: str, *, deadline: float = 10.0) -> dict:
-    """Stream the interactions SSE until the pending interaction carrying
+    """Poll the paged pending-list door until the pending interaction carrying
     ``question`` appears; return its payload."""
-    url = f"http://{stack.host}:{stack.port_a}/api/interactions/stream"
+    url = f"http://{stack.host}:{stack.port_a}/api/interactions"
 
     async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
             try:
-                async with client.stream("GET", url) as response:
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        while "\n\n" in buffer:
-                            frame, buffer = buffer.split("\n\n", 1)
-                            data = _payload(frame, question)
-                            if data is not None:
-                                return data
-                            if "backlog_done" in frame:
-                                return None
+                resp = await client.get(url, params={"page": 1, "pageSize": 200})
+                resp.raise_for_status()
             except httpx.HTTPError:
                 return None
+            for item in resp.json()["data"]["items"]:
+                if isinstance(item, dict) and question in json.dumps(item):
+                    return item
         return None
 
     found = await wait_for_async(probe, deadline=deadline, message=f"no pending external interaction for {question!r}")
     assert found is not None
     return found
-
-
-def _payload(frame: str, question: str) -> dict | None:
-    for line in frame.splitlines():
-        if line.startswith("data:"):
-            try:
-                data = json.loads(line[len("data:") :].strip())
-            except json.JSONDecodeError:
-                return None
-            if isinstance(data, dict) and question in json.dumps(data):
-                return data
-    return None
 
 
 def _resolve_ticket(stack: TaiStack, interaction_id: str) -> str:

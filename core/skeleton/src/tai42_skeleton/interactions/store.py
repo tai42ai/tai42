@@ -34,6 +34,7 @@ from typing import Any, Final, Literal, cast, overload
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 from tai42_contract.interactions import (
+    MEDIA_ROUTE_PREFIX,
     InteractionRequest,
     InteractionResponse,
     InteractionState,
@@ -43,6 +44,17 @@ ADD_EVENT = "interaction.add"
 ANSWERED_EVENT = "interaction.answered"
 REMOVED_EVENT = "interaction.removed"
 _EVENTS_MAXLEN = 10000
+
+
+def _event_fields(event_type: str, interaction_id: str, group_id: str, audience: str | None) -> dict[str, str]:
+    # An answered/removed event frame. ``audience`` rides it so the tail-only SSE
+    # filters the frame directly (a restricted caller sees only its own); it is
+    # omitted when None (an unaddressed question) — a redis stream field is never None.
+    fields = {"type": event_type, "interaction_id": interaction_id, "group_id": group_id}
+    if audience is not None:
+        fields["audience"] = audience
+    return fields
+
 
 # The three end states ``prune_pending`` distinguishes: ``"pruned"`` deleted a
 # still-pending question; ``"answered"`` found an answered status (no writes);
@@ -104,6 +116,46 @@ if tonumber(redis.call('ZCARD', KEYS[1])) >= tonumber(ARGV[2]) then
 end
 redis.call('ZADD', KEYS[1], ARGV[3], ARGV[4])
 return 1
+"""
+
+
+# Set-or-extend the group media index and every member media key to the group's TTL,
+# queued into the add's write pipeline so it commits atomically with the question. Reads
+# the current index members, SADDs the add's new ids, then — over the union — sets the
+# index and each ``media:{id}`` key to the horizon via
+# ``EXPIRE ... NX`` (set when a key has none yet) + ``EXPIRE ... GT`` (raise only when
+# longer), the same SET-OR-EXTEND-TO-GREATER discipline the group stream and count use.
+# So a co-grouped long park keeps the whole group's media alive and a later short add
+# never shrinks it. Like the phantom purge, it constructs the per-member ``media:{id}``
+# keys from members read at runtime — a single-node access (undeclared for Cluster),
+# consistent with this store's single-node assumption.
+#   KEYS[1] = media_index_key
+#   ARGV[1] = ttl seconds,  ARGV[2] = media_key prefix,  ARGV[3..] = the add's new ids
+_MEDIA_SET_OR_EXTEND_LUA = """
+-- interactions:media-set-or-extend
+local ttl = tonumber(ARGV[1])
+local prefix = ARGV[2]
+local members = redis.call('SMEMBERS', KEYS[1])
+local seen = {}
+for _, id in ipairs(members) do seen[id] = true end
+for i = 3, #ARGV do
+    local id = ARGV[i]
+    if not seen[id] then
+        redis.call('SADD', KEYS[1], id)
+        members[#members + 1] = id
+        seen[id] = true
+    end
+end
+if #members > 0 then
+    redis.call('EXPIRE', KEYS[1], ttl, 'NX')
+    redis.call('EXPIRE', KEYS[1], ttl, 'GT')
+    for _, id in ipairs(members) do
+        local mk = prefix .. id
+        redis.call('EXPIRE', mk, ttl, 'NX')
+        redis.call('EXPIRE', mk, ttl, 'GT')
+    end
+end
+return #members
 """
 
 
@@ -210,6 +262,16 @@ def _expiry_ms(request: InteractionRequest) -> int:
 _DEFAULT_EXPIRY_TTL_MARGIN_SECONDS = 60
 
 
+def _media_ids_of(request: InteractionRequest) -> list[str]:
+    # The stored-media ids a request's media references — items whose url is a served
+    # reference (``MEDIA_ROUTE_PREFIX{id}``); https/link/data: items carry none. A
+    # data:image is substituted to a served reference before the request is built, so
+    # by the time it reaches ``add`` only served references remain to index.
+    if not request.media:
+        return []
+    return [item.url[len(MEDIA_ROUTE_PREFIX) :] for item in request.media if item.url.startswith(MEDIA_ROUTE_PREFIX)]
+
+
 def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int, expiry_margin_s: int) -> int:
     """The TTL a question's own keys need. An async park with an ``expiry_at`` beyond
     the idle horizon must survive to its expiry PLUS a reaper-pass margin, or its
@@ -261,7 +323,7 @@ class InteractionStore:
         """Parallel index to ``pending_key``, scored by each group's FURTHEST
         question deadline (extend-only via ``ZADD GT``). ``pending_key`` is scored
         by creation TIME, not deadline — ``add`` sets a group's score to its most
-        recent question's ``created_at`` — so the reconnect backlog reads in
+        recent question's ``created_at`` — so the pending list reads in
         creation-timestamp order rather than deadline order; only this parallel
         index carries the deadline the atomic phantom purge keys on, and the purge
         never rescores ``pending_key``."""
@@ -311,6 +373,19 @@ class InteractionStore:
     @property
     def events_key(self) -> str:
         return f"{self._p}events"
+
+    def media_key(self, media_id: str) -> str:
+        """The hash holding one stored-by-reference media item (its mime + base64
+        bytes). Keyed by the media id (the served-media capability secret); its TTL
+        is set-or-extended to the owning group's horizon on every ``add`` (media of a
+        group lives as long as the group)."""
+        return f"{self._p}media:{media_id}"
+
+    def media_index_key(self, group_id: str) -> str:
+        """SET of the stored-media ids a group's questions reference. ``add`` extends
+        every member ``media_key`` and this index to the group's TTL, so the bytes a
+        durable record points at outlive no shorter than the group stream."""
+        return f"{self._p}media-index:{group_id}"
 
     # -- writes --------------------------------------------------------------
 
@@ -417,6 +492,13 @@ class InteractionStore:
         }
         if request.sensitive:
             state_mapping["sensitive"] = "1"
+        if request.audience is not None:
+            # Denormalized like ``sensitive`` so the answered/removed events can carry
+            # the question's audience from a single ``hget`` inside the claim's WATCH
+            # loop, without deserializing the request — the tail-only SSE filters those
+            # frames on it directly (a restricted caller sees only its own). Absent means
+            # an unaddressed question (audience None).
+            state_mapping["audience"] = request.audience
         if request.mode == "async":
             # Denormalized like ``sensitive`` so the atomic answer/expiry claim can write
             # the durable continuation-due record from a few ``hget``s inside its WATCH
@@ -429,6 +511,14 @@ class InteractionStore:
             state_mapping["continuation_identity"] = request.continuation_identity
             if continuation_fingerprint is not None:
                 state_mapping["continuation_fingerprint"] = continuation_fingerprint
+        new_media_ids = _media_ids_of(request)
+        if new_media_ids:
+            # This question's own served-media ids, comma-joined and denormalized like
+            # ``sensitive`` so a terminal claim (record_answer/prune_pending) drops them
+            # from the group media index from a single ``hget`` inside its WATCH loop
+            # without deserializing the request. Absent when the question has no stored
+            # media.
+            state_mapping["media_ids"] = ",".join(new_media_ids)
         pipe = r.pipeline()
         pipe.zremrangebyscore(self.open_key, 0, _now_ms())
         pipe.xadd(
@@ -486,6 +576,22 @@ class InteractionStore:
         pipe.expire(group_key, new_ttl, gt=True)
         pipe.expire(count_key, new_ttl, nx=True)
         pipe.expire(count_key, new_ttl, gt=True)
+        # Media the group's questions reference must outlive no shorter than the group
+        # stream: this question's own ids join the group media index, and every member
+        # media key (plus the index) takes the same SET-OR-EXTEND-TO-GREATER TTL as the
+        # group stream, so a co-grouped long park keeps the whole group's media alive.
+        # One Lua call folds read-members + SADD-new + the index/key EXPIREs in, queued
+        # into this write pipeline so it commits ATOMICALLY with the question — no window
+        # where committed state carries media at the bootstrap TTL. Removal/answer paths
+        # never delete media — it expires on this TTL.
+        pipe.eval(
+            _MEDIA_SET_OR_EXTEND_LUA,
+            1,
+            self.media_index_key(request.group_id),
+            str(new_ttl),
+            self.media_key(""),
+            *new_media_ids,
+        )
         await pipe.execute()
 
     async def reserve_open_slot(self, r: Redis, request: InteractionRequest, limit: int) -> bool:
@@ -587,6 +693,15 @@ class InteractionStore:
                         await pipe.reset()
                         return False
                     sensitive = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "sensitive"))) == "1"
+                    # The question's audience rides the answered event so the tail-only
+                    # SSE filters the frame directly (absent = an unaddressed question).
+                    audience = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "audience")))
+                    # The question's own media ids, read from the denormalized ``media_ids``
+                    # field, so the group's media index drops them as the question leaves
+                    # pending (the media keys themselves are left to expire on their group
+                    # TTL). Absent when the question referenced no stored media.
+                    media_ids_field = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
+                    media_ids = media_ids_field.split(",") if media_ids_field else []
                     # An async park carries a denormalized continuation tool + identity
                     # (+ fingerprint); their presence is the signal to enqueue the durable
                     # continuation-due record in THIS claim's MULTI. Read them in the
@@ -634,6 +749,8 @@ class InteractionStore:
                     # Drop any async-expiry member so the reaper never re-fires an
                     # answered question (a no-op for a sync question, never a member).
                     pipe.zrem(self.pending_expiry_key, interaction_id)
+                    if media_ids:
+                        pipe.srem(self.media_index_key(group_id), *media_ids)
                     if ticket is not None:
                         # ``ticket_ttl`` is guaranteed non-None here (guarded at
                         # the top); pin it for the type checker.
@@ -650,11 +767,7 @@ class InteractionStore:
                     pipe.expire(reply_key, reply_ttl)
                     pipe.xadd(
                         self.events_key,
-                        {
-                            "type": ANSWERED_EVENT,
-                            "interaction_id": interaction_id,
-                            "group_id": group_id,
-                        },
+                        cast("dict[Any, Any]", _event_fields(ANSWERED_EVENT, interaction_id, group_id, audience)),
                         maxlen=_EVENTS_MAXLEN,
                         approximate=True,
                     )
@@ -719,6 +832,14 @@ class InteractionStore:
                     if status == "answered":
                         await pipe.reset()
                         return "answered"
+                    # The question's audience rides the removed event so the tail-only
+                    # SSE filters the frame directly (absent = an unaddressed question).
+                    audience = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "audience")))
+                    # The question's own media ids drop from the group's media index as it
+                    # leaves pending, read from the denormalized ``media_ids`` field; the media
+                    # keys expire on their group TTL. Absent when the question had no stored media.
+                    media_ids_field = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
+                    media_ids = media_ids_field.split(",") if media_ids_field else []
                     current = await pipe.get(count_key)
                     if current is None:
                         # count_key is set-or-extended to cover the group's
@@ -735,6 +856,8 @@ class InteractionStore:
                     # Drop any async-expiry member alongside the state (a no-op for
                     # a sync question, never a member).
                     pipe.zrem(self.pending_expiry_key, interaction_id)
+                    if media_ids:
+                        pipe.srem(self.media_index_key(group_id), *media_ids)
                     pipe.decr(count_key)
                     if remaining <= 0:  # this was the group's last open question
                         pipe.zrem(self.pending_key, group_id)
@@ -742,11 +865,7 @@ class InteractionStore:
                         pipe.delete(count_key)
                     pipe.xadd(
                         self.events_key,
-                        {
-                            "type": REMOVED_EVENT,
-                            "interaction_id": interaction_id,
-                            "group_id": group_id,
-                        },
+                        cast("dict[Any, Any]", _event_fields(REMOVED_EVENT, interaction_id, group_id, audience)),
                         maxlen=_EVENTS_MAXLEN,
                         approximate=True,
                     )
@@ -882,11 +1001,11 @@ class InteractionStore:
         raw = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
         return self._state_from_raw(raw)
 
-    async def backlog(self, r: Redis) -> list[InteractionRequest]:
-        """The pending-question backlog an SSE consumer replays on connect, in
+    async def pending(self, r: Redis) -> list[InteractionRequest]:
+        """The full pending-question set the paged list door serves, in
         ``pending_key`` score order (each group's most-recent question
         ``created_at``) then stream order within a group. Performs the same
-        reconciliation an inline read would, so the route
+        reconciliation an inline read would, so the door
         holds zero store-key knowledge:
 
         * a phantom group (its stream expired but it lingers in the index) is
@@ -900,7 +1019,7 @@ class InteractionStore:
         round trip for the group's open questions) rather than an N+1 of
         per-question ``HGETALL`` calls."""
         now = datetime.now(UTC)
-        backlog: list[InteractionRequest] = []
+        pending: list[InteractionRequest] = []
         for raw_group in await r.zrange(self.pending_key, 0, -1):
             group_id = as_str(raw_group)
             entries = await r.xrange(self.group_key(group_id))
@@ -930,8 +1049,8 @@ class InteractionStore:
                 if state.request.mode != "async" and now >= state.request.timeout_at:
                     await self.prune_pending(r, req.interaction_id, group_id)
                     continue
-                backlog.append(req)
-        return backlog
+                pending.append(req)
+        return pending
 
     async def wait_for_reply(
         self, r: Redis, reply_to: str, timeout_seconds: float, grace_seconds: float

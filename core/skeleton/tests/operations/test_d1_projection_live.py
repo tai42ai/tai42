@@ -130,7 +130,7 @@ def test_d1_projected_surface_is_the_expected_op_count():
             tier1 = sorted(op.name for op in ops if is_tier1(op))
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
-            # The arithmetic: 178 total - 41 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 133.
+            # The arithmetic: 179 total - 41 tier-2 default-excluded - 4 tier-1 hardcode-blocked = 134.
             # The +8 over the historical 143 are the settings-profile CRUD ops (list/get/put/
             # delete/diff/versions/version/rollback under /api/config/profiles*) — tier-0
             # default-projected like the sibling config ops (read_env/write_env/reload_config);
@@ -169,8 +169,9 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # conversations filter/search + person-forget doors ``search_conversation_messages``
             # (a tier-0 read like ``list_conversation_threads``) and ``delete_conversation_person``
             # — tier-0 default-projected like its ``delete_conversation_thread`` sibling
-            # (destructive but not authority_changing).
-            assert total == 178, total
+            # (destructive but not authority_changing). The +1 to 179 is ``list_interactions``
+            # — the paged pending-inbox read door, a tier-0 read like ``list_notifications``.
+            assert total == 179, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -230,23 +231,23 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 133, measured two ways.
+            # The default-projected surface = 134, measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 133, len(projected)
-            assert total - len(tier2) - len(tier1) == 133
+            assert len(projected) == 134, len(projected)
+            assert total - len(tier2) - len(tier1) == 134
 
-            # The LIVE booted tool surface is the 133 projected ops PLUS the one
+            # The LIVE booted tool surface is the 134 projected ops PLUS the one
             # force-registered hidden mechanism tool the conversations router installs
             # at startup: ``conversation_deliver``, the completion continuation a resumed
             # async turn's driver fires through ``run_tool``. It is NOT an api_tools
-            # projection (``projected`` stays 133) — it is a mandatory bridge registered
+            # projection (``projected`` stays 134) — it is a mandatory bridge registered
             # independently of the api_tools toggle and carried on the live surface like
-            # any hidden tool, so the live count is 134.
+            # any hidden tool, so the live count is 135.
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | {"conversation_deliver"}
             assert (live["conversation_deliver"].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 134
+            assert len(live) == 135
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -407,13 +408,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 133 projected ops plus the
+            # api_tools projected the surface: the 134 projected ops plus the
             # force-registered hidden ``conversation_deliver`` completion mechanism the
-            # conversations router installs at startup (134 live).
+            # conversations router installs at startup (135 live).
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 134
+            assert len(live) == 135
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

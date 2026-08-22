@@ -207,10 +207,8 @@ async def test_sse_stream_survives_a_hot_apply(replicas_stack: TaiStack, uniq: C
         assert response.status_code == 200, f"interactions SSE did not open: {response.status_code}"
         lines = response.aiter_lines()
 
-        # The stream is live pre-apply: it replays its backlog up to the sentinel.
-        await _read_until(lines, "backlog_done", deadline=20.0)
-
-        # A hot apply lands on the SAME worker over a SEPARATE connection.
+        # The tail-only stream is open pre-apply (a 200, no backlog). A hot apply lands on
+        # the SAME worker over a SEPARATE connection.
         await _apply_hot_flip(replicas_stack, uniq)
 
         # The SAME stream still delivers after the swap: its 15s keepalive still fires (the
@@ -218,7 +216,7 @@ async def test_sse_stream_survives_a_hot_apply(replicas_stack: TaiStack, uniq: C
         await _read_until(lines, "keepalive", deadline=45.0)
 
     # A REAL swap crossed the live stream: the serving worker's epoch advanced between the
-    # pre-apply backlog read and the post-apply keepalive, so the stream genuinely survived a
+    # stream opening and the post-apply keepalive, so the stream genuinely survived a
     # generation swap rather than merely outlasting an awaited no-op.
     after_epoch = await _settings_epoch(replicas_stack)
     assert after_epoch > before_epoch, (

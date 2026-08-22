@@ -1,10 +1,18 @@
 """HTTP routes for the ask_user interactions surface — ``/api/interactions/*``.
 
-Four doors:
+Doors:
 
-* ``GET /api/interactions/stream`` — authenticated SSE feed: the pending-question
-  backlog on connect, a ``backlog_done`` marker, then a live tail of add/answered/
-  removed events.
+* ``GET /api/interactions`` — the authenticated PAGED pending-question list (the
+  ``list_interactions`` operation): the initial-load surface a client reads before
+  applying the live stream. Audience-filtered before paging so the totals are honest.
+* ``GET /api/interactions/stream`` — the authenticated TAIL-ONLY SSE feed: a live
+  tail of add/answered/removed events from the cursor captured at connect. It
+  carries no backlog and no ``backlog_done`` marker (the paged list door is the
+  initial-load surface).
+* ``GET /api/interactions/media/{media_id}`` — the UNAUTHENTICATED served-media
+  door: the media id is the capability secret (a vendor fetches the url from its
+  own servers, a browser ``<img>`` from the inbox origin). Serves the stored bytes
+  with their mime; a malformed id is a 400, a miss/expired id a 404.
 * ``POST /api/interactions/{interaction_id}/answer`` — the authenticated human
   answer door. The value is validated server-side against the stored question's
   ``answer_format`` before the blocked caller is woken; an invalid answer is
@@ -32,9 +40,9 @@ filtered out of a question's stream can never obtain that question's ticket, and
 the answer-door audience gate cannot be bypassed through this door.
 
 Success bodies are ``{"data": {...}}``; failures are ``{"error": "<message>"}``.
-Add frames are at-least-once across the cursor/backlog window — an add landing
-between cursor capture and the backlog snapshot can appear in both the backlog
-and the tail; clients de-duplicate by ``interaction_id``.
+The paged list door and the live tail share the same add-frame shape (``_add_data``);
+a client seeds from the list, then applies the tail, de-duplicating by
+``interaction_id``.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,7 +60,6 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     AnswerFormat,
-    InteractionRequest,
     InteractionResponse,
     InteractionState,
 )
@@ -65,6 +73,7 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.form_schema import channel_form_fields
+from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.interactions.settings import (
     INTERACTIONS_NOT_CONFIGURED_CODE,
     INTERACTIONS_NOT_CONFIGURED_MESSAGE,
@@ -90,6 +99,7 @@ from tai42_skeleton.operations import (
 # the still-handler callback door shares its answer-validation, reply-TTL, and
 # serializer-guarded claim helpers, imported from that module.
 from tai42_skeleton.operations.interactions import (
+    _add_data,
     _AnswerInvalid,
     _claim_or_serialization_error,
     _reply_ttl,
@@ -97,6 +107,7 @@ from tai42_skeleton.operations.interactions import (
     _validate_answer,
 )
 from tai42_skeleton.operations.interactions import answer_interaction as _answer_interaction_op
+from tai42_skeleton.operations.interactions import list_interactions as _list_interactions_op
 
 logger = logging.getLogger(__name__)
 
@@ -343,93 +354,22 @@ def _frame(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _add_data(request: InteractionRequest) -> dict:
-    # A verifier config rides ``format_payload`` server-side; STRIP it from the
-    # client frame (the browser never needs the verifier name / secret_env) and
-    # in its place emit ``server_verified`` so the UI renders a non-actionable
-    # "awaiting a verified server callback" card instead of a dead confirm link.
-    format_payload = request.format_payload
-    server_verified = False
-    if format_payload is not None and "verifier" in format_payload:
-        format_payload = {k: v for k, v in format_payload.items() if k != "verifier"}
-        server_verified = True
-
-    data = {
-        "interaction_id": request.interaction_id,
-        "group_id": request.group_id,
-        "question": request.question,
-        "answer_format": request.answer_format.value,
-        "format_payload": format_payload,
-        "created_at": request.created_at.isoformat(),
-        "timeout_at": request.timeout_at.isoformat(),
-        # Rides every add frame (backlog + live tail) so the UI can label the
-        # answered state of a sensitive question, whose body is never persisted.
-        "sensitive": request.sensitive,
-    }
-    if server_verified:
-        data["server_verified"] = True
-    if request.channel is not None:
-        data["channel"] = request.channel
-    # Attribution, additive and absent-when-None (the channel/media idiom). The
-    # feed is the channel operator's own authed surface already scoped by the
-    # audience read-gate, so ``recipient`` (a delivery address) rides as-is,
-    # unmasked. ``recipient``/``origin`` are display/binding-only; ``audience`` IS
-    # the isolation axis, emitted here purely for display — the feed is already
-    # audience-gated at the read query, so echoing it grants no extra reach.
-    if request.recipient is not None:
-        data["recipient"] = request.recipient
-    if request.origin is not None:
-        data["origin"] = request.origin
-    if request.audience is not None:
-        data["audience"] = request.audience
-    # Display-only media rides the add frame as plain JSON dicts when present
-    # (absent — no key — when the question has none); ``exclude_none`` keeps a
-    # caption-less item lean, and the client treats a missing caption as absent.
-    if request.media is not None:
-        data["media"] = [item.model_dump(mode="json", exclude_none=True) for item in request.media]
-    return data
-
-
-async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings):
+async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings, cursor: str):
     # Resolve the caller's isolation identity once. A RESTRICTED caller (owner claim
-    # present) sees ONLY interactions addressed to it: backlog/add frames are filtered
-    # on the record's ``audience == <own id>``. ``answered``/``removed`` frames carry
-    # no audience and the record may already be gone, so the connection keeps a
-    # ``visible`` set of the interaction_ids it emitted an ``audience==self`` frame
-    # for and emits a later ``answered``/``removed`` ONLY when its id is in that set —
-    # failing CLOSED for anything else (never leaking another identity's interaction
-    # id or lifecycle timing) while never dropping a frame for the caller's own
-    # addressed interaction. An UNRESTRICTED caller sees every frame (today's
-    # operator inbox). The interactions backlog is the FULL pending index (not a
-    # bounded window), so — unlike tool runs — no completeness truncation exists and
-    # a plain per-frame filter suffices.
+    # present) sees ONLY interactions addressed to it: an ``add`` frame is filtered on
+    # the record's ``audience == <own id>``, and an ``answered``/``removed`` frame on
+    # the audience the store stamps into the event payload — so a terminal frame is
+    # filtered directly, with no record left to read. An UNRESTRICTED caller sees every
+    # frame (the operator inbox). This is a TAIL-ONLY stream: the pending set is served
+    # by the paged ``GET /api/interactions`` door, so the stream carries no backlog and
+    # no ``backlog_done`` marker — only the live add/answered/removed tail. ``cursor`` is
+    # the events-stream tail the route handler captured BEFORE returning the response, so
+    # any add published after the client has the response headers has an id past it and
+    # is guaranteed delivered (the generator body runs only once the response iterates).
     _user_id, restricted_id = request_identity()
     restricted = restricted_id is not None
-    visible: set[str] = set()
 
-    async with client_ctx(RedisClient, settings.redis) as r:
-        # Capture the events cursor BEFORE the backlog read so no live event that
-        # arrives during the backlog is missed. Empty stream -> tail from "0-0"
-        # ("$" would drop an event written before the first XREAD call).
-        tail = await r.xrevrange(store.events_key, count=1)
-        cursor = as_str(tail[0][0]) if tail else "0-0"
-
-        # The store owns the backlog read: pending-group order, per-group batched
-        # state reads (no N+1), and the phantom/abandoned reconciliation side
-        # effects. Read the WHOLE backlog under the pooled connection, then exit
-        # the block to return the connection BEFORE yielding — a slow SSE client
-        # suspends the generator between frames and must never pin the shared pool.
-        backlog = await store.backlog(r)
-
-    for req in backlog:
-        if restricted and req.audience != restricted_id:
-            continue
-        if restricted:
-            visible.add(req.interaction_id)
-        yield _frame(ADD_EVENT, _add_data(req))
-    yield _frame("interaction.backlog_done", {})
-
-    # The finite backlog is delivered; what follows is the NEVER-completing live tail. Exempt
+    # What follows is the NEVER-completing live tail. Exempt
     # this request from its serving generation's retire drain now: this is a plain Starlette
     # route on its own redis connection — a reload's ``aclose`` closes only the FastMCP
     # session-manager, so it does NOT sever this stream; the tail can never drain, so a retire
@@ -486,27 +426,22 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
                         state = await store.get_state(tail_conn, interaction_id)
                         # A state pruned/expired between the event and this read
                         # has nothing left to show — the add frame is skipped,
-                        # matching the backlog's pending-only filter.
+                        # matching the pending-only filter.
                         if state is None:
                             continue
                         if restricted and state.request.audience != restricted_id:
                             continue
-                        if restricted:
-                            visible.add(interaction_id)
                         yield _frame(ADD_EVENT, _add_data(state.request))
                         yielded = True
                     elif event_type in (ANSWERED_EVENT, REMOVED_EVENT):
-                        # Fail closed: a restricted caller is emitted a terminal
-                        # frame only for an interaction it saw an addressed add for.
-                        if restricted and interaction_id not in visible:
+                        # Filter directly on the audience the store stamped into the
+                        # event: a restricted caller sees a terminal frame only for its
+                        # OWN addressed interaction (an absent audience field is an
+                        # unaddressed question, which a restricted caller never sees).
+                        if restricted and fields.get("audience") != restricted_id:
                             continue
                         yield _frame(event_type, {"interaction_id": interaction_id, "group_id": group_id})
                         yielded = True
-                        # An interaction fires exactly one terminal event, and its id
-                        # is never reused — drop it from the visible set so the set
-                        # stays bounded to currently-open interactions. A later
-                        # duplicate terminal frame then fails closed (suppressed).
-                        visible.discard(interaction_id)
             # The keepalive is deadline-driven: it fires whenever the monotonic
             # deadline passes and no frame reached THIS caller this window — whether
             # XREAD returned nothing OR only events filtered out for a restricted
@@ -524,7 +459,7 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
 @http_surface().custom_route(
     "/api/interactions/stream",
     methods=["GET"],
-    summary="Stream the interactions inbox (backlog then live)",
+    summary="Stream the interactions inbox live tail",
     tags=["interactions"],
     response_model=None,
     declared=DeclaredRouteMetadata(
@@ -546,14 +481,96 @@ async def stream(request: Request) -> Response:
         )
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
+    # Capture the tail cursor on the pooled connection BEFORE the response is returned, so
+    # a client that has received the response headers is guaranteed every later add: any
+    # event published after this read has an id past the cursor. The connection is
+    # released here — the never-completing tail below runs on its own dedicated
+    # connection and must never pin the shared pool.
+    async with client_ctx(RedisClient, settings.redis) as r:
+        tail = await r.xrevrange(store.events_key, count=1)
+        cursor = as_str(tail[0][0]) if tail else "0-0"
     return StreamingResponse(
-        _stream_events(request, store, settings),
+        _stream_events(request, store, settings, cursor),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
-# -- human answer door (route 2) — an operation adapter ----------------------
+# -- served-media door — an UNAUTHENTICATED capability URL --------------------
+
+# A stored-media id: 43 urlsafe-base64 chars (32 random bytes), the whole path
+# segment. Anything else is a malformed request, answered 400 before any store read.
+_MEDIA_ID_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+@http_surface().custom_route(
+    "/api/interactions/media/{media_id}",
+    methods=["GET"],
+    summary="Serve interaction media stored by reference",
+    tags=["interactions"],
+    response_model=None,
+    authed=False,
+    declared=DeclaredRouteMetadata(
+        reload_gated=False,
+        reads_body=False,
+        error_statuses=(400, 404),
+        success_status=200,
+    ),
+)
+async def media(request: Request) -> Response:
+    # UNAUTHENTICATED: the media id IS the capability secret — a vendor fetches the
+    # url from its own servers, a browser ``<img>`` from the inbox origin. A malformed
+    # id is a 400; an unconfigured store answers the SAME uniform 404 as a miss (never
+    # a 501 that would oracle the store's absence), matching the callback door.
+    media_id = request.path_params["media_id"]
+    if _MEDIA_ID_RE.fullmatch(media_id) is None:
+        return JSONResponse({"error": "invalid media id"}, status_code=400)
+    if not interactions_store_configured():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as r:
+        found = await read_media(store, r, media_id)
+        if found is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        mime, payload = found
+        # The remaining lifetime bounds the client cache: the bytes vanish at the key's
+        # TTL (extended to the owning group's horizon), so a cache must not outlive it.
+        remaining_ttl = await r.ttl(store.media_key(media_id))
+    max_age = remaining_ttl if remaining_ttl > 0 else 0
+    return Response(
+        payload,
+        media_type=mime,
+        headers={"Cache-Control": f"private, max-age={max_age}", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+# -- paged pending-list door — an operation adapter --------------------------
+
+
+async def _extract_page_window(request: Request) -> dict:
+    """The ``?page=`` / ``?pageSize=`` window as the list door's flat arguments (a GET
+    reads its parameters from the query string, never a body). A non-integer is a loud
+    400 here; the operation range-checks the pair and caps the size."""
+    page = request.query_params.get("page", "1")
+    page_size = request.query_params.get("pageSize", "50")
+    try:
+        return {"page": int(page), "page_size": int(page_size)}
+    except ValueError as exc:
+        raise BadRequestError(f"page and pageSize must be integers: page={page!r} pageSize={page_size!r}") from exc
+
+
+list_interactions = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_interactions_op),
+    path="/api/interactions",
+    method="GET",
+    context_extractor=_extract_page_window,
+    action="read",
+)
+
+
+# -- human answer door — an operation adapter --------------------------------
 
 
 async def _extract_answer(request: Request) -> dict:
@@ -586,7 +603,7 @@ answer = register_operation_route(
 )
 
 
-# -- callback doors (routes 3 & 4) -------------------------------------------
+# -- callback doors ----------------------------------------------------------
 
 
 async def _read_bounded_body(request: Request, cap: int) -> bytes:

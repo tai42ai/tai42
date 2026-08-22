@@ -4,8 +4,9 @@ A small ASGI app mounts the interactions routes behind the real three-middleware
 stack (Authentication -> AuthContext -> ResourceGuard). The verifier's tier-1
 mapping is seeded via ``AccessControlSettings(path_patterns=...)`` (the mechanism
 the deploy docs prescribe) and tier 2 as ``ac:route:`` entries. The pin needs no
-authenticated identity: it asserts the two callback doors reach the handlers with
-NO credentials, and that ``/stream`` and ``/answer`` are rejected without auth.
+authenticated identity: it asserts the two callback doors and the served-media door
+reach the handlers with NO credentials, and that ``/stream`` and ``/answer`` are
+rejected without auth.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from ._auth_boundary import wire_store_from_route_strings
 # tier 1: path -> template key; tier 2 (Redis ``ac:route:``): template -> resource id.
 _PATH_PATTERNS = {
     r"/api/interactions/callback/[^/]+": "interactions-callback",
+    r"/api/interactions/media/[^/]+": "interactions-media",
     r"/api/interactions/stream": "interactions",
     r"/api/interactions/[^/]+/answer": "interactions",
 }
@@ -62,6 +64,7 @@ def boundary_client(monkeypatch):
     ac_fake = _AcFake(
         {
             "interactions-callback": ac_settings.public_resource_id,
+            "interactions-media": ac_settings.public_resource_id,
             "interactions": "interactions-protected",
         }
     )
@@ -87,6 +90,7 @@ def boundary_client(monkeypatch):
 
     routes = [
         Route("/api/interactions/stream", router.stream, methods=["GET"]),
+        Route("/api/interactions/media/{media_id}", router.media, methods=["GET"]),
         Route("/api/interactions/{interaction_id}/answer", router.answer, methods=["POST"]),
         Route("/api/interactions/callback/{ticket}", router.callback, methods=["GET", "POST"]),
     ]
@@ -108,6 +112,14 @@ def test_callback_post_reachable_unauthenticated(boundary_client):
 def test_callback_get_reachable_unauthenticated(boundary_client):
     resp = boundary_client.get("/api/interactions/callback/UNKNOWN")
     assert resp.status_code == 404
+
+
+def test_media_reachable_unauthenticated(boundary_client):
+    # A well-formed but absent media id reaches the handler and returns its uniform 404,
+    # proving the served-media door is public through the real middleware stack.
+    resp = boundary_client.get("/api/interactions/media/" + "a" * 43)
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not found"}
 
 
 def test_stream_rejected_without_auth(boundary_client):

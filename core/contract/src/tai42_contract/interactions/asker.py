@@ -109,17 +109,19 @@ class AskUser(Protocol):
         ``MediaItem`` or a plain dict (coerced through ``MediaItem`` at request
         construction). A ``link`` url must be an absolute ``http(s)`` URL; an
         ``image`` url must be an absolute ``https`` URL or a ``data:image/*`` URI
-        (remote images are https-only — the inbox CSP blocks ``http:`` images).
-        Every url is a single line — whitespace and control/format characters are
-        rejected.
-        Caps (each exceeded value raises, never truncates): at most
-        ``MEDIA_MAX_ITEMS`` items, each url ``<= MEDIA_URL_MAX_CHARS`` (a data:
-        URI ``<= MEDIA_DATA_URI_MAX_CHARS``), each caption
-        ``<= MEDIA_CAPTION_MAX_CHARS``, and the summed url text across the list
-        ``<= MEDIA_TOTAL_URI_CHARS``. Media never affects the human's ANSWER, and
-        it is NOT forwarded to channel deliveries — the Studio inbox is where it
-        renders. ``None`` (the default) attaches no media; a present list must be
-        non-empty.
+        (remote images are https-only — the inbox CSP blocks ``http:`` images). A
+        ``data:image/*`` URI is stored by the platform and the durable record keeps
+        a served reference to it, not the inline bytes. Every url is a single line —
+        whitespace and control/format characters are rejected.
+        Caps on the REQUEST (each exceeded value raises, never truncates):
+        ``MEDIA_MAX_ITEMS`` is a loose platform abuse guard on the item count (each
+        channel refuses anything beyond its own native envelope), each url
+        ``<= MEDIA_URL_MAX_CHARS`` (a data: URI ``<= MEDIA_DATA_URI_MAX_CHARS``),
+        each caption ``<= MEDIA_CAPTION_MAX_CHARS``, and the summed url text across
+        the list ``<= MEDIA_TOTAL_URI_CHARS``. Media never affects the human's
+        ANSWER, and it is NOT forwarded to channel deliveries — the Studio inbox is
+        where it renders. ``None`` (the default) attaches no media; a present list
+        must be non-empty.
 
         ``mode`` selects the wait discipline: ``"sync"`` (the default) blocks and
         returns the typed answer; ``"async"`` PARKS the caller, returning a

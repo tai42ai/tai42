@@ -676,21 +676,6 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
     assert fake_httpx.calls[2]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
 
 
-async def test_notify_media_data_image_refused_before_any_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # WhatsApp's link-sourced image send takes a public URL; a data: image is
-    # refused loudly BEFORE anything is sent, naming the constraint.
-    with pytest.raises(ChannelInputError, match="data: image URL"):
-        await WhatsAppChannel().notify(
-            ChannelNotification(
-                message="Photo.",
-                recipient=ALLOWED_A,
-                media=[MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAABBBB")],
-            )
-        )
-
-    assert not fake_httpx.calls  # nothing sent — not even the body
-
-
 async def test_notify_partial_media_send_names_already_sent_wamids(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # A multi-part send that fails on the Nth part raises naming the wamids already
     # delivered — partial delivery stays visible.

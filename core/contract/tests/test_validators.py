@@ -825,6 +825,16 @@ def test_media_dict_items_coerce_to_mediaitem():
     assert req.media[0].kind is MediaKind.IMAGE
 
 
+def test_media_image_stored_reference_valid():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    url = MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
+    item = MediaItem(kind=MediaKind.IMAGE, url=url)
+    assert item.url == url
+
+
 # -- MediaItem rejected forms ------------------------------------------------
 
 
@@ -861,6 +871,29 @@ def test_media_rejects_relative_path_for_both_kinds():
         MediaItem(kind=MediaKind.IMAGE, url="/api/storage/resources/1/content")
     with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
         MediaItem(kind=MediaKind.LINK, url="/api/storage/resources/1/content")
+
+
+def test_media_image_rejects_stored_reference_malformed_id():
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # A served reference is valid only with a well-formed 43-char id and nothing after
+    # it; a short id, a trailing segment, or a bad charset falls through to the raise.
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + "short")
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + "a" * 43 + "/extra")
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + "!" * 43)
+
+
+def test_media_link_rejects_stored_reference():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # The served-media reference is an image-only branch; a link stays absolute http(s).
+    with pytest.raises(ValueError, match="absolute http\\(s\\) URL"):
+        MediaItem(kind=MediaKind.LINK, url=MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32))
 
 
 def test_media_rejects_empty_and_whitespace_url():

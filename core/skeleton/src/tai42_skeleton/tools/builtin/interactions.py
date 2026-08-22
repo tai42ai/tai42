@@ -93,12 +93,14 @@ async def ask_user(
             ``{"kind": "image"|"link", "url": ..., "caption": ...?}``. For an
             ``image`` the url is an absolute ``https`` URL or a ``data:image/*``
             URI (remote images are https-only — the inbox CSP blocks ``http:``
-            images); for a ``link`` it is an absolute ``http(s)`` URL. ``caption``
-            is the image alt text or link label. At most 8 items, within a
-            per-question total URI budget. Media is display-only — the human still
-            answers via ``answer_format`` — and is NOT forwarded to channel
-            deliveries (a channel receives the question text only). Invalid media
-            fails the call before the question is stored.
+            images); for a ``link`` it is an absolute ``http(s)`` URL. A
+            ``data:image/*`` URI is stored by the platform and the record keeps a
+            served reference to it, not the inline bytes. ``caption`` is the image
+            alt text or link label. The item count is bounded by a loose platform
+            guard, within a per-request total URI budget. Media is display-only —
+            the human still answers via ``answer_format`` — and is NOT forwarded to
+            channel deliveries (a channel receives the question text only). Invalid
+            media fails the call before the question is stored.
         mode: The wait discipline. "sync" (the default) blocks and returns the
             typed answer. "async" PARKS the caller: it stores (and optionally
             delivers) the question but returns a suspension sentinel immediately,

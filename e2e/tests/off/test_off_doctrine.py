@@ -73,6 +73,16 @@ async def test_collection_reads_answer_200_empty(off_stack: TaiStack) -> None:
     # notifications feed.
     assert await api.get("/api/notifications") == {"notifications": []}
 
+    # interactions pending list -> the honest empty page (the paged inbox door).
+    assert await api.get("/api/interactions") == {
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "page_size": 50,
+        "next_page": None,
+        "truncated": False,
+    }
+
     # marketplace installed inventory + advisories.
     assert await api.get("/api/marketplace/installed") == {"installed": [], "quarantined": []}
     advisories = await api.get("/api/marketplace/advisories")
@@ -207,6 +217,14 @@ async def test_interactions_callback_doors_are_uniform_404(off_stack: TaiStack) 
     post_resp = await _raw(off_stack, "POST", "/api/interactions/callback/ghost-ticket", json={"answer": "x"})
     assert post_resp.status_code == 404, post_resp.text
     assert post_resp.json() == {"error": "not found"}
+
+
+async def test_interactions_media_door_is_uniform_404(off_stack: TaiStack) -> None:
+    # The served-media door answers the SAME 404 as a miss (a well-formed id that is not
+    # stored), never a 501 that would out the OFF state on this unauthenticated door.
+    resp = await _raw(off_stack, "GET", "/api/interactions/media/" + "a" * 43)
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"error": "not found"}
 
 
 async def test_sse_stream_refuses_501_before_body(off_stack: TaiStack) -> None:
