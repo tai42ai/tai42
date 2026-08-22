@@ -354,6 +354,31 @@ async def test_notify_data_image_substituted_to_absolute_url(register_channel, m
     assert forwarded[0].url == "https://box.example" + MEDIA_ROUTE_PREFIX + "N" * 43
 
 
+async def test_notify_data_image_http_localhost_base_validates_end_to_end(register_channel, monkeypatch, fake_redis):
+    # With an http://127.0.0.1 public base (the local-dev/e2e stack), the absolute
+    # served url the seam mints must validate inside ChannelNotification and reach the
+    # channel — the contract admits the absolute http(s) served-reference form.
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(
+        notify_module,
+        "interactions_settings",
+        lambda: InteractionsSettings(public_base_url="http://127.0.0.1:8000"),
+    )
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notify_module, "client_ctx", _ctx)
+    monkeypatch.setattr(media_module.secrets, "token_urlsafe", lambda n: "N" * 43)
+
+    await notify_user("hi", channel="rich", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)])
+
+    forwarded = channel.notifications[0].media
+    assert forwarded is not None
+    assert forwarded[0].url == "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX + "N" * 43
+
+
 async def test_notify_data_image_without_public_base_url_raises(register_channel, monkeypatch):
     # A data:image needs an absolute url to reach a channel; with no public base url the
     # seam refuses LOUDLY (ChannelInputError, the op maps it to a 400) naming the setting,

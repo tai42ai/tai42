@@ -10,13 +10,9 @@ from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
+from tai42_contract.interactions.models import LOCAL_HTTP_HOSTS
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.settings import TaiBaseSettings, settings_cache
-
-# Hosts for which an http:// (non-TLS) public base URL is accepted — local
-# development only; every other host must be https:// (the callback URL built
-# from it is a bearer capability and the POST door carries sensitive data).
-_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 class InteractionsRedisSettings(RedisConnectionSettings):
@@ -79,7 +75,7 @@ class InteractionsSettings(TaiBaseSettings):
     # external-format questions (the callback URL is built from it). Must be
     # https:// — the callback URL is a bearer capability and the POST door carries
     # sensitive data. http:// is rejected loudly at settings load unless the host
-    # is localhost/127.0.0.1 (local development).
+    # is a loopback host (``LOCAL_HTTP_HOSTS``) for local development.
     public_base_url: str | None = None
 
     # Hard cap (bytes) on any request body the interactions doors read into
@@ -121,18 +117,18 @@ class InteractionsSettings(TaiBaseSettings):
     @field_validator("public_base_url")
     @classmethod
     def _require_tls(cls, value: str | None) -> str | None:
-        """Reject a non-TLS public base URL unless it points at
-        localhost/127.0.0.1 (local dev) — loud at settings load, before any
+        """Reject a non-TLS public base URL unless it points at a loopback host
+        (``LOCAL_HTTP_HOSTS``, local dev) — loud at settings load, before any
         callback URL is ever minted from it."""
         if value is None:
             return None
         parsed = urlparse(value)
         if parsed.scheme == "https":
             return value
-        if parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS:
+        if parsed.scheme == "http" and parsed.hostname in LOCAL_HTTP_HOSTS:
             return value
         raise ValueError(
-            f"INTERACTIONS_PUBLIC_BASE_URL must be https:// (or http:// for localhost/127.0.0.1), got {value!r}"
+            f"INTERACTIONS_PUBLIC_BASE_URL must be https:// (or http:// for a loopback host), got {value!r}"
         )
 
 
