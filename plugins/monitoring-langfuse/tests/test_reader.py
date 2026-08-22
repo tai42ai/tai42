@@ -381,6 +381,23 @@ async def test_list_traces_token_truncation_raises(manager, mock_client):
         await LangfuseReader(manager).list_traces()
 
 
+async def test_list_traces_token_cap_null_sum_page_id_is_covered(manager, mock_client):
+    # The token query hits the row cap, and the page id IS present with a null sum:
+    # a null sum means no usage, so the id is covered — no truncation raise, tokens None.
+    _list_returns(mock_client, [_trace_row(id="p")])
+    from tai42_monitoring_langfuse.reader import _METRIC_ROW_LIMIT_MAX
+
+    def _call(query, request_options=None):
+        rows = [{"id": f"other-{i}", "sum_totalTokens": 1} for i in range(_METRIC_ROW_LIMIT_MAX - 1)]
+        rows.append({"id": "p", "sum_totalTokens": None})
+        return SimpleNamespace(data=rows)
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    result = await LangfuseReader(manager).list_traces()
+    assert {t.id: t.total_tokens for t in result} == {"p": None}
+
+
 async def test_list_traces_token_measure_unrecognised_raises(manager, mock_client):
     # Rows come back but none carry a totalTokens-like measure key: the query
     # shape is wrong — raise rather than report every trace as usage-less.
@@ -396,6 +413,57 @@ async def test_list_traces_token_measure_unrecognised_raises(manager, mock_clien
     _errors_for(mock_client, [])
     with pytest.raises(MonitoringReadNotSupportedError):
         await LangfuseReader(manager).list_traces()
+
+
+async def test_list_traces_token_measure_null_is_none_not_raise(manager, mock_client):
+    # A page of tool runs with no LLM usage: the summed measure comes back null on
+    # every row. The column IS present, so the query shape is right — tokens are
+    # simply None, never a wrong-shape raise.
+    _list_returns(mock_client, [_trace_row(id="a"), _trace_row(id="b")])
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(data=[{"id": "a", "sum_totalTokens": None}, {"id": "b", "sum_totalTokens": None}])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    result = await LangfuseReader(manager).list_traces()
+    assert {t.id: t.total_tokens for t in result} == {"a": None, "b": None}
+
+
+async def test_list_traces_token_measure_numeric_string_parses(manager, mock_client):
+    # ClickHouse-backed sums serialise as strings; a "17" measure is 17 tokens.
+    _list_returns(mock_client, [_trace_row(id="a")])
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(data=[{"id": "a", "sum_totalTokens": "17"}])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    result = await LangfuseReader(manager).list_traces()
+    assert {t.id: t.total_tokens for t in result}["a"] == 17
+
+
+async def test_list_traces_token_measure_non_finite_is_none(manager, mock_client):
+    # A non-finite sum ("nan"/"inf") is not a token count — the column is present
+    # (no wrong-shape raise), the value is simply no usage.
+    _list_returns(mock_client, [_trace_row(id="a")])
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(data=[{"id": "a", "sum_totalTokens": "nan"}])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    result = await LangfuseReader(manager).list_traces()
+    assert {t.id: t.total_tokens for t in result} == {"a": None}
 
 
 async def test_list_traces_token_query_carries_page_filter(manager, mock_client):

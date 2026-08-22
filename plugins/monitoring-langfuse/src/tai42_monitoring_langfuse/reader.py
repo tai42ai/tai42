@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -496,8 +497,7 @@ class LangfuseReader:
         while wanted - found.keys():
             if list_page > _METRIC_LIST_PAGE_BUDGET:
                 raise MonitoringReadNotSupportedError(
-                    "metric-sorted listing could not resolve the page within the bounded window; "
-                    "narrow the time range"
+                    "metric-sorted listing could not resolve the page within the bounded window; narrow the time range"
                 )
             batch = await self._list_page(
                 client,
@@ -651,17 +651,25 @@ class LangfuseReader:
         )
         rows = list(getattr(response, "data", []) or [])
         tokens_by_id: dict[str, float] = {}
+        # A trace whose summed measure is null IS covered by the result (no usage),
+        # so coverage is the set of ids carrying the measure column, not just those
+        # with a non-null value — otherwise a null-sum page id reads as truncated.
+        covered_ids: set[str] = set()
         for raw in rows:
+            key = _measure_key(raw, "totalTokens")
+            if key is None:
+                continue
             trace_id = raw.get("id")
             if trace_id is None:
                 continue
-            value = _measure_value(raw, "totalTokens")
+            covered_ids.add(trace_id)
+            value = _measure_value(raw[key])
             if value is not None:
                 tokens_by_id[trace_id] = value
-        if rows and not tokens_by_id:
+        if rows and not covered_ids:
             raise MonitoringReadNotSupportedError("token totals came back without a recognised total-tokens measure")
         if len(rows) >= _METRIC_ROW_LIMIT_MAX:
-            uncovered = [tid for tid in page_ids if tid not in tokens_by_id]
+            uncovered = [tid for tid in page_ids if tid not in covered_ids]
             if uncovered:
                 raise MonitoringReadNotSupportedError(
                     "token totals could not be resolved within the bounded window; narrow the time range"
@@ -788,18 +796,44 @@ def _nonneg_number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
-def _measure_value(row: dict[str, Any], measure: str) -> float | None:
-    """Read a summed measure from a metrics row. The backend names the output
-    column by measure + aggregation (e.g. ``sum_totalTokens`` / ``totalTokens_sum``)
-    and the exact key varies, so match by substring with an exact-key fast path.
-    ``None`` when the row carries no numeric value for the measure."""
-    if measure in row and isinstance(row[measure], (int, float)):
-        return float(row[measure])
+def _measure_key(row: dict[str, Any], measure: str) -> str | None:
+    """The row's column for a summed measure. The backend names the output column
+    by measure + aggregation (e.g. ``sum_totalTokens`` / ``totalTokens_sum``) and
+    the exact key varies, so match by substring with an exact-key fast path.
+    ``None`` when no column matches — presence is decided by the column, never by
+    its value (a null sum is a real measure cell, not a missing column)."""
+    if measure in row:
+        return measure
     needle = measure.lower()
-    for key, value in row.items():
-        if isinstance(key, str) and needle in key.lower() and isinstance(value, (int, float)):
-            return float(value)
+    for key in row:
+        if isinstance(key, str) and needle in key.lower():
+            return key
     return None
+
+
+def _measure_value(cell: Any) -> float | None:
+    """Parse a metrics measure cell to a non-negative finite float. Numbers and
+    numeric strings (ClickHouse-backed sums serialise as strings) become floats;
+    ``None`` and the empty string mean no usage and become ``None``. A bool, an
+    unparseable string, or a non-finite/negative value is not a token sum —
+    ``None`` (a token sum is a non-negative finite number)."""
+    if isinstance(cell, bool):
+        return None
+    if isinstance(cell, (int, float)):
+        number = float(cell)
+    elif isinstance(cell, str):
+        text = cell.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def _environment_clause(source: str) -> dict[str, Any]:
