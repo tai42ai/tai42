@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import asynccontextmanager
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -363,6 +364,42 @@ async def test_notify_data_image_without_public_base_url_raises(register_channel
     with pytest.raises(ChannelInputError, match="INTERACTIONS_PUBLIC_BASE_URL"):
         await notify_user("hi", channel="rich", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)])
     assert channel.notifications == []
+
+
+async def test_notify_dict_media_coerced_and_data_image_substituted(register_channel, monkeypatch, fake_redis):
+    # The operation door hands this seam ``media`` as plain dicts (``model_dump`` of the
+    # validated request body), so the seam must coerce them to MediaItem before any
+    # ``.kind``/``.url`` inspection. A dict data:image is stored by reference and the
+    # channel receives an ABSOLUTE served url, exactly as with MediaItem input.
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(
+        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
+    )
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notify_module, "client_ctx", _ctx)
+    monkeypatch.setattr(media_module.secrets, "token_urlsafe", lambda n: "N" * 43)
+
+    await notify_user(
+        "hi",
+        channel="rich",
+        # The operation door hands this seam ``model_dump`` dicts, not MediaItem objects.
+        media=cast(
+            "list[MediaItem]",
+            [
+                {"kind": "link", "url": "https://example.com/doc", "caption": "a link"},
+                {"kind": "image", "url": _DATA_PNG},
+            ],
+        ),
+    )
+
+    forwarded = channel.notifications[0].media
+    assert forwarded is not None
+    assert forwarded[0] == MediaItem(kind=MediaKind.LINK, url="https://example.com/doc", caption="a link")
+    assert forwarded[1].url == "https://box.example" + MEDIA_ROUTE_PREFIX + "N" * 43
 
 
 # -- loud failures: every error propagates, nothing is swallowed -----------------

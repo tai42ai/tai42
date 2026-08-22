@@ -306,15 +306,16 @@ async def test_run_applies_from_tool_input_mapping(one_agent):
     assert agent.received_kwargs == {"user_message": "hey", "count": 2}
 
 
-async def test_run_response_headers_mirror_interactions_stream(one_agent):
+async def test_run_response_headers_mirror_interactions_stream(one_agent, monkeypatch, fake_client_ctx):
     one_agent(_FakeAgent([MessageFinal(text="ok")]))
     resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
     assert isinstance(resp, StreamingResponse)
     # The agents stream mirrors the interactions stream route's headers rather
     # than re-listing literals: derive the reference from the interactions stream
-    # response itself (its headers are set at construction — reading them does not
-    # start the body iterator, so no backing store is touched) and assert the same
-    # media type and no-cache / keep-alive / no-buffering header values.
+    # response itself. That route captures its tail cursor on the store connection
+    # BEFORE returning the response, so wire the fake so the capture runs offline;
+    # then assert the same media type and no-cache / keep-alive / no-buffering values.
+    monkeypatch.setattr(interactions_router, "client_ctx", fake_client_ctx)
     reference = await interactions_router.stream(_make_get_request())
     assert isinstance(reference, StreamingResponse)
     assert resp.media_type == reference.media_type == "text/event-stream"

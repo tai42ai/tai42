@@ -54,11 +54,18 @@ test('ask_user blocks a run, is answered in the browser, and the run unblocks', 
   expect(JSON.stringify(body.data)).toContain(answer);
 });
 
-// A 1x1 PNG data URI: a valid inline image that renders with no network fetch, so
-// the `onError` load-failure branch never fires and the CSP `data:` allowance is
-// exercised end to end.
+// A 1x1 PNG data URI passed as the image item's INPUT url. A data:image is stored
+// BY REFERENCE server-side (`substitute_media`): the durable record carries a
+// served-media reference (`/api/interactions/media/<id>`), never these inline
+// bytes, so the inbox renders that reference and fetches the image from the media
+// route — the src asserted below is that reference, not this data: url.
 const DATA_IMAGE =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+
+// A served-media reference: the fixed route prefix followed by the 43-char urlsafe
+// stored-media id. Origin-agnostic — relative on a same-origin deployment, absolute
+// (`<api base>/...`) when the SPA is built against a cross-origin API base.
+const SERVED_MEDIA_SRC = /^(https?:\/\/[^/]+)?\/api\/interactions\/media\/[A-Za-z0-9_-]{43}$/;
 
 test('a media-bearing question renders images + links in the inbox and still answers', async ({
   page,
@@ -106,10 +113,14 @@ test('a media-bearing question renders images + links in the inbox and still ans
   await expect(card.getByTestId('media-item-blocked')).toHaveCount(0);
   await expect(card.getByTestId('media-image-error')).toHaveCount(0);
 
-  // The image renders from the exact data: src, alt=caption, and carries the
-  // no-referrer privacy hygiene attribute.
+  // The image renders from the served-media reference the record carries, resolved
+  // against the SPA's configured API base: relative on a same-origin deployment,
+  // absolute (`<api base>/...`) when Studio and the API are split origins. The
+  // media-image-error count 0 above already proved it LOADED — a page-origin 404
+  // (a relative ref resolved against Studio when the API is elsewhere) would have
+  // tripped it. It is the reference, never the inline data: bytes.
   const image = gallery.locator('img');
-  await expect(image).toHaveAttribute('src', DATA_IMAGE);
+  await expect(image).toHaveAttribute('src', SERVED_MEDIA_SRC);
   await expect(image).toHaveAttribute('alt', caption);
   await expect(image).toHaveAttribute('referrerpolicy', 'no-referrer');
   // The caption text is shown below the image (escaped text, not an attribute).
