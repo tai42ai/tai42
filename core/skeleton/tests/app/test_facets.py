@@ -1,4 +1,4 @@
-"""Facet forwarding: each of the 17 ``tai42_contract.app`` facets is a thin view
+"""Facet forwarding: each ``tai42_contract.app`` facet is a thin view
 that forwards to its feature's impl collaborator (``ToolBinding``,
 ``AgentBinding``, ``BackendHolder``, the extension registry, ``HttpSurface``) or
 to the app's remaining private members. These assert every facet method and
@@ -7,6 +7,7 @@ property delegates to the right target with the right arguments.
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,9 +27,11 @@ from tai42_skeleton.app.facets import (
     ConnectorsFacet,
     ExtensionsFacet,
     HttpFacet,
+    InteractionsFacet,
     LifecycleFacet,
     MonitoringFacet,
     PresetsFacet,
+    SandboxesFacet,
     StorageFacet,
     SubAppFacet,
     ToolsFacet,
@@ -113,8 +116,8 @@ async def test_tools_facet_async_forwarding():
 def test_agents_facet_forwarding():
     app = _app()
     f = AgentsFacet(app)
-    assert f.agent("n", {"agents"}) is app._agent_binding.agent.return_value
-    app._agent_binding.agent.assert_called_once_with("n", {"agents"})
+    assert f.agent("n", {"agents"}, {"tai42/crash_resume": True}) is app._agent_binding.agent.return_value
+    app._agent_binding.agent.assert_called_once_with("n", {"agents"}, {"tai42/crash_resume": True})
     assert f.get_agent("n") is app._agent_binding.get_agent.return_value
     app._agent_binding.get_agent.assert_called_once_with("n")
     assert f.all_agents() is app._agent_binding.all_agents.return_value
@@ -164,7 +167,32 @@ async def test_presets_facet_forwarding():
     assert f.store == "ps"
     result = await f.bind("base", {"k": 1}, name="p", description="d")
     assert result == "bound"
-    app._preset_bind.assert_awaited_once_with("base", {"k": 1}, name="p", description="d", output_schema=None)
+    app._preset_bind.assert_awaited_once_with(
+        "base", {"k": 1}, name="p", description="d", output_schema=None, input_schema=None
+    )
+
+
+async def test_presets_facet_bind_threads_input_schema():
+    app = _app()
+    app._preset_bind = AsyncMock(return_value="bound")
+    f = PresetsFacet(app)
+    await f.bind("base", {}, name="p", description="d", input_schema={"type": "object"})
+    app._preset_bind.assert_awaited_once_with(
+        "base", {}, name="p", description="d", output_schema=None, input_schema={"type": "object"}
+    )
+
+
+def test_presets_facet_input_schema_and_tier_forwarding():
+    app = _app()
+    f = PresetsFacet(app)
+    f.register_input_schema_support("base", "support")  # pyright: ignore[reportArgumentType]
+    app._input_schema_support_registry.register.assert_called_once_with("base", "support")
+    assert f.input_schema_support("base") is app._input_schema_support_registry.get.return_value
+    app._input_schema_support_registry.get.assert_called_once_with("base")
+    f.register_registration_tier("base", "fenced")
+    app._registration_tier_registry.register.assert_called_once_with("base", "fenced")
+    assert f.registration_tier("base") is app._registration_tier_registry.get.return_value
+    app._registration_tier_registry.get.assert_called_once_with("base")
 
 
 async def test_presets_facet_list_active_bodies_validates_each_raw_body():
@@ -289,6 +317,127 @@ def test_connectors_facet_forwarding():
     assert f.register_connector("descriptor") is app._register_connector.return_value  # pyright: ignore[reportArgumentType]
     app._register_connector.assert_called_once_with("descriptor")
     assert f.token_store == "ts"
+
+
+async def test_connectors_facet_resolve_connection_auth_forwarding():
+    app = _app()
+    app._resolve_connection_auth = AsyncMock(return_value="resolved")
+    f = ConnectorsFacet(app)
+    assert await f.resolve_connection_auth("conn", "prov", "sub") == "resolved"
+    app._resolve_connection_auth.assert_awaited_once_with("conn", "prov", "sub")
+
+
+# -- TaiMCP._resolve_connection_auth (the real facade body) -------------------
+# The forwarding test above mocks the method; these exercise the ACTUAL body. It
+# reads only its arguments and module-level collaborators (never ``self``), so an
+# unbound call with a stand-in ``self`` drives the real implementation.
+
+
+async def test_resolve_connection_auth_body_fails_close_before_resolution_without_identity(monkeypatch):
+    # Fail-close chokepoint: with no execution identity bound the body refuses
+    # BEFORE any resolution, so an identity-less door never gets a token injected.
+    import tai42_skeleton.authz.execution_identity as exec_id_mod
+    import tai42_skeleton.connectors.runtime.resolver as resolver_mod
+    from tai42_skeleton.app.server import TaiMCP
+
+    monkeypatch.setattr(exec_id_mod, "get_execution_identity", lambda: None)
+
+    async def _must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError("resolution must not run before the identity fail-close")
+
+    monkeypatch.setattr(resolver_mod, "resolve_managed_auth", _must_not_resolve)
+
+    with pytest.raises(RuntimeError, match="no execution identity"):
+        await TaiMCP._resolve_connection_auth(cast("TaiMCP", MagicMock()), "conn", "prov", "sub")
+
+
+async def test_resolve_connection_auth_body_maps_managed_auth_wrapping_every_channel_in_secretstr(monkeypatch):
+    # Under a bound identity a resolved ManagedAuth maps to a ResolvedConnectionAuth
+    # with the OAuth access_token plus every static env/headers channel value wrapped
+    # in SecretStr; resolution runs with refresh allowed.
+    from pydantic import SecretStr
+
+    import tai42_skeleton.authz.execution_identity as exec_id_mod
+    import tai42_skeleton.connectors.runtime.resolver as resolver_mod
+    from tai42_skeleton.app.server import TaiMCP
+    from tai42_skeleton.authz.identity import CallerIdentity
+    from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
+
+    monkeypatch.setattr(exec_id_mod, "get_execution_identity", lambda: CallerIdentity(user_id="svc"))
+
+    captured: dict[str, object] = {}
+
+    async def _resolve(connection_id: str, provider_id: str, sub_service: str, *, allow_refresh: bool) -> ManagedAuth:
+        captured["args"] = (connection_id, provider_id, sub_service, allow_refresh)
+        return ManagedAuth(access_token="tok", env={"E": "e-val"}, headers={"H": "h-val"})
+
+    monkeypatch.setattr(resolver_mod, "resolve_managed_auth", _resolve)
+
+    result = await TaiMCP._resolve_connection_auth(cast("TaiMCP", MagicMock()), "conn", "prov", "sub")
+    assert result is not None
+    assert isinstance(result.access_token, SecretStr)
+    assert result.access_token.get_secret_value() == "tok"
+    assert isinstance(result.env["E"], SecretStr)
+    assert result.env["E"].get_secret_value() == "e-val"
+    assert isinstance(result.headers["H"], SecretStr)
+    assert result.headers["H"].get_secret_value() == "h-val"
+    assert captured["args"] == ("conn", "prov", "sub", True)
+
+
+async def test_resolve_connection_auth_body_returns_none_for_a_no_inject_connection(monkeypatch):
+    # A no-inject connection resolves (under the bound identity) to no ManagedAuth;
+    # the body maps that None straight through to None (inject nothing).
+    import tai42_skeleton.authz.execution_identity as exec_id_mod
+    import tai42_skeleton.connectors.runtime.resolver as resolver_mod
+    from tai42_skeleton.app.server import TaiMCP
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    monkeypatch.setattr(exec_id_mod, "get_execution_identity", lambda: CallerIdentity(user_id="svc"))
+
+    async def _resolve(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(resolver_mod, "resolve_managed_auth", _resolve)
+
+    result = await TaiMCP._resolve_connection_auth(cast("TaiMCP", MagicMock()), "conn", "prov", "sub")
+    assert result is None
+
+
+# -- SandboxesFacet -----------------------------------------------------------
+
+
+def test_sandboxes_facet_forwarding():
+    app = _app()
+    app._sandbox_holder.sandbox = "the-sandbox"
+    app._sandbox_holder.require.return_value = "required-sandbox"
+    f = SandboxesFacet(app)
+    assert f.register_sandbox("cls") is app._sandbox_holder.register_sandbox.return_value  # pyright: ignore[reportArgumentType]
+    app._sandbox_holder.register_sandbox.assert_called_once_with("cls")
+    assert f.sandbox == "the-sandbox"
+    assert f.require_sandbox() == "required-sandbox"
+
+
+def test_sandboxes_facet_sandbox_policy_resolves_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The accessor returns the SAME resolved policy the holder binds to the kit, read
+    # through the ONE shared resolver — and is callable with no provider registered.
+    from tai42_contract.sandbox import SandboxPolicy
+
+    import tai42_skeleton.sandbox.policy as policy_mod
+
+    resolved = SandboxPolicy(egress="internal", isolation="vm", scrub_transcript=True, durable=False)
+    monkeypatch.setattr(policy_mod, "resolve_sandbox_policy", lambda: resolved)
+    f = SandboxesFacet(_app())
+    assert f.sandbox_policy() == resolved
+
+
+# -- InteractionsFacet --------------------------------------------------------
+
+
+def test_interactions_facet_ask_user_returns_the_helper():
+    from tai42_skeleton.interactions.helper import ask_user as helper_ask_user
+
+    f = InteractionsFacet(_app())
+    assert f.ask_user is helper_ask_user
 
 
 # -- HttpFacet ----------------------------------------------------------------

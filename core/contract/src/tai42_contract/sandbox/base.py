@@ -11,7 +11,11 @@ PATH CONTRACT (``exec``/``exec_start`` ``cwd`` and ``put_file``/``get_file``
 relative value against ``workspace_path`` with realpath containment, and an unset
 ``cwd`` defaults to ``workspace_path``. An ABSOLUTE value remains allowed but is
 the CALLER's own responsibility. A consumer needing an absolute path builds it
-from ``session.workspace_path``, never a hardcoded root.
+from ``session.workspace_path``, never a hardcoded root. A direct-host
+(``isolation="none"``) provider MAY reject a file-transfer ``path`` that resolves
+outside the workspace — containment is a permitted tightening where the provider
+itself performs the I/O; an absolute path built from ``workspace_path`` is accepted
+by every provider.
 """
 
 from __future__ import annotations

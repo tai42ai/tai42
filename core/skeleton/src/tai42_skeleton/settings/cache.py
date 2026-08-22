@@ -22,6 +22,11 @@ def template_provider() -> str:
 
 
 @settings_cache
+def sandbox_provider() -> str:
+    return (CoreSettings().sandbox or "").strip().lower()
+
+
+@settings_cache
 def mcp_probe_timeout() -> float:
     return CoreSettings().mcp_probe_timeout
 

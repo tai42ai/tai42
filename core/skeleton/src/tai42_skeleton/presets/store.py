@@ -80,6 +80,7 @@ class PresetStoreView(PresetStore):
         spec: PresetSpec,
         extensions: Sequence[Sequence[ExtensionElement]],
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> DocumentRecord:
         _validate_extensions(extensions)
         if self._name_conflicts is not None and await self._name_conflicts(spec.name):
@@ -90,6 +91,7 @@ class PresetStoreView(PresetStore):
             fixed_kwargs=spec.fixed_kwargs,
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
+            input_schema=input_schema,
         )
         try:
             return await self._store.create(_KIND, spec.name, body.model_dump())
@@ -103,11 +105,14 @@ class PresetStoreView(PresetStore):
         extensions: Sequence[Sequence[ExtensionElement]] | None = None,
         output_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
+        *,
+        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
     ) -> DocumentVersion:
         active = await self._active_body(name)
         new_extensions = active.extensions if extensions is None else extensions
         _validate_extensions(new_extensions)
         new_output_schema = active.output_schema if isinstance(output_schema, CarryForward) else output_schema
+        new_input_schema = active.input_schema if isinstance(input_schema, CarryForward) else input_schema
         # ``description`` is editable per version: None carries the active value
         # forward, an explicit string sets it. The RESULTING description is validated
         # non-empty either way, so an explicit "" is rejected and a carry-forward from
@@ -121,6 +126,7 @@ class PresetStoreView(PresetStore):
             fixed_kwargs=active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs,
             extensions=[list(combo) for combo in new_extensions],
             output_schema=new_output_schema,
+            input_schema=new_input_schema,
         )
         try:
             return await self._store.save_version(_KIND, name, new_body.model_dump())

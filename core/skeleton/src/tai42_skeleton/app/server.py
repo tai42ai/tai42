@@ -30,9 +30,11 @@ from tai42_skeleton.app.facets import (
     ConnectorsFacet,
     ExtensionsFacet,
     HttpFacet,
+    InteractionsFacet,
     LifecycleFacet,
     MonitoringFacet,
     PresetsFacet,
+    SandboxesFacet,
     StorageFacet,
     SubAppFacet,
     ToolMetaFacet,
@@ -54,8 +56,13 @@ from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
+from tai42_skeleton.presets.base_tool_config import (
+    PresetInputSchemaSupportRegistry,
+    PresetRegistrationTierRegistry,
+)
 from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
+from tai42_skeleton.sandbox import SandboxHolder
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -67,6 +74,7 @@ if TYPE_CHECKING:
     from fastmcp.tools import Tool
     from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.app import TaiApp
+    from tai42_contract.connectors.models import ResolvedConnectionAuth
     from tai42_contract.conversations import DeliveryReceipt
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
@@ -202,6 +210,11 @@ class ServingCore:
         self._tool_binding = ToolBinding(app)
         self._agent_binding = AgentBinding(app)
         self._backend_holder = BackendHolder()
+        # The scalar sandbox-provider holder, rebuilt per epoch beside the backend
+        # holder: a reload re-imports the ``sandbox_module`` and re-runs its
+        # ``register_sandbox`` against a clean holder. No launch wiring — a sandbox is
+        # not launched at boot; sessions are created on demand by consumers.
+        self._sandbox_holder = SandboxHolder()
         self._http_surface = HttpSurface(app)
         # Every PUBLIC door (any route registered authed=False, wherever it comes from) is
         # exposed by design; its flood limiter is registered on EVERY epoch's surface here,
@@ -218,6 +231,12 @@ class ServingCore:
         # Per-base-tool preset write-validator registry, reset each start() so a
         # reload re-imports the tool modules and re-registers cleanly.
         self._write_validator_registry = PresetWriteValidatorRegistry()
+
+        # Per-base-tool preset input-schema support + registration-tier registries,
+        # reset each start() alongside the write-validator registry so a reload
+        # re-imports the tool modules and re-registers cleanly.
+        self._input_schema_support_registry = PresetInputSchemaSupportRegistry()
+        self._registration_tier_registry = PresetRegistrationTierRegistry()
 
         # Per-tool declared tool-references registry, reset each start() so a reload
         # re-imports the tool modules and re-registers cleanly. Mirrors the
@@ -262,7 +281,7 @@ class ServingCore:
 
 class TaiMCP(TaiMCPLifecycleMixin):
     """The concrete ``tai42_contract.app.TaiApp`` impl — owns the FastMCP server and
-    exposes the 18 contract facet namespaces as its SOLE feature/contract surface;
+    exposes the contract facet namespaces as its SOLE feature/contract surface;
     the concrete server additionally exposes a launch surface (``sse_app`` /
     ``http_app`` / ``run`` and friends) that is not part of the facade.
 
@@ -294,12 +313,14 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._mcp_sub_app_router: SubMcpAppRouter = SubMcpAppRouter(app=self)
         self._clients: ClientsFacet = ClientsFacet()
 
-        # The 18 contract facet namespaces, partitioning the feature surface.
+        # The contract facet namespaces, partitioning the feature surface.
         self._tools_facet = ToolsFacet(self)
         self._agents_facet = AgentsFacet(self)
         self._backends_facet = BackendsFacet(self)
+        self._sandboxes_facet = SandboxesFacet(self)
         self._storage_facet = StorageFacet(self)
         self._connectors_facet = ConnectorsFacet(self)
+        self._interactions_facet = InteractionsFacet(self)
         self._accounts_facet = AccountsFacet(self)
         self._webhook_verifiers_facet = WebhookVerifiersFacet(self)
         self._channels_facet = ChannelsFacet(self)
@@ -354,12 +375,20 @@ class TaiMCP(TaiMCPLifecycleMixin):
         return self._backends_facet
 
     @property
+    def sandboxes(self) -> SandboxesFacet:
+        return self._sandboxes_facet
+
+    @property
     def storage(self) -> StorageFacet:
         return self._storage_facet
 
     @property
     def connectors(self) -> ConnectorsFacet:
         return self._connectors_facet
+
+    @property
+    def interactions(self) -> InteractionsFacet:
+        return self._interactions_facet
 
     @property
     def accounts(self) -> AccountsFacet:
@@ -609,6 +638,37 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
         return token_store()
 
+    async def _resolve_connection_auth(
+        self, connection_id: str, provider_id: str, sub_service: str
+    ) -> "ResolvedConnectionAuth | None":
+        """The ``app.connectors.resolve_connection_auth`` facade body.
+
+        Fail-close chokepoint: reads the bound execution identity FIRST and refuses
+        BEFORE any resolution when none is bound, so an identity-less door never gets
+        the operator's service token injected. The mapping wraps every credential value
+        in ``SecretStr``, conveying the OAuth ``access_token`` plus static ``env`` /
+        ``headers`` channels; ``None`` maps to ``None``."""
+        from pydantic import SecretStr
+        from tai42_contract.connectors.models import ResolvedConnectionAuth
+
+        from tai42_skeleton.authz.execution_identity import get_execution_identity
+        from tai42_skeleton.connectors.runtime.resolver import resolve_managed_auth
+
+        if get_execution_identity() is None:
+            raise RuntimeError(
+                "resolve_connection_auth refuses to inject a connection credential with no execution "
+                "identity bound: an identity-less door must never receive the operator's credential"
+            )
+
+        managed = await resolve_managed_auth(connection_id, provider_id, sub_service, allow_refresh=True)
+        if managed is None:
+            return None
+        return ResolvedConnectionAuth(
+            access_token=SecretStr(managed.access_token) if managed.access_token is not None else None,
+            env={key: SecretStr(value) for key, value in managed.env.items()},
+            headers={key: SecretStr(value) for key, value in managed.headers.items()},
+        )
+
     # -- Conversations (AppConversations facet body) --------------------------
     # ``app.conversations`` forwards here; the bridge core lives in its own module
     # (like the connector registry), reached through a deferred import so the app
@@ -681,6 +741,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         name: str,
         description: str = "",
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> "Tool":
         from tai42_skeleton.presets import preset_bind
 
@@ -693,6 +754,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             name=name,
             description=description,
             output_schema=output_schema,
+            input_schema=input_schema,
         )
 
     # -- Lifecycle seam --------------------------------------------------------

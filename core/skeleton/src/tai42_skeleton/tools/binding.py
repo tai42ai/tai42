@@ -36,6 +36,7 @@ from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
+from tai42_skeleton.tools.attribution import stamp_run_attribution
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.turn_budget import turn_budget
@@ -568,8 +569,12 @@ class ToolBinding:
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        async with turn_budget():
-            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        # Attribution WRAPS the drive together with the turn-budget arming (the same
+        # door set), so the tool work and its spans run INSIDE the run's attribution
+        # scope; it no-ops when no ambient attribution is deposited.
+        with stamp_run_attribution():
+            async with turn_budget():
+                return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
 
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity, arguments

@@ -68,6 +68,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
+from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,9 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
     is raised."""
     structured: StructuredFinal | None = None
     message: MessageFinal | None = None
-    async for event in agent.astream(user_message=text, thread_id=thread_id):
+    # Route the live-caller drive through the shared seam so the turn is budgeted and its
+    # trace attributed — this bridge holds a live client, so it is not detached-exempt.
+    async for event in drive_live_caller_astream(agent.astream(user_message=text, thread_id=thread_id)):
         if isinstance(event, SuspendedFinal):
             # The agent parked on an async ask_user. The conversation door bound a completion
             # tool around the run, so its resumed answer is delivered out of band into this

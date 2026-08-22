@@ -219,10 +219,16 @@ class Manifest(ManifestContract):
 
     def _is_plugin_module(self, module: str) -> bool:
         """Whether ``module`` belongs to an explicitly-loaded plugin the manifest
-        names directly (the backend/storage/monitoring module or a lifecycle
+        names directly (the backend/sandbox/storage/monitoring module or a lifecycle
         module) rather than a ``tools:`` entry. Such a module's registered
         tools/agents are always included — they carry no include/exclude list."""
-        roots = [self.backend_module, self.storage_module, self.monitoring_module, *self.lifecycle_modules]
+        roots = [
+            self.backend_module,
+            self.sandbox_module,
+            self.storage_module,
+            self.monitoring_module,
+            *self.lifecycle_modules,
+        ]
         return any(root and (module == root or module.startswith(f"{root}.")) for root in roots)
 
     @staticmethod

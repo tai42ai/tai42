@@ -60,6 +60,15 @@ def test_class_level_default_stays_hot() -> None:
     [
         ("CoreSettings", "backend", "recycle"),
         ("CoreSettings", "template", "recycle"),
+        ("CoreSettings", "sandbox", "recycle"),
+        # All four sandbox security-as-config knobs are recycle-class (never hot): the
+        # policy is bound to the kit ONCE at provider registration, so a hot change would
+        # leave the kit enforcing the boot snapshot while the identity door reports the new
+        # value — recycle re-imports the scalar module and re-binds the resolved policy.
+        ("CoreSettings", "sandbox_egress", "recycle"),
+        ("CoreSettings", "sandbox_isolation", "recycle"),
+        ("CoreSettings", "sandbox_scrub_transcript", "recycle"),
+        ("CoreSettings", "sandbox_durable", "recycle"),
         ("CoreSettings", "manifest_path", "excluded"),
         ("CoreSettings", "mcp_probe_timeout", "hot"),
         ("BackendSettings", "manifest_key", "recycle"),

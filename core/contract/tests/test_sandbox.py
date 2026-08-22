@@ -117,6 +117,7 @@ def test_session_info_carries_workspace_path():
     now = datetime.now(UTC)
     info = SandboxSessionInfo(
         id="s1",
+        image="repo/app@sha256:abc",
         workspace_key="ws-01",
         workspace_path="/workspace",
         durability="persistent",
@@ -124,6 +125,7 @@ def test_session_info_carries_workspace_path():
         expires_at=now,
     )
     assert info.workspace_path == "/workspace"
+    assert info.image == "repo/app@sha256:abc"
     assert info.labels == {}
 
 

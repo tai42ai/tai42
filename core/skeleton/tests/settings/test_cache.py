@@ -41,6 +41,24 @@ def test_backend_provider_is_trimmed_and_lowercased(monkeypatch: pytest.MonkeyPa
         cache.backend_provider.cache_clear()
 
 
+def test_sandbox_provider_is_trimmed_and_lowercased(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAI_MCP_SANDBOX", "  Docker  ")
+    cache.sandbox_provider.cache_clear()
+    try:
+        assert cache.sandbox_provider() == "docker"
+    finally:
+        cache.sandbox_provider.cache_clear()
+
+
+def test_sandbox_provider_empty_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAI_MCP_SANDBOX", raising=False)
+    cache.sandbox_provider.cache_clear()
+    try:
+        assert cache.sandbox_provider() == ""
+    finally:
+        cache.sandbox_provider.cache_clear()
+
+
 def test_backend_provider_empty_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TAI_MCP_BACKEND", raising=False)
     cache.backend_provider.cache_clear()

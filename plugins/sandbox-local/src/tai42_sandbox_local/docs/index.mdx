@@ -1,0 +1,84 @@
+---
+title: local sandbox
+description: Configure the direct/host sandbox — runs a session's code as a plain host subprocess, no container and no isolation.
+---
+
+The local sandbox runs a session's code **directly on the host** as a plain
+subprocess. There is no container and no isolation: the operator picks this
+execution mode by installing this provider instead of a container provider, and
+every consumer acquires it through the same provider-agnostic seam.
+
+## Enable it
+
+```yaml manifest.yml
+sandbox_module: tai42_sandbox_local
+```
+
+## Configuration
+
+The `SANDBOX_LOCAL_` env group.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SANDBOX_LOCAL_ROOT` | `/var/lib/tai-sandbox-local` | Host workspace root. A persistent session's workspace is the named directory `<SANDBOX_LOCAL_ROOT>/<workspace_key>`. Changing it strands existing durable workspaces (recycle-class). |
+| `SANDBOX_LOCAL_BASE_PATH` | `/usr/local/bin:/usr/bin:/bin` | The `PATH` seeded into the clean subprocess env so a host subprocess resolves its binary without inheriting the host environment. A `spec.env` / per-exec `env` `PATH` overrides it. |
+| `SANDBOX_LOCAL_DEFAULT_TTL_SECONDS` | `3600` | Default reap deadline for an idle session. |
+| `SANDBOX_LOCAL_REAP_INTERVAL_SECONDS` | `300` | Interval of the reap sweep. |
+| `SANDBOX_LOCAL_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Default per-`exec` timeout. |
+
+## Security model — read this honestly
+
+This provider gives **no isolation**. `isolation="none"` means arbitrary session
+code runs on the host with the host's filesystem, network, and any host-reachable
+secrets in reach. That is the accepted price of the direct mode: fine for a
+**trusted, single-tenant box** the operator controls, **not** for untrusted flows.
+For enforced isolation, install a container provider instead.
+
+- **Isolation floor.** Only `isolation="none"` is accepted. A `container` / `vm`
+  request is rejected loudly — this provider never silently downgrades a stronger
+  request to a bare host process. Because the operator isolation floor defaults to
+  `container`, a deployment that installs this provider **must** set
+  `TAI_MCP_SANDBOX_ISOLATION=none`; otherwise every session create rejects. That
+  coupling is deliberate: dropping isolation is an explicit operator choice, never
+  reached by accident.
+- **Network.** Only `network="egress"` is truthful — a host subprocess runs on the
+  host network. `none` / `internal` are rejected, because a bare host process
+  cannot be confined without machinery this mode omits. Use a container provider
+  for network lockdown.
+- **Resource caps.** A `cpu` / `memory_mb` cap is rejected — the direct mode has no
+  cgroup/rlimit machinery and never runs a capped request uncapped.
+- **`image` is inert.** The host itself is the execution environment; the operator
+  installs the runtime on the host. The requested image reference is surfaced on
+  `info()` / `list_sessions()` and recorded in the workspace's sidecar metadata for
+  traceability, but never governs the runtime. An operator who needs a pinned image
+  to actually govern the runtime uses a container provider.
+
+## Durability
+
+- **Persistent** — the named directory `<SANDBOX_LOCAL_ROOT>/<workspace_key>`,
+  created-if-absent / adopted-if-present. It survives the session and a reap; only
+  an explicit teardown removes it. This is the durable workspace persistent
+  sessions share by `workspace_key`.
+- **Ephemeral** — a fresh temp directory under `<SANDBOX_LOCAL_ROOT>/.ephemeral/`,
+  removed on reap and on destroy. Scratch that dies with the session.
+
+Whether a persistent workspace survives a **node move** depends on the storage
+under `SANDBOX_LOCAL_ROOT`: it must be durable, node-independent storage, or a
+persistent session's data does not actually survive the move. (Direct/host mode is
+typically a single-box deployment where the box's own disk is that storage.)
+
+### Cross-worker teardown
+
+The session ledger is per process: one app worker cannot see that another holds a
+live session over the same persistent directory, and a plain host directory has no
+kernel "in use" refusal. So a reap never removes a persistent directory
+(`remove_workspace=False`), and an explicit teardown that does remove it is a
+deliberate operation the consumer issues outside a live turn — guarded by the
+consumer's per-`workspace_key` lease (the same lease that serializes turns), not by
+a filesystem lock.
+
+## Host runtime
+
+This provider ships **no runtime**: it simply execs whatever `argv` the consumer
+hands it. If a consumer needs a host runtime present, the operator installs it on
+the host. See the platform operate page for the deployment prerequisites.

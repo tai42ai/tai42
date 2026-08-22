@@ -128,11 +128,17 @@ def test_resolved_connection_auth_masks_every_channel():
 
 
 def test_resolve_connection_auth_accessor_return_type_is_optional_model():
+    import inspect
+
     from tai42_contract.app import AppConnectors
     from tai42_contract.connectors import ResolvedConnectionAuth
 
     hints = get_type_hints(AppConnectors.resolve_connection_auth)
     assert hints["return"] == ResolvedConnectionAuth | None
+    # The accessor resolves credentials over async I/O (OAuth refresh under the connection
+    # lock), so the contract types it ``async`` — callers ``await`` it and the fail-close
+    # raise fires as the awaited coroutine runs.
+    assert inspect.iscoroutinefunction(AppConnectors.resolve_connection_auth)
 
 
 # -- Presets: the four sandbox_exec preset-mechanism accessors -----------------

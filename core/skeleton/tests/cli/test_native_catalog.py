@@ -30,6 +30,7 @@ _VALID_KINDS = {
     "channel",
     "backend",
     "storage",
+    "sandbox",
     "monitoring",
     "webhook-verifier",
     "config",

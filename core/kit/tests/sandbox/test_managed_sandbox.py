@@ -69,6 +69,8 @@ async def test_standard_labels_are_stamped_on_the_effective_spec() -> None:
 
     # ...but info().labels round-trips ONLY the consumer's labels, never the markers.
     assert sandbox.session_info(session.id).labels == {"team": "x"}
+    # info().image surfaces the requested image reference (policy never rewrites it).
+    assert sandbox.session_info(session.id).image == "fake:image"
 
 
 async def test_a_consumer_label_in_the_reserved_namespace_is_rejected_loudly() -> None:

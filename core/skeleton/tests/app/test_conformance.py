@@ -1,8 +1,8 @@
 """The concrete ``TaiMCP`` satisfies the ``tai42_contract.app`` facade + every facet.
 
 Builds a bare ``TaiMCP`` and asserts it is a structural instance of the assembled
-``TaiApp`` protocol and of each of the 18 per-feature sub-protocols, so the flat
-impl surface stays correctly partitioned onto the contract namespaces.
+``TaiApp`` protocol and of each per-feature sub-protocol, so the flat impl surface
+stays correctly partitioned onto the contract namespaces.
 """
 
 from __future__ import annotations
@@ -19,9 +19,11 @@ from tai42_contract.app import (
     AppConnectors,
     AppExtensions,
     AppHttp,
+    AppInteractions,
     AppLifecycle,
     AppMonitoring,
     AppPresets,
+    AppSandboxes,
     AppStorage,
     AppSubApp,
     AppVersioning,
@@ -51,8 +53,10 @@ def test_app_satisfies_tai_app(app: TaiMCP) -> None:
         ("tools", AppTools),
         ("agents", AppAgents),
         ("backends", AppBackends),
+        ("sandboxes", AppSandboxes),
         ("storage", AppStorage),
         ("connectors", AppConnectors),
+        ("interactions", AppInteractions),
         ("monitoring", AppMonitoring),
         ("extensions", AppExtensions),
         ("http", AppHttp),

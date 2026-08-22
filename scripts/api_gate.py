@@ -41,6 +41,7 @@ import ast
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import NoReturn
 
@@ -213,6 +214,95 @@ def _is_doc_only_field_change(old_expr: str, new_expr: str) -> bool:
     return ast.dump(old_node) == ast.dump(new_node)
 
 
+# Collection wrappers whose single positional argument holds the underlying
+# literal, so ``MappingProxyType({...})`` and ``frozenset({...})`` compare as the
+# dict/set they wrap. A change of wrapper (``frozenset`` -> ``set``) is NOT a
+# match: both sides must unwrap through an identical wrapper-name chain.
+_COLLECTION_WRAPPERS = frozenset({"MappingProxyType", "frozenset", "tuple", "list", "set", "dict"})
+
+
+def _unwrap_collection(node: ast.expr) -> tuple[ast.expr, tuple[str, ...]]:
+    """Peel any chain of recognised single-argument collection wrappers off
+    ``node``, returning the innermost expression and the wrapper-name chain that
+    was peeled (outermost first). A wrapper only unwraps when its callee is a
+    bare or dotted name in :data:`_COLLECTION_WRAPPERS` with EXACTLY one
+    positional argument and NO keywords; anything else stops the peeling."""
+    chain: list[str] = []
+    while (
+        isinstance(node, ast.Call)
+        and _field_call_name(node.func) in _COLLECTION_WRAPPERS
+        and len(node.args) == 1
+        and not node.keywords
+        and not isinstance(node.args[0], ast.Starred)
+    ):
+        name = _field_call_name(node.func)
+        assert name is not None  # guarded by the membership test above
+        chain.append(name)
+        node = node.args[0]
+    return node, tuple(chain)
+
+
+def _is_subsequence(old: list[str], new: list[str]) -> bool:
+    """True when every element of ``old`` appears in ``new`` in the same relative
+    order (insertions anywhere are allowed, reorderings are not)."""
+    it = iter(new)
+    return all(elem in it for elem in old)
+
+
+def _is_additive_collection_growth(old_expr: str, new_expr: str) -> bool:
+    """True only when both value expressions are same-typed collection constants
+    and the new one is a STRICT SUPERSET of the old — a purely additive growth
+    (dict/set gained entries, tuple/list gained elements without disturbing the
+    order of the pre-existing ones). Every other relation — element removal or
+    edit, a changed value for a preserved dict key, a reorder, a wrapper-type or
+    collection-type change, a duplicate dict key, a non-collection expression, or
+    an identical collection — returns ``False`` so the classification stays
+    breaking. The comparison is purely structural (parse-only, never evaluated);
+    a parse failure or any ambiguity fails closed to ``False``."""
+    try:
+        old_node = ast.parse(old_expr, mode="eval").body
+        new_node = ast.parse(new_expr, mode="eval").body
+    except (SyntaxError, ValueError):
+        return False
+    old_inner, old_chain = _unwrap_collection(old_node)
+    new_inner, new_chain = _unwrap_collection(new_node)
+    if old_chain != new_chain:
+        return False
+    if type(old_inner) is not type(new_inner):
+        return False
+    if isinstance(old_inner, ast.Dict) and isinstance(new_inner, ast.Dict):
+        old_pairs = [
+            (ast.dump(k), ast.dump(v)) for k, v in zip(old_inner.keys, old_inner.values, strict=True) if k is not None
+        ]
+        new_pairs = [
+            (ast.dump(k), ast.dump(v)) for k, v in zip(new_inner.keys, new_inner.values, strict=True) if k is not None
+        ]
+        if len(old_pairs) != len(old_inner.keys) or len(new_pairs) != len(new_inner.keys):
+            return False  # a ``**expansion`` has a None key node — not a plain literal
+        old_keys = [k for k, _ in old_pairs]
+        new_keys = [k for k, _ in new_pairs]
+        if len(set(old_keys)) != len(old_keys) or len(set(new_keys)) != len(new_keys):
+            return False  # a duplicate key dump makes the mapping ambiguous
+        new_by_key = dict(new_pairs)
+        for key, value in old_pairs:
+            if new_by_key.get(key) != value:
+                return False  # a missing key or a changed value for a preserved key
+        return len(new_pairs) > len(old_pairs)
+    if isinstance(old_inner, ast.Set) and isinstance(new_inner, ast.Set):
+        old_dumps = [ast.dump(e) for e in old_inner.elts]
+        new_dumps = [ast.dump(e) for e in new_inner.elts]
+        if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
+            return False
+        return Counter(old_dumps) <= Counter(new_dumps) and len(new_dumps) > len(old_dumps)
+    if isinstance(old_inner, ast.Tuple | ast.List) and isinstance(new_inner, ast.Tuple | ast.List):
+        if any(isinstance(e, ast.Starred) for e in (*old_inner.elts, *new_inner.elts)):
+            return False
+        old_dumps = [ast.dump(e) for e in old_inner.elts]
+        new_dumps = [ast.dump(e) for e in new_inner.elts]
+        return len(new_dumps) > len(old_dumps) and _is_subsequence(old_dumps, new_dumps)
+    return False
+
+
 def _breakages(module: str, ref: str, search: str) -> list[str]:
     # griffe is the heavy release-only dependency (api-gate group); import it
     # lazily so the pure decision helpers can be imported and unit-tested in an
@@ -225,6 +315,7 @@ def _breakages(module: str, ref: str, search: str) -> list[str]:
     for b in griffe.find_breaking_changes(old, new):
         if b.kind is griffe.BreakageKind.ATTRIBUTE_CHANGED_VALUE and (
             _is_doc_only_field_change(str(b.old_value), str(b.new_value))
+            or _is_additive_collection_growth(str(b.old_value), str(b.new_value))
         ):
             continue
         explained.append(_ANSI.sub("", b.explain(style=griffe.ExplanationStyle.ONE_LINE)))

@@ -51,6 +51,7 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
+from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations._broadcast import log_non_convergence, snapshot_membership
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
@@ -80,6 +81,7 @@ class PresetCreate(BaseModel):
     fixed_kwargs: dict[str, Any] = {}
     extensions: list[list[ExtensionElement]] = []
     output_schema: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None
 
 
 class PresetVersionSave(BaseModel):
@@ -208,6 +210,16 @@ def read_output_schema(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         raise BadRequestError("'output_schema' must be a JSON object (a JSON Schema)")
+    return value
+
+
+def read_input_schema(value: Any) -> dict[str, Any] | None:
+    """The optional author-set input schema from a request value: ``null`` → ``None``;
+    a JSON object → itself; anything else → a loud 400."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise BadRequestError("'input_schema' must be a JSON object (a JSON Schema)")
     return value
 
 
@@ -463,15 +475,22 @@ async def _dry_run_bind_error(
     name: str,
     description: str,
     output_schema: dict[str, Any] | None = None,
+    input_schema: dict[str, Any] | None = None,
 ) -> str | None:
     """Bake the body through the kernel WITHOUT registering, returning a 400 message
     if the bake raises (unknown base tool, a ``fixed_kwargs`` key that is not an
-    argument of the base, an ``output_schema`` the base cannot carry) or ``None`` if
-    it binds. The dry run never touches the live registry, so a rejected edit leaves
-    both the store and the bindings untouched."""
+    argument of the base, an ``output_schema`` the base cannot carry, an ``input_schema``
+    over a base tool with no support) or ``None`` if it binds. The dry run never touches
+    the live registry, so a rejected edit leaves both the store and the bindings
+    untouched."""
     try:
         await instance.app.presets.bind(
-            base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
+            base_tool,
+            fixed_kwargs,
+            name=name,
+            description=description,
+            output_schema=output_schema,
+            input_schema=input_schema,
         )
     except Exception as exc:
         return f"preset {name!r} cannot bind: {exc}"
@@ -489,6 +508,35 @@ async def _write_validator_error(body: PresetBody) -> str | None:
     issues = await validator(body)
     if issues:
         return "\n".join(issues)
+    return None
+
+
+async def _enforce_registration_tier(base_tool: str) -> None:
+    """Enforce the base tool's authoring tier BEFORE any store write — ruling 14.
+
+    A base tool declaring ``fenced`` (or ``secret``) requires the caller clears the admin
+    fence to author (create/save/rollback/rename) a preset over it: resolve the acting
+    principal and ``require_admin`` (a loud ``ForbiddenError`` for a non-admin). A base
+    tool with no declaration keeps the presets' own default ``write`` action (no extra
+    gate). ``resolve_caller`` returns an admin when access-control is disabled, so the
+    fence bites only where the platform fences at all — the same semantics as a static
+    ``action="fenced"`` route."""
+    tier = instance.app.presets.registration_tier(base_tool)
+    if tier in ("fenced", "secret"):
+        require_admin(await resolve_caller())
+
+
+def _input_schema_authoring_error(body: PresetBody) -> str | None:
+    """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no
+    registered input-schema support, else ``None``. Loud, never a silently-ignored
+    schema — the ``_write_validator_error`` precedent."""
+    if body.input_schema is None:
+        return None
+    if instance.app.presets.input_schema_support(body.base_tool) is None:
+        return (
+            f"base tool {body.base_tool!r} does not accept a preset input_schema "
+            "(no input-schema support is registered for it)"
+        )
     return None
 
 
@@ -716,6 +764,7 @@ async def create_preset(
     fixed_kwargs: dict[str, Any],
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a preset, ATOMIC: ordered name pre-checks run BEFORE any store write,
     then the base rule + agent-authoring + combo/schema/bind validation, then the
@@ -771,23 +820,36 @@ async def create_preset(
     if schema_error is not None:
         raise BadRequestError(schema_error)
     bind_error = await _dry_run_bind_error(
-        base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
+        base_tool,
+        fixed_kwargs,
+        name=name,
+        description=description,
+        output_schema=output_schema,
+        input_schema=input_schema,
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
+    body = PresetBody(
+        base_tool=base_tool,
+        description=description,
+        fixed_kwargs=fixed_kwargs,
+        extensions=extensions,
+        output_schema=output_schema,
+        input_schema=input_schema,
+    )
+    # An ``input_schema`` over a base tool with no registered support is a loud 400 that
+    # never persists a row (never a silently-ignored schema).
+    input_schema_error = _input_schema_authoring_error(body)
+    if input_schema_error is not None:
+        raise BadRequestError(input_schema_error)
     # The base tool's own write validator over the full body about to persist — a
     # body its base tool rejects is a 400 that never persists a row.
-    write_validator_error = await _write_validator_error(
-        PresetBody(
-            base_tool=base_tool,
-            description=description,
-            fixed_kwargs=fixed_kwargs,
-            extensions=extensions,
-            output_schema=output_schema,
-        )
-    )
+    write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # Registration-tier fence (ruling 14): a base tool declaring ``fenced``/``secret``
+    # requires the caller clears the admin fence to author a preset over it.
+    await _enforce_registration_tier(base_tool)
 
     # A preset needs the durable store; on a store-less deploy (the skeleton
     # database unconfigured) refuse cleanly here — the same predicate the
@@ -816,14 +878,14 @@ async def create_preset(
     spec = PresetSpec(name=name, description=description, base_tool=base_tool, fixed_kwargs=fixed_kwargs)
     try:
         record = await instance.app.presets.store.create_preset(
-            spec, extensions=extensions, output_schema=output_schema
+            spec, extensions=extensions, output_schema=output_schema, input_schema=input_schema
         )
     except PresetNameConflictError as exc:
         raise ConflictError(f"preset name {name!r} collides with an existing tool") from exc
     except PresetExistsError as exc:
         raise ConflictError(f"preset {name!r} already exists") from exc
     try:
-        await mgr.register(name, base_tool, fixed_kwargs, extensions, description, output_schema)
+        await mgr.register(name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema)
     except Exception as register_exc:
         try:
             await instance.app.versioning.store.delete("preset", name)
@@ -987,6 +1049,9 @@ async def save_version(
     )
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # Registration-tier fence (ruling 14): the tier is the CURRENT preset's base tool,
+    # so editing a fenced base tool's preset is admin-fenced too.
+    await _enforce_registration_tier(base_tool)
 
     # Snapshot the OLD wire tool + its extension combos BEFORE the store write —
     # reload tears the old tool down, and after the write the active body already
@@ -1079,12 +1144,15 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         name=name,
         description=target_body.description,
         output_schema=target_body.output_schema,
+        input_schema=target_body.input_schema,
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
     write_validator_error = await _write_validator_error(target_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # Registration-tier fence (ruling 14): the tier is the target body's base tool.
+    await _enforce_registration_tier(target_body.base_tool)
 
     prior_active = prior_record.active_version
     # Pinned before the rollback+reload local apply — see :func:`_census_at_start`.
@@ -1149,8 +1217,12 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     store = instance.app.presets.store
     try:
         await store.get_preset(name)
+        active_body = await store.get_active_body(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
+    # Registration-tier fence (ruling 14): the tier is the CURRENT preset's base tool, so
+    # renaming a fenced base tool's preset is admin-fenced too. Runs BEFORE the store move.
+    await _enforce_registration_tier(active_body.base_tool)
 
     # NEW-name pre-checks — create's exact order and codes: quarantine 409 → live-tool
     # collision 409 → agent tool-name collision 400 → duplicate-preset 409.

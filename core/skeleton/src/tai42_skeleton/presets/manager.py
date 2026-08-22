@@ -152,6 +152,7 @@ class PresetManager:
         extensions: Sequence[Sequence[ExtensionElement]],
         description: str = "",
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec (public entry).
 
@@ -163,7 +164,7 @@ class PresetManager:
         if not is_valid_preset_name(name):
             raise ValueError(f"invalid preset name {name!r}: must match {_PRESET_NAME_RE.pattern}")
         async with self._locks[name]:
-            await self._register(name, base_tool, fixed_kwargs, extensions, description, output_schema)
+            await self._register(name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema)
 
     async def _register(
         self,
@@ -173,6 +174,7 @@ class PresetManager:
         extensions: Sequence[Sequence[ExtensionElement]],
         description: str = "",
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec — the UNLOCKED core.
 
@@ -194,7 +196,12 @@ class PresetManager:
         if name in await self._app.tools.get_tools():
             raise PresetNameConflictError(name)
         tool_obj = await self._app.presets.bind(
-            base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
+            base_tool,
+            fixed_kwargs,
+            name=name,
+            description=description,
+            output_schema=output_schema,
+            input_schema=input_schema,
         )
         try:
             # Clear any stale registry entry for ``name`` first — the seed below is
@@ -221,6 +228,7 @@ class PresetManager:
             fixed_kwargs=fixed_kwargs,
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
+            input_schema=input_schema,
         )
 
     # -- reload one (edit path) -----------------------------------------------
@@ -255,6 +263,7 @@ class PresetManager:
                     body.extensions,
                     body.description,
                     body.output_schema,
+                    body.input_schema,
                 )
             except Exception:
                 if captured is not None:
@@ -265,6 +274,7 @@ class PresetManager:
                         captured.extensions,
                         captured.description,
                         captured.output_schema,
+                        captured.input_schema,
                     )
                 raise
 
@@ -313,6 +323,7 @@ class PresetManager:
                             body.extensions,
                             body.description,
                             body.output_schema,
+                            body.input_schema,
                         )
                         continue
                     except Exception:
@@ -396,7 +407,9 @@ class PresetManager:
             logger.error("preset %r quarantined: %s", name, reason)
             return
         try:
-            await self._register(name, base, body.fixed_kwargs, body.extensions, body.description, body.output_schema)
+            await self._register(
+                name, base, body.fixed_kwargs, body.extensions, body.description, body.output_schema, body.input_schema
+            )
         except Exception:
             reason = "registration failed"
             self._quarantine[name] = reason

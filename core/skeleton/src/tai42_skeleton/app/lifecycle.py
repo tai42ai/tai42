@@ -62,8 +62,13 @@ if TYPE_CHECKING:
     from tai42_skeleton.backend.registry import BackendHolder
     from tai42_skeleton.backup import BackupRegistry
     from tai42_skeleton.channels.registry import ChannelRegistry
+    from tai42_skeleton.presets.base_tool_config import (
+        PresetInputSchemaSupportRegistry,
+        PresetRegistrationTierRegistry,
+    )
     from tai42_skeleton.presets.manager import PresetManager
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
+    from tai42_skeleton.sandbox import SandboxHolder
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import ToolRefsRegistry
     from tai42_skeleton.tools.binding import ToolBinding
@@ -151,6 +156,11 @@ class TaiMCPLifecycleMixin(ABC):
         # has no blocking waiter, so this loop is what fires a parked question's
         # continuation once its expiry passes. Runs until cancelled at shutdown.
         self._interactions_reaper_task: asyncio.Task[None] | None = None
+
+        # The sandbox session reap loop, owned by app_context and spawned ONLY when a
+        # sandbox provider is registered (a no-op absent one). Reaps expired sessions on
+        # a fixed cadence; runs until cancelled at shutdown.
+        self._sandbox_reaper_task: asyncio.Task[None] | None = None
 
         # The module → mount-binding map for the CURRENT registration pass, rebuilt at
         # the top of ``_initialize_components`` before any manifest module imports.
@@ -277,6 +287,10 @@ class TaiMCPLifecycleMixin(ABC):
         return self._serving_core._backend_holder
 
     @property
+    def _sandbox_holder(self) -> "SandboxHolder":
+        return self._serving_core._sandbox_holder
+
+    @property
     def _http_surface(self) -> "HttpSurface":
         return self._serving_core._http_surface
 
@@ -291,6 +305,14 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _write_validator_registry(self) -> "PresetWriteValidatorRegistry":
         return self._serving_core._write_validator_registry
+
+    @property
+    def _input_schema_support_registry(self) -> "PresetInputSchemaSupportRegistry":
+        return self._serving_core._input_schema_support_registry
+
+    @property
+    def _registration_tier_registry(self) -> "PresetRegistrationTierRegistry":
+        return self._serving_core._registration_tier_registry
 
     @property
     def _tool_refs_registry(self) -> "ToolRefsRegistry":
@@ -491,6 +513,10 @@ class TaiMCPLifecycleMixin(ABC):
             # Start the async-park expiry reaper so a parked ask_user's continuation
             # fires once its expiry passes even with no blocking waiter to trip it.
             self._spawn_interactions_reaper()
+            # Start the sandbox session reap loop, but only when a provider backs the
+            # slot — the reaper is a no-op door otherwise, so it is never spawned
+            # without a provider to reap through.
+            self._spawn_sandbox_reaper()
             yield self
         finally:
             # Shutdown start: drop the readiness sentinel FIRST so the readiness probe
@@ -500,6 +526,7 @@ class TaiMCPLifecycleMixin(ABC):
             await self._cancel_bus_subscription()
             await self._cancel_reprobe_task()
             await self._cancel_interactions_reaper()
+            await self._cancel_sandbox_reaper()
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
@@ -810,6 +837,11 @@ class TaiMCPLifecycleMixin(ABC):
         # update()/reload — the manifest's tool modules re-run their
         # register_write_validator() call each start(). Mirrors the resets above.
         self._write_validator_registry.reset()
+
+        # Reset the per-base-tool preset input-schema support + registration-tier
+        # declarations alongside the write validator, for the same reload reason.
+        self._input_schema_support_registry.reset()
+        self._registration_tier_registry.reset()
 
         # Reset so a dropped tool-references declaration doesn't linger across
         # update()/reload — the manifest's tool modules re-run their
@@ -1141,9 +1173,10 @@ class TaiMCPLifecycleMixin(ABC):
             self._import_additive_plugin(module, "middleware", dist_map, executed_modules)
 
         # The scalar slots ABORT boot on incompat/import failure instead of
-        # quarantining: the server cannot run without its backend/storage/
+        # quarantining: the server cannot run without its backend/sandbox/storage/
         # monitoring, so a skipped slot would be a silently crippled server.
         self._import_core_plugin(self._manifest.backend_module, "backend_module", dist_map, executed_modules)
+        self._import_core_plugin(self._manifest.sandbox_module, "sandbox_module", dist_map, executed_modules)
         self._import_core_plugin(self._manifest.storage_module, "storage_module", dist_map, executed_modules)
         self._import_core_plugin(self._manifest.monitoring_module, "monitoring_module", dist_map, executed_modules)
 
@@ -1865,6 +1898,42 @@ class TaiMCPLifecycleMixin(ABC):
         remaining teardown)."""
         task = self._interactions_reaper_task
         self._interactions_reaper_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    def _spawn_sandbox_reaper(self) -> None:
+        """Start the sandbox session reap loop on the serving loop, but ONLY when a
+        provider is registered — the loop is never started absent one. Owned by
+        ``app_context``; runs until cancelled at shutdown."""
+        if self._sandbox_holder.sandbox is None:
+            return
+        from tai42_skeleton.sandbox import run_sandbox_reap_loop
+
+        self._sandbox_reaper_task = asyncio.create_task(
+            run_sandbox_reap_loop(),
+            name="tai-sandbox-reaper",
+        )
+        # Backstop a silent death OR an unexpected normal return loudly, mirroring the
+        # interactions expiry reaper: a run-until-cancelled task.
+        self._sandbox_reaper_task.add_done_callback(self._on_perpetual_task_done)
+
+    async def _cancel_sandbox_reaper(self) -> None:
+        """Cancel the sandbox reap loop and await its termination — the shutdown
+        counterpart of ``_spawn_sandbox_reaper``.
+
+        A non-``CancelledError`` death was already surfaced at ERROR by the
+        done-callback, so it is awaited-and-swallowed here (this runs inside
+        ``app_context``'s shutdown ``finally``, where re-raising would skip the
+        remaining teardown)."""
+        task = self._sandbox_reaper_task
+        self._sandbox_reaper_task = None
         if task is None:
             return
         task.cancel()

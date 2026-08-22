@@ -180,6 +180,68 @@ def test_non_doc_field_change_stays_breaking(old: str, new: str):
     assert api_gate._is_doc_only_field_change(old, new) is False
 
 
+# ----------------------------------------------------- additive collection growth
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # Dict gained a key (the real KIND_MANIFEST_BINDINGS SANDBOX addition shape).
+        ("{'a': 1}", "{'a': 1, 'b': 2}"),
+        # MappingProxyType wraps a dict; the wrapper is peeled before comparison.
+        (
+            "MappingProxyType({'kind': tool})",
+            "MappingProxyType({'kind': tool, 'sandbox': sbx})",
+        ),
+        # Set gained a member.
+        ("{'a', 'b'}", "{'a', 'b', 'c'}"),
+        # frozenset wraps a set (the TIER2_*_REFUSED_KEYS additions shape).
+        ("frozenset({'x'})", "frozenset({'x', 'y'})"),
+        # Tuple gained an element by appending (the DEFAULT_API_ROUTERS shape).
+        ("(a, b)", "(a, b, c)"),
+        # Tuple gained an element mid-sequence — alphabetical insert, order kept.
+        ("('a', 'c')", "('a', 'b', 'c')"),
+        # List gained an element mid-sequence.
+        ("['a', 'c']", "['a', 'b', 'c']"),
+    ],
+)
+def test_additive_collection_growth_is_not_breaking(old: str, new: str):
+    assert api_gate._is_additive_collection_growth(old, new) is True
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # An element removal is a real break, never additive.
+        ("{'a': 1, 'b': 2}", "{'a': 1}"),
+        ("{'a', 'b'}", "{'a'}"),
+        ("(a, b, c)", "(a, b)"),
+        # An element edit (same length, different member) is breaking.
+        ("{'a', 'b'}", "{'a', 'c'}"),
+        ("(a, b)", "(a, c)"),
+        # A changed value for a preserved dict key is breaking.
+        ("{'a': 1, 'b': 2}", "{'a': 1, 'b': 3}"),
+        # A tuple reorder disturbs pre-existing order — not a pure insertion.
+        ("(a, b, c)", "(c, b, a)"),
+        # A wrapper-type change (frozenset -> set) is not additive growth.
+        ("frozenset({'x'})", "{'x', 'y'}"),
+        # A collection collapsing to a scalar is a type change.
+        ("{'a', 'b'}", "5"),
+        # A duplicate dict key makes the mapping ambiguous -> fail closed.
+        ("{'a': 1, 'a': 2}", "{'a': 1, 'a': 2, 'b': 3}"),
+        # A non-collection expression is never additive growth.
+        ("42", "43"),
+        # Identical collections are not growth.
+        ("{'a': 1}", "{'a': 1}"),
+        ("(a, b)", "(a, b)"),
+        # A parse failure fails closed to False with no crash.
+        ("{'a':", "{'a': 1}"),
+    ],
+)
+def test_non_additive_collection_change_stays_breaking(old: str, new: str):
+    assert api_gate._is_additive_collection_growth(old, new) is False
+
+
 # ------------------------------------------------------------------- config read
 
 

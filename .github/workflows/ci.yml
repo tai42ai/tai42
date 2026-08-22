@@ -64,6 +64,8 @@ jobs:
             identity-oidc: [plugins/identity-oidc/**]
             identity-redis: [plugins/identity-redis/**]
             monitoring-langfuse: [plugins/monitoring-langfuse/**]
+            sandbox-docker: [plugins/sandbox-docker/**]
+            sandbox-local: [plugins/sandbox-local/**]
             storage-github: [plugins/storage-github/**]
             storage-local: [plugins/storage-local/**]
             storage-s3: [plugins/storage-s3/**]
@@ -121,6 +123,8 @@ jobs:
           identity-oidc|plugins/identity-oidc|tai42-identity-oidc|tai42_identity_oidc|--extra dev|arq|cov
           identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
           monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov
+          sandbox-docker|plugins/sandbox-docker|tai42-sandbox-docker|tai42_sandbox_docker||arq|cov
+          sandbox-local|plugins/sandbox-local|tai42-sandbox-local|tai42_sandbox_local||arq|cov
           storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github||arq|cov
           storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov
           storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3||arq|cov

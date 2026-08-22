@@ -38,6 +38,21 @@ class EchoFieldsAgent(Agent):
         return ",".join(sorted(kwargs))
 
 
+# The contract ``AppAgents.agent`` carries the generic ``meta`` passthrough, so a
+# meta-carrying registration goes through the plain ``tai42_app.agents`` protocol surface.
+@tai42_app.agents.agent("meta_carrier", meta={"tai42/crash_resume": True})
+class MetaCarrierAgent(Agent):
+    """Registers with generic ``meta`` so the run-tool ``FunctionTool`` carries it —
+    exercising the generic registration passthrough (naming no consumer concept)."""
+
+    tool_name = "meta_carrier"
+    tool_description = "An agent whose run tool carries generic registration meta."
+    ToolInput = EchoInput
+
+    async def run(self, **kwargs) -> str:
+        return "ok"
+
+
 class PresetSpecLike(BaseModel):
     base_tool: str
     fixed_kwargs: dict[str, Any] = {}
@@ -55,7 +70,7 @@ class InlineSkillLike(BaseModel):
 
 class NestedInput(BaseModel):
     """A ``ToolInput`` carrying nested pydantic-model fields, standing in for the
-    real ``tools_agent`` / ``deep_agent`` inputs (the skeleton binds the ``Agent``
+    real ``tools_agent`` / ``langchain_deep_agent`` inputs (the skeleton binds the ``Agent``
     contract only and never imports ``tai42_agents``).
 
     ``presets`` / ``subagents`` / ``inline_skills`` each nest a model, so

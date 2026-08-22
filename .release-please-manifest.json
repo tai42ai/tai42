@@ -22,6 +22,8 @@
   "plugins/identity-oidc": "1.0.4",
   "plugins/identity-redis": "1.0.4",
   "plugins/monitoring-langfuse": "1.0.4",
+  "plugins/sandbox-docker": "1.0.0",
+  "plugins/sandbox-local": "1.0.0",
   "plugins/storage-github": "1.0.4",
   "plugins/storage-local": "1.0.4",
   "plugins/storage-s3": "1.0.4",

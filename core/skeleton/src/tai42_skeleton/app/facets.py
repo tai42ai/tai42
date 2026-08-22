@@ -1,4 +1,4 @@
-"""Facet adapters mapping the concrete app across the facade's 17
+"""Facet adapters mapping the concrete app across the facade's
 ``tai42_contract.app`` sub-protocols.
 
 Each facet is a thin view bound to the owning :class:`~tai42_skeleton.app.server.TaiMCP`;
@@ -34,8 +34,16 @@ if TYPE_CHECKING:
     from tai42_contract.app import DeclaredRouteMetadata
     from tai42_contract.backend import Backend
     from tai42_contract.config import ConfigManager
+    from tai42_contract.connectors.models import ResolvedConnectionAuth
+    from tai42_contract.interactions import AskUser
     from tai42_contract.monitoring import Monitoring
-    from tai42_contract.presets import PresetBody, PresetStore, PresetWriteValidator
+    from tai42_contract.presets import (
+        PresetBody,
+        PresetInputSchemaSupport,
+        PresetStore,
+        PresetWriteValidator,
+    )
+    from tai42_contract.sandbox import Sandbox, SandboxPolicy
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
@@ -119,8 +127,10 @@ class ToolsFacet(_Facet):
 class AgentsFacet(_Facet):
     """``app.agents`` — agent registration + lookup (``AppAgents``)."""
 
-    def agent(self, name: str, tags: set[str] | None = None) -> Callable[[type[_AgentT]], type[_AgentT]]:
-        return self._app._agent_binding.agent(name, tags)
+    def agent(
+        self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> Callable[[type[_AgentT]], type[_AgentT]]:
+        return self._app._agent_binding.agent(name, tags, meta)
 
     def get_agent(self, name: str) -> Agent:
         return self._app._agent_binding.get_agent(name)
@@ -138,6 +148,34 @@ class BackendsFacet(_Facet):
     @property
     def backend(self) -> Backend | None:
         return self._app._backend_holder.backend
+
+
+class SandboxesFacet(_Facet):
+    """``app.sandboxes`` — sandbox provider registration + the acquisition chokepoint
+    and the resolved-policy read (``AppSandboxes``)."""
+
+    def register_sandbox(self, cls: type[Sandbox]) -> type[Sandbox]:
+        return self._app._sandbox_holder.register_sandbox(cls)
+
+    @property
+    def sandbox(self) -> Sandbox | None:
+        """The registered provider, or ``None`` — status/introspection ONLY. Never gate
+        execution on this nullable read; acquire through :meth:`require_sandbox`."""
+        return self._app._sandbox_holder.sandbox
+
+    def require_sandbox(self) -> Sandbox:
+        """The ONE raising acquisition chokepoint every consumer reaches — returns the
+        registered provider or raises ``SandboxUnavailableError`` when none is registered."""
+        return self._app._sandbox_holder.require()
+
+    def sandbox_policy(self) -> SandboxPolicy:
+        """The skeleton-resolved :class:`SandboxPolicy` — the SAME value the holder binds
+        to the kit at provider registration, read through the ONE shared resolver so the
+        bound policy and this read can never diverge. Available REGARDLESS of whether a
+        provider is registered (it reads operator config, not a provider)."""
+        from tai42_skeleton.sandbox.policy import resolve_sandbox_policy
+
+        return resolve_sandbox_policy()
 
 
 class StorageFacet(_Facet):
@@ -249,6 +287,40 @@ class ConnectorsFacet(_Facet):
     @property
     def token_store(self) -> ConnectorTokenStore:
         return self._app._token_store
+
+    async def resolve_connection_auth(
+        self, connection_id: str, provider_id: str, sub_service: str
+    ) -> ResolvedConnectionAuth | None:
+        """Resolve the credential a connection injects for the CURRENT caller — the facade
+        accessor an in-process plugin uses to read a skeleton-resolved credential without
+        importing the skeleton.
+
+        FAILS CLOSE BEFORE any resolution: reads the bound execution identity FIRST and
+        raises a loud, constant-message error when none is bound — so an identity-less
+        door (raw agent-run SSE, sync-HTTP/MCP, background/schedule) can never have the
+        operator's service token injected. Only with a bound identity does it proceed to
+        ``resolve_managed_auth`` (refreshing an expired OAuth token under the connection
+        lock), then MAPS the resulting ``ManagedAuth`` onto the contract
+        :class:`ResolvedConnectionAuth`, conveying all three channels with every value
+        wrapped ``SecretStr``. ``None`` maps to ``None`` (the connection injects nothing).
+        ``connection_id`` is a REFERENCE supplied by operator settings, never
+        session-supplied, so a session can neither reach an identity-less door's creds nor
+        name another identity's connection."""
+        return await self._app._resolve_connection_auth(connection_id, provider_id, sub_service)
+
+
+class InteractionsFacet(_Facet):
+    """``app.interactions`` — the ``ask_user`` facade (``AppInteractions``)."""
+
+    @property
+    def ask_user(self) -> AskUser:
+        """The bound, ``AskUser``-typed ``ask_user`` callable, so an in-process plugin asks
+        a human without importing the skeleton. A facade EXPOSURE of the existing helper —
+        its rich signature and return contract are forwarded verbatim, no new ask
+        semantics."""
+        from tai42_skeleton.interactions.helper import ask_user
+
+        return ask_user
 
 
 class AccountsFacet(_Facet):
@@ -422,13 +494,31 @@ class PresetsFacet(_Facet):
         name: str,
         description: str = "",
         output_schema: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> Tool:
         return await self._app._preset_bind(
-            base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
+            base_tool,
+            fixed_kwargs,
+            name=name,
+            description=description,
+            output_schema=output_schema,
+            input_schema=input_schema,
         )
 
     def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
         return self._app._write_validator_registry.register(base_tool, validator)
+
+    def register_input_schema_support(self, base_tool: str, support: PresetInputSchemaSupport) -> None:
+        return self._app._input_schema_support_registry.register(base_tool, support)
+
+    def input_schema_support(self, base_tool: str) -> PresetInputSchemaSupport | None:
+        return self._app._input_schema_support_registry.get(base_tool)
+
+    def register_registration_tier(self, base_tool: str, tier: RouteAction) -> None:
+        return self._app._registration_tier_registry.register(base_tool, tier)
+
+    def registration_tier(self, base_tool: str) -> RouteAction | None:
+        return self._app._registration_tier_registry.get(base_tool)
 
     def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
         """The registered write validator for ``base_tool``, or ``None`` when none

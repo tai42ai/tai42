@@ -61,14 +61,33 @@ class _FakeAgents:
         return {name: object() for name in self._names}
 
 
+class _FakePresets:
+    """Exposes the input-schema support lookup the bind kernel reads."""
+
+    def __init__(self, support: object | None) -> None:
+        self._support = support
+
+    def input_schema_support(self, base_tool: str) -> object | None:
+        return self._support
+
+
 class _FakeApp:
-    def __init__(self, tool: Tool, agent_names: tuple[str, ...] = ()) -> None:
+    def __init__(self, tool: Tool, agent_names: tuple[str, ...] = (), support: object | None = None) -> None:
         self.tools = _FakeTools(tool)
         self.agents = _FakeAgents(agent_names)
+        self.presets = _FakePresets(support)
 
 
-def _app(tool: Tool, agent_names: tuple[str, ...] = ()) -> TaiApp:
-    return cast("TaiApp", _FakeApp(tool, agent_names))
+def _app(tool: Tool, agent_names: tuple[str, ...] = (), support: object | None = None) -> TaiApp:
+    return cast("TaiApp", _FakeApp(tool, agent_names, support))
+
+
+def _payload_base_tool() -> Tool:
+    def runner(payload: dict, image: str = "x") -> dict:
+        """A base tool with a structured payload argument."""
+        return {"payload": payload, "image": image}
+
+    return Tool.from_function(runner, name="runner")
 
 
 async def test_bind_hides_baked_key_and_keeps_typed_schema():
@@ -218,3 +237,83 @@ async def test_agent_base_does_not_double_validate():
     out = await tool.run({"city": "paris"})
     assert out.structured_content is not None
     assert out.structured_content["city"] == "paris"
+
+
+# -- input_schema mechanism ----------------------------------------------------
+
+
+class _Support:
+    """A minimal PresetInputSchemaSupport stand-in naming the payload argument."""
+
+    def __init__(self, payload_arg: str) -> None:
+        self.payload_arg = payload_arg
+
+
+async def test_input_schema_routes_validated_object_into_payload_arg():
+    authored = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "string"}},
+        "required": ["a"],
+    }
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"image": "pinned"},
+        name="p",
+        input_schema=authored,
+    )
+    # The exposed tool advertises the AUTHORED schema as its own input contract.
+    assert tool.parameters == authored
+    # The caller's validated object is delivered under ``payload`` on the base call,
+    # alongside the baked ``image``.
+    out = await tool.run({"a": 1, "b": "hi"})
+    assert out.structured_content == {"payload": {"a": 1, "b": "hi"}, "image": "pinned"}
+
+
+async def test_input_schema_rejects_invalid_caller_object_loudly_before_routing():
+    # The exposed tool advertises the authored schema, but a custom transform_fn
+    # bypasses FastMCP's own argument validation — the kernel MUST validate the
+    # caller's object against the authored schema itself. A missing-required,
+    # wrong-typed, or additionalProperties-forbidden field is rejected LOUDLY as a
+    # bad caller call (FastMCP's ValidationError), never routed into ``payload_arg``.
+    from fastmcp.exceptions import ValidationError as FastMCPValidationError
+
+    authored = {
+        "type": "object",
+        "required": ["a"],
+        "properties": {"a": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    base = _payload_base_tool()
+    tool = await preset_bind(
+        _app(base, support=_Support("payload")),
+        "runner",
+        {"image": "pinned"},
+        name="p",
+        input_schema=authored,
+    )
+
+    # Missing the required "a".
+    with pytest.raises(FastMCPValidationError):
+        await tool.run({})
+    # Wrong type for "a".
+    with pytest.raises(FastMCPValidationError):
+        await tool.run({"a": "notint"})
+    # An extra field the schema forbids (additionalProperties: false).
+    with pytest.raises(FastMCPValidationError):
+        await tool.run({"a": 1, "zzz": 9})
+
+    # A valid object IS routed into payload_arg, alongside the baked image.
+    out = await tool.run({"a": 1})
+    assert out.structured_content == {"payload": {"a": 1}, "image": "pinned"}
+
+
+async def test_input_schema_over_unsupported_base_is_loud():
+    with pytest.raises(ValueError, match="does not accept a preset input_schema"):
+        await preset_bind(
+            _app(_payload_base_tool(), support=None),
+            "runner",
+            {},
+            name="p",
+            input_schema={"type": "object"},
+        )

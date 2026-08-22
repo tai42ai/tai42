@@ -24,6 +24,7 @@ from tai42_kit.utils.detached_util import in_detached_run
 
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.settings.turn import turn_settings
+from tai42_skeleton.tools.attribution import stamp_run_attribution
 
 if TYPE_CHECKING:
     from fastmcp.server.middleware import MiddlewareContext
@@ -105,5 +106,25 @@ class TurnBudgetMiddleware(Middleware):
         context: "MiddlewareContext[Any]",
         call_next: Callable[["MiddlewareContext[Any]"], Awaitable[Any]],
     ) -> Any:
+        with stamp_run_attribution():
+            async with turn_budget():
+                return await call_next(context)
+
+
+async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> AsyncIterator[EventT]:
+    """Drive a live-caller agent ``astream`` under the turn budget AND the attribution
+    scope — the ONE shared seam every live-caller agent-run door routes through.
+
+    The three live-caller doors that call ``agent.astream`` directly (the conversation
+    bridge and both agent-run SSE routes) hold a live client connection, so they are NOT
+    in the design-exempt detached set and MUST be budgeted; routing them here keeps the
+    budget single-sourced and stamps their run's trace with its attribution, so no future
+    door can add an unbudgeted/unattributed astream. On expiry :func:`turn_budget` raises
+    ``TurnTimeoutError`` out through this iterator to the door's existing raise path;
+    ``turn_budget``'s re-entrancy guard keeps a nested tool re-dispatch from opening a
+    second window. Detached runs stay exempt by ``turn_budget``'s own ``in_detached_run``
+    no-op — this seam never arms a budget there."""
+    with stamp_run_attribution():
         async with turn_budget():
-            return await call_next(context)
+            async for event in stream:
+                yield event
