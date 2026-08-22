@@ -1,0 +1,104 @@
+# After any first-party member cuts a release (its component tag is pushed on
+# merge of the release PR), re-derive the fleet's first-party tai42-* dependency
+# ranges + tai-plugin.yml contract pins from the released member versions on
+# main, so the `fleet` range-sync gate is never left red waiting for a
+# maintainer to run scripts/range_sync.py by hand.
+#
+# This is the safety net BEHIND release-please.yml's in-PR re-pin (its
+# `sync-lock` job runs range_sync on the release PR branch). In the normal flow
+# that in-PR step already carried the re-pin, so range_sync finds nothing here
+# and this is a clean no-op. It earns its keep when a member version reaches
+# main OUTSIDE a release PR (e.g. a hand-pinned release-as wave) — a path the
+# in-PR step never sees — where the fleet would otherwise sit stale on main.
+#
+# A range-only re-pin touches no resolved version, so uv.lock is unaffected (a
+# first-party dep is a specifier-less editable workspace entry in the lock) and
+# no `uv lock` runs here — the change is pyproject specifiers + descriptor pins
+# only. range_sync is an idempotent fixed point, so re-runs converge.
+name: release-repin
+
+on:
+  push:
+    # The same component tags release.yml publishes on: tai42-<package>-v<ver>.
+    # Whichever first-party member released, re-deriving the whole fleet is
+    # correct and idempotent; a release that drives no range change is a no-op.
+    tags: ["tai42-*-v*"]
+
+permissions:
+  contents: read
+
+# One re-pin at a time; a release wave's burst of tags collapses to a single
+# convergent re-pin. Never cancel an in-flight re-pin PR mid-open (matches
+# release-please.yml's release concurrency posture).
+concurrency:
+  group: release-repin
+  cancel-in-progress: false
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Check out main's tip (not the tagged commit) so the re-pin converges the
+      # current fleet. The PAT (not GITHUB_TOKEN) so the branch push + PR trigger
+      # CI and the PR's own required checks — refs written by GITHUB_TOKEN fire
+      # no workflows, which would strand the re-pin PR with no checks to merge on.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      # Pure-stdlib script; --no-project avoids resolving the workspace just to
+      # run it. Rewrites in place; range-only, so uv.lock is untouched.
+      - name: Re-derive first-party ranges from the released versions
+        run: uv run --python 3.13 --no-project python scripts/range_sync.py
+      - name: Open an auto-merging re-pin PR if the fleet drifted
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Normal flow: the release PR already carried the re-pin, so main is in
+          # sync and there is nothing to do.
+          if git diff --quiet -- core plugins e2e; then
+            echo "Fleet already in sync with the released versions; nothing to re-pin."
+            exit 0
+          fi
+          # A single, stable re-pin branch so a burst of tags updates ONE PR
+          # rather than opening duplicates. The branch is bot-exclusive (only this
+          # workflow ever writes it) and always carries the latest derivation, so a
+          # plain force push is correct — the single-ref ``main`` checkout holds no
+          # tracking ref for a ``--force-with-lease`` baseline, and no human writes here.
+          branch="fleet-repin"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          # Stage only what range_sync rewrites (member pyproject.toml specifiers
+          # + tai-plugin.yml contract pins); all live under these roots.
+          git add -- core plugins e2e
+          title="fix(deps): re-pin the fleet after ${TAG}"
+          body=$(printf '%s\n' \
+            "Re-derive every first-party tai42-* dependency range and every" \
+            "tai-plugin.yml contract pin from the released member versions on main" \
+            "(scripts/range_sync.py, the derived-range source of truth), so the" \
+            "fleet range-sync gate stays green without a hand-run after ${TAG}." \
+            "" \
+            "Range-only: uv.lock is unaffected. A \`fix(deps)\` subject so each" \
+            "re-pinned member is re-attributed a patch release." \
+            "" \
+            "Automated by .github/workflows/release-repin.yml.")
+          git commit -m "$title" -m "$body"
+          git push --force origin "$branch"
+          # Open the PR only if one is not already open for this branch (a prior
+          # run in the same wave may have opened it), then enable auto-merge so it
+          # lands the moment branch protection's required checks pass — the same
+          # no-human-step merge the release train uses (see release-automerge.yml).
+          if ! gh pr view "$branch" --json state --jq '.state' 2>/dev/null | grep -qx OPEN; then
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+          fi
+          gh pr merge --auto --squash "$branch"
