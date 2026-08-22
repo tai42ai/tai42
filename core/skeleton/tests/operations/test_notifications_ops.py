@@ -288,6 +288,51 @@ async def test_notify_user_data_image_without_public_base_url_is_400(monkeypatch
         app._channel_registry.reset()
 
 
+async def test_notify_user_dict_media_substituted_end_to_end(monkeypatch, fake_redis) -> None:
+    # The HTTP door hands the op ``media`` as plain dicts (``model_dump`` of the validated
+    # body); this drives the op with dicts, as that door does, all the way through the REAL
+    # seam. A dict data:image is stored by reference and the channel receives an ABSOLUTE
+    # served url — never a ``.kind`` AttributeError on the raw dict.
+    from tai42_skeleton.channels import notify as notify_seam
+    from tai42_skeleton.interactions import media as media_module
+    from tai42_skeleton.interactions.settings import InteractionsSettings
+
+    monkeypatch.setattr(
+        notify_seam, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
+    )
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notify_seam, "client_ctx", _ctx)
+    monkeypatch.setattr(media_module.secrets, "token_urlsafe", lambda n: "N" * 43)
+
+    channel = _RichChannel()
+    app._channel_registry.reset()
+    tai42_app.channels.register("whatsapp", cast(Channel, channel))
+    try:
+        result = await notifications_ops.notify_user(
+            "hi",
+            channel="whatsapp",
+            # The HTTP door hands the op ``model_dump`` dicts, not MediaItem objects.
+            media=cast(
+                "list[MediaItem]",
+                [
+                    {"kind": "link", "url": "https://example.com/doc", "caption": "a link"},
+                    {"kind": "image", "url": _DATA_PNG},
+                ],
+            ),
+        )
+        assert result == "notification sent via 'whatsapp'"
+        forwarded = channel.notifications[0].media
+        assert forwarded is not None
+        assert forwarded[0] == MediaItem(kind=MediaKind.LINK, url="https://example.com/doc", caption="a link")
+        assert forwarded[1].url == "https://box.example/api/interactions/media/" + "N" * 43
+    finally:
+        app._channel_registry.reset()
+
+
 async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> None:
     # The options field is forwarded verbatim to the channels helper.
     helper = _RecordingHelper()
