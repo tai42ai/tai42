@@ -27,7 +27,7 @@ dependencies = [
     # The pure interface contract this verifier registers through — the tai42_app
     # handle and the WebhookVerifier / WebhookVerificationError types. The HMAC
     # work is pure standard library (hmac / hashlib); no other tai-* dependency.
-    "tai42-contract>=2.0,<4",
+    "tai42-contract>=3.0,<4",
 ]
 
 [project.urls]

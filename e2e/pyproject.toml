@@ -28,7 +28,7 @@ dependencies = [
     # below — a lower floor lets an older wheel back in and makes the published
     # harness unresolvable.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=2.0,<4",
+    "tai42-contract>=3.0,<4",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.5,<4",
     "tai42-skeleton[toolbox,files]>=6.0,<7",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
