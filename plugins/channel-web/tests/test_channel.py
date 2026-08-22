@@ -13,7 +13,6 @@ import pytest
 from pydantic import ValidationError
 from tai42_contract.channels import (
     ChannelDeliveryError,
-    ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
 )
@@ -357,18 +356,21 @@ async def test_notify_mixed_media_rides_the_array_in_order(fake_redis: FakeRedis
     ]
 
 
-async def test_notify_refuses_a_data_image(fake_redis: FakeRedis):
-    # The page renders an image only from an absolute https source; a data: URI is
-    # refused loudly and nothing is written.
-    notification = ChannelNotification(
-        message="see this",
-        recipient=VISITOR_ID,
-        sender_identity=IDENTITY,
-        media=[MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA")],
+async def test_notify_served_reference_image_rides_the_card(fake_redis: FakeRedis):
+    # The notify door substitutes a data: image for a served reference before the send,
+    # so the channel receives a same-origin served url and renders it as a normal image
+    # card — the channel no longer refuses (the data: refusal is gone).
+    ref = "/api/interactions/media/" + "m" * 43
+    await WebChannel().notify(
+        ChannelNotification(
+            message="see this",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[MediaItem(kind=MediaKind.IMAGE, url=ref)],
+        )
     )
-    with pytest.raises(ChannelInputError, match="data: image"):
-        await WebChannel().notify(notification)
-    assert _TRANSCRIPT_KEY not in fake_redis.streams
+    payload = _only_media_entry(fake_redis)
+    assert payload["media"] == [{"kind": "image", "url": ref}]
 
 
 async def test_notify_options_appends_a_card_with_options(fake_redis: FakeRedis):

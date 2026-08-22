@@ -10,14 +10,17 @@ projection carries ``destructiveHint``.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
+from typing import cast
 
 import pytest
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
+    Channel,
     ChannelDeliveryError,
     ChannelInputError,
     ChannelNotification,
@@ -80,6 +83,20 @@ def sink_redis(monkeypatch, fake_redis):
 
     monkeypatch.setattr(notifications_sink, "client_ctx", _ctx)
     return fake_redis
+
+
+class _RichChannel:
+    """A channel advertising media support that records the notifications it receives —
+    a real target so the seam's substitution runs end-to-end through the op."""
+
+    supports_media_notifications = True
+
+    def __init__(self) -> None:
+        self.notifications: list[ChannelNotification] = []
+
+    async def notify(self, notification: ChannelNotification) -> list[str]:
+        self.notifications.append(notification)
+        return []
 
 
 class _RecordingHelper:
@@ -245,6 +262,30 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
             },
         ),
     ]
+
+
+_DATA_PNG = "data:image/png;base64," + base64.b64encode(bytes.fromhex("89504e470d0a1a0a")).decode()
+
+
+async def test_notify_user_data_image_without_public_base_url_is_400(monkeypatch) -> None:
+    # End-to-end through the REAL seam: a data:image needs an absolute url to reach a
+    # channel; with no public base url the seam raises ChannelInputError and the op maps
+    # it to a 400 naming the setting — never a silent drop, and never sends.
+    from tai42_skeleton.channels import notify as notify_seam
+    from tai42_skeleton.interactions.settings import InteractionsSettings
+
+    monkeypatch.setattr(notify_seam, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+    channel = _RichChannel()
+    app._channel_registry.reset()
+    tai42_app.channels.register("whatsapp", cast(Channel, channel))
+    try:
+        with pytest.raises(BadRequestError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+            await notifications_ops.notify_user(
+                "hi", channel="whatsapp", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)]
+            )
+        assert channel.notifications == []  # the send was never reached
+    finally:
+        app._channel_registry.reset()
 
 
 async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> None:

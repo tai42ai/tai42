@@ -10,6 +10,7 @@ unknown channel name, or a blank recipient is rejected before any send.
 
 from __future__ import annotations
 
+import base64
 from contextlib import asynccontextmanager
 
 import pytest
@@ -19,14 +20,19 @@ from tai42_contract.channels import (
     NOTIFICATION_ADDRESS_MAX_CHARS,
     NOTIFICATION_MESSAGE_MAX_CHARS,
     ChannelDeliveryError,
+    ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
 )
+from tai42_contract.interactions import MEDIA_ROUTE_PREFIX
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import notifications_sink
+from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
+from tai42_skeleton.interactions import media as media_module
+from tai42_skeleton.interactions.settings import InteractionsSettings
 
 
 class RecordingChannel:
@@ -315,6 +321,48 @@ async def test_options_with_channel_none_rejected(sink_redis):
     with pytest.raises(ValueError, match="media, template and options require a named channel"):
         await notify_user("pick one", options=["Item A", "Item B"])
     assert await notifications_sink.read_notifications() == []
+
+
+# -- data: image substitution: stored by reference, absolute url minted here -----
+
+
+_DATA_PNG = "data:image/png;base64," + base64.b64encode(bytes.fromhex("89504e470d0a1a0a")).decode()
+
+
+async def test_notify_data_image_substituted_to_absolute_url(register_channel, monkeypatch, fake_redis):
+    # A data:image on a channel send is stored by reference BEFORE the send: the channel
+    # receives an ABSOLUTE served url (a vendor fetches it from its own servers), never
+    # the inline bytes. The substitution lives in this shared seam, so every caller of it
+    # is covered.
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(
+        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
+    )
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notify_module, "client_ctx", _ctx)
+    monkeypatch.setattr(media_module.secrets, "token_urlsafe", lambda n: "N" * 43)
+
+    await notify_user("hi", channel="rich", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)])
+
+    forwarded = channel.notifications[0].media
+    assert forwarded is not None
+    assert forwarded[0].url == "https://box.example" + MEDIA_ROUTE_PREFIX + "N" * 43
+
+
+async def test_notify_data_image_without_public_base_url_raises(register_channel, monkeypatch):
+    # A data:image needs an absolute url to reach a channel; with no public base url the
+    # seam refuses LOUDLY (ChannelInputError, the op maps it to a 400) naming the setting,
+    # and never sends.
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+
+    with pytest.raises(ChannelInputError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+        await notify_user("hi", channel="rich", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)])
+    assert channel.notifications == []
 
 
 # -- loud failures: every error propagates, nothing is swallowed -----------------

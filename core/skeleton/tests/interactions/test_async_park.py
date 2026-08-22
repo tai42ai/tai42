@@ -141,8 +141,8 @@ async def test_sync_question_stores_no_continuation_and_is_not_indexed(fake_redi
     assert await store.due_expiries(fake_redis, datetime.now(UTC) + timedelta(days=1)) == []
 
 
-async def test_async_park_past_expiry_is_not_sync_pruned_in_backlog(fake_redis):
-    # An async park read via ``backlog()`` after its ``expiry_at`` has passed but before
+async def test_async_park_past_expiry_is_not_sync_pruned_in_pending(fake_redis):
+    # An async park read via ``pending()`` after its ``expiry_at`` has passed but before
     # the next reaper pass is NEVER sync-pruned — pruning would drop its continuation on
     # the floor. It stays pending and expiry-indexed for the reaper to resolve.
     store = InteractionStore("t:")
@@ -162,7 +162,7 @@ async def test_async_park_past_expiry_is_not_sync_pruned_in_backlog(fake_redis):
         expiry_at=past,
     )
     await store.add(fake_redis, req, idle_ttl=86400, continuation_fingerprint="fp-1")
-    assert [r.interaction_id for r in await store.backlog(fake_redis)] == ["ap1"]
+    assert [r.interaction_id for r in await store.pending(fake_redis)] == ["ap1"]
     state = await store.get_state(fake_redis, "ap1")
     assert state is not None
     assert state.status == "pending"  # not pruned

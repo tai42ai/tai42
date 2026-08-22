@@ -1,11 +1,10 @@
-"""The store-owned SSE backlog read: ``InteractionStore.backlog`` returns
-the pending questions to replay — in group creation order then stream order —
-AND owns the reconciliation side effects (phantom-group prune, abandoned
-past-deadline prune, answered/missing skip). The returned sequence AND the
-post-read store key state are both pinned
-here, since the pruning is a store-state side effect invisible in the returned
-list alone. A second test pins the batching: one pipeline per group, not an N+1
-of per-question state reads.
+"""The store-owned pending read: ``InteractionStore.pending`` returns the pending
+questions the list door serves — in group creation order then stream order — AND owns
+the reconciliation side effects (phantom-group prune, abandoned past-deadline prune,
+answered/missing skip). The returned sequence AND the post-read store key state are both
+pinned here, since the pruning is a store-state side effect invisible in the returned
+list alone. A second test pins the batching: one pipeline per group, not an N+1 of
+per-question state reads.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ async def _removed_ids(fake_redis, store: InteractionStore) -> list[str]:
     return [f["interaction_id"] for _id, f in events if f.get("type") == "interaction.removed"]
 
 
-async def test_backlog_returns_order_and_reconciles_state(fake_redis):
+async def test_pending_returns_order_and_reconciles_state(fake_redis):
     store = InteractionStore("t:")
     now = datetime.now(UTC)
     # Group A: a live question, an abandoned one (past deadline, SIGKILLed waiter),
@@ -62,10 +61,10 @@ async def test_backlog_returns_order_and_reconciles_state(fake_redis):
     fake_redis._zadd(store.pending_key, {"C": 1.0})
     fake_redis._zadd(store.pending_deadline_key, {"C": 1.0})
 
-    backlog = await store.backlog(fake_redis)
+    pending = await store.pending(fake_redis)
 
     # Only the live questions surface, in group-creation then stream order.
-    assert [r.interaction_id for r in backlog] == ["live", "b1"]
+    assert [r.interaction_id for r in pending] == ["live", "b1"]
 
     # Phantom group C pruned from BOTH indexes.
     assert "C" not in fake_redis._zsets.get(store.pending_key, {})
@@ -81,7 +80,7 @@ async def test_backlog_returns_order_and_reconciles_state(fake_redis):
     assert done_state.status == "answered"
 
 
-async def test_backlog_batches_state_reads_one_pipeline_per_group(fake_redis):
+async def test_pending_batches_state_reads_one_pipeline_per_group(fake_redis):
     store = InteractionStore("t:")
     now = datetime.now(UTC)
     # One group with three open questions — the N+1 candidate.
@@ -97,8 +96,8 @@ async def test_backlog_batches_state_reads_one_pipeline_per_group(fake_redis):
 
     fake_redis.pipeline = counting_pipeline
 
-    backlog = await store.backlog(fake_redis)
-    assert [r.interaction_id for r in backlog] == ["i0", "i1", "i2"]
+    pending = await store.pending(fake_redis)
+    assert [r.interaction_id for r in pending] == ["i0", "i1", "i2"]
     # Exactly ONE pipeline batches the group's three state reads — not three
     # separate HGETALL round trips (the N+1 the refactor removed).
     assert pipelines["count"] == 1

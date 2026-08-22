@@ -18,7 +18,7 @@ from tai42_skeleton.routers import interactions as router
 
 
 class _StallTailRedis:
-    """A redis with an empty backlog whose keepalive XREAD never resolves."""
+    """A redis whose keepalive XREAD never resolves."""
 
     async def xrevrange(self, key, count=1):
         return []
@@ -48,9 +48,8 @@ async def test_sse_tail_stall_raises_runtime_error(monkeypatch):
     settings = InteractionsSettings(blocking_grace_seconds=0.05)
     store = InteractionStore(settings.key_prefix)
 
-    gen = router._stream_events(cast(Request, _FakeRequest()), store, settings)
-    # Empty backlog -> first frame is the backlog_done marker.
-    assert "backlog_done" in await gen.__anext__()
-    # Next pull drives into the tail loop; the stalled XREAD trips the outer bound.
+    gen = router._stream_events(cast(Request, _FakeRequest()), store, settings, "0-0")
+    # Tail-only: the first pull drives straight into the tail loop; the stalled XREAD
+    # trips the outer bound and the generator dies loudly.
     with pytest.raises(RuntimeError, match="XREAD"):
         await gen.__anext__()

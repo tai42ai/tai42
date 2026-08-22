@@ -3,8 +3,8 @@ tool runs, interactions, and notifications. For each: identity A creates/receive
 record (sentinel), identity B does not see it (list absence + direct-id 403 where the
 matrix says 403), and the unrestricted operator sees everything. Two structural pins go
 beyond simple exclusion: the per-identity index/feed stays COMPLETE under a shared-window
-flood, and the interactions add-frame carries NO callback ticket (so a filtered caller
-can never obtain another identity's ticket through the stream)."""
+flood, and no interactions read surface (the paged list or the stream) carries a callback
+ticket (so a filtered caller can never obtain another identity's ticket)."""
 
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from ._owned_support import mint_owned, mint_owner
 _ADD_EVENT = "interaction.add"
 _ANSWERED_EVENT = "interaction.answered"
 _REMOVED_EVENT = "interaction.removed"
-_BACKLOG_DONE = "interaction.backlog_done"
 
 
 # -- SSE stream helpers ------------------------------------------------------
@@ -49,68 +48,57 @@ def _stream_url(stack: TaiStack, port: int) -> str:
     return f"http://{stack.host}:{port}/api/interactions/stream"
 
 
-async def _find_add(stack: TaiStack, port: int, token: str, question: str, *, deadline: float = 8.0) -> dict:
-    """Stream as ``token`` until an add-frame carrying ``question`` appears; return the
-    frame's data. Re-opens per probe so a not-yet-registered question simply retries."""
-    url = _stream_url(stack, port)
+async def _visible_pending(stack: TaiStack, port: int, token: str, *, timeout: float = 8.0) -> list[dict]:
+    """Read the paged pending-list door as ``token`` and return every item — the
+    caller's whole visible pending set (the door is audience-filtered to the caller,
+    so a restricted caller sees ONLY its own addressed questions)."""
+    url = f"http://{stack.host}:{port}/api/interactions"
     headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params={"page": 1, "pageSize": 200}, headers=headers)
+        resp.raise_for_status()
+        return list(resp.json()["data"]["items"])
+
+
+async def _find_add(stack: TaiStack, port: int, token: str, question: str, *, deadline: float = 8.0) -> dict:
+    """Poll the paged list door as ``token`` until an item carrying ``question`` appears
+    (the door is audience-filtered to the caller); return the item."""
 
     async def probe() -> dict | None:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            try:
-                async with client.stream("GET", url, headers=headers) as response:
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        while "\n\n" in buffer:
-                            frame, buffer = buffer.split("\n\n", 1)
-                            event, data = _parse_frame(frame)
-                            if event == _ADD_EVENT and question in json.dumps(data):
-                                return data
-                            if event == _BACKLOG_DONE:
-                                return None
-            except httpx.HTTPError:
-                return None
+        try:
+            items = await _visible_pending(stack, port, token, timeout=4.0)
+        except httpx.HTTPError:
+            return None
+        for item in items:
+            if question in json.dumps(item):
+                return item
         return None
 
-    found = await wait_for_async(probe, deadline=deadline, message=f"add-frame for {question!r} never appeared")
+    found = await wait_for_async(probe, deadline=deadline, message=f"list item for {question!r} never appeared")
     assert found is not None
     return found
 
 
-async def _backlog_adds(stack: TaiStack, port: int, token: str, *, timeout: float = 8.0) -> list[dict]:
-    """Read one stream as ``token`` through to ``backlog_done`` and return every
-    add-frame's data — the caller's whole visible pending backlog."""
-    url = _stream_url(stack, port)
-    headers = {"Authorization": f"Bearer {token}"}
-    adds: list[dict] = []
-    async with httpx.AsyncClient(timeout=timeout) as client, client.stream("GET", url, headers=headers) as response:
-        buffer = ""
-        async for chunk in response.aiter_text():
-            buffer += chunk
-            while "\n\n" in buffer:
-                frame, buffer = buffer.split("\n\n", 1)
-                event, data = _parse_frame(frame)
-                if event == _ADD_EVENT:
-                    adds.append(data)
-                elif event == _BACKLOG_DONE:
-                    return adds
-    return adds
-
-
-async def _collect_frames(stack: TaiStack, port: int, token: str, sink: list[tuple[str, dict]]) -> None:
-    """Stream as ``token``, appending every (event, data) except the backlog marker to
-    ``sink`` until cancelled — a long-lived observer for the answered/removed pins."""
+async def _collect_frames(
+    stack: TaiStack, port: int, token: str, sink: list[tuple[str, dict]], ready: asyncio.Event | None = None
+) -> None:
+    """Stream as ``token``, appending every (event, data) to ``sink`` until cancelled —
+    a long-lived observer of the tail-only add/answered/removed events. ``ready`` is set
+    once the response headers are in: entering ``client.stream`` has received them, so the
+    server has captured the tail cursor and every later add/answered/removed is guaranteed
+    — the caller waits on it before publishing so no frame races the connect."""
     url = _stream_url(stack, port)
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=None) as client, client.stream("GET", url, headers=headers) as response:
+        if ready is not None:
+            ready.set()
         buffer = ""
         async for chunk in response.aiter_text():
             buffer += chunk
             while "\n\n" in buffer:
                 frame, buffer = buffer.split("\n\n", 1)
                 event, data = _parse_frame(frame)
-                if event is not None and event != _BACKLOG_DONE:
+                if event is not None:
                     sink.append((event, data))
 
 
@@ -254,8 +242,8 @@ async def test_interaction_stream_filter_and_answer_matrix(auth_stack: TaiStack,
         add = await _find_add(auth_stack, port, owned_a_raw, question)
         interaction_id = add["interaction_id"]
 
-        # B (a different identity) never sees A's addressed interaction in its backlog.
-        b_adds = await _backlog_adds(auth_stack, port, owned_b_raw)
+        # B (a different identity) never sees A's addressed interaction in its pending list.
+        b_adds = await _visible_pending(auth_stack, port, owned_b_raw)
         assert all(question not in json.dumps(entry) for entry in b_adds), "B's stream leaked A's addressed question"
 
         api_b = auth_stack.api(port=port).with_token(owned_b_raw)
@@ -325,9 +313,9 @@ async def test_key_own_not_owner_interactions_two_siblings_under_one_owner(
         assert add["audience"] == owned_1_id
 
         # The SIBLING under the SAME owner never sees sibling-1's addressed question in
-        # its backlog — isolation follows the own id, so a shared owner does NOT share a
+        # its pending list — isolation follows the own id, so a shared owner does NOT share a
         # stream (the owner-keyed model would leak it here).
-        two_adds = await _backlog_adds(auth_stack, port, owned_2_raw)
+        two_adds = await _visible_pending(auth_stack, port, owned_2_raw)
         assert all(question not in json.dumps(entry) for entry in two_adds), "sibling leaked A's addressed question"
 
         api_1 = auth_stack.api(port=port).with_token(owned_1_raw)
@@ -407,12 +395,12 @@ async def test_stream_add_frame_omits_ticket_though_one_exists(
         # The ticket EXISTS in Redis (the channel carries it out-of-band)...
         ticket = _resolve_ticket(auth_stack, interaction_id)
         # ...yet its exact VALUE appears nowhere in the add-frame nor anywhere in the
-        # caller's whole visible backlog — so a filtered caller can never lift another
+        # caller's whole visible pending list — so a filtered caller can never lift another
         # identity's callback capability off the stream. The leak channel is an embedded
         # callback URL, caught only by this value check.
         assert ticket not in json.dumps(add), "add-frame leaked the callback ticket"
-        for entry in await _backlog_adds(auth_stack, port, owned_raw):
-            assert ticket not in json.dumps(entry), "a backlog add-frame leaked the callback ticket"
+        for entry in await _visible_pending(auth_stack, port, owned_raw):
+            assert ticket not in json.dumps(entry), "a pending-list item leaked the callback ticket"
 
         # Unblock through the public callback door so the waiter completes cleanly.
         callback = await root.request_raw("POST", f"/api/interactions/callback/{ticket}", json={"answer": "done"})
@@ -430,8 +418,10 @@ async def test_answered_and_removed_frames_do_not_leak_cross_identity(
     port = auth_stack.port_a
     frames_a: list[tuple[str, dict]] = []
     frames_b: list[tuple[str, dict]] = []
-    collector_a = asyncio.create_task(_collect_frames(auth_stack, port, owned_a_raw, frames_a))
-    collector_b = asyncio.create_task(_collect_frames(auth_stack, port, owned_b_raw, frames_b))
+    ready_a = asyncio.Event()
+    ready_b = asyncio.Event()
+    collector_a = asyncio.create_task(_collect_frames(auth_stack, port, owned_a_raw, frames_a, ready_a))
+    collector_b = asyncio.create_task(_collect_frames(auth_stack, port, owned_b_raw, frames_b, ready_b))
     api_a = auth_stack.api(port=port).with_token(owned_a_raw)
     api_b = auth_stack.api(port=port).with_token(owned_b_raw)
 
@@ -454,6 +444,9 @@ async def test_answered_and_removed_frames_do_not_leak_cross_identity(
     # frames is genuine isolation, not a dead stream.
     b_answered_q = uniq("banswered")
     b_removed_q = uniq("bremoved")
+    # Both observers must have their response headers (cursor captured) before any ask
+    # publishes, so no add/answered/removed frame races the connect.
+    await asyncio.wait_for(asyncio.gather(ready_a.wait(), ready_b.wait()), timeout=8.0)
     answered_task = asyncio.create_task(_ask(auth_stack, owned_a_raw, answered_q))
     b_answered_task = asyncio.create_task(_ask(auth_stack, owned_b_raw, b_answered_q))
     # A short SUT-side timeout drives a deterministic prune → removed frame (no cancel

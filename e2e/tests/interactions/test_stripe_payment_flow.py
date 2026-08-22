@@ -255,16 +255,6 @@ class _StreamCollector:
             with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
                 await self._task
 
-    def add_interaction_id(self, question: str) -> str | None:
-        for frame in list(self.frames):
-            event, data = _parse_frame(frame)
-            if event == "interaction.add" and data is not None and data.get("question") == question:
-                return data.get("interaction_id")
-        return None
-
-    def backlog_done(self) -> bool:
-        return any(_parse_frame(frame)[0] == "interaction.backlog_done" for frame in list(self.frames))
-
     def answered_count(self, interaction_id: str) -> int:
         count = 0
         for frame in list(self.frames):
@@ -272,6 +262,19 @@ class _StreamCollector:
             if event == "interaction.answered" and data is not None and data.get("interaction_id") == interaction_id:
                 count += 1
         return count
+
+
+async def _pending_interaction_id(stack: TaiStack, port: int, token: str, question: str) -> str | None:
+    """The id of the pending interaction carrying ``question`` from the paged list door,
+    or None while it has not yet persisted."""
+    url = f"http://{stack.host}:{port}/api/interactions"
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(url, params={"page": 1, "pageSize": 200}, headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        for item in resp.json()["data"]["items"]:
+            if item.get("question") == question:
+                return item.get("interaction_id")
+    return None
 
 
 def _log_has(stack: TaiStack, needle: str) -> str:
@@ -288,13 +291,12 @@ async def test_stripe_payment_webhook_loop(
     api = stack.api(port=stack.port_a)
     topic, preset_name = await _setup_flow(stack, api, uniq)
 
-    # Open the SSE stream BEFORE the first delivery and hold it across both, so the add frame
-    # is a live-tail frame and no terminal frame fires before the connection.
+    # Open the TAIL-ONLY SSE stream BEFORE the first delivery and hold it across both, so
+    # the answered terminal frame (fired much later, during the claim) is caught live; the
+    # pending id itself is read from the paged list door.
     stream = _StreamCollector()
     stream.start(f"http://{stack.host}:{stack.port_a}/api/interactions/stream", root_token)
     try:
-        await _until(lambda: stream.backlog_done() or None, deadline=10.0, message="stream never drained its backlog")
-
         # --- Item 1: the loop closes ---------------------------------------
         question = uniq("q")
         before = set(fake_stripe.session_ids())
@@ -303,8 +305,10 @@ async def test_stripe_payment_webhook_loop(
             sid = await _until(
                 lambda: _new_session_id(fake_stripe, before), deadline=15.0, message="no session was minted"
             )
-            interaction_id = await _until(
-                lambda: stream.add_interaction_id(question), deadline=15.0, message="no add frame for the ask"
+            interaction_id = await wait_for_async(
+                lambda: _pending_interaction_id(stack, stack.port_a, root_token, question),
+                deadline=15.0,
+                message="no pending list entry for the ask",
             )
             callback_url = fake_stripe.session(sid)["metadata"]["tai_callback_url"]
 

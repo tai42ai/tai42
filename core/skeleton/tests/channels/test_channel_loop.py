@@ -895,7 +895,7 @@ async def test_delivery_that_eats_the_budget_times_out_without_a_forever_wait(wi
 
 async def test_timeout_when_record_already_gone_reports_gone(wired, monkeypatch):
     # TOCTOU at the timeout prune: the question record has already vanished
-    # (expired, or the backlog reconciler pruned a deadline-crossed question)
+    # (expired, or the pending-list reconciler pruned a deadline-crossed question)
     # before the timeout prune runs, so the prune reports "gone". The timeout
     # message must name that state — never claim a late answer was recorded.
     async def gone(self, r, interaction_id, group_id):

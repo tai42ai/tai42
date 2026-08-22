@@ -20,26 +20,20 @@ from tai42_e2e.stack import TaiStack
 
 
 async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:
-    """Stream the interactions SSE on ``port`` until a pending interaction whose
-    payload carries ``question`` appears; return its add-frame data."""
-    url = f"http://{stack.host}:{port}/api/interactions/stream"
+    """Poll the paged pending-list door on ``port`` until a pending interaction whose
+    payload carries ``question`` appears; return its list-item data."""
+    url = f"http://{stack.host}:{port}/api/interactions"
 
     async def probe() -> dict | None:
         async with httpx.AsyncClient(timeout=2.0) as client:
             try:
-                async with client.stream("GET", url) as response:
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        while "\n\n" in buffer:
-                            frame, buffer = buffer.split("\n\n", 1)
-                            data = _match(frame, question)
-                            if data is not None:
-                                return data
-                            if "backlog_done" in frame:
-                                return None
+                resp = await client.get(url, params={"page": 1, "pageSize": 200})
+                resp.raise_for_status()
             except httpx.HTTPError:
                 return None
+            for item in resp.json()["data"]["items"]:
+                if question in json.dumps(item):
+                    return item
         return None
 
     found = await wait_for_async(
@@ -47,18 +41,6 @@ async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: 
     )
     assert found is not None
     return found
-
-
-def _match(frame: str, question: str) -> dict | None:
-    for line in frame.splitlines():
-        if line.startswith("data:"):
-            try:
-                data = json.loads(line[len("data:") :].strip())
-            except json.JSONDecodeError:
-                return None
-            if question in json.dumps(data):
-                return data
-    return None
 
 
 async def test_ask_user_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:

@@ -1,6 +1,6 @@
 """Interactions router: the human answer door, the two callback doors (data +
 redirect), byte-constant HTML + headers, webhook-verifier binding on the
-callback door, and the SSE backlog/tail. (The public-door rate limiter lives
+callback door, and the tail-only SSE stream. (The public-door rate limiter lives
 in the app-level ``RateLimitMiddleware``; its tests are in ``tests/middleware``.)
 
 Handlers are driven directly (the existing router-test pattern); Redis is the
@@ -11,6 +11,8 @@ seams so a blocked ``ask_user`` caller and the callback door share one store.
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -24,6 +26,7 @@ from starlette.requests import Request
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.interactions import (
+    MEDIA_ROUTE_PREFIX,
     AnswerFormat,
     InteractionRequest,
     InteractionResponse,
@@ -37,6 +40,7 @@ from tai42_skeleton.access_control.request_scopes import (
 )
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.routers import interactions as router
@@ -661,9 +665,40 @@ async def _collect_stream(gen) -> list[str]:
     return frames
 
 
+async def _events_cursor(wired) -> str:
+    """The events-stream tail cursor the route handler captures BEFORE returning the
+    response — reproduced here so the generator is driven exactly as production drives
+    it (an empty stream yields ``0-0``)."""
+    tail = await wired.fake.xrevrange(wired.store.events_key, count=1)
+    return tail[0][0] if tail else "0-0"
+
+
+async def _tail_collect(wired, inject, *, alive: int = 1, identity=None) -> list[str]:
+    """Drive the TAIL-ONLY stream and return its frames. The cursor is captured on an
+    empty events tail (``0-0``); ``inject`` (an async callback) runs on the first XREAD
+    — BEFORE the tail reads — so the events it writes ride that read as unambiguous live
+    tail frames (the stream carries no backlog). ``alive`` bounds the connected windows;
+    ``identity`` is an optional ``_identity(...)`` context for a restricted caller."""
+    real_xread = wired.fake.xread
+    injected = {"done": False}
+
+    async def _hooked_xread(streams, block=None):
+        if not injected["done"]:
+            injected["done"] = True
+            await inject()
+        return await real_xread(streams, block=block)
+
+    wired.monkeypatch.setattr(wired.fake, "xread", _hooked_xread)
+    ctx = identity if identity is not None else contextlib.nullcontext()
+    cursor = await _events_cursor(wired)
+    with ctx:
+        gen = router._stream_events(cast(Request, _AliveRequest(alive=alive)), wired.store, wired.settings, cursor)
+        return [frame async for frame in gen]
+
+
 def _stream_request() -> Request:
     """A GET request that yields one empty receive then disconnects — the tail-driven
-    stream harness (backlog + one live-tail iteration, then the disconnect ends it)."""
+    stream harness (one live-tail iteration, then the disconnect ends it)."""
     scope = {
         "type": "http",
         "method": "GET",
@@ -708,15 +743,12 @@ def _event_ids(frames: list[str], event: str) -> list[str]:
     return [json.loads(f.split("data: ", 1)[1])["interaction_id"] for f in frames if f.startswith(prefix)]
 
 
-async def test_stream_backlog_add_carries_external_url(wired):
+async def test_list_add_carries_external_url(wired):
     await _seed(wired)
-    req = make_request("GET")
-    frames = await _collect_stream(router._stream_events(req, wired.store, wired.settings))
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
-    assert add_frames, frames
-    payload = json.loads(add_frames[0].split("data: ", 1)[1].strip())
-    assert payload["format_payload"]["url"] == "https://ext.example/resource"
-    assert any("interaction.backlog_done" in f for f in frames)
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    assert page["items"], page
+    assert page["items"][0]["format_payload"]["url"] == "https://ext.example/resource"
 
 
 async def test_stream_route_returns_streaming_response(wired):
@@ -726,12 +758,28 @@ async def test_stream_route_returns_streaming_response(wired):
     assert isinstance(resp, StreamingResponse)
 
 
-async def test_stream_backlog_prunes_phantom_group(wired):
-    # A group in the pending index whose stream expired must be pruned, not counted.
+async def test_stream_cursor_captured_before_response_delivers_later_add(wired):
+    # The route handler captures the tail cursor BEFORE returning the response, so an add
+    # published after the handler returns — but before the generator's first XREAD — has
+    # an id past the cursor and is still delivered. This is the post-headers guarantee: a
+    # client holding the response headers never misses a later add.
+    from starlette.responses import StreamingResponse
+
+    resp = await router.stream(cast(Request, _AliveRequest(alive=1)))
+    assert isinstance(resp, StreamingResponse)
+    await _seed(wired, iid="late1", gid="glate")  # published AFTER stream() returned
+    frames = [cast(str, frame) async for frame in resp.body_iterator]
+    assert _add_ids(frames) == ["late1"]
+
+
+async def test_list_prunes_phantom_group(wired):
+    # A group in the pending index whose stream expired must be pruned, not counted —
+    # the list door prunes it — the reconciliation the pending read performs.
     wired.fake._zadd(wired.store.pending_key, {"gone": 1.0})
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
     assert "gone" not in wired.fake._zsets.get(wired.store.pending_key, {})
-    assert any("interaction.backlog_done" in f for f in frames)
+    assert page["total"] == 0
 
 
 def _plain_request_dated(store, iid, gid, created, timeout) -> InteractionRequest:
@@ -746,8 +794,8 @@ def _plain_request_dated(store, iid, gid, created, timeout) -> InteractionReques
     )
 
 
-async def test_stream_backlog_reconciles_abandoned_past_deadline(wired):
-    # A SIGKILLed waiter leaves a pending state past its deadline; the backlog must
+async def test_list_reconciles_abandoned_past_deadline(wired):
+    # A SIGKILLed waiter leaves a pending state past its deadline; the list must
     # NOT surface it and must reconcile the count/pending index (it self-heals). An
     # already-answered sibling is simply skipped.
     now = datetime.now(UTC)
@@ -760,10 +808,9 @@ async def test_stream_backlog_reconciles_abandoned_past_deadline(wired):
     done_resp = InteractionResponse(interaction_id="done", answer="x", answered_by="tester", answered_at=now)
     await wired.store.record_answer(wired.fake, done_resp, "g", reply_ttl=60)
 
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_ids = [
-        json.loads(f.split("data: ", 1)[1])["interaction_id"] for f in frames if f.startswith("event: interaction.add")
-    ]
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    add_ids = [item["interaction_id"] for item in page["items"]]
     assert add_ids == ["live"]  # dead abandoned, done answered — only live surfaces
 
     # Reconciled: a removed event for the dead one, count decremented to the live
@@ -795,60 +842,32 @@ def _sensitive_request(store, iid="s1", gid="sg", budget=60) -> InteractionReque
     )
 
 
-async def test_stream_backlog_add_carries_sensitive_flag(wired):
-    # The sensitive flag must reach the client on the backlog add frame so the UI
+async def test_list_add_carries_sensitive_flag(wired):
+    # The sensitive flag must reach the client on the list add frame so the UI
     # can label the answered state — not just live in a render fixture.
     await wired.store.add(wired.fake, _sensitive_request(wired.store), idle_ttl=86400)
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
-    assert add_frames, frames
-    payload = json.loads(add_frames[0].split("data: ", 1)[1].strip())
-    assert payload["sensitive"] is True
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    assert page["items"], page
+    assert page["items"][0]["sensitive"] is True
 
 
-async def test_stream_non_sensitive_add_carries_sensitive_false(wired):
+async def test_list_non_sensitive_add_carries_sensitive_false(wired):
     # Regression: an ordinary question serializes sensitive: false, never omitted.
     await _seed(wired)
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
-    assert add_frames, frames
-    payload = json.loads(add_frames[0].split("data: ", 1)[1].strip())
-    assert payload["sensitive"] is False
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    assert page["items"], page
+    assert page["items"][0]["sensitive"] is False
 
 
 async def test_stream_tail_add_carries_sensitive_flag(wired):
     # The live tail re-fetches the state and forwards the add frame; the sensitive
-    # flag must ride that frame too (added after cursor capture).
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/s",
-        "query_string": b"",
-        "headers": [],
-        "client": ("1.2.3.4", 1),
-    }
-    msgs = iter([{}, {"type": "http.disconnect"}])
+    # flag must ride that frame too (the question is added after cursor capture).
+    async def _inject():
+        await wired.store.add(wired.fake, _sensitive_request(wired.store, iid="s7", gid="sg7"), idle_ttl=86400)
 
-    async def receive():
-        try:
-            return next(msgs)
-        except StopIteration:
-            return {"type": "http.disconnect"}
-
-    store = wired.store
-    # Seed a sensitive question, then move its events out of the way so capture
-    # sees an empty tail; the live tail re-fetches the pending state and forwards.
-    await store.add(wired.fake, _sensitive_request(store, iid="s7", gid="sg7"), idle_ttl=86400)
-    events = wired.fake._streams.pop(store.events_key, [])
-    gen = router._stream_events(Request(scope, receive), store, wired.settings)
-    frames: list[str] = []
-    async for frame in gen:
-        frames.append(frame)
-        if "backlog_done" in frame:
-            break
-    wired.fake._streams[store.events_key] = events
-    async for frame in gen:
-        frames.append(frame)
+    frames = await _tail_collect(wired, _inject)
     add_frames = [f for f in frames if f.startswith("event: interaction.add")]
     assert add_frames, frames
     payload = json.loads(add_frames[-1].split("data: ", 1)[1].strip())
@@ -859,38 +878,10 @@ async def test_stream_tail_add_carries_sensitive_flag(wired):
 async def test_stream_tail_forwards_add(wired):
     # A pending interaction whose add-event lands after cursor capture is
     # re-fetched and forwarded by the tail.
-    await _seed(wired, iid="i5", gid="g5")
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/s",
-        "query_string": b"",
-        "headers": [],
-        "client": ("1.2.3.4", 1),
-    }
-    msgs = iter([{}, {"type": "http.disconnect"}])
+    async def _inject():
+        await _seed(wired, iid="i5", gid="g5")
 
-    async def receive():
-        try:
-            return next(msgs)
-        except StopIteration:
-            return {"type": "http.disconnect"}
-
-    # Fresh store with an empty events stream at capture; then inject the add event.
-    empty_settings = wired.settings
-    store = InteractionStore(empty_settings.key_prefix)
-    # Move the existing add-event out of the way so capture sees an empty tail.
-    events = wired.fake._streams.pop(store.events_key, [])
-    gen = router._stream_events(Request(scope, receive), store, empty_settings)
-    frames: list[str] = []
-    async for frame in gen:
-        frames.append(frame)
-        if "backlog_done" in frame:
-            break
-    # Restore the add event so the tail re-fetches and forwards it.
-    wired.fake._streams[store.events_key] = events
-    async for frame in gen:
-        frames.append(frame)
+    frames = await _tail_collect(wired, _inject)
     assert any(f.startswith("event: interaction.add") for f in frames)
 
 
@@ -909,9 +900,15 @@ _EXPECTED_MEDIA_FRAME = [
 
 
 def _store_empty(fake_redis) -> bool:
-    # All five FakeRedis stores empty — nothing was written (``_lists`` is the reply channel).
+    # Every FakeRedis store empty — nothing was written (``_lists`` is the reply channel,
+    # ``_sets`` the media index).
     return not (
-        fake_redis._hashes or fake_redis._streams or fake_redis._zsets or fake_redis._strings or fake_redis._lists
+        fake_redis._hashes
+        or fake_redis._streams
+        or fake_redis._zsets
+        or fake_redis._strings
+        or fake_redis._lists
+        or fake_redis._sets
     )
 
 
@@ -933,49 +930,25 @@ def _media_request(
 
 
 async def _tail_add_frames(wired, request: InteractionRequest) -> list[dict]:
-    """Drive the live-tail path for ``request`` in isolation: start the stream against
-    an empty backlog and add ``request`` only AFTER ``backlog_done`` — so the backlog
-    phase emits nothing for it and the add frame can come ONLY from the live tail's
-    XREAD (never a backlog replay). Returns the parsed add payloads."""
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/s",
-        "query_string": b"",
-        "headers": [],
-        "client": ("1.2.3.4", 1),
-    }
-    msgs = iter([{}, {"type": "http.disconnect"}])
+    """Drive the live-tail path for ``request`` in isolation: the cursor captures an
+    empty tail and ``request`` is added only on the first XREAD — so the add frame can
+    come ONLY from the live tail (the stream carries no backlog). Returns the parsed
+    add payloads."""
 
-    async def receive():
-        try:
-            return next(msgs)
-        except StopIteration:
-            return {"type": "http.disconnect"}
+    async def _inject():
+        await wired.store.add(wired.fake, request, idle_ttl=86400)
 
-    store = wired.store
-    gen = router._stream_events(Request(scope, receive), store, wired.settings)
-    frames: list[str] = []
-    async for frame in gen:
-        frames.append(frame)
-        if "backlog_done" in frame:
-            break
-    # The add-event lands only now — after the backlog read and the cursor capture —
-    # so the frame the tail forwards is unambiguously a live-tail frame, not a replay.
-    await store.add(wired.fake, request, idle_ttl=86400)
-    async for frame in gen:
-        frames.append(frame)
+    frames = await _tail_collect(wired, _inject)
     return [json.loads(f.split("data: ", 1)[1].strip()) for f in frames if f.startswith("event: interaction.add")]
 
 
-async def test_stream_backlog_add_carries_media(wired):
-    # The media list rides the backlog add frame as plain JSON dicts (exclude_none).
+async def test_list_add_carries_media(wired):
+    # The media list rides the list add frame as plain JSON dicts (exclude_none).
     await wired.store.add(wired.fake, _media_request(wired.store, media=_MEDIA_ITEMS), idle_ttl=86400)
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
-    assert add_frames, frames
-    payload = json.loads(add_frames[0].split("data: ", 1)[1].strip())
-    assert payload["media"] == _EXPECTED_MEDIA_FRAME
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    assert page["items"], page
+    assert page["items"][0]["media"] == _EXPECTED_MEDIA_FRAME
 
 
 async def test_stream_tail_add_carries_media(wired):
@@ -986,14 +959,52 @@ async def test_stream_tail_add_carries_media(wired):
     assert payloads[-1]["media"] == _EXPECTED_MEDIA_FRAME
 
 
-async def test_stream_add_without_media_omits_key(wired):
+# -- paged list door ---------------------------------------------------------
+
+
+async def test_list_pages_bounds_cap_and_next_page(wired):
+    from tai42_skeleton.operations import BadRequestError
+
+    for i in range(3):
+        await _seed_addressed(wired, f"p{i}", f"g{i}", None)
+    with _identity(user_id="op1", owner=None):
+        page1 = await ops.list_interactions(page=1, page_size=2)
+        assert len(page1["items"]) == 2
+        assert page1["total"] == 3
+        assert page1["next_page"] == 2  # off the indexed total, not the returned count
+        assert page1["truncated"] is False
+        page2 = await ops.list_interactions(page=2, page_size=2)
+        assert len(page2["items"]) == 1
+        assert page2["next_page"] is None  # last page
+        # A page size above the cap is CAPPED to 200 (valid data), never refused.
+        capped = await ops.list_interactions(page=1, page_size=5000)
+        assert capped["page_size"] == 200
+        # A malformed window is a loud 400.
+        with pytest.raises(BadRequestError):
+            await ops.list_interactions(page=0, page_size=1)
+        with pytest.raises(BadRequestError):
+            await ops.list_interactions(page=1, page_size=0)
+
+
+async def test_list_off_store_answers_empty_page(wired, monkeypatch):
+    from tai42_skeleton.operations import BadRequestError
+
+    monkeypatch.setattr(ops, "interactions_store_configured", lambda: False)
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions(page=1, page_size=5000)
+        assert page == {"items": [], "total": 0, "page": 1, "page_size": 200, "next_page": None, "truncated": False}
+        # A malformed window is a 400 even with the store OFF — no configured-vs-off oracle.
+        with pytest.raises(BadRequestError):
+            await ops.list_interactions(page=0, page_size=1)
+
+
+async def test_list_add_without_media_omits_key(wired):
     # A question without media carries NO ``media`` key (absent, not null).
     await _seed(wired)
-    frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [f for f in frames if f.startswith("event: interaction.add")]
-    assert add_frames, frames
-    payload = json.loads(add_frames[0].split("data: ", 1)[1].strip())
-    assert "media" not in payload
+    with _identity(user_id="op1", owner=None):
+        page = await ops.list_interactions()
+    assert page["items"], page
+    assert "media" not in page["items"][0]
 
 
 def test_add_data_media_is_conditional(wired):
@@ -1041,29 +1052,103 @@ async def test_ask_user_media_persists_and_frame_carries_it(wired):
     assert captured["frame"]["media"] == _EXPECTED_MEDIA_FRAME
 
 
-async def test_restricted_stream_media_frame_filtered_by_audience(wired):
-    # Media rides the frame identically under the audience filter: a restricted caller
+async def test_list_media_frame_filtered_by_audience(wired):
+    # Media rides the list item identically under the audience filter: a restricted caller
     # sees its OWN addressed media question (media intact) and NOT another identity's.
     mine = _media_request(wired.store, iid="mine", gid="gm", media=_MEDIA_ITEMS, audience="keyA")
     other = _media_request(wired.store, iid="other", gid="go", media=_MEDIA_ITEMS, audience="bob")
     await wired.store.add(wired.fake, mine, idle_ttl=86400)
     await wired.store.add(wired.fake, other, idle_ttl=86400)
     with _identity(user_id="keyA", owner="alice"):
-        frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [json.loads(f.split("data: ", 1)[1].strip()) for f in frames if f.startswith("event: interaction.add")]
-    assert [p["interaction_id"] for p in add_frames] == ["mine"]
-    assert add_frames[0]["media"] == _EXPECTED_MEDIA_FRAME
+        page = await ops.list_interactions()
+    assert [item["interaction_id"] for item in page["items"]] == ["mine"]
+    assert page["total"] == 1  # the audience filter runs BEFORE paging — an honest total
+    assert page["items"][0]["media"] == _EXPECTED_MEDIA_FRAME
 
 
-async def test_unrestricted_stream_media_frame_broadcast(wired):
+async def test_list_media_frame_broadcast(wired):
     # An unrestricted operator sees a broadcast (unaddressed) media question, media intact.
     broadcast = _media_request(wired.store, iid="cast", gid="gc", media=_MEDIA_ITEMS, audience=None)
     await wired.store.add(wired.fake, broadcast, idle_ttl=86400)
     with _identity(user_id="op1", owner=None):
-        frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    add_frames = [json.loads(f.split("data: ", 1)[1].strip()) for f in frames if f.startswith("event: interaction.add")]
-    assert [p["interaction_id"] for p in add_frames] == ["cast"]
-    assert add_frames[0]["media"] == _EXPECTED_MEDIA_FRAME
+        page = await ops.list_interactions()
+    assert [item["interaction_id"] for item in page["items"]] == ["cast"]
+    assert page["items"][0]["media"] == _EXPECTED_MEDIA_FRAME
+
+
+# -- served-media door -------------------------------------------------------
+
+_PNG_BYTES = bytes.fromhex("89504e470d0a1a0a")
+_DATA_PNG = "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()
+
+
+async def _store_media(wired, media_id: str, ttl: int = 120) -> None:
+    # Write the media hash directly (the ``wired`` fixture pins ``secrets.token_urlsafe``,
+    # so ``store_data_image``'s random id is stubbed; the route reads by a known id here).
+    key = wired.store.media_key(media_id)
+    wired.fake._hset(key, mapping={"mime": "image/png", "b64": base64.b64encode(_PNG_BYTES).decode()})
+    wired.fake._expire(key, ttl)
+
+
+async def test_media_route_serves_stored_bytes_with_headers(wired):
+    media_id = "m" * 43
+    await _store_media(wired, media_id, ttl=120)
+    resp = await router.media(make_request("GET", path_params={"media_id": media_id}))
+    assert resp.status_code == 200
+    assert bytes(resp.body) == _PNG_BYTES
+    assert resp.media_type == "image/png"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    # The client cache is bounded by the key's remaining lifetime (private, never shared).
+    assert resp.headers["Cache-Control"] == "private, max-age=120"
+
+
+async def test_media_route_bad_id_is_400(wired):
+    resp = await router.media(make_request("GET", path_params={"media_id": "too-short"}))
+    assert resp.status_code == 400
+
+
+async def test_media_route_miss_is_404(wired):
+    resp = await router.media(make_request("GET", path_params={"media_id": "a" * 43}))
+    assert resp.status_code == 404
+
+
+async def test_media_route_off_store_is_uniform_404(wired, monkeypatch):
+    # An unconfigured store answers the SAME 404 as a miss — never a 501 that would
+    # oracle the store's absence on this unauthenticated door.
+    monkeypatch.setattr(router, "interactions_store_configured", lambda: False)
+    resp = await router.media(make_request("GET", path_params={"media_id": "a" * 43}))
+    assert resp.status_code == 404
+
+
+async def test_ask_user_data_image_stored_by_reference(wired):
+    # The ASK door substitutes a data:image BEFORE the request is built: the durable
+    # record carries a same-origin served reference (never inline bytes), and the bytes
+    # are readable by that id — the media round-trips through the store by reference.
+    wired.monkeypatch.setattr(helper_module.secrets, "token_urlsafe", lambda n: "M" * 43)
+    captured: dict = {}
+
+    async def answer_when_asked() -> None:
+        iid, gid = await await_add_event(wired.fake, wired.store)
+        state = await wired.store.get_state(wired.fake, iid)
+        assert state is not None
+        captured["req"] = state.request
+        await wired.store.record_answer(
+            wired.fake,
+            InteractionResponse(interaction_id=iid, answer="ok", answered_by="t", answered_at=datetime.now(UTC)),
+            gid,
+            reply_ttl=60,
+        )
+
+    answerer = asyncio.create_task(answer_when_asked())
+    await ask_user("Pick", answer_format="text", media=[{"kind": "image", "url": _DATA_PNG}], timeout=5)
+    await answerer
+
+    req = captured["req"]
+    assert req.media is not None
+    assert req.media[0].url == MEDIA_ROUTE_PREFIX + "M" * 43  # a served reference, not the data: bytes
+    got = await read_media(wired.store, wired.fake, "M" * 43)
+    assert got is not None
+    assert got[0] == "image/png"
 
 
 def test_reply_ttl_clamps_past_deadline(wired):
@@ -1094,8 +1179,9 @@ async def test_stream_tail_keepalive_then_disconnect(wired):
         except StopIteration:
             return {"type": "http.disconnect"}
 
-    frames = await _collect_stream(router._stream_events(Request(scope, receive), wired.store, wired.settings))
-    assert frames == ["event: interaction.backlog_done\ndata: {}\n\n", ": keepalive\n\n"]
+    cursor = await _events_cursor(wired)
+    frames = await _collect_stream(router._stream_events(Request(scope, receive), wired.store, wired.settings, cursor))
+    assert frames == [": keepalive\n\n"]
 
 
 async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
@@ -1116,8 +1202,15 @@ async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
 
     real_xread = wired.fake.xread
     advances = iter([3, 8])  # window 1 stays before the deadline; window 2 crosses it
+    injected = {"done": False}
 
     async def _advancing_xread(streams, block=None):
+        # A bob-addressed add lands live on the first window (cursor captured an empty
+        # tail): window 1's XREAD returns a NON-empty result the restricted alice caller
+        # filters out entirely.
+        if not injected["done"]:
+            injected["done"] = True
+            await _seed_addressed(wired, "b1", "gb", "bob")
         result = await real_xread(streams, block=block)
         clock["t"] += next(advances, 0)  # model time elapsed while blocked in this window
         return result
@@ -1125,13 +1218,8 @@ async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
     wired.monkeypatch.setattr(wired.fake, "xread", _advancing_xread)
 
     with _identity(user_id="keyA", owner="alice"):
-        gen = router._stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings)
-        # Empty backlog at capture -> the first frame is the backlog_done marker, which
-        # also arms the deadline at _now() + 10 == 1010.
-        assert "backlog_done" in await gen.__anext__()
-        # A bob-addressed add lands live (after cursor capture): window 1's XREAD returns
-        # a NON-empty result the restricted alice caller filters out entirely.
-        await _seed_addressed(wired, "b1", "gb", "bob")
+        # The tail arms the deadline at _now() + 10 == 1010.
+        gen = router._stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings, "0-0")
         tail = [frame async for frame in gen]
     # The filtered window emitted nothing and left the deadline at 1010; only window 2's
     # deadline crossing emits a keepalive. A dropped `_now() >= next_keepalive` guard
@@ -1157,8 +1245,14 @@ async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
 
     real_xread = wired.fake.xread
     advances = iter([8, 4])  # window 1 stays before the deadline; window 2 crosses only the original
+    injected = {"done": False}
 
     async def _advancing_xread(streams, block=None):
+        # A keyA-addressed add lands live on the first window (cursor captured an empty
+        # tail): window 1's XREAD returns it and the entitled keyA caller delivers it.
+        if not injected["done"]:
+            injected["done"] = True
+            await _seed_addressed(wired, "a1", "ga", "keyA")
         result = await real_xread(streams, block=block)
         clock["t"] += next(advances, 0)  # model time elapsed while blocked in this window
         return result
@@ -1166,12 +1260,8 @@ async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
     wired.monkeypatch.setattr(wired.fake, "xread", _advancing_xread)
 
     with _identity(user_id="keyA", owner="alice"):
-        gen = router._stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings)
-        # Empty backlog at capture -> the backlog_done marker arms the deadline at 1010.
-        assert "backlog_done" in await gen.__anext__()
-        # A keyA-addressed add lands live (after cursor capture): window 1's XREAD
-        # returns it and the entitled keyA caller delivers it.
-        await _seed_addressed(wired, "a1", "ga", "keyA")
+        # The tail arms the deadline at _now() + 10 == 1010.
+        gen = router._stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings, "0-0")
         tail = [frame async for frame in gen]
     # Only the entitled add rides the tail; the following idle window stays silent
     # because delivering the add re-armed the deadline to 1018. Dropping the
@@ -1182,38 +1272,17 @@ async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
 
 
 async def test_stream_tail_forwards_answered_and_removed(wired):
-    # Events injected AFTER the cursor is captured (empty-at-capture -> "0-0") are
+    # Events landing AFTER the cursor is captured (empty-at-capture -> "0-0") are
     # delivered by the tail: answered + removed frames both forward.
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/s",
-        "query_string": b"",
-        "headers": [],
-        "client": ("1.2.3.4", 1),
-    }
-    msgs = iter([{}, {"type": "http.disconnect"}])
+    async def _inject():
+        wired.fake._xadd(
+            wired.store.events_key, {"type": "interaction.answered", "interaction_id": "i9", "group_id": "g9"}
+        )
+        wired.fake._xadd(
+            wired.store.events_key, {"type": "interaction.removed", "interaction_id": "i9", "group_id": "g9"}
+        )
 
-    async def receive():
-        try:
-            return next(msgs)
-        except StopIteration:
-            return {"type": "http.disconnect"}
-
-    req = Request(scope, receive)
-    gen = router._stream_events(req, wired.store, wired.settings)
-
-    frames: list[str] = []
-    async for frame in gen:
-        frames.append(frame)
-        if "backlog_done" in frame:
-            break
-    # Now inject the events the live tail must forward.
-    wired.fake._xadd(wired.store.events_key, {"type": "interaction.answered", "interaction_id": "i9", "group_id": "g9"})
-    wired.fake._xadd(wired.store.events_key, {"type": "interaction.removed", "interaction_id": "i9", "group_id": "g9"})
-    async for frame in gen:
-        frames.append(frame)
-
+    frames = await _tail_collect(wired, _inject)
     assert any(f.startswith("event: interaction.answered") for f in frames)
     assert any(f.startswith("event: interaction.removed") for f in frames)
 
@@ -1222,34 +1291,14 @@ async def test_stream_tail_skips_malformed_event_without_crashing(wired):
     # A stream entry missing a required field (partial XADD / older-or-newer schema
     # / seeded frame) must be SKIPPED, not tear down the whole SSE tail: a valid
     # event queued behind it is still delivered.
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/s",
-        "query_string": b"",
-        "headers": [],
-        "client": ("1.2.3.4", 1),
-    }
-    msgs = iter([{}, {"type": "http.disconnect"}])
+    async def _inject():
+        # A malformed frame (missing group_id) followed by a well-formed answered frame.
+        wired.fake._xadd(wired.store.events_key, {"type": "interaction.answered", "interaction_id": "bad"})
+        wired.fake._xadd(
+            wired.store.events_key, {"type": "interaction.answered", "interaction_id": "i9", "group_id": "g9"}
+        )
 
-    async def receive():
-        try:
-            return next(msgs)
-        except StopIteration:
-            return {"type": "http.disconnect"}
-
-    gen = router._stream_events(Request(scope, receive), wired.store, wired.settings)
-    frames: list[str] = []
-    async for frame in gen:
-        frames.append(frame)
-        if "backlog_done" in frame:
-            break
-    # A malformed frame (missing group_id) followed by a well-formed answered frame.
-    wired.fake._xadd(wired.store.events_key, {"type": "interaction.answered", "interaction_id": "bad"})
-    wired.fake._xadd(wired.store.events_key, {"type": "interaction.answered", "interaction_id": "i9", "group_id": "g9"})
-    async for frame in gen:
-        frames.append(frame)
-
+    frames = await _tail_collect(wired, _inject)
     answered = [f for f in frames if f.startswith("event: interaction.answered")]
     # The malformed entry was skipped; only the well-formed one surfaced.
     assert len(answered) == 1
@@ -1265,98 +1314,86 @@ async def _seed_addressed(wired, iid, gid, audience) -> None:
     )
 
 
-async def test_restricted_stream_backlog_shows_only_addressed(wired):
+async def test_list_restricted_shows_only_addressed(wired):
     await _seed_addressed(wired, "a1", "ga", "keyA")
     await _seed_addressed(wired, "b1", "gb", "bob")
     await _seed_addressed(wired, "own1", "gown", "alice")  # addressed to keyA's OWNER
     await _seed_addressed(wired, "o1", "go", None)  # broadcast/operator
     with _identity(user_id="keyA", owner="alice"):
-        frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
+        page = await ops.list_interactions()
     # Only keyA's OWN-addressed question — not bob's, not the unaddressed broadcast, and
     # NOT the one addressed to its owner "alice" (key-keyed, not owner-keyed).
-    assert _add_ids(frames) == ["a1"]
+    assert [item["interaction_id"] for item in page["items"]] == ["a1"]
+    assert page["total"] == 1  # the audience filter runs BEFORE paging
 
 
-async def test_unrestricted_stream_backlog_shows_all(wired):
+async def test_list_unrestricted_shows_all(wired):
     await _seed_addressed(wired, "a1", "ga", "alice")
     await _seed_addressed(wired, "o1", "go", None)
     # An unrestricted (authenticated, no owner) caller keeps today's full inbox.
     with _identity(user_id="op1", owner=None):
-        frames = await _collect_stream(router._stream_events(make_request("GET"), wired.store, wired.settings))
-    assert sorted(_add_ids(frames)) == ["a1", "o1"]
+        page = await ops.list_interactions()
+    assert sorted(item["interaction_id"] for item in page["items"]) == ["a1", "o1"]
 
 
-async def test_restricted_stream_suppresses_other_identities_answered_removed(wired):
-    # keyA's own addressed question rides the backlog (entering the visible set); a
-    # bob-addressed interaction is answered AND removed while keyA streams. keyA
-    # receives NEITHER of bob's terminal frames (its id was never in its set) but
-    # DOES receive its own terminal frame. In reality exactly one terminal event
-    # fires per interaction; a1's answered frame delivers and then discards a1 from
-    # the visible set, so the duplicate removed frame is fail-closed suppressed —
-    # never a leak, never a dropped entitled frame.
-    await _seed_addressed(wired, "a1", "ga", "keyA")
-    req = _stream_request()
-    with _identity(user_id="keyA", owner="alice"):
-        gen = router._stream_events(req, wired.store, wired.settings)
-        frames: list[str] = []
-        async for frame in gen:
-            frames.append(frame)
-            if "backlog_done" in frame:
-                break
-        for iid, gid in (("b1", "gb"), ("a1", "ga")):
-            wired.fake._xadd(
-                wired.store.events_key, {"type": "interaction.answered", "interaction_id": iid, "group_id": gid}
-            )
-            wired.fake._xadd(
-                wired.store.events_key, {"type": "interaction.removed", "interaction_id": iid, "group_id": gid}
-            )
-        async for frame in gen:
-            frames.append(frame)
-    # keyA's single entitled terminal (answered) is delivered; the duplicate removed
-    # for the same id is suppressed after the discard, and bob's are never entitled.
-    assert _event_ids(frames, "interaction.answered") == ["a1"]
-    assert _event_ids(frames, "interaction.removed") == []
+async def test_restricted_stream_terminal_filtered_by_event_audience(wired):
+    # A terminal frame is filtered DIRECTLY on the audience the store stamps into the
+    # event payload: a restricted caller sees a terminal ONLY for its own addressed
+    # interaction; another identity's and an unaddressed one are suppressed.
+    async def _inject():
+        ev = wired.store.events_key
+        wired.fake._xadd(
+            ev, {"type": "interaction.answered", "interaction_id": "mine", "group_id": "gm", "audience": "keyA"}
+        )
+        wired.fake._xadd(
+            ev, {"type": "interaction.answered", "interaction_id": "bob", "group_id": "gb", "audience": "bob"}
+        )
+        wired.fake._xadd(ev, {"type": "interaction.removed", "interaction_id": "cast", "group_id": "gc"})  # unaddressed
+        wired.fake._xadd(
+            ev, {"type": "interaction.removed", "interaction_id": "mine2", "group_id": "gm2", "audience": "keyA"}
+        )
+
+    frames = await _tail_collect(wired, _inject, identity=_identity(user_id="keyA", owner="alice"))
+    assert _event_ids(frames, "interaction.answered") == ["mine"]
+    assert _event_ids(frames, "interaction.removed") == ["mine2"]
+
+
+async def test_unrestricted_stream_terminal_sees_all_audiences(wired):
+    # An unrestricted operator receives every terminal frame regardless of its audience.
+    async def _inject():
+        ev = wired.store.events_key
+        wired.fake._xadd(
+            ev, {"type": "interaction.answered", "interaction_id": "a1", "group_id": "ga", "audience": "keyA"}
+        )
+        wired.fake._xadd(ev, {"type": "interaction.answered", "interaction_id": "o1", "group_id": "go"})
+
+    frames = await _tail_collect(wired, _inject, identity=_identity(user_id="op1", owner=None))
+    assert sorted(_event_ids(frames, "interaction.answered")) == ["a1", "o1"]
 
 
 async def test_restricted_stream_live_add_other_identity_not_emitted(wired):
     # A live ADD (arriving after cursor capture) addressed to bob must NOT reach the
     # restricted keyA caller — the live-add path filters on the record's audience.
-    req = _stream_request()
-    with _identity(user_id="keyA", owner="alice"):
-        gen = router._stream_events(req, wired.store, wired.settings)
-        frames: list[str] = []
-        async for frame in gen:
-            frames.append(frame)
-            if "backlog_done" in frame:
-                break
-        # Add bob's addressed interaction AFTER backlog_done, so its add-event rides
-        # the live tail (empty at capture -> "0-0").
+    async def _inject():
         await _seed_addressed(wired, "b1", "gb", "bob")
-        async for frame in gen:
-            frames.append(frame)
+
+    frames = await _tail_collect(wired, _inject, identity=_identity(user_id="keyA", owner="alice"))
     assert _add_ids(frames) == []
 
 
 async def test_restricted_stream_live_add_own_identity_emitted_and_terminal_delivered(wired):
-    # A live ADD addressed to keyA IS emitted, and the live-add path adds its id to
-    # the visible set — proven by the subsequent terminal frame being delivered
-    # (a terminal for an id never seen on an addressed add would be suppressed).
-    req = _stream_request()
-    with _identity(user_id="keyA", owner="alice"):
-        gen = router._stream_events(req, wired.store, wired.settings)
-        frames: list[str] = []
-        async for frame in gen:
-            frames.append(frame)
-            if "backlog_done" in frame:
-                break
-        # Empty backlog at capture: keyA's addressed add arrives live, then its
-        # single terminal (answered) frame follows.
+    # A live ADD addressed to keyA IS emitted, and its subsequent answered frame — which
+    # carries audience keyA in the event payload — is delivered to the keyA caller.
+    async def _inject():
         await _seed_addressed(wired, "a1", "ga", "keyA")
-        wired.fake._xadd(
-            wired.store.events_key, {"type": "interaction.answered", "interaction_id": "a1", "group_id": "ga"}
+        await wired.store.record_answer(
+            wired.fake,
+            InteractionResponse(interaction_id="a1", answer="x", answered_by="t", answered_at=datetime.now(UTC)),
+            "ga",
+            reply_ttl=60,
         )
-        async for frame in gen:
-            frames.append(frame)
+
+    frames = await _tail_collect(wired, _inject, identity=_identity(user_id="keyA", owner="alice"))
     assert _add_ids(frames) == ["a1"]
     assert _event_ids(frames, "interaction.answered") == ["a1"]
 
