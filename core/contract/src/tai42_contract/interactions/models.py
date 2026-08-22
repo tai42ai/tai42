@@ -63,6 +63,12 @@ _DATA_IMAGE_PREFIX = "data:image/"
 # serve route) and the channels (absolute-url minting).
 MEDIA_ROUTE_PREFIX = "/api/interactions/media/"
 
+# Loopback hosts for which an http (non-TLS) served-media base URL is admitted —
+# every other host must be https. ``InteractionsSettings.public_base_url``'s
+# validator imports this set: an http served reference validated here is minted
+# from that base, so the two admit exactly the same hosts.
+LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 _DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
 
 # A stored-media id: the urlsafe-base64 (no padding) of 32 random bytes, 43 chars.
@@ -144,15 +150,34 @@ def _is_absolute_web_url(value: str, *, schemes: tuple[str, ...]) -> bool:
     return _is_valid_host(host, bracketed="[" in split.netloc)
 
 
+def _is_served_media_url(value: str) -> bool:
+    # An absolute served-media reference: a well-formed absolute http(s) URL (host,
+    # port and userinfo judged by ``_is_absolute_web_url``) whose path is exactly
+    # ``MEDIA_ROUTE_PREFIX`` + a 43-char stored-media id, with no query or fragment.
+    # http is admitted only when the host is a loopback host (``LOCAL_HTTP_HOSTS``),
+    # because such a base is minted from ``InteractionsSettings.public_base_url``,
+    # whose validator restricts http to those same hosts; https keeps any valid host.
+    if not _is_absolute_web_url(value, schemes=("http", "https")):
+        return False
+    split = urlsplit(value)
+    if split.scheme == "http" and split.hostname not in LOCAL_HTTP_HOSTS:
+        return False
+    if split.query or split.fragment or not split.path.startswith(MEDIA_ROUTE_PREFIX):
+        return False
+    return _MEDIA_ID.fullmatch(split.path[len(MEDIA_ROUTE_PREFIX) :]) is not None
+
+
 class MediaItem(BaseModel):
     """One media item shown WITH a question — display-only, never part of the answer.
 
     ``kind`` selects how it renders: an ``image`` inline, a ``link`` as a labelled
     anchor. ``url`` is the source — an ``image`` must be an absolute ``https`` URL, a
-    ``data:image/*`` URI, or a same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to
-    media the skeleton serves by id (remote images are https-only: the inbox CSP
+    ``data:image/*`` URI, a same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to
+    media the skeleton serves by id, or an absolute ``http(s)`` served reference of
+    that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a channel send mints from
+    ``public_base_url`` (remote images are https-only: the inbox CSP
     ``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an
-    ``http:`` image would be an unrenderable record), while a ``link`` must be an
+    ``http:`` remote image would be an unrenderable record), while a ``link`` must be an
     absolute ``http(s)`` URL (anchors are not governed
     by ``img-src``; the human clicks through). A remote url names a host directly —
     an ASCII DNS name, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply
@@ -209,6 +234,13 @@ class MediaItem(BaseModel):
             # A same-origin reference to media the skeleton serves by id; the id
             # charset+length is the whole check (no host, relative path).
             pass
+        elif _is_served_media_url(self.url):
+            # An absolute served reference a channel send mints from public_base_url;
+            # http is allowed only here (that base is loopback-restricted at settings).
+            if len(self.url) > MEDIA_URL_MAX_CHARS:
+                raise ValueError(
+                    f"image media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(self.url)}"
+                )
         elif _is_absolute_web_url(self.url, schemes=("https",)):
             if len(self.url) > MEDIA_URL_MAX_CHARS:
                 raise ValueError(

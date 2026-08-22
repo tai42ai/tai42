@@ -835,6 +835,79 @@ def test_media_image_stored_reference_valid():
     assert item.url == url
 
 
+def test_media_image_absolute_served_https_valid():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # An absolute served reference a channel send mints from an https public base url.
+    url = "https://box.example" + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
+    assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
+
+
+def test_media_image_absolute_served_http_localhost_valid():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # http is allowed for a served reference: the base comes from public_base_url,
+    # whose validator restricts http to localhost/127.0.0.1.
+    url = "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
+    assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
+
+
+def test_media_image_absolute_served_query_or_extra_segment_invalid():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    media_id = secrets.token_urlsafe(32)
+    # http is admitted ONLY for the exact served form; a query, a fragment, or an extra
+    # path segment past the id breaks that form and — http not being a valid general
+    # image scheme — leaves no accepting branch. (An https base with a query would still
+    # be a valid general https image, so the exactness only bites on the http form.)
+    base = "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=base + media_id + "?x=1")
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=base + media_id + "#frag")
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url=base + media_id + "/extra")
+
+
+def test_media_image_absolute_http_non_served_invalid():
+    # http is admitted only for the served-reference path; a plain http image url is
+    # not that form and stays invalid.
+    with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+        MediaItem(kind=MediaKind.IMAGE, url="http://box.example/photo.png")
+
+
+def test_media_image_absolute_served_http_loopback_hosts_valid():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # http is admitted for a served reference on any loopback host: the base is
+    # minted from public_base_url, whose validator restricts http to those hosts.
+    for base in ("http://localhost", "http://127.0.0.1:8000", "http://[::1]:8000"):
+        url = base + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
+        assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
+
+
+def test_media_image_absolute_served_http_non_loopback_rejected():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
+
+    # http is admitted only for a loopback served base; a public or private-LAN host
+    # over http is not a valid served reference and has no other accepting branch
+    # (remote images are https-only).
+    media_id = secrets.token_urlsafe(32)
+    for base in ("http://evil.example", "http://10.0.0.5:9000"):
+        with pytest.raises(ValueError, match="absolute https URL or a data:image"):
+            MediaItem(kind=MediaKind.IMAGE, url=base + MEDIA_ROUTE_PREFIX + media_id)
+
+
 # -- MediaItem rejected forms ------------------------------------------------
 
 
