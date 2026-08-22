@@ -515,7 +515,12 @@ jobs:
         working-directory: e2e
         env:
           TAI_E2E_SANDBOX_DOCKER: "1"
+          # A tcp:// endpoint — the provider normalizes it to mTLS https:// itself.
           SANDBOX_DOCKER_TEST_HOST: tcp://127.0.0.1:2376
+          # The genuinely-listening RFC1918 control-plane host on sandbox-ctrl the
+          # RFC1918-drop negative dials (the `sandbox-ctrl-listener` compose service
+          # at its static IP); without it that negative skips instead of asserting.
+          SANDBOX_DOCKER_BLOCKED_ADDR: 10.111.0.9:9000
         run: |
           mkdir -p .sandbox-certs && chmod 0777 .sandbox-certs
           docker compose --profile sandbox up -d --wait sandbox-engine

@@ -16,6 +16,7 @@ that speaks the engine control API.
 from __future__ import annotations
 
 import json
+import re
 import ssl
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +65,33 @@ _NETWORK_MODES = {"none": "none", "egress": "bridge", "internal": INTERNAL_NETWO
 
 _NANO = 1_000_000_000
 _MEBI = 1024 * 1024
+
+# A ``tcp://``/``http://`` scheme carrying an mTLS control API. aiodocker upgrades
+# such a scheme to ``https://`` ONLY when it builds the SSL context itself (from
+# DOCKER_TLS_VERIFY or a docker context); with a caller-supplied ssl_context it
+# leaves the scheme untouched and would dial PLAINTEXT against the TLS port — the
+# daemon then answers "Client sent an HTTP request to an HTTPS server". We hand
+# aiodocker a normalized ``https://`` URL so an operator's canonical ``tcp://``
+# endpoint speaks mTLS without them having to write ``https://``.
+_TLS_SCHEME_RX = re.compile(r"^(?:tcp|http)://")
+
+
+def resolve_engine_url(host: str, *, tls: bool) -> str:
+    """The URL to hand aiodocker for ``host``.
+
+    ``unix://``/``npipe://`` and a bare filesystem path address a local socket and
+    pass through unchanged (a bare path becomes ``unix://<path>``). A ``tcp://`` /
+    ``http://`` endpoint under mTLS (``tls`` true — cert paths in force) is
+    normalized to ``https://`` so aiodocker actually runs TLS over it; without TLS
+    the scheme is left as-is for aiodocker's own handling.
+    """
+    if host.startswith(("unix://", "npipe://")):
+        return host
+    if host.startswith("/"):
+        return f"unix://{host}"
+    if tls:
+        return _TLS_SCHEME_RX.sub("https://", host)
+    return host
 
 
 def container_name(workspace_key: str) -> str:
@@ -194,12 +222,12 @@ class DockerSandbox(ManagedSandbox):
     def _create_engine(self) -> Any:
         settings = self._settings()
         host = settings.host
-        if host.startswith(("unix://", "npipe://")):
-            return Docker(url=host)
-        if host.startswith("/"):
-            return Docker(url=f"unix://{host}")
-        ssl_context = self._build_ssl_context(settings) if settings.tls_verify else None
-        return Docker(url=host, ssl_context=ssl_context)
+        local = host.startswith(("unix://", "npipe://", "/"))
+        # mTLS applies only to a remote tcp:// endpoint; a local socket carries no
+        # client identity (and must not try to load one).
+        ssl_context = None if local else (self._build_ssl_context(settings) if settings.tls_verify else None)
+        url = resolve_engine_url(host, tls=ssl_context is not None)
+        return Docker(url=url, ssl_context=ssl_context)
 
     def _build_ssl_context(self, settings: DockerSandboxSettings) -> ssl.SSLContext:
         """The mTLS client identity that speaks the engine control API. Loaded from the
