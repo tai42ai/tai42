@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — the Storage ABC, ObjectStat, assert_not_root,
     # and the tai42_app handle the backend registers through.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=2.0,<4",
     # PooledClient + TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.5,<4",
     # The async S3 driver and its config/exception types (imported directly).

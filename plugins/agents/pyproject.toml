@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the agents register through — the tai42_app
     # handle, the Agent ABC, and the StreamEvent taxonomy.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=2.0,<4",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
     "tai42-kit>=3.5,<4",
