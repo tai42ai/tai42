@@ -1,23 +1,25 @@
-"""Harness self-test for the browser-e2e studio stack's access-control route map.
+"""Harness self-test for the declared-public interactions doors.
 
-The studio stack resolves a request path in two tiers: ``STUDIO_PATH_PATTERNS``
-(``ACCESS_CONTROL_PATH_PATTERNS``) fullmatches the path to a route TEMPLATE, then the
-tier-two route table ``seed_studio_auth`` seeds maps that template to a resource id.
-This pins that resolution for the interactions doors the way the real verifier runs it
-(the tier-1 fullmatch union, then the tier-2 template lookup), so an auth-flip is caught
-here without booting a stack: the served-media capability url (a tokenless ``<img>``
-fetch) resolves PUBLIC exactly as the callback door does, while the authed studio
-surface (the interactions stream) stays protected.
+Runs the REAL ``AccessControlVerifier`` against a route registry recording the
+interactions doors, with an EMPTY path-pattern table, so an auth-flip on a
+declared-public door (media/callback) is caught here WITHOUT booting a stack: the
+verifier's declared-public tier publics the ``authed=False`` doors straight from their
+registration, while the ``authed=True`` stream stays gated.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.settings import AccessControlSettings
-
-from tai42_e2e import harness
+from tai42_skeleton.access_control.verifier import AccessControlVerifier
+from tai42_skeleton.app.route_registry import CORE_OWNER, RouteAction, RouteRegistry
 
 pytestmark = pytest.mark.backendless
 
@@ -27,51 +29,86 @@ _CALLBACK_PATH = "/api/interactions/callback/some-ticket"
 _STREAM_PATH = "/api/interactions/stream"
 
 
-def _tier_two(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """The ``{template: resource_id}`` map ``seed_studio_auth`` writes into the route
-    store, captured without a backend by intercepting the two seed helpers it forwards
-    ``infra``/``resources`` to."""
-    captured: dict[str, str] = {}
-
-    def _capture_rows(resources: Any, rows: Any) -> None:
-        for url, scope_id, _pattern in rows:
-            captured[url] = scope_id
-
-    # ``infra``/``resources`` are forwarded only to the two stubbed seed helpers, so the
-    # seed writes nothing and the arguments are never dereferenced.
-    monkeypatch.setattr(harness, "seed_root_identity", lambda *a, **k: "sk-test")
-    monkeypatch.setattr(harness, "seed_route_rows", _capture_rows)
-    harness.seed_studio_auth(cast(Any, None), cast(Any, None), api_key="sk-test")
-    return captured
+async def _handler(request: Request) -> Response:
+    """A plain handler."""
+    return JSONResponse({"data": {}})
 
 
-def _resolve(settings: AccessControlSettings, tier_two: dict[str, str], path: str) -> set[str]:
-    """The resource ids a path resolves to under the studio map: the verifier's tier-1
-    fullmatch union of templates, each looked up in the tier-2 table (deny-wins union)."""
-    templates = {template for pattern, template in settings.compiled_patterns if pattern.fullmatch(path)}
-    return {tier_two[template] for template in templates if template in tier_two}
+class _EmptyStore:
+    """The policy store with no route rows and no dynamic patterns: an authed door
+    resolves to nothing (gated) without reaching a backend."""
+
+    async def fetch_route(self, path: str) -> str | None:
+        return None
+
+    async def fetch_dynamic_patterns(self) -> dict[str, str]:
+        return {}
 
 
-def test_media_door_resolves_public(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = AccessControlSettings(path_patterns=harness.STUDIO_PATH_PATTERNS)
-    tier_two = _tier_two(monkeypatch)
+@asynccontextmanager
+async def _null_redis(client_cls: Any, settings: Any = None, **kwargs: Any) -> AsyncIterator[Any]:
+    """Yields a policy-version reader returning ``None`` (version 0); no other redis op runs."""
 
-    # The served-media door is a public capability url: a browser <img> loads it with no
-    # credential, so it must NOT fall into the authed catch-all.
-    assert _resolve(settings, tier_two, _MEDIA_PATH) == {settings.public_resource_id}
-    assert harness.STUDIO_RESOURCE_ID not in _resolve(settings, tier_two, _MEDIA_PATH)
+    class _R:
+        async def get(self, key: str) -> None:
+            return None
 
-
-def test_callback_door_still_public(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = AccessControlSettings(path_patterns=harness.STUDIO_PATH_PATTERNS)
-    tier_two = _tier_two(monkeypatch)
-
-    assert _resolve(settings, tier_two, _CALLBACK_PATH) == {settings.public_resource_id}
+    yield _R()
 
 
-def test_stream_stays_authed(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = AccessControlSettings(path_patterns=harness.STUDIO_PATH_PATTERNS)
-    tier_two = _tier_two(monkeypatch)
+def _record(
+    registry: RouteRegistry, path: str, methods: list[str], *, public: bool, action: RouteAction | None = None
+) -> None:
+    registry.record(
+        path=path,
+        methods=methods,
+        name=None,
+        handler=_handler,
+        summary="s",
+        tags=["t"],
+        authed=not public,
+        action=action,
+        request_model=None,
+        response_model=None,
+        owner=CORE_OWNER,
+        public=public,
+    )
 
-    # The authed studio surface resolves to the single protected resource, never public.
-    assert _resolve(settings, tier_two, _STREAM_PATH) == {harness.STUDIO_RESOURCE_ID}
+
+def _registry() -> RouteRegistry:
+    registry = RouteRegistry()
+    _record(registry, "/api/interactions/media/{media_id}", ["GET"], public=True)
+    _record(registry, "/api/interactions/callback/{ticket}", ["GET", "POST"], public=True)
+    _record(registry, "/api/interactions/stream", ["GET"], public=False, action="read")
+    return registry
+
+
+def _verifier(monkeypatch: pytest.MonkeyPatch) -> AccessControlVerifier:
+    settings = AccessControlSettings(path_patterns={})
+    assert settings.compiled_patterns == []
+    monkeypatch.setattr(verifier_module, "route_registry", _registry())
+    monkeypatch.setattr(verifier_module, "access_control_store", _EmptyStore)
+    monkeypatch.setattr(verifier_module, "client_ctx", _null_redis)
+    # The isolated registry surfaces no non-/api GET routes, so the reserved-set memo is empty.
+    monkeypatch.setattr(verifier_module, "registered_reserved_get_paths_cached", frozenset)
+    return AccessControlVerifier(settings, providers=[])
+
+
+async def test_media_door_resolves_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    v = _verifier(monkeypatch)
+    # A browser <img> loads the served-media door with no credential, so it must resolve
+    # public from its authed=False registration alone.
+    assert await v.resolve_resource_ids(_MEDIA_PATH, "GET") == [v.settings.public_resource_id]
+
+
+async def test_callback_door_resolves_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    v = _verifier(monkeypatch)
+    assert await v.resolve_resource_ids(_CALLBACK_PATH, "GET") == [v.settings.public_resource_id]
+    assert await v.resolve_resource_ids(_CALLBACK_PATH, "POST") == [v.settings.public_resource_id]
+
+
+async def test_stream_stays_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    v = _verifier(monkeypatch)
+    # The authed studio surface is not declared public: it resolves to nothing (gated),
+    # never the public marker. An auth-flip to public would fail this here.
+    assert v.settings.public_resource_id not in await v.resolve_resource_ids(_STREAM_PATH, "GET")
