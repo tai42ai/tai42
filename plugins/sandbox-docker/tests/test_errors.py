@@ -70,7 +70,9 @@ async def test_create_engine_tcp_with_mtls(monkeypatch: pytest.MonkeyPatch) -> N
     sandbox = DockerSandbox(settings=_settings(host="tcp://engine:2376", tls_verify=True))
     monkeypatch.setattr(sandbox, "_build_ssl_context", lambda settings: "SSL-CONTEXT")
     client = await sandbox._engine()
-    assert client.url == "tcp://engine:2376"
+    # Under mTLS the tcp:// endpoint is normalized to https:// so aiodocker runs TLS
+    # over the client identity (a bare tcp:// would dial plaintext against :2376).
+    assert client.url == "https://engine:2376"
     assert client.ssl_context == "SSL-CONTEXT"
 
 

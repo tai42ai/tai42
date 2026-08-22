@@ -15,7 +15,9 @@ engine call and never placed in a repr, log, or error message.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import posixpath
+import socket
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -93,17 +95,34 @@ async def read_exit_code(exec_obj: Any) -> int:
 
 async def half_close_stdin(stream: Any) -> None:
     """Half-close the write (stdin) side of a live attach stream, leaving the read
-    side open so remaining output still drains.
+    side open so remaining output still drains — this is what delivers EOF to the
+    in-session process, so a ``cat``-style reader exits instead of hanging.
 
-    The aiodocker ``Stream`` exposes only a full ``close()`` (which write-EOFs AND
-    tears down the read side), so the write-EOF is issued on the underlying transport
-    directly; the ``aiodocker~=0.27`` pin fixes this shape."""
+    The aiodocker ``Stream`` exposes only a full ``close()`` (which tears down the
+    read side too), so the half-close is issued on the underlying transport directly
+    (the ``aiodocker~=0.27`` pin fixes this shape):
+
+    - Plain TCP: ``write_eof()`` sends a FIN on the write half — the clean half-close.
+    - mTLS (``tcp://`` normalized to ``https://``): an asyncio SSL transport reports
+      ``can_write_eof() == False`` (TLS has no half-close), so ``write_eof()`` never
+      fires and the process's stdin never sees EOF. Signal it by shutting the WRITE
+      half of the UNDERLYING socket: the daemon reads a FIN on the hijacked stream
+      and closes the process's stdin, while the socket's read half stays open so the
+      remaining stdout/stderr still drains. This is how the docker CLI half-closes an
+      interactive exec over a TLS control API."""
     resp = stream._resp
     if resp is None or resp.connection is None:
         return
     transport = resp.connection.transport
-    if transport is not None and transport.can_write_eof():
+    if transport is None:
+        return
+    if transport.can_write_eof():
         transport.write_eof()
+        return
+    sock = transport.get_extra_info("socket")
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_WR)
 
 
 class DockerSandboxExecHandle(SandboxExecHandle):
@@ -304,10 +323,21 @@ class DockerSandboxSession(ManagedSandboxSession):
 
     async def put_file(self, path: str, data: bytes) -> None:
         target = resolve_workspace_path(path)
-        directory, name = posixpath.split(target)
-        archive = _tar_single_member(name, data)
+        # docker's put_archive extracts a tar at ``base`` and requires that dir to
+        # exist. For a workspace path we extract at the workspace ROOT with the member
+        # path RELATIVE to it, and the tar carries its parent-dir entries, so a nested
+        # ``sub/nested.txt`` creates ``sub/`` instead of 404-ing on the missing dir.
+        if target == WORKSPACE_PATH or target.startswith(WORKSPACE_PATH + "/"):
+            base = WORKSPACE_PATH
+            member = target[len(WORKSPACE_PATH) :].lstrip("/")
+        else:
+            # An absolute path outside the workspace: its parent is the caller's own
+            # responsibility (the contract path rule), matching prior behavior.
+            base, member = posixpath.split(target)
+            base = base or "/"
+        archive = _tar_single_member(member, data)
         try:
-            await self._container.put_archive(directory or WORKSPACE_PATH, archive)
+            await self._container.put_archive(base, archive)
         except DockerError as exc:
             raise engine_error(exc) from exc
 
@@ -377,7 +407,19 @@ def _tar_single_member(name: str, data: bytes) -> bytes:
 
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
+        # Parent-directory entries first, so extracting a nested member creates its
+        # intermediate dirs (``sub/`` for ``sub/nested.txt``).
+        prefix = ""
+        for part in name.split("/")[:-1]:
+            if not part:
+                continue
+            prefix = f"{prefix}{part}/"
+            directory = tarfile.TarInfo(name=prefix)
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            tar.addfile(directory)
         info = tarfile.TarInfo(name=name)
         info.size = len(data)
+        info.mode = 0o644
         tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()

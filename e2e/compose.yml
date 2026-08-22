@@ -305,35 +305,39 @@ services:
   # a throwaway loopback engine; the deployment shares certs over a named volume
   # to in-cluster consumers instead.
   #
-  # Engine posture — privileged, and why session isolation is UNAFFECTED.
-  # The engine runs `docker:28-dind-rootless`: dockerd itself runs ROOTLESS
-  # (uid 1000) inside this container via rootlesskit, so inner sessions remain
-  # rootless-contained. rootlesskit must create a nested user namespace and then
-  # program the inner bridge (tuntap/slirp + iptables); in a containerized
-  # environment that setup needs `privileged: true` — WITHOUT it rootlesskit
-  # cannot mount sysfs or create tap0 and the daemon never becomes usable.
-  # `privileged` makes the CONTAINER privileged; dockerd inside it is still
-  # rootless. Privilege does NOT widen what an inner SESSION can reach: by design,
-  # session isolation from the deployment is enforced by (a) the `sandbox-ctrl`
-  # NETWORK SPLIT — this engine is OFF the datastore network — and (b) the
-  # INNER-BRIDGE EGRESS FIREWALL below (RFC1918 + link-local/metadata DROP), NOT by
-  # the engine container's privilege level. seccomp/apparmor stay unconfined for the
-  # nested userns + inner-bridge iptables. (Also, docker's own dind-rootless
-  # guidance requires the OUTER container to be privileged; the previous
-  # "NOT --privileged" posture never actually booted the rootless daemon.)
+  # Engine posture — privileged CONTAINER, ROOTLESS daemon, root-installed firewall.
+  # The engine runs `docker:28-dind-rootless`: dockerd itself runs ROOTLESS (uid
+  # 1000) via rootlesskit, so inner sessions stay rootless-contained. rootlesskit
+  # must create a nested user namespace and program the inner bridge (vpnkit tap +
+  # iptables); in a container that setup needs `privileged: true` — WITHOUT it
+  # rootlesskit cannot mount sysfs or create tap0 and the daemon never boots (this
+  # is docker's own dind-rootless requirement; the prior "NOT --privileged" posture
+  # never actually started the daemon). `privileged` makes the CONTAINER privileged;
+  # dockerd inside stays rootless.
   #
-  # NOTE — the egress firewall below does NOT currently install in this rootless
-  # topology: its `nsenter -t <dockerd_pid> -n` runs as the rootless user (uid 1000),
-  # which lacks CAP_SYS_ADMIN over the rootlesskit CHILD userns that owns dockerd's
-  # netns, so the DROP rules are never programmed. A session can therefore still
-  # reach RFC1918 peers on `sandbox-ctrl` (the `test_rfc1918_control_plane_blocked`
-  # negative fails). The installer must run as root (`nsenter -n` succeeds as root in
-  # this privileged container). Separately, when the drops ARE installed, the rootless
-  # daemon here NATs inner sessions out via `rootlesskit --net=vpnkit`, whose internal
-  # path rides RFC1918 (192.168.65/24) — so a blanket RFC1918 DROP also breaks public
-  # egress + DNS. Both issues are shared with the distribution reference compose and
-  # need a coordinated fix (root installer + drop only the deployment's own subnet +
-  # link-local, not all RFC1918). Tracked in the mission report, not fixed here.
+  # Privilege does NOT widen what an inner SESSION can reach. Session isolation from
+  # the deployment is enforced by (a) the `sandbox-ctrl` NETWORK SPLIT — this engine
+  # is OFF the datastore network — and (b) the INNER-BRIDGE EGRESS FIREWALL below,
+  # NOT by the container's privilege level. The four isolation NEGATIVES in
+  # tests/sandbox_docker prove it (incl. test_rfc1918_control_plane_blocked: a session
+  # cannot reach a genuinely-listening RFC1918 host on sandbox-ctrl, WHILE public
+  # egress + DNS still work).
+  #
+  # Two rootless-specific details make that firewall actually enforce here:
+  #   * ROOT INSTALL: the installer programs DOCKER-USER inside dockerd's netns via
+  #     `nsenter -n`, which needs CAP_SYS_ADMIN over the rootlesskit CHILD userns that
+  #     owns that netns — the rootless user (uid 1000) does NOT have it. So the
+  #     container ENTRYPOINT runs as ROOT (`user: "0:0"`), installs the firewall as
+  #     root, then drops the DAEMON back to rootless with `su rootless -c
+  #     dockerd-entrypoint.sh`. Only the firewall install is root; dockerd is rootless.
+  #   * NARROW RULES (vpnkit): the rootless daemon NATs sessions out through
+  #     `rootlesskit --net=vpnkit`, whose internal path rides RFC1918 (192.168.65/24).
+  #     A blanket RFC1918 DROP would kill that NAT and take out public egress + DNS.
+  #     So the firewall denies ONLY the deployment's own subnet(s) — the engine's own
+  #     connected networks, i.e. sandbox-ctrl, the ONLY deployment network a session
+  #     can route to via this engine — PLUS link-local/cloud-metadata (169.254.0.0/16).
+  #     Everything else (the public internet + DNS + the vpnkit NAT range) stays OPEN.
+  # seccomp/apparmor stay unconfined for the nested userns + inner-bridge iptables.
   #
   # HOST PREREQUISITE (Ubuntu 23.10+/kernel 6.x): rootlesskit's userns creation is
   # mediated by the host's `kernel.apparmor_restrict_unprivileged_userns`. When
@@ -352,11 +356,23 @@ services:
     # across a pull — byte-identical to the reference compose's pin.
     image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
     profiles: ["sandbox"]
+    # Bring up the sandbox-ctrl control-plane listener alongside the engine so a
+    # single `up --wait sandbox-engine` stands the whole isolation topology up: the
+    # RFC1918-drop negative dials that listener (a genuinely-LISTENING private host)
+    # to prove the firewall denies it. Test scaffolding — not part of the deployment.
+    depends_on:
+      sandbox-ctrl-listener:
+        condition: service_healthy
     # The CONTAINER is privileged so rootlesskit can create the nested userns and
     # program the inner bridge (sysfs mount + tap0). dockerd still runs ROOTLESS
     # inside; session isolation is network+firewall enforced (see block above),
     # so this does not weaken the four isolation negatives.
     privileged: true
+    # Run the ENTRYPOINT as root so the egress-firewall installer can `nsenter -n`
+    # into dockerd's rootless netns (needs CAP_SYS_ADMIN over the rootlesskit child
+    # userns). The daemon itself is dropped back to the rootless user in the
+    # entrypoint (`su rootless -c dockerd-entrypoint.sh`), so dockerd stays ROOTLESS.
+    user: "0:0"
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
@@ -379,13 +395,14 @@ services:
       # A bind (not a named volume) so a host process can read them; the CI step
       # pre-creates the source world-writable for the rootless daemon's uid.
       - "${TAI_E2E_SANDBOX_CERT_DIR:-./.sandbox-certs}:/certs/client"
-    # Install the inner-bridge egress firewall (inlined byte-for-byte from the
-    # reference script), relax the client certs for the host reader, then exec the
-    # stock rootless dind entrypoint. Both helpers background themselves so the
-    # daemon starts immediately; the firewall installs its DROP rules before the
-    # first session create can succeed (the app only dials once the daemon is up).
-    # Every shell `$` is escaped `$$` so Compose interpolation leaves it for the
-    # shell — the reason the reference keeps this in a separate mounted file.
+    # Install the inner-bridge egress firewall as ROOT (inlined byte-for-byte from
+    # the reference script), relax the client certs for the host reader, then DROP
+    # the daemon back to the rootless user via `su rootless -c dockerd-entrypoint.sh`.
+    # Both helpers background themselves so the daemon starts immediately; the
+    # firewall installs its DROP rules before the first session create can succeed
+    # (the app only dials once the daemon is up). Every shell `$` is escaped `$$` so
+    # Compose interpolation leaves it for the shell — the reason the reference keeps
+    # this in a separate mounted file.
     entrypoint:
       - sh
       - -c
@@ -395,35 +412,48 @@ services:
         # dind inner-bridge egress firewall — programmed at daemon start, BEFORE
         # the daemon accepts any session create. Installs DROP rules at the top of
         # the DOCKER-USER chain (docker traverses it FIRST in FORWARD and never
-        # flushes it on reloads) so ALL inner-session egress is filtered: the
-        # deployment-internal RFC1918 ranges (the sandbox-ctrl subnet is one) and
-        # cloud metadata / link-local are denied; everything else (internet + DNS)
-        # is OPEN. The control path is unaffected: serve/backend -> engine:2376
-        # hits INPUT (not FORWARD), so mTLS is the only backstop there. Errors
-        # surface LOUDLY (any failed step aborts — never a daemon whose sessions
-        # are unconfined).
+        # flushes it on reloads) so inner-session egress to the deployment is
+        # filtered. Runs as ROOT and enters dockerd's rootless netns with `nsenter
+        # -n` (needs CAP_SYS_ADMIN over the rootlesskit child userns — hence the
+        # root entrypoint). Errors surface LOUDLY (any failed step aborts — never a
+        # daemon whose sessions are unconfined).
+        #
+        # DENY exactly: the ENGINE's own connected subnet(s) — its sandbox-ctrl
+        # network, the ONLY deployment network a session can route to through this
+        # engine (serve/backend/datastores/the engine's own control IP live on RFC1918
+        # there) — PLUS link-local/cloud-metadata (169.254.0.0/16). NOT all RFC1918:
+        # the rootless daemon NATs sessions out via `rootlesskit --net=vpnkit`, whose
+        # internal path rides 192.168.65/24, so a blanket RFC1918 drop would also kill
+        # public egress + DNS. Everything else (public internet + DNS + the vpnkit NAT
+        # range) stays OPEN.
         set -eu
         log() { echo "[dind-egress-firewall] $$*" >&2; }
         fail() { log "FATAL: $$*"; exit 1; }
-        INTERNAL_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
+        # The engine's own connected subnets (this container's netns, e.g. eth0 on
+        # sandbox-ctrl). `scope link` routes are the directly-attached CIDRs.
+        DEPLOY_CIDRS="$$(ip -o route show scope link 2>/dev/null | awk '{print $$1}' | grep -E '^[0-9]+\.' || true)"
+        [ -n "$$DEPLOY_CIDRS" ] || fail "could not resolve the engine's own subnet(s) to deny"
+        DENY_CIDRS="$$DEPLOY_CIDRS 169.254.0.0/16"
+        # Select the dockerd whose netns actually holds the DOCKER-USER chain. During
+        # rootless startup `pidof dockerd` can briefly report a transient pid that then
+        # re-execs and dies, so pick the one that is READY (chain present) — not just
+        # the first — and wait until such a pid exists.
         i=0
         DOCKERD_PID=""
         while [ -z "$$DOCKERD_PID" ]; do
-          DOCKERD_PID="$$(pidof dockerd 2>/dev/null || true)"
+          for _p in $$(pidof dockerd 2>/dev/null || true); do
+            if nsenter -t "$$_p" -n iptables -w -n -L DOCKER-USER >/dev/null 2>&1; then
+              DOCKERD_PID="$$_p"
+              break
+            fi
+          done
           [ -n "$$DOCKERD_PID" ] && break
           i=$$((i + 1))
-          [ "$$i" -gt 120 ] && fail "dockerd did not start within 120s"
+          [ "$$i" -gt 120 ] && fail "no dockerd netns with a DOCKER-USER chain within 120s"
           sleep 1
         done
-        DOCKERD_PID="$${DOCKERD_PID%% *}"
-        log "dockerd pid=$$DOCKERD_PID"
+        log "dockerd pid=$$DOCKERD_PID; deny -> $$DENY_CIDRS"
         in_netns() { nsenter -t "$$DOCKERD_PID" -n "$$@"; }
-        i=0
-        while ! in_netns iptables -w -n -L DOCKER-USER >/dev/null 2>&1; do
-          i=$$((i + 1))
-          [ "$$i" -gt 120 ] && fail "DOCKER-USER chain not present within 120s of dockerd start"
-          sleep 1
-        done
         add_drop() {
           _cidr="$$1"
           if in_netns iptables -w -C DOCKER-USER -d "$$_cidr" -j DROP 2>/dev/null; then
@@ -434,15 +464,18 @@ services:
             || fail "could not install DROP rule for $$_cidr"
           log "deny egress -> $$_cidr"
         }
-        for cidr in $$INTERNAL_CIDRS; do
+        for cidr in $$DENY_CIDRS; do
           add_drop "$$cidr"
         done
-        log "egress firewall active: internal ranges + metadata denied, internet OPEN"
+        log "egress firewall active: deployment subnet(s) + metadata denied, internet OPEN"
         FW
         chmod +x /tmp/dind-egress-firewall.sh
         /tmp/dind-egress-firewall.sh &
         ( until [ -f /certs/client/key.pem ]; do sleep 1; done; chmod 0644 /certs/client/*.pem ) &
-        exec dockerd-entrypoint.sh "$$@"
+        # Drop the DAEMON to the rootless user; the firewall above stays root. `exec`
+        # inside `su` so signals reach dockerd. DOCKER_TLS_CERTDIR is re-exported
+        # because `su` resets a minimal environment.
+        exec su rootless -c 'DOCKER_TLS_CERTDIR=/certs exec dockerd-entrypoint.sh'
       - sh
     # Ready when the daemon answers over its TLS socket using the client certs it
     # generated into /certs/client. Generous start_period covers first-boot cert
@@ -456,8 +489,38 @@ services:
       retries: 30
       start_period: 60s
 
+  # A genuinely-LISTENING RFC1918 host on sandbox-ctrl, standing in for a deployment
+  # control-plane peer (serve/backend/datastore). The session-isolation RFC1918
+  # negative dials it via SANDBOX_DOCKER_BLOCKED_ADDR to prove the egress firewall
+  # DROPs it — a DROP is distinguishable from a dead route ONLY because this host
+  # actually accepts connections. It sits on sandbox-ctrl (reachable from the engine,
+  # so the drop is meaningful) at a STATIC IP the CI env can name; a session, being an
+  # inner dind container behind the firewall, must never reach it. E2E test
+  # scaffolding — NOT a deployment service.
+  sandbox-ctrl-listener:
+    image: alpine:3.20
+    profiles: ["sandbox"]
+    command:
+      - sh
+      - -c
+      - 'while true; do printf "HTTP/1.0 200 OK\r\n\r\nLISTENING\n" | nc -l -p 9000; done'
+    networks:
+      sandbox-ctrl:
+        ipv4_address: 10.111.0.9
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -lnt 2>/dev/null | grep -q ':9000' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 # The sandbox control network, declared so the sandbox-engine can sit OFF the
 # implicit `default` network the datastore services ride. Only the sandbox
-# profile uses it; every other service still joins `default` automatically.
+# profile uses it; every other service still joins `default` automatically. A
+# STATIC subnet so the control-plane listener above can take a fixed IP the RFC1918
+# negative names (SANDBOX_DOCKER_BLOCKED_ADDR); the firewall derives the deny CIDR
+# from the engine's own interface, so it tracks whatever subnet is set here.
 networks:
   sandbox-ctrl:
+    ipam:
+      config:
+        - subnet: 10.111.0.0/24

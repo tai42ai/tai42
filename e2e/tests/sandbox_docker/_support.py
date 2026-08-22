@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
@@ -66,13 +67,34 @@ SKIP_REASON = (
 requires_engine = pytest.mark.skipif(not TEST_HOST, reason=SKIP_REASON)
 
 
+def _shared_cert_settings() -> dict[str, str]:
+    """Point the host-run SUT at the mTLS client certs the ``sandbox-engine`` shares
+    through the compose bind mount (``./.sandbox-certs`` -> ``/certs/client``).
+
+    The provider's canonical default is the IN-CONTAINER ``/certs/client`` mount,
+    which does not exist on the host that runs this leg — so the harness resolves the
+    bind-mount host dir here (honouring ``TAI_E2E_SANDBOX_CERT_DIR`` exactly as the
+    compose file does, else ``e2e/.sandbox-certs``). This is why the CI step sets only
+    ``SANDBOX_DOCKER_TEST_HOST`` and no cert env. An explicit ``SANDBOX_DOCKER_TLS_*``
+    still wins (we only fill a path the environment did not set)."""
+    configured = os.environ.get("TAI_E2E_SANDBOX_CERT_DIR", "")
+    cert_dir = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / ".sandbox-certs"
+    cert_dir = cert_dir.resolve()
+    overrides: dict[str, str] = {}
+    for key, filename in (("tls_cert_path", "cert.pem"), ("tls_key_path", "key.pem"), ("tls_ca_path", "ca.pem")):
+        if f"SANDBOX_DOCKER_{key.upper()}" not in os.environ:
+            overrides[key] = str(cert_dir / filename)
+    return overrides
+
+
 def build_sandbox() -> DockerSandbox:
-    """A ``DockerSandbox`` pointed at the live engine. Every ``SANDBOX_DOCKER_*``
-    knob other than ``host`` (the mTLS cert paths, pull policy, dispatch defaults)
-    resolves from the environment the harness sets, exactly as it would in a
-    deployment."""
+    """A ``DockerSandbox`` pointed at the live engine. ``host`` comes from
+    ``SANDBOX_DOCKER_TEST_HOST`` (a ``tcp://`` endpoint — the provider normalizes it
+    to mTLS ``https://`` itself); the mTLS cert paths resolve to the engine's shared
+    bind-mount dir (see :func:`_shared_cert_settings`); every other ``SANDBOX_DOCKER_*``
+    knob resolves from the environment, exactly as in a deployment."""
     assert TEST_HOST is not None  # guarded by requires_engine at the call sites
-    return DockerSandbox(settings=DockerSandboxSettings(host=TEST_HOST))
+    return DockerSandbox(settings=DockerSandboxSettings(host=TEST_HOST, **_shared_cert_settings()))
 
 
 @contextlib.asynccontextmanager

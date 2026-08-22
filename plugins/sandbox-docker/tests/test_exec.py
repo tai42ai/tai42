@@ -12,7 +12,7 @@ from tai42_contract.sandbox import (
 )
 
 from tai42_sandbox_docker import sessions
-from tai42_sandbox_docker.provider import DockerSandbox
+from tai42_sandbox_docker.provider import DockerSandbox, resolve_engine_url
 from tai42_sandbox_docker.sessions import (
     DockerSandboxSession,
     engine_error,
@@ -94,6 +94,20 @@ async def test_put_and_get_file_round_trip() -> None:
 
     await session.put_file("note.txt", b"bytes")
     assert await session.get_file("note.txt") == b"bytes"
+
+
+async def test_put_file_creates_parent_dirs_for_nested_path() -> None:
+    container = _container()
+    session = _session(container)
+
+    # A nested workspace path: the archive carries its parent-dir entries and is
+    # extracted at the workspace root, so `sub/deep/` is created instead of docker's
+    # put_archive 404-ing on the missing parent dir.
+    await session.put_file("sub/deep/nested.txt", b"bytes")
+    assert await session.get_file("sub/deep/nested.txt") == b"bytes"
+    # The intermediate directories were materialized as archive members.
+    assert "/workspace/sub" in container.files
+    assert "/workspace/sub/deep" in container.files
 
 
 async def test_get_missing_file_raises() -> None:
@@ -238,36 +252,118 @@ async def test_read_exit_code_times_out(monkeypatch: pytest.MonkeyPatch) -> None
         await read_exit_code(exec_obj)
 
 
-async def test_half_close_stdin_write_eofs_the_transport() -> None:
-    class _Transport:
-        def __init__(self, *, can: bool) -> None:
-            self._can = can
-            self.wrote_eof = False
+class _Sock:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.shutdown_how: int | None = None
+        self._raises = raises
 
-        def can_write_eof(self) -> bool:
-            return self._can
+    def shutdown(self, how: int) -> None:
+        if self._raises:
+            raise OSError("socket already shut")
+        self.shutdown_how = how
 
-        def write_eof(self) -> None:
-            self.wrote_eof = True
 
-    class _Conn:
-        def __init__(self, transport) -> None:
-            self.transport = transport
+class _Transport:
+    def __init__(self, *, can: bool, sock: _Sock | None = None) -> None:
+        self._can = can
+        self._sock = sock
+        self.wrote_eof = False
 
-    class _Resp:
-        def __init__(self, connection) -> None:
-            self.connection = connection
+    def can_write_eof(self) -> bool:
+        return self._can
 
-    class _Stream:
-        def __init__(self, resp) -> None:
-            self._resp = resp
+    def write_eof(self) -> None:
+        self.wrote_eof = True
 
-    transport = _Transport(can=True)
+    def get_extra_info(self, name: str):
+        return self._sock if name == "socket" else None
+
+
+class _Conn:
+    def __init__(self, transport) -> None:
+        self.transport = transport
+
+
+class _Resp:
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+
+class _Stream:
+    def __init__(self, resp) -> None:
+        self._resp = resp
+
+    async def _init(self) -> None:
+        return None
+
+
+async def test_half_close_stdin_write_eofs_a_plain_transport() -> None:
+    # Plain TCP: a transport that CAN write-EOF gets the clean FIN half-close, and the
+    # socket is never touched.
+    sock = _Sock()
+    transport = _Transport(can=True, sock=sock)
     await half_close_stdin(_Stream(_Resp(_Conn(transport))))
     assert transport.wrote_eof is True
+    assert sock.shutdown_how is None
 
-    # No response yet, or a transport that cannot half-close: a safe no-op.
+
+async def test_half_close_stdin_shuts_socket_write_half_over_tls() -> None:
+    import socket as _socket
+
+    # mTLS: an SSL transport reports can_write_eof()==False, so EOF is signalled by
+    # shutting the WRITE half of the underlying socket (SHUT_WR) — this is the fix
+    # that stops cat-style execs hanging over the TLS control API.
+    sock = _Sock()
+    transport = _Transport(can=False, sock=sock)
+    await half_close_stdin(_Stream(_Resp(_Conn(transport))))
+    assert transport.wrote_eof is False
+    assert sock.shutdown_how == _socket.SHUT_WR
+
+
+async def test_half_close_stdin_is_a_safe_noop_without_a_socket() -> None:
+    # No response/connection yet, and an SSL transport whose socket is gone or already
+    # shut: never raises, never write-EOFs.
     await half_close_stdin(_Stream(None))
-    idle = _Transport(can=False)
-    await half_close_stdin(_Stream(_Resp(_Conn(idle))))
-    assert idle.wrote_eof is False
+    await half_close_stdin(_Stream(_Resp(_Conn(_Transport(can=False, sock=None)))))
+    already_shut = _Sock(raises=True)
+    await half_close_stdin(_Stream(_Resp(_Conn(_Transport(can=False, sock=already_shut)))))
+
+
+def test_resolve_engine_url_normalizes_tls_scheme() -> None:
+    # Under mTLS (tls=True), a tcp:// / http:// control endpoint is normalized to
+    # https:// so aiodocker actually runs TLS over the caller-supplied ssl_context
+    # (otherwise it dials plaintext against the TLS port).
+    assert resolve_engine_url("tcp://engine:2376", tls=True) == "https://engine:2376"
+    assert resolve_engine_url("http://engine:2376", tls=True) == "https://engine:2376"
+    assert resolve_engine_url("https://engine:2376", tls=True) == "https://engine:2376"
+    # Without TLS the scheme is left untouched for aiodocker's own handling.
+    assert resolve_engine_url("tcp://engine:2376", tls=False) == "tcp://engine:2376"
+    # Local sockets pass through (a bare path becomes a unix socket) regardless of tls.
+    assert resolve_engine_url("unix:///var/run/docker.sock", tls=True) == "unix:///var/run/docker.sock"
+    assert resolve_engine_url("npipe:////./pipe/docker_engine", tls=False) == "npipe:////./pipe/docker_engine"
+    assert resolve_engine_url("/var/run/docker.sock", tls=True) == "unix:///var/run/docker.sock"
+
+
+def test_create_engine_dials_https_under_mtls(monkeypatch: pytest.MonkeyPatch) -> None:
+    # End-to-end through _create_engine: a tcp:// host + tls_verify builds an SSL
+    # context and hands aiodocker an https:// URL (not tcp://).
+    import ssl as _ssl
+
+    captured: dict[str, object] = {}
+
+    def _fake_docker(*, url: str, ssl_context: object) -> object:
+        captured["url"] = url
+        captured["ssl_context"] = ssl_context
+        return object()
+
+    monkeypatch.setattr("tai42_sandbox_docker.provider.Docker", _fake_docker)
+    sandbox = DockerSandbox(
+        docker=object(),
+        settings=DockerSandboxSettings(host="tcp://engine:2376"),
+    )
+    monkeypatch.setattr(sandbox, "_build_ssl_context", lambda _s: _ssl.create_default_context())
+
+    sandbox._create_engine()
+
+    assert captured["url"] == "https://engine:2376"
+    assert captured["ssl_context"] is not None
