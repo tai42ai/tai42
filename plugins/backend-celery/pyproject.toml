@@ -41,7 +41,7 @@ dependencies = [
     # Pydantic-aware task argument (de)serialization (CallbackSchema task args).
     "celery-pydantic~=1.0.1",
     # The `flower` launch subcommand (dashboard).
-    "flower~=2.0.1",
+    "flower~=2.1.0",
     # Composed callables for the backend tool extensions.
     "makefun~=1.16.0",
     # Imported directly by core/signatures.py (FastMCP Context detection when
