@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "2.2.1"
+version = "2.2.2"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
