@@ -25,6 +25,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
+from tai42_contract.sandbox import SandboxSession
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
@@ -34,8 +35,9 @@ from tai42_kit.llm.settings import llm_settings
 from tai42_agents._internal.park import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _tool_error_middleware
 from tai42_agents._internal.structured import as_tool_strategy
-from tai42_agents.deep_agent.backend import SKILLS_ROOT, build_backend
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT, build_backend
+from tai42_agents.langchain_deep_agent.sandbox_backend import build_sandbox_backend
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 # One shared, stateless park hook on every agent + subagent stack, so an async
 # ``ask_user`` parked inside any of them (main, subagent, nested subagent, the
@@ -88,7 +90,7 @@ def _validate(
     sub_names = [spec.name for spec in subagents]
     dup_subs = sorted({name for name in sub_names if sub_names.count(name) > 1})
     if dup_subs:
-        raise ValueError(f"deep_agent has duplicate subagent names: {dup_subs}. Names must be unique.")
+        raise ValueError(f"langchain_deep_agent has duplicate subagent names: {dup_subs}. Names must be unique.")
 
     for spec in subagents:
         if not spec.subagents:
@@ -116,16 +118,20 @@ def _validate(
     # purpose" deliberately overrides deepagents' default subagent, so it is allowed.)
     sub_builtin = sorted(set(sub_names) & _DEEPAGENTS_BUILTIN_TOOLS)
     if sub_builtin:
-        raise ValueError(f"deep_agent subagent names collide with built-in tool names: {sub_builtin}. Rename them.")
+        raise ValueError(
+            f"langchain_deep_agent subagent names collide with built-in tool names: {sub_builtin}. Rename them."
+        )
 
     tool_names = [tool.name for tool in tools]
     dup_tools = sorted({name for name in tool_names if tool_names.count(name) > 1})
     if dup_tools:
-        raise ValueError(f"deep_agent has duplicate tool names: {dup_tools}. Names must be unique.")
+        raise ValueError(f"langchain_deep_agent has duplicate tool names: {dup_tools}. Names must be unique.")
 
     clobbered = sorted(set(tool_names) & _DEEPAGENTS_BUILTIN_TOOLS)
     if clobbered:
-        raise ValueError(f"deep_agent tools collide with deepagents built-in tools: {clobbered}. Rename them.")
+        raise ValueError(
+            f"langchain_deep_agent tools collide with deepagents built-in tools: {clobbered}. Rename them."
+        )
 
     # Only the reference ``skills`` list is path-checked (source paths rooted under
     # SKILLS_ROOT). Inline skills are names, validated separately.
@@ -137,7 +143,7 @@ def _validate(
     off_root = sorted(path for path in all_skills if not path.startswith(SKILLS_ROOT))
     if off_root:
         raise ValueError(
-            f"deep_agent skill paths must start with {SKILLS_ROOT!r}: {off_root}. "
+            f"langchain_deep_agent skill paths must start with {SKILLS_ROOT!r}: {off_root}. "
             f"Off-root paths route to the scratch backend and load no skills."
         )
 
@@ -158,7 +164,7 @@ def _merge_inline_skills(target: dict[str, str], inline_skills: list[InlineSkill
         existing = target.get(skill.name)
         if existing is not None and existing != skill.content:
             raise ValueError(
-                f"deep_agent inline skill {skill.name!r} supplied twice with different content. "
+                f"langchain_deep_agent inline skill {skill.name!r} supplied twice with different content. "
                 f"Inline skill names must be unique unless their content is identical."
             )
         target[skill.name] = skill.content
@@ -310,7 +316,7 @@ async def _compile_nested_subagent(
     return {"name": child.name, "description": child.description, "runnable": runnable}
 
 
-async def build_deep_agent(
+async def build_langchain_deep_agent(
     *,
     llm: BaseChatModel,
     store: BaseStore,
@@ -322,13 +328,14 @@ async def build_deep_agent(
     system_prompt: str | None = None,
     interrupt_on: dict[str, Any] | None = None,
     response_format: Any | None = None,
+    session: SandboxSession | None = None,
 ) -> CompiledStateGraph:
     """Assemble a compiled deep agent over the composite backend.
 
     ``llm``, ``store`` and ``checkpointer`` are the resolved registry resources.
     ``subagents`` are declarative specs resolved to deepagents ``SubAgent`` dicts; a
     spec may carry one level of nested ``subagents``. ``skills`` are source paths
-    under :data:`tai42_agents.deep_agent.backend.SKILLS_ROOT`.
+    under :data:`tai42_agents.langchain_deep_agent.backend.SKILLS_ROOT`.
 
     ``inline_skills`` (each a name + ``SKILL.md`` body) are collected from the main
     agent and every subagent into one mount, and each agent's own inline skills are
@@ -338,12 +345,21 @@ async def build_deep_agent(
     agent return a validated structured object in ``state['structured_response']``;
     a raw schema is routed through the tool-calling strategy so structured output
     never depends on provider-native support. ``None`` keeps free-form text.
+
+    ``session`` is the acquired durable sandbox session for a run/astream drive: when set the
+    scratch backend is a :class:`~tai42_agents.langchain_deep_agent.sandbox_backend.SandboxSessionBackend`
+    over the workspace VOLUME (§B2); when ``None`` (the append path) it stays the non-sandbox
+    ``StateBackend`` — the hard sandbox dependency lives at the run/astream door, not here.
     """
     subagent_specs = list(subagents or [])
     _validate(tools or [], subagent_specs, skills)
 
     inline_skill_contents = _collect_inline_skills(inline_skills, subagent_specs)
-    backend = build_backend(inline_skill_contents or None)
+    backend = (
+        build_sandbox_backend(session, inline_skill_contents or None)
+        if session is not None
+        else build_backend(inline_skill_contents or None)
+    )
     resolved = await asyncio.gather(
         *(_resolve_subagent(spec, llm=llm, tools=tools or [], store=store, backend=backend) for spec in subagent_specs)
     )

@@ -22,16 +22,16 @@ from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.runtime import build_agent_input
 
 from tai42_agents._internal.recovery import _tool_error_middleware
-from tai42_agents.deep_agent import factory
-from tai42_agents.deep_agent.backend import SKILLS_ROOT
-from tai42_agents.deep_agent.factory import (
+from tai42_agents.langchain_deep_agent import factory
+from tai42_agents.langchain_deep_agent.backend import SKILLS_ROOT
+from tai42_agents.langchain_deep_agent.factory import (
     _collect_inline_skills,
     _resolve_subagent,
     _skills_with_inline,
     _validate,
-    build_deep_agent,
+    build_langchain_deep_agent,
 )
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
 _FAKE_LLM = cast(BaseChatModel, "LLM")
 
@@ -161,7 +161,7 @@ def test_validate_accepts_clean_config() -> None:
     _validate([_tool("search")], [spec], [f"{SKILLS_ROOT}flow/"])  # no raise
 
 
-# --- build_deep_agent wiring ----------------------------------------------
+# --- build_langchain_deep_agent wiring ----------------------------------------------
 
 
 def test_build_deep_agent_runs_validation_before_create(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,7 +175,7 @@ def test_build_deep_agent_runs_validation_before_create(monkeypatch: pytest.Monk
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     with pytest.raises(ValueError, match="must start with"):
         asyncio.run(
-            build_deep_agent(
+            build_langchain_deep_agent(
                 llm=_FAKE_LLM,
                 store=InMemoryStore(),
                 checkpointer=InMemorySaver(),
@@ -211,7 +211,7 @@ def test_build_deep_agent_passes_response_format(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -235,18 +235,18 @@ def test_build_deep_agent_leads_with_async_park_then_system_purge_middleware(
     # reaches the model with one alongside the per-run prompt.
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
-    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    asyncio.run(build_langchain_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     assert captured["middleware"][0] is factory._async_park_middleware
     assert isinstance(captured["middleware"][1], SystemPurgeMiddleware)
 
 
 def test_build_deep_agent_wires_rolling_cache_mark_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
-    # deep_agent honors user_content_kwargs (the mark rides its main user turn), so its
+    # langchain_deep_agent honors user_content_kwargs (the mark rides its main user turn), so its
     # main-agent stack carries the rolling-cache-mark middleware too — a per-turn-marked
     # thread sends one breakpoint at the model call, same as every tools-agent face.
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
-    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    asyncio.run(build_langchain_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     assert any(isinstance(mw, RollingCacheMarkMiddleware) for mw in captured["middleware"])
 
 
@@ -258,7 +258,7 @@ def test_build_deep_agent_pins_main_middleware_order(monkeypatch: pytest.MonkeyP
     # middleware trails last (mirroring every subagent stack's tool-error tail).
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
-    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
+    asyncio.run(build_langchain_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver()))
     stack = captured["middleware"]
     assert len(stack) == 5
     assert stack[0] is factory._async_park_middleware
@@ -298,7 +298,7 @@ def test_build_deep_agent_collapses_empty_subagents(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     agent = asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -324,7 +324,7 @@ def test_build_deep_agent_does_not_double_add_general_purpose(monkeypatch: pytes
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     gp_spec = ResolvedSubAgentSpec(name="general-purpose", description="d", system_prompt="p")
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], subagents=[gp_spec]
         )
     )
@@ -348,14 +348,18 @@ def test_general_purpose_subagent_inherits_skill_sources(monkeypatch: pytest.Mon
     captured: dict[str, Any] = {}
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
 
-    asyncio.run(build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[]))
+    asyncio.run(
+        build_langchain_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[])
+    )
     assert captured["skills"] is None
     assert "skills" not in _injected_gp(captured)
 
     captured.clear()
     skills = [f"{SKILLS_ROOT}jq/"]
     asyncio.run(
-        build_deep_agent(llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], skills=skills)
+        build_langchain_deep_agent(
+            llm=_FAKE_LLM, store=InMemoryStore(), checkpointer=InMemorySaver(), tools=[], skills=skills
+        )
     )
     assert _injected_gp(captured)["skills"] == captured["skills"] == skills
 
@@ -367,7 +371,7 @@ def test_general_purpose_subagent_inherits_inline_skill_sources(monkeypatch: pyt
     monkeypatch.setattr(factory, "create_deep_agent", lambda **kwargs: captured.update(kwargs) or "AGENT")
 
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -532,7 +536,7 @@ def test_build_deep_agent_passes_nested_subagents_through(monkeypatch: pytest.Mo
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     parent, _ = _nested_pair(child_tools=[_tool("search")])
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -614,7 +618,7 @@ def test_resolve_subagent_auto_loads_its_inline_skills() -> None:
 
 
 def test_build_deep_agent_mounts_and_auto_loads_inline_skills(monkeypatch: pytest.MonkeyPatch) -> None:
-    """build_deep_agent feeds inline content to the backend and auto-loads the path."""
+    """build_langchain_deep_agent feeds inline content to the backend and auto-loads the path."""
     captured: dict[str, Any] = {}
     built_backends: list[Any] = []
 
@@ -629,7 +633,7 @@ def test_build_deep_agent_mounts_and_auto_loads_inline_skills(monkeypatch: pytes
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     monkeypatch.setattr(factory, "build_backend", fake_build_backend)
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -653,7 +657,7 @@ def test_build_deep_agent_inline_collision_raises_before_create(monkeypatch: pyt
     sub = ResolvedSubAgentSpec(name="b", description="d", system_prompt="p", inline_skills=[_inline("dup", "B")])
     with pytest.raises(ValueError, match="different content"):
         asyncio.run(
-            build_deep_agent(
+            build_langchain_deep_agent(
                 llm=_FAKE_LLM,
                 store=InMemoryStore(),
                 checkpointer=InMemorySaver(),
@@ -673,7 +677,7 @@ def test_build_deep_agent_no_inline_skills_keeps_skills_none(monkeypatch: pytest
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create)
     asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=_FAKE_LLM,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -734,7 +738,7 @@ def test_deep_agent_per_turn_marking_sends_one_breakpoint_on_a_reused_thread() -
     config: RunnableConfig = {"configurable": {"thread_id": "t-deep-roll"}}
 
     async def run_two_turns() -> list[BaseMessage]:
-        agent = await build_deep_agent(
+        agent = await build_langchain_deep_agent(
             llm=model,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),

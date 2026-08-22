@@ -2,14 +2,14 @@ spec_version: 1
 namespace: tai42
 name: agents
 package: tai42-agents
-version: 3.0.1
+version: 4.0.0
 description: >-
   Reference agents package for the TAI ecosystem: opt-in, manifest-loaded
   generic agents built on the deepagents/LangGraph runtime.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/agents
-contract: '>=3.0,<4'
+contract: '>=3.1,<4'
 categories:
   - agents
 tags:
@@ -23,14 +23,24 @@ permissions:
   filesystem: true
 provides:
   - kind: agent
-    name: deep_agent
-    module: tai42_agents.deep_agent
+    name: langchain_deep_agent
+    module: tai42_agents.langchain_deep_agent
     description: >-
       Run a deep agent with planning, subagents, skills, and a filesystem
       backend.
     tags:
       - deep
       - planning
+  - kind: agent
+    name: claude_code
+    module: tai42_agents.claude_code
+    description: >-
+      Run Claude Code inside a sandbox: it drives the real claude binary over a
+      versioned exec protocol, with tools, skills, and subagents.
+    tags:
+      - agents
+      - coding
+      - claude
   - kind: agent
     name: refine_agent
     module: tai42_agents.refine_agent

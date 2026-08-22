@@ -375,7 +375,7 @@ def test_run_response_format_without_title_raises_loudly(app_tools: Any, resourc
 
 def test_run_with_subagents_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """``run`` never silently drops baked ``subagents``: sub-agent delegation is
-    deep_agent's domain, so a non-empty value fails loud rather than being ignored."""
+    langchain_deep_agent's domain, so a non-empty value fails loud rather than being ignored."""
     invoked = False
 
     async def fake_invoke(**kwargs: Any) -> AgentInvokeResult:

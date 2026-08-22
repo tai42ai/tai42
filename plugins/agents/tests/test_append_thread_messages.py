@@ -1,6 +1,6 @@
 """``append_thread_messages`` across the graph-backed agents that address one thread.
 
-Each implementing agent (``tools_agent``, ``deep_agent``, ``retrieval_tools_agent``)
+Each implementing agent (``tools_agent``, ``langchain_deep_agent``, ``retrieval_tools_agent``)
 writes the role/content messages straight into its thread's checkpoint through the
 graph's ``START`` node — no model call — so a later run on the same thread reads
 them as prior history. The tests drive each agent's real compile path with a
@@ -38,7 +38,7 @@ from tai42_kit.llm.middleware.leading_user import _CONVERSATION_START_MARKER
 # manifest names; the classes drive the structural registration checks below.
 from tai42_agents._internal import append as append_mod
 from tai42_agents._internal import recovery as rec
-from tai42_agents.deep_agent.agent import DeepAgent
+from tai42_agents.langchain_deep_agent.agent import DeepAgent
 from tai42_agents.refine_agent.agent import RefineAgent
 from tai42_agents.retrieval_tools_agent.agent import RetrievalToolsAgent
 from tai42_agents.tools_agent import ToolsAgent
@@ -47,7 +47,7 @@ from tai42_agents.vqa_agent import VqaAgent
 
 _THREAD_AGENTS = [
     ("tools_agent", ToolsAgent),
-    ("deep_agent", DeepAgent),
+    ("langchain_deep_agent", DeepAgent),
     ("retrieval_tools_agent", RetrievalToolsAgent),
 ]
 _NON_THREAD_AGENTS = [
@@ -288,7 +288,7 @@ class TestToolsAgentAppend:
 
 
 # --------------------------------------------------------------------------
-# deep_agent — the real deepagents graph
+# langchain_deep_agent — the real deepagents graph
 # --------------------------------------------------------------------------
 
 
@@ -296,7 +296,7 @@ class TestDeepAgentAppend:
     def _seams(
         self, monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemorySaver, store: InMemoryStore
     ) -> None:
-        from tai42_agents.deep_agent import agent as dagent
+        from tai42_agents.langchain_deep_agent import agent as dagent
 
         monkeypatch.setattr(
             dagent,
@@ -324,9 +324,9 @@ class TestDeepAgentAppend:
     def _read(
         self, saver: InMemorySaver, store: InMemoryStore, model: BaseChatModel, thread_id: str
     ) -> list[BaseMessage]:
-        from tai42_agents.deep_agent.factory import build_deep_agent
+        from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
-        graph = asyncio.run(build_deep_agent(llm=model, store=store, checkpointer=saver, tools=[]))
+        graph = asyncio.run(build_langchain_deep_agent(llm=model, store=store, checkpointer=saver, tools=[]))
         snapshot = asyncio.run(graph.aget_state(_thread(thread_id)))
         return list(snapshot.values.get("messages", []))
 
@@ -334,7 +334,7 @@ class TestDeepAgentAppend:
         saver, store = InMemorySaver(), InMemoryStore()
         model = ScriptedChatModel([AIMessage(content="reply")])
         self._seams(monkeypatch, model, saver, store)
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-map", messages=_PRIOR))
         _assert_role_mapping(self._read(saver, store, model, "t-deep-map"))
 
@@ -342,7 +342,7 @@ class TestDeepAgentAppend:
         saver, store = InMemorySaver(), InMemoryStore()
         model = ScriptedChatModel([AIMessage(content="reply")])
         self._seams(monkeypatch, model, saver, store)
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-run", messages=_PRIOR))
         out = asyncio.run(agent.run(tools=[], user_message="new turn", thread_id="t-deep-run"))
         assert out == "reply"
@@ -352,23 +352,23 @@ class TestDeepAgentAppend:
         saver, store = InMemorySaver(), InMemoryStore()
         model = ScriptedChatModel([AIMessage(content="reply")])
         self._seams(monkeypatch, model, saver, store)
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         asyncio.run(agent.append_thread_messages(thread_id="t-deep-op", messages=_OPERATOR_OPENER))
         asyncio.run(agent.run(tools=[], user_message="client turn", thread_id="t-deep-op"))
         _assert_leads_user_first(model)
 
     def test_invalid_role_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         with pytest.raises(ValueError, match="role 'tool'"):
             asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "tool", "content": "x"}]))
 
     def test_blank_content_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         with pytest.raises(ValueError, match="blank content"):
             asyncio.run(agent.append_thread_messages(thread_id="t", messages=[{"role": "assistant", "content": ""}]))
 
     def test_missing_thread_id_raises(self) -> None:
-        agent = tai42_app.agents.get_agent("deep_agent")
+        agent = tai42_app.agents.get_agent("langchain_deep_agent")
         with pytest.raises(ValueError, match="requires a thread_id"):
             asyncio.run(agent.append_thread_messages(thread_id=None, messages=_PRIOR))  # type: ignore[arg-type]
 

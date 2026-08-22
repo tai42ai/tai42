@@ -1,4 +1,4 @@
-"""The ``tools_agent`` async ``ask_user`` park/resume — parity with ``deep_agent``.
+"""The ``tools_agent`` async ``ask_user`` park/resume — parity with ``langchain_deep_agent``.
 
 ``tools_agent`` builds through ``create_agent`` (not ``create_deep_agent``); these tests
 prove the SAME shared park machinery covers it: the ``run`` face parks on an async ask and

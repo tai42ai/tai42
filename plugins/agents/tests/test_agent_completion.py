@@ -7,7 +7,7 @@ commit precedes the tombstone. A re-park carries the completion tool forward to 
 (fired only when the run finally terminates). A handoff failure raises loudly and leaves the
 index LIVE, so the platform redelivers and re-drives — the completion is never dropped.
 
-Driven over a real ``tools_agent`` / ``deep_agent`` graph with a scripted model + shared
+Driven over a real ``tools_agent`` / ``langchain_deep_agent`` graph with a scripted model + shared
 in-memory checkpointer and the fakeredis-backed park index (same wiring as the park tests).
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -41,7 +42,7 @@ from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.park import agent_resume
 from tai42_agents._internal.park import driver as drv
 from tai42_agents._internal.park import index as idx
-from tai42_agents.deep_agent import agent as agent_mod
+from tai42_agents.langchain_deep_agent import agent as agent_mod
 
 _COMPLETION_TOOL = "conversation_deliver"
 
@@ -69,13 +70,23 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+# Within the durable-workspace retention horizon (session_ttl, 24h default) — the deep agent's
+# parks must carry a deadline inside it.
+_WITHIN_HORIZON = datetime.now(UTC) + timedelta(hours=1)
+
+
 class _SequentialAsk:
     """A tool that parks on a fresh interaction id each call (so a run can park, resume, then
     re-park on a second ask). Refuses loudly if no resume continuation is bound."""
 
-    def __init__(self, ids: list[str]) -> None:
+    def __init__(self, ids: list[str], expiry_at: datetime | None = None) -> None:
         self.calls = 0
         self._ids = ids
+        # The durable ``langchain_deep_agent`` acquires a persistent workspace whose TTL bounds
+        # the park retention to min(checkpoint, workspace) (§B3.1), so its parks must carry an ask
+        # deadline within that horizon; the non-durable ``tools_agent`` keeps a keep-forever
+        # (None) retention and its parks pass with no deadline.
+        self._expiry_at = expiry_at
 
     def tool(self) -> StructuredTool:
         def ask() -> dict[str, Any]:
@@ -83,7 +94,7 @@ class _SequentialAsk:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
             interaction_id = self._ids[self.calls]
             self.calls += 1
-            return suspended_interaction_marker(interaction_id, None)
+            return suspended_interaction_marker(interaction_id, self._expiry_at)
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -244,8 +255,8 @@ def test_completion_carried_forward_on_repark(
 def _wire_deep(
     monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemorySaver, store: InMemoryStore
 ) -> None:
-    """Keep the REAL build_deep_agent but inject the scripted model + a SHARED
-    checkpointer/store, so a deep_agent park run and its resume read one durable checkpoint."""
+    """Keep the REAL build_langchain_deep_agent but inject the scripted model + a SHARED
+    checkpointer/store, so a langchain_deep_agent park run and its resume read one durable checkpoint."""
 
     async def fake_get_llm_async(provider: str, **kwargs: Any) -> Any:
         return model
@@ -260,7 +271,7 @@ def _wire_deep(
 
 
 async def _park_via_astream_deep(agent: Any, thread_id: str) -> None:
-    """Drive a fresh deep_agent turn through the astream face with the completion tool bound,
+    """Drive a fresh langchain_deep_agent turn through the astream face with the completion tool bound,
     so the run parks with a completion delivery path recorded on its park entry."""
     token = set_park_completion_tool(_COMPLETION_TOOL)
     try:
@@ -272,25 +283,25 @@ async def _park_via_astream_deep(agent: Any, thread_id: str) -> None:
         reset_park_completion_tool(token)
 
 
-def test_deep_agent_completion_carried_forward_on_repark(
+def test_langchain_deep_agent_completion_carried_forward_on_repark(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
     saver = InMemorySaver()
     store = InMemoryStore()
-    ask = _SequentialAsk(["i1", "i2"])
+    ask = _SequentialAsk(["i1", "i2"], expiry_at=_WITHIN_HORIZON)
     model = ScriptedChatModel([_ask_call("c1"), _ask_call("c2"), AIMessage(content="all done")])
     _wire_deep(monkeypatch, model, saver, store)
     app_tools.client_tools["ask"] = ask.tool()
     delivered: list[dict[str, Any]] = []
     app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
 
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> None:
         await _park_via_astream_deep(agent, "bridge:acme:alice")
 
         # First resume RE-PARKS on the second ask; the completion tool must be carried forward
-        # to the new entry (the deep_agent resume face rebinds it), and is NOT fired on a re-park.
+        # to the new entry (the langchain_deep_agent resume face rebinds it), and is NOT fired on a re-park.
         receipt = await agent_resume("i1", "a1")
         assert receipt["status"] == "suspended"
         assert receipt["interaction_ids"] == ["i2"]
@@ -308,12 +319,12 @@ def test_deep_agent_completion_carried_forward_on_repark(
     asyncio.run(go())
 
 
-def test_deep_agent_completion_handoff_crash_then_redelivery_delivers_once(
+def test_langchain_deep_agent_completion_handoff_crash_then_redelivery_delivers_once(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
     saver = InMemorySaver()
     store = InMemoryStore()
-    ask = _SequentialAsk(["i1"])
+    ask = _SequentialAsk(["i1"], expiry_at=_WITHIN_HORIZON)
     model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
     _wire_deep(monkeypatch, model, saver, store)
     app_tools.client_tools["ask"] = ask.tool()
@@ -327,7 +338,7 @@ def test_deep_agent_completion_handoff_crash_then_redelivery_delivers_once(
 
     app_tools.tool_runners[_COMPLETION_TOOL] = _flaky
 
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
 
     async def go() -> None:
         await _park_via_astream_deep(agent, "bridge:acme:alice")

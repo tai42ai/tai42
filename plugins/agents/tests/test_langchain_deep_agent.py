@@ -1,4 +1,4 @@
-"""Runtime + wiring tests for the ``deep_agent`` :class:`Agent`.
+"""Runtime + wiring tests for the ``langchain_deep_agent`` :class:`Agent`.
 
 Covers three layers, all with fakes (no live LLM, no real store):
 
@@ -44,10 +44,10 @@ from tai42_contract.app import tai42_app
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal.reject import reject_unhonored
-from tai42_agents.deep_agent import agent as agent_mod
-from tai42_agents.deep_agent.agent import DeepAgent, DeepAgentInput, _neutral_to_internal
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
-from tai42_agents.deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
+from tai42_agents.langchain_deep_agent import agent as agent_mod
+from tai42_agents.langchain_deep_agent.agent import DeepAgent, DeepAgentInput, _neutral_to_internal
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
 
 
 def _client_tool(name: str) -> StructuredTool:
@@ -223,7 +223,7 @@ def _patch_build(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> N
     async def fake_get_llm_async(provider: str, **kwargs: object) -> object:
         return object()
 
-    monkeypatch.setattr(agent_mod, "build_deep_agent", fake_build_deep_agent)
+    monkeypatch.setattr(agent_mod, "build_langchain_deep_agent", fake_build_deep_agent)
     monkeypatch.setattr(agent_mod, "get_llm_async", fake_get_llm_async)
     monkeypatch.setattr(agent_mod, "checkpoint_registry", _FakeRegistry)
     monkeypatch.setattr(agent_mod, "store_registry", _FakeRegistry)
@@ -268,7 +268,7 @@ def test_build_agent_passes_subagents_to_factory(monkeypatch: pytest.MonkeyPatch
 
 
 def test_build_agent_forwards_inline_skills(monkeypatch: pytest.MonkeyPatch) -> None:
-    """inline_skills reach build_deep_agent on the stream path; empty → None."""
+    """inline_skills reach build_langchain_deep_agent on the stream path; empty → None."""
     captured: dict[str, Any] = {}
     _patch_build(monkeypatch, captured)
 
@@ -352,7 +352,7 @@ def test_astream_requires_exactly_one_of_message_or_resume() -> None:
 
 
 def test_deep_agent_registers() -> None:
-    agent = tai42_app.agents.get_agent("deep_agent")
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
     assert isinstance(agent, DeepAgent)
     assert isinstance(agent, Agent)
 
@@ -515,7 +515,7 @@ def test_run_resume_feeds_a_command(monkeypatch: pytest.MonkeyPatch, app_tools: 
     agent: Any = DeepAgent()
     _install_fake_resolve(monkeypatch, agent, graph)
 
-    asyncio.run(agent.run(resume={"answer": 1}, resume_checkpoint_id="cp-7", thread_id="t"))
+    asyncio.run(agent.run(resume={"answer": 1}, thread_id="t"))
 
     assert isinstance(graph.received_input, Command)
     assert graph.received_input.resume == {"answer": 1}
@@ -614,14 +614,14 @@ def test_run_honors_live_tools(monkeypatch: pytest.MonkeyPatch, app_tools: Any, 
 
 
 def test_run_rejects_presets() -> None:
-    """Main-agent presets are not a composable deep_agent input; run raises loudly
+    """Main-agent presets are not a composable langchain_deep_agent input; run raises loudly
     rather than silently dropping them."""
     with pytest.raises(RuntimeError, match="does not support presets"):
         asyncio.run(DeepAgent().run(user_message="go", presets=[PresetSpec(name="p", base_tool="calc")]))
 
 
 def test_run_rejects_strategy() -> None:
-    """deep_agent applies no composition strategy; run raises rather than ignoring one."""
+    """langchain_deep_agent applies no composition strategy; run raises rather than ignoring one."""
     with pytest.raises(RuntimeError, match="does not support strategy"):
         asyncio.run(DeepAgent().run(user_message="go", strategy="vote"))
 
@@ -642,20 +642,23 @@ _UNHONORED_CASES = [
     ("presets", [PresetSpec(name="p", base_tool="calc")]),
     ("strategy", "vote"),
     ("system_content_kwargs", {"cache_control": {"type": "ephemeral"}}),
+    # The durable sandbox WORKSPACE cannot be forked alongside the checkpoint, so a set
+    # resume_checkpoint_id is unhonored (loud reject) on the durable deep agent (§B3.3).
+    ("resume_checkpoint_id", "cp-7"),
 ]
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
 def test_run_rejects_every_unhonored_param(param: str, value: Any) -> None:
     """run rejects every key in the guard's reasons map, naming it and the run face."""
-    with pytest.raises(RuntimeError, match=rf"deep_agent\.run does not support .*\b{param}\b"):
+    with pytest.raises(RuntimeError, match=rf"langchain_deep_agent\.run does not support .*\b{param}\b"):
         asyncio.run(DeepAgent().run(user_message="go", **{param: value}))
 
 
 @pytest.mark.parametrize(("param", "value"), _UNHONORED_CASES)
 def test_astream_rejects_every_unhonored_param(param: str, value: Any) -> None:
     """astream rejects the same full set as run — parity — naming the astream face."""
-    with pytest.raises(RuntimeError, match=rf"deep_agent\.astream does not support .*\b{param}\b"):
+    with pytest.raises(RuntimeError, match=rf"langchain_deep_agent\.astream does not support .*\b{param}\b"):
         _drain_astream(DeepAgent().astream(user_message="go", **{param: value}))
 
 
@@ -696,7 +699,7 @@ def test_reject_unhonored_permits_empty_collection_param(param: str, empty: obje
     the parameter dropped from ``_UNHONORED_COLLECTION_PARAMS`` it would be classified as a
     scalar (set whenever it is not ``None``) and this empty value would raise."""
     reject_unhonored(
-        "deep_agent.run",
+        "langchain_deep_agent.run",
         {param: empty},
         agent_mod._UNHONORED_REASONS,
         collection_params=agent_mod._UNHONORED_COLLECTION_PARAMS,
@@ -704,44 +707,44 @@ def test_reject_unhonored_permits_empty_collection_param(param: str, empty: obje
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
 def test_run_rejects_blank_memory_key(key: str, blank: str) -> None:
     """A present-but-blank memory key is malformed — it would silently share a
     checkpoint namespace across runs — so run raises rather than minting/overlaying it."""
-    with pytest.raises(ValueError, match=rf"deep_agent\.run: {key} must be a non-empty string"):
+    with pytest.raises(ValueError, match=rf"langchain_deep_agent\.run: {key} must be a non-empty string"):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
         asyncio.run(DeepAgent().run(user_message="go", **{key: blank}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
 def test_astream_rejects_blank_memory_key(key: str, blank: str) -> None:
     """Parity with run: astream rejects a present-but-blank memory key loudly."""
-    with pytest.raises(ValueError, match=rf"deep_agent\.astream: {key} must be a non-empty string"):
+    with pytest.raises(ValueError, match=rf"langchain_deep_agent\.astream: {key} must be a non-empty string"):
         # The dynamic key spreads into a typed astream parameter, so the arg-type mismatch is expected.
         _drain_astream(DeepAgent().astream(user_message="go", **{key: blank}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
-@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
 def test_run_rejects_non_string_memory_key(key: str, value: Any) -> None:
     """A non-string memory key is a type violation — it cannot name a checkpoint
     namespace — so run raises TypeError naming the offending param and the received
     type rather than probing a non-string for whitespace."""
     with pytest.raises(
-        TypeError, match=rf"deep_agent\.run: {key} must be a string or None; got {type(value).__name__}"
+        TypeError, match=rf"langchain_deep_agent\.run: {key} must be a string or None; got {type(value).__name__}"
     ):
         # The dynamic key spreads into a typed run parameter, so the arg-type mismatch is expected.
         asyncio.run(DeepAgent().run(user_message="go", **{key: value}))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [123, ["x"]])
-@pytest.mark.parametrize("key", ["thread_id", "resume_checkpoint_id"])
+@pytest.mark.parametrize("key", ["thread_id"])  # resume_checkpoint_id is now unhonored (B3.3), not a memory key
 def test_astream_rejects_non_string_memory_key(key: str, value: Any) -> None:
     """Parity with run: astream rejects a non-string memory key with a TypeError naming
     the offending param and the received type."""
     with pytest.raises(
-        TypeError, match=rf"deep_agent\.astream: {key} must be a string or None; got {type(value).__name__}"
+        TypeError, match=rf"langchain_deep_agent\.astream: {key} must be a string or None; got {type(value).__name__}"
     ):
         # The dynamic key spreads into a typed astream parameter, so the arg-type mismatch is expected.
         _drain_astream(DeepAgent().astream(user_message="go", **{key: value}))  # type: ignore[arg-type]
@@ -982,14 +985,14 @@ def _drain_astream(gen: Any) -> None:
 
 
 def test_astream_rejects_presets() -> None:
-    """Main-agent presets are not a composable deep_agent input; astream raises loudly
+    """Main-agent presets are not a composable langchain_deep_agent input; astream raises loudly
     rather than silently dropping them (parity with run)."""
     with pytest.raises(RuntimeError, match="does not support presets"):
         _drain_astream(DeepAgent().astream(user_message="go", presets=[PresetSpec(name="p", base_tool="calc")]))
 
 
 def test_astream_rejects_strategy() -> None:
-    """deep_agent applies no composition strategy; astream raises rather than ignoring
+    """langchain_deep_agent applies no composition strategy; astream raises rather than ignoring
     one (parity with run)."""
     with pytest.raises(RuntimeError, match="does not support strategy"):
         _drain_astream(DeepAgent().astream(user_message="go", strategy="vote"))

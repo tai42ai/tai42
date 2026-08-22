@@ -100,7 +100,7 @@ exactly the ones a deployment wants:
   tools agent. Uniform tool inputs: `tool_names` (client tools resolved through
   the app registry), live `tools`, and `presets` (a base tool bound to fixed
   kwargs; a sub-flow is `base_tool="flow"` with `fixed_kwargs={"flow_graph": ...}`).
-- **`deep_agent`** (`tai42_agents.deep_agent`) — a deepagents-harness agent:
+- **`langchain_deep_agent`** (`tai42_agents.langchain_deep_agent`) — a deepagents-harness agent:
   planning, a per-thread scratch filesystem, skills (served live from the
   template provider or supplied inline), one level of nested subagents, and
   human-in-the-loop interrupts with resume via a LangGraph `Command`. Both faces
@@ -136,7 +136,7 @@ agents:
   - title: tools-agent
     module: tai42_agents.tools_agent
   - title: deep-agent
-    module: tai42_agents.deep_agent
+    module: tai42_agents.langchain_deep_agent
   - title: retrieval-tools-agent
     module: tai42_agents.retrieval_tools_agent
   - title: voting-agent

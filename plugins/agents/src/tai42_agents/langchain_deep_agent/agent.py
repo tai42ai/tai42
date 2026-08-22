@@ -1,4 +1,4 @@
-"""``deep_agent`` as an :class:`Agent`.
+"""``langchain_deep_agent`` as an :class:`Agent`.
 
 Two faces built from the one shared streaming core (:meth:`DeepAgent._astream_built`):
 
@@ -30,6 +30,7 @@ from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import get_park_completion_tool
+from tai42_contract.sandbox import SandboxSession
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_user_output, extract_structured_output
@@ -43,8 +44,9 @@ from tai42_agents._internal.park import (
     build_park_identity,
     finalize_drive,
     park_continuation,
+    register_agent_resume_tool,
 )
-from tai42_agents._internal.park.driver import _collect_pending_interrupts
+from tai42_agents._internal.park.driver import _collect_pending_interrupts, _is_suspended_receipt
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import (
@@ -56,11 +58,13 @@ from tai42_agents._internal.render import render_message
 from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import as_tool_strategy
-from tai42_agents.deep_agent.factory import build_deep_agent
-from tai42_agents.deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
-from tai42_agents.deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
+from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
+from tai42_agents.langchain_deep_agent.session import DeepAgentSession
+from tai42_agents.langchain_deep_agent.settings import langchain_deep_agent_crash_resume
+from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
+from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec, resolve_subagent_specs
 
-# The two ABC ``run``/``astream`` parameters ``deep_agent`` cannot honor on the
+# The two ABC ``run``/``astream`` parameters ``langchain_deep_agent`` cannot honor on the
 # main agent, mapped to the reason named in the raised error (the keys define this
 # agent's unhonored set). ``presets`` is truthiness-checked, ``strategy`` set when
 # not ``None``.
@@ -74,17 +78,22 @@ _UNHONORED_REASONS: dict[str, str] = {
         "its system prompt is handed to the deepagents factory, never built as a content block through "
         "build_system_message, so it cannot carry content-block keys; use user_content_kwargs instead"
     ),
+    "resume_checkpoint_id": (
+        "the durable sandbox WORKSPACE volume cannot be forked alongside the LangGraph checkpoint, so "
+        "forking the checkpoint past an aborted turn would run a forked graph over post-abort workspace "
+        "state — a silent divergence; it is unhonored on the durable deep agent (user ruling 2026-08-21)"
+    ),
 }
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})
 
 
 class DeepAgentInput(BaseModel):
-    """JSON tool-face parameters for ``deep_agent``. Live ``tools=`` are absent
+    """JSON tool-face parameters for ``langchain_deep_agent``. Live ``tools=`` are absent
     from this JSON schema (a live ``StructuredTool`` is not JSON-serializable), but
     both in-process faces — :meth:`DeepAgent.run` and :meth:`DeepAgent.astream` —
     accept them directly.
 
-    The schema advertises exactly the composable fields ``deep_agent``'s runtime
+    The schema advertises exactly the composable fields ``langchain_deep_agent``'s runtime
     honors — ``subagents``, ``skills``, ``inline_skills``, ``interrupt_on``,
     ``response_format`` alongside the ``tool_names`` / message / provider plumbing.
     It carries no ``strategy`` field: the deepagents runtime has no composition
@@ -183,9 +192,27 @@ async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpe
     )
 
 
-@tai42_app.agents.agent("deep_agent", tags={"agents"})
+# A parking agent binds the hidden ``agent_resume`` continuation from its OWN registration:
+# the park package no longer binds it as a module-import side effect. Per-epoch idempotent, so
+# a box loading several parking agents binds it exactly once.
+register_agent_resume_tool()
+
+
+# The §B4 ``crash_resume`` setting is DECLARED to the skeleton at registration as
+# ``meta={"tai42/crash_resume": <setting>}`` on the run tool, threaded through the generic
+# ``agents.agent(name, tags=..., meta=...)`` passthrough; the run-dispatch seam reads that key to
+# decide whether to re-invoke a recycled detached run. Captured ONCE at registration (the setting
+# is recycle-class, so a hot change re-registers and re-declares it). Sourced from the lightweight
+# ``langchain_deep_agent_crash_resume`` read — reading the full settings here would couple this
+# module's IMPORT to the REQUIRED digest-pinned ``session_image``, regressing a zero-config import;
+# full validation still fires at the first run/astream drive.
+@tai42_app.agents.agent(
+    "langchain_deep_agent",
+    tags={"agents"},
+    meta={"tai42/crash_resume": langchain_deep_agent_crash_resume()},
+)
 class DeepAgent(Agent):
-    tool_name: ClassVar[str] = "deep_agent"
+    tool_name: ClassVar[str] = "langchain_deep_agent"
     tool_description: ClassVar[str] = (
         "Create and run a deep agent (planning + subagents + skills + filesystem). "
         "Loads tools by name and runs with the given system/user messages. With "
@@ -245,22 +272,27 @@ class DeepAgent(Agent):
         block through ``build_system_message``).
         """
         reject_unhonored(
-            "deep_agent.run",
-            {"presets": presets, "strategy": strategy, "system_content_kwargs": system_content_kwargs},
+            "langchain_deep_agent.run",
+            {
+                "presets": presets,
+                "strategy": strategy,
+                "system_content_kwargs": system_content_kwargs,
+                "resume_checkpoint_id": resume_checkpoint_id,
+            },
             _UNHONORED_REASONS,
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
-        reject_blank_memory_keys("deep_agent.run", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
-        reject_untitled_response_format("deep_agent", response_format)
+        reject_blank_memory_keys("langchain_deep_agent.run", thread_id=thread_id, resume_checkpoint_id=None)
+        reject_untitled_response_format("langchain_deep_agent", response_format)
 
         if resume is None and not (user_message or user_message_id):
-            raise ValueError("deep_agent.run requires exactly one of user_message or resume")
+            raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume")
         if resume is not None:
             if user_message or user_message_id:
-                raise ValueError("deep_agent.run requires exactly one of user_message or resume, not both.")
+                raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume, not both.")
             if user_content_kwargs:
                 raise ValueError(
-                    "deep_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
+                    "langchain_deep_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
                 )
             rendered_user: str | None = None
         else:
@@ -275,68 +307,91 @@ class DeepAgent(Agent):
         # Wrap the schema ONCE and bind that same strategy into both the graph and the
         # projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
-        agent = await self._resolve_and_build(
-            tools=resolved_tools,
-            subagents=internal_subagents,
-            skills=skills,
-            inline_skills=coerced_inline_skills or None,
-            system_message=rendered_system,
-            response_format=strategy,
-            interrupt_on=interrupt_on,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            store_provider=store_provider,
-            llm_kwargs=llm_kwargs,
-        )
-        config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-        if resume is not None:
-            agent_input: Any = Command(resume=resume)
-        else:
-            # The resume/user guard above makes rendered_user a str on this branch.
-            assert rendered_user is not None
-            agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
 
-        # The run face returns the park RECEIPT to its caller and resumes out of band, so it
-        # binds the resume continuation: an async ask_user this run drives parks through it. No
-        # completion tool is bound here, so a resumed run's final text is delivered nowhere —
-        # its side effects are the product; a caller needing the answer must invoke through a
-        # completion-bound door. A run carrying live tools, a non-durable checkpoint, or an
-        # unconfigured park index is not park-capable — build_park_identity returns None and the
-        # async ask refuses loudly pre-persist.
-        park = build_park_identity(
-            agent_name=self.tool_name,
-            config=config,
-            checkpoint_provider=checkpoint_provider,
-            has_live_tools=bool(tools),
-            rebuild_kwargs=self._rebuild_kwargs(
-                tool_names=tool_names,
-                subagents=subagents,
-                skills=skills,
-                inline_skills=coerced_inline_skills,
-                rendered_system=rendered_system,
-                interrupt_on=interrupt_on,
-                response_format=response_format,
-                llm_provider=llm_provider,
-                store_provider=store_provider,
-                llm_kwargs=llm_kwargs,
-                langgraph_config=langgraph_config,
-            ),
-            recursion_limit=recursion_limit,
-            bind=True,
-        )
-        with park_continuation(park):
-            return await self._drain(
-                self._astream_built(
-                    agent,
-                    agent_input,
-                    config,
-                    interrupt_on,
-                    response_format=response_format,
-                    structured_strategy=strategy,
-                    park=park,
-                ),
-                response_format=response_format,
-            )
+        # HARD sandbox dependency (§B3.7): the scratch backend is durable, so a run requires a
+        # provider — acquire the session BEFORE the graph compiles (the backend needs it), a
+        # loud SandboxUnavailableError on a box with none. A threaded run reattaches its durable
+        # volume by workspace_key; a tool-face run gets a fresh ephemeral one. The workspace lease
+        # wraps session-acquire + cred-materialize + drive as one guarded region (§B3.2), so two
+        # same-thread_id workers never each open a session on the shared volume (the lease-loser
+        # raises before any session/cred exists).
+        async with DeepAgentSession.leased(thread_id=thread_id) as drive:
+            suspended = False
+            try:
+                agent = await self._resolve_and_build(
+                    tools=resolved_tools,
+                    subagents=internal_subagents,
+                    skills=skills,
+                    inline_skills=coerced_inline_skills or None,
+                    system_message=rendered_system,
+                    response_format=strategy,
+                    interrupt_on=interrupt_on,
+                    llm_provider=llm_provider,
+                    checkpoint_provider=checkpoint_provider,
+                    store_provider=store_provider,
+                    llm_kwargs=llm_kwargs,
+                    session=drive.session,
+                )
+                config = self._run_config(langgraph_config, thread_id, None, recursion_limit)
+                if resume is not None:
+                    agent_input: Any = Command(resume=resume)
+                else:
+                    # The resume/user guard above makes rendered_user a str on this branch.
+                    assert rendered_user is not None
+                    agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
+
+                # The run face returns the park RECEIPT to its caller and resumes out of band, so
+                # it binds the resume continuation: an async ask_user this run drives parks through
+                # it. No completion tool is bound here, so a resumed run's final text is delivered
+                # nowhere — its side effects are the product; a caller needing the answer must
+                # invoke through a completion-bound door. A run carrying live tools, a non-durable
+                # checkpoint, an ephemeral (tool-face) workspace, or an unconfigured park index is
+                # not park-capable — build_park_identity returns None and the async ask refuses
+                # loudly pre-persist. The park's retention bound is min(checkpoint, workspace): the
+                # paused graph lives only as long as BOTH stores hold it (§B3.1).
+                park = build_park_identity(
+                    agent_name=self.tool_name,
+                    config=config,
+                    checkpoint_provider=checkpoint_provider,
+                    has_live_tools=bool(tools),
+                    rebuild_kwargs=self._rebuild_kwargs(
+                        tool_names=tool_names,
+                        subagents=subagents,
+                        skills=skills,
+                        inline_skills=coerced_inline_skills,
+                        rendered_system=rendered_system,
+                        interrupt_on=interrupt_on,
+                        response_format=response_format,
+                        llm_provider=llm_provider,
+                        store_provider=store_provider,
+                        llm_kwargs=llm_kwargs,
+                        langgraph_config=langgraph_config,
+                        workspace_key=drive.workspace_key,
+                    ),
+                    recursion_limit=recursion_limit,
+                    bind=True,
+                    extra_retention_horizon=drive.workspace_retention_horizon,
+                )
+                with park_continuation(park):
+                    result = await self._drain(
+                        self._astream_built(
+                            agent,
+                            agent_input,
+                            config,
+                            interrupt_on,
+                            response_format=response_format,
+                            structured_strategy=strategy,
+                            park=park,
+                        ),
+                        response_format=response_format,
+                    )
+                # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
+                # stays for the door-less expiry resume (its own terminal exit scrubs it, §B4).
+                suspended = _is_suspended_receipt(result)
+                return result
+            finally:
+                if not suspended:
+                    await drive.scrub_credentials()
 
     async def append_thread_messages(
         self,
@@ -359,11 +414,18 @@ class DeepAgent(Agent):
         agent compiles the SAME way a run does (over the resolved checkpointer and
         store) but with no tools or sub-agents — the checkpoint write is
         tool-independent — and no model call is made.
+
+        This path acquires NO sandbox session (``session=None`` → the non-sandbox
+        ``StateBackend`` default): it does no file work and makes no model call, so a
+        deployment can record manual-mode history without a live sandbox — the sandbox hard
+        dependency is on the run/astream drive only (§B3.5), never here.
         """
         converted = to_thread_messages(messages)
-        reject_blank_memory_keys("deep_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None)
+        reject_blank_memory_keys(
+            "langchain_deep_agent.append_thread_messages", thread_id=thread_id, resume_checkpoint_id=None
+        )
         config = build_run_config(langgraph_config, thread_id)
-        require_thread_id("deep_agent.append_thread_messages", config)
+        require_thread_id("langchain_deep_agent.append_thread_messages", config)
         agent = await self._resolve_and_build(
             tools=[],
             subagents=[],
@@ -376,6 +438,9 @@ class DeepAgent(Agent):
             checkpoint_provider=checkpoint_provider,
             store_provider=store_provider,
             llm_kwargs=llm_kwargs,
+            # No sandbox session — the non-sandbox StateBackend default; a checkpoint-only write
+            # does no file work and requires no live sandbox (§B3.5).
+            session=None,
         )
         await awrite_thread_messages(agent, config, converted)
 
@@ -450,18 +515,23 @@ class DeepAgent(Agent):
         ``strategy`` and ``system_content_kwargs`` are not honored here; each raises.
         """
         reject_unhonored(
-            "deep_agent.astream",
-            {"presets": presets, "strategy": strategy, "system_content_kwargs": system_content_kwargs},
+            "langchain_deep_agent.astream",
+            {
+                "presets": presets,
+                "strategy": strategy,
+                "system_content_kwargs": system_content_kwargs,
+                "resume_checkpoint_id": resume_checkpoint_id,
+            },
             _UNHONORED_REASONS,
             collection_params=_UNHONORED_COLLECTION_PARAMS,
         )
-        reject_blank_memory_keys("deep_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id)
-        reject_untitled_response_format("deep_agent", response_format)
+        reject_blank_memory_keys("langchain_deep_agent.astream", thread_id=thread_id, resume_checkpoint_id=None)
+        reject_untitled_response_format("langchain_deep_agent", response_format)
         if (user_message is None) == (resume is None):
-            raise ValueError("deep_agent.astream requires exactly one of user_message or resume")
+            raise ValueError("langchain_deep_agent.astream requires exactly one of user_message or resume")
         if resume is not None and user_content_kwargs:
             raise ValueError(
-                "deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
+                "langchain_deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
             )
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
@@ -470,89 +540,106 @@ class DeepAgent(Agent):
         # Wrap the schema ONCE and bind that same strategy into both the graph and the
         # projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
-        agent, config = await self._build_agent(
-            tools=[*tools, *client_tools],
-            subagents=internal_subagents,
-            skills=skills,
-            inline_skills=coerced_inline_skills or None,
-            system_message=system_message,
-            response_format=strategy,
-            interrupt_on=interrupt_on,
-            thread_id=thread_id,
-            resume_checkpoint_id=resume_checkpoint_id,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            store_provider=store_provider,
-            llm_kwargs=llm_kwargs,
-            recursion_limit=recursion_limit,
-            langgraph_config=langgraph_config,
-        )
-        if resume is not None:
-            agent_input: Any = Command(resume=resume)
-        else:
-            # The exactly-one-of guard above makes user_message non-None here.
-            assert user_message is not None
-            agent_input = build_agent_input(user_message, user_content_kwargs=user_content_kwargs)
 
-        # The streaming face returns its stream to a caller that cannot receive a late
-        # answer, so it binds a resume path — and lets an async ask park — ONLY when a
-        # completion tool is bound in context (the conversation turn binds one to deliver
-        # the resumed answer). The completion tool is stored on the park entry and fired
-        # with the final answer on a clean terminal drive. A run carrying live tools or
-        # neutral (live) subagents is not rebuildable, so it never parks; with no
-        # completion bound, an async ask refuses loudly pre-persist.
-        completion_tool = get_park_completion_tool()
-        park: ParkIdentity | None = None
-        park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
-        if completion_tool is not None and park_rebuildable:
-            park = build_park_identity(
-                agent_name=self.tool_name,
-                config=config,
-                checkpoint_provider=checkpoint_provider,
-                has_live_tools=bool(tools),
-                rebuild_kwargs=self._rebuild_kwargs(
-                    tool_names=tool_names,
-                    subagents=[s for s in (subagents or []) if isinstance(s, DeepSubAgentSpec)],
+        # HARD sandbox dependency (§B3.7): acquire the durable session BEFORE compile and thread
+        # it into the backend, a loud SandboxUnavailableError on a box with none. The workspace
+        # lease wraps session-acquire + cred-materialize + drive as one guarded region so threaded
+        # turns serialize across workers (§B3.2) and the lease-loser never opens a leaked session; a
+        # tool-face run takes none.
+        async with DeepAgentSession.leased(thread_id=thread_id) as drive:
+            saw_structured = False
+            saw_interrupt = False
+            saw_suspended = False
+            try:
+                agent, config = await self._build_agent(
+                    tools=[*tools, *client_tools],
+                    subagents=internal_subagents,
                     skills=skills,
-                    inline_skills=coerced_inline_skills,
-                    rendered_system=system_message,
+                    inline_skills=coerced_inline_skills or None,
+                    system_message=system_message,
+                    response_format=strategy,
                     interrupt_on=interrupt_on,
-                    response_format=response_format,
+                    thread_id=thread_id,
+                    resume_checkpoint_id=None,
                     llm_provider=llm_provider,
+                    checkpoint_provider=checkpoint_provider,
                     store_provider=store_provider,
                     llm_kwargs=llm_kwargs,
+                    recursion_limit=recursion_limit,
                     langgraph_config=langgraph_config,
-                ),
-                recursion_limit=recursion_limit,
-                completion_tool=completion_tool,
-                bind=True,
-            )
+                    session=drive.session,
+                )
+                if resume is not None:
+                    agent_input: Any = Command(resume=resume)
+                else:
+                    # The exactly-one-of guard above makes user_message non-None here.
+                    assert user_message is not None
+                    agent_input = build_agent_input(user_message, user_content_kwargs=user_content_kwargs)
 
-        saw_structured = False
-        saw_interrupt = False
-        saw_suspended = False
-        with park_continuation(park):
-            async for event in self._astream_built(
-                agent,
-                agent_input,
-                config,
-                interrupt_on,
-                response_format=response_format,
-                structured_strategy=strategy,
-                park=park,
-            ):
-                if isinstance(event, StructuredFinal):
-                    saw_structured = True
-                elif isinstance(event, InterruptFinal):
-                    saw_interrupt = True
-                elif isinstance(event, SuspendedFinal):
-                    saw_suspended = True
-                yield event
-        # A requested response_format that produced no StructuredFinal fails loudly.
-        # A pending interrupt OR an async park means the run paused rather than finished,
-        # so (as in _drain) the pause takes precedence and the raise is skipped.
-        if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
-            raise RuntimeError("agent run requested a response_format but produced no structured output")
+                # The streaming face returns its stream to a caller that cannot receive a late
+                # answer, so it binds a resume path — and lets an async ask park — ONLY when a
+                # completion tool is bound in context (the conversation turn binds one to deliver
+                # the resumed answer). The completion tool is stored on the park entry and fired
+                # with the final answer on a clean terminal drive. A run carrying live tools or
+                # neutral (live) subagents is not rebuildable, so it never parks; with no
+                # completion bound, an async ask refuses loudly pre-persist. The retention bound is
+                # min(checkpoint, workspace) (§B3.1).
+                completion_tool = get_park_completion_tool()
+                park: ParkIdentity | None = None
+                park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
+                if completion_tool is not None and park_rebuildable:
+                    park = build_park_identity(
+                        agent_name=self.tool_name,
+                        config=config,
+                        checkpoint_provider=checkpoint_provider,
+                        has_live_tools=bool(tools),
+                        rebuild_kwargs=self._rebuild_kwargs(
+                            tool_names=tool_names,
+                            subagents=[s for s in (subagents or []) if isinstance(s, DeepSubAgentSpec)],
+                            skills=skills,
+                            inline_skills=coerced_inline_skills,
+                            rendered_system=system_message,
+                            interrupt_on=interrupt_on,
+                            response_format=response_format,
+                            llm_provider=llm_provider,
+                            store_provider=store_provider,
+                            llm_kwargs=llm_kwargs,
+                            langgraph_config=langgraph_config,
+                            workspace_key=drive.workspace_key,
+                        ),
+                        recursion_limit=recursion_limit,
+                        completion_tool=completion_tool,
+                        bind=True,
+                        extra_retention_horizon=drive.workspace_retention_horizon,
+                    )
+
+                with park_continuation(park):
+                    async for event in self._astream_built(
+                        agent,
+                        agent_input,
+                        config,
+                        interrupt_on,
+                        response_format=response_format,
+                        structured_strategy=strategy,
+                        park=park,
+                    ):
+                        if isinstance(event, StructuredFinal):
+                            saw_structured = True
+                        elif isinstance(event, InterruptFinal):
+                            saw_interrupt = True
+                        elif isinstance(event, SuspendedFinal):
+                            saw_suspended = True
+                        yield event
+                # A requested response_format that produced no StructuredFinal fails loudly.
+                # A pending interrupt OR an async park means the run paused rather than finished,
+                # so (as in _drain) the pause takes precedence and the raise is skipped.
+                if response_format is not None and not saw_structured and not saw_interrupt and not saw_suspended:
+                    raise RuntimeError("agent run requested a response_format but produced no structured output")
+            finally:
+                # A park-suspend is still LIVE: keep the bearer file for the door-less expiry
+                # resume (its own terminal exit scrubs it, §B4); every other exit is terminal.
+                if not saw_suspended:
+                    await drive.scrub_credentials()
 
     async def _astream_built(
         self,
@@ -600,9 +687,15 @@ class DeepAgent(Agent):
         checkpoint_provider: str | None,
         store_provider: str | None,
         llm_kwargs: dict[str, Any] | None,
+        session: SandboxSession | None = None,
     ) -> Any:
         """Resolve the LLM / checkpointer / store from the registries and assemble
-        the compiled deep agent. The caller builds the run config separately."""
+        the compiled deep agent. The caller builds the run config separately.
+
+        ``session`` is the acquired durable sandbox session threaded through to the backend:
+        set on a run/astream drive (scratch on the workspace VOLUME via
+        ``SandboxSessionBackend``), ``None`` on the append path (the non-sandbox
+        ``StateBackend`` — a checkpoint-only write needs no session, §B3.5)."""
         provider = llm_provider or llm_provider_settings().llm
         llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
 
@@ -615,7 +708,7 @@ class DeepAgent(Agent):
             provider=st_provider, conn_string=llm_provider_settings().store_conn_string
         )
 
-        return await build_deep_agent(
+        return await build_langchain_deep_agent(
             llm=llm,
             store=store,
             checkpointer=checkpointer,
@@ -626,6 +719,7 @@ class DeepAgent(Agent):
             interrupt_on=interrupt_on,
             response_format=response_format,
             subagents=subagents or None,
+            session=session,
         )
 
     async def _build_agent(
@@ -646,6 +740,7 @@ class DeepAgent(Agent):
         llm_kwargs: dict[str, Any] | None,
         recursion_limit: int | None,
         langgraph_config: dict[str, Any] | None = None,
+        session: SandboxSession | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """Assemble the compiled deep agent and its run config for the streaming face.
 
@@ -653,7 +748,9 @@ class DeepAgent(Agent):
         the same one the invoke face uses. The recursion cap bounds the TOP-LEVEL
         graph ONLY: each task-tool subagent runs its own graph bound by deepagents at
         9999, so the effective step budget is MULTIPLICATIVE across nesting depth.
-        """
+
+        ``session`` is the acquired durable sandbox session the caller threads through to
+        the backend (``None`` leaves the non-sandbox ``StateBackend`` default)."""
         agent = await self._resolve_and_build(
             tools=tools,
             subagents=subagents,
@@ -666,6 +763,7 @@ class DeepAgent(Agent):
             checkpoint_provider=checkpoint_provider,
             store_provider=store_provider,
             llm_kwargs=llm_kwargs,
+            session=session,
         )
         config = self._run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
         return agent, config
@@ -684,16 +782,21 @@ class DeepAgent(Agent):
         store_provider: str | None,
         llm_kwargs: dict[str, Any] | None,
         langgraph_config: dict[str, Any] | None,
+        workspace_key: str,
     ) -> dict[str, Any]:
         """The JSON-serializable subset of a run's inputs that determines graph
         compilation — the identity a cross-worker resume recompiles the same graph from.
 
-        Every value is a ``DeepAgentInput`` field name (subagents/inline_skills dumped to
-        JSON, the system message already RENDERED so resume never re-renders differently),
-        so :meth:`aresume_park` reconstructs the run inputs with
-        ``ToolInput.model_validate``. The checkpoint provider is pinned separately by
-        :func:`~tai42_agents._internal.park.build_park_identity` (the resolved durable
-        one), so it is deliberately absent here."""
+        Every DeepAgentInput value is a ``DeepAgentInput`` field name (subagents/inline_skills
+        dumped to JSON, the system message already RENDERED so resume never re-renders
+        differently), so :meth:`aresume_park` reconstructs the run inputs with
+        ``ToolInput.model_validate``. The checkpoint provider and ``recursion_limit`` are pinned
+        separately by :func:`~tai42_agents._internal.park.build_park_identity`, so they are
+        deliberately absent here.
+
+        ``workspace_key`` is the engine extra a cross-worker resume needs to REATTACH THE SAME
+        durable volume (§B3.4); like ``recursion_limit`` it is NOT a ``DeepAgentInput`` field, so
+        :meth:`aresume_park` pops it out before the JSON inputs validate."""
         return {
             "tool_names": list(tool_names),
             "subagents": [spec.model_dump(mode="json") for spec in (subagents or [])],
@@ -706,6 +809,7 @@ class DeepAgent(Agent):
             "store_provider": store_provider,
             "llm_kwargs": llm_kwargs,
             "langgraph_config": langgraph_config,
+            "workspace_key": workspace_key,
         }
 
     async def aresume_park(
@@ -713,7 +817,6 @@ class DeepAgent(Agent):
         *,
         rebuild_kwargs: dict[str, Any],
         thread_id: str,
-        recursion_limit: int | None,
         resume_map: dict[str, dict[str, Any]],
     ) -> Any:
         """Rebuild the parked graph from its stored identity and resume its park interrupts BY
@@ -727,8 +830,19 @@ class DeepAgent(Agent):
         so the caller releases the drive lease and the reaper redelivers), then drives one
         ``Command(resume=resume_map)`` under the drive wrapper — a re-park re-persists a fresh
         index (carrying the completion tool the driver rebound) and returns the suspended
-        receipt, completion returns the final value."""
-        validated = DeepAgentInput.model_validate(rebuild_kwargs)
+        receipt, completion returns the final value.
+
+        The LangGraph ``recursion_limit`` and the ``workspace_key`` are engine extras carried
+        INSIDE ``rebuild_kwargs`` (the provider-free park identity holds no engine facts), popped
+        out here before the JSON inputs validate against ``DeepAgentInput``. The ``workspace_key``
+        REATTACHES THE SAME durable volume the park wrote (§B3.4), so a cross-worker resume drives
+        the same scratch tree. Resume is a turn like any other: it reacquires the session, takes
+        the shared workspace lease, and scrubs the bearer credential material on its own terminal
+        exit."""
+        rebuild = dict(rebuild_kwargs)
+        recursion_limit = rebuild.pop("recursion_limit", None)
+        workspace_key = rebuild.pop("workspace_key", None)
+        validated = DeepAgentInput.model_validate(rebuild)
         response_format = validated.response_format
         interrupt_on = validated.interrupt_on
         strategy = as_tool_strategy(response_format)
@@ -740,65 +854,80 @@ class DeepAgent(Agent):
         coerced_inline_skills = [
             s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (validated.inline_skills or [])
         ]
-        agent = await self._resolve_and_build(
-            tools=client_tools,
-            subagents=internal_subagents,
-            skills=validated.skills,
-            inline_skills=coerced_inline_skills or None,
-            system_message=validated.system_message or "",
-            response_format=strategy,
-            interrupt_on=interrupt_on,
-            llm_provider=validated.llm_provider,
-            checkpoint_provider=validated.checkpoint_provider,
-            store_provider=validated.store_provider,
-            llm_kwargs=validated.llm_kwargs,
-        )
-        config = self._run_config(validated.langgraph_config, thread_id, None, recursion_limit)
 
-        snapshot = await agent.aget_state(config, subgraphs=True)
-        pending_ids = {iid for iid, _ in _collect_pending_interrupts(snapshot)}
-        missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
-        if missing:
-            if pending_ids:
-                # The graph is still parked, but not on every interrupt this super-step resumes
-                # — a corrupted routing, or a graph that advanced past one. Raise.
-                raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
-            # No interrupt pending at all: the super-step already drove to a CLEAN TERMINAL, so
-            # this is an idempotent re-drive after a crash between the terminal drive and the
-            # index finalize. Re-produce the SAME terminal output from the persisted state —
-            # never re-invoke a resolved graph — so the completion handoff re-fires under its
-            # stable id and the delivery ledger dedupes it to one delivery.
-            if response_format is not None:
-                return extract_structured_output(snapshot.values, response_format)
-            return build_user_output(snapshot.values)
+        # Reattach the SAME durable volume by workspace_key and serialize this drive on the shared
+        # workspace lease, exactly like a fresh turn (§B3.4): the lease wraps session-acquire +
+        # cred-materialize + drive, so a concurrent resume for the same thread loses the lease
+        # before opening a second session on the volume.
+        async with DeepAgentSession.leased(thread_id=thread_id, workspace_key=workspace_key) as drive:
+            suspended = False
+            try:
+                agent = await self._resolve_and_build(
+                    tools=client_tools,
+                    subagents=internal_subagents,
+                    skills=validated.skills,
+                    inline_skills=coerced_inline_skills or None,
+                    system_message=validated.system_message or "",
+                    response_format=strategy,
+                    interrupt_on=interrupt_on,
+                    llm_provider=validated.llm_provider,
+                    checkpoint_provider=validated.checkpoint_provider,
+                    store_provider=validated.store_provider,
+                    llm_kwargs=validated.llm_kwargs,
+                    session=drive.session,
+                )
+                config = self._run_config(validated.langgraph_config, thread_id, None, recursion_limit)
 
-        # Bind again so a re-park on resume re-persists a fresh index (resume re-enters
-        # through the agent's own bound entrypoint); the completion tool the driver
-        # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
-        # park-capable by construction.
-        park = build_park_identity(
-            agent_name=self.tool_name,
-            config=config,
-            checkpoint_provider=validated.checkpoint_provider,
-            has_live_tools=False,
-            rebuild_kwargs=rebuild_kwargs,
-            recursion_limit=recursion_limit,
-            completion_tool=get_park_completion_tool(),
-            bind=True,
-        )
-        with park_continuation(park):
-            return await self._drain(
-                self._astream_built(
-                    agent,
-                    Command(resume=resume_map),
-                    config,
-                    interrupt_on,
-                    response_format=response_format,
-                    structured_strategy=strategy,
-                    park=park,
-                ),
-                response_format=response_format,
-            )
+                snapshot = await agent.aget_state(config, subgraphs=True)
+                pending_ids = {iid for iid, _ in _collect_pending_interrupts(snapshot)}
+                missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
+                if missing:
+                    if pending_ids:
+                        # The graph is still parked, but not on every interrupt this super-step
+                        # resumes — a corrupted routing, or a graph that advanced past one. Raise.
+                        raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
+                    # No interrupt pending at all: the super-step already drove to a CLEAN TERMINAL,
+                    # so this is an idempotent re-drive after a crash between the terminal drive and
+                    # the index finalize. Re-produce the SAME terminal output from the persisted
+                    # state — never re-invoke a resolved graph — so the completion handoff re-fires
+                    # under its stable id and the delivery ledger dedupes it to one delivery.
+                    if response_format is not None:
+                        return extract_structured_output(snapshot.values, response_format)
+                    return build_user_output(snapshot.values)
+
+                # Bind again so a re-park on resume re-persists a fresh index (resume re-enters
+                # through the agent's own bound entrypoint); the completion tool the driver
+                # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
+                # park-capable by construction. The retention bound is min(checkpoint, workspace).
+                park = build_park_identity(
+                    agent_name=self.tool_name,
+                    config=config,
+                    checkpoint_provider=validated.checkpoint_provider,
+                    has_live_tools=False,
+                    rebuild_kwargs=rebuild_kwargs,
+                    recursion_limit=recursion_limit,
+                    completion_tool=get_park_completion_tool(),
+                    bind=True,
+                    extra_retention_horizon=drive.workspace_retention_horizon,
+                )
+                with park_continuation(park):
+                    result = await self._drain(
+                        self._astream_built(
+                            agent,
+                            Command(resume=resume_map),
+                            config,
+                            interrupt_on,
+                            response_format=response_format,
+                            structured_strategy=strategy,
+                            park=park,
+                        ),
+                        response_format=response_format,
+                    )
+                suspended = _is_suspended_receipt(result)
+                return result
+            finally:
+                if not suspended:
+                    await drive.scrub_credentials()
 
     @staticmethod
     async def _pending_interrupts(agent: Any, config: dict[str, Any]) -> list[InterruptFinal]:

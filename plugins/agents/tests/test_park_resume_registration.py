@@ -9,9 +9,10 @@ Each case runs in a FRESH interpreter (a subprocess), because module import is c
 process-wide: once one test here imports a park-capable module, a later import in the same
 process re-runs nothing, so isolation is the only faithful way to prove "importing THIS
 module alone registers the tool". The child binds a stub app whose ``tools.tool`` records
-each bound name and RAISES on a duplicate — mirroring the skeleton's
-``on_duplicate="error"`` — so a double registration fails loudly rather than passing
-silently.
+each bound name and RAISES the FastMCP duplicate-bind error on a re-bind — mirroring the
+skeleton's ``on_duplicate="error"`` (a ``ValueError('Component already exists: ...')``) — so
+the idempotent ``register_agent_resume_tool`` catches exactly that on the second caller and
+the count still lands at exactly one binding.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ _REGISTERED = []
 
 
 class _StubAgents:
-    def agent(self, name, tags=None):
+    def agent(self, name, tags=None, meta=None):
         def decorator(cls):
             return cls
 
@@ -47,7 +48,7 @@ class _StubTools:
         def decorator(func):
             name = kwargs.get("name") or getattr(func, "__name__", None)
             if name in _REGISTERED:
-                raise RuntimeError("duplicate tool registration: " + repr(name))
+                raise ValueError("Component already exists: " + repr(name))
             _REGISTERED.append(name)
             return func
 
@@ -94,11 +95,11 @@ def test_importing_tools_agent_alone_registers_agent_resume() -> None:
     assert _resume_registrations(result) == 1
 
 
-def test_importing_deep_agent_alone_registers_agent_resume() -> None:
-    result = _import_in_fresh_interpreter("tai42_agents.deep_agent")
+def test_importing_langchain_deep_agent_alone_registers_agent_resume() -> None:
+    result = _import_in_fresh_interpreter("tai42_agents.langchain_deep_agent")
     assert _resume_registrations(result) == 1
 
 
 def test_importing_both_park_capable_agents_registers_agent_resume_exactly_once() -> None:
-    result = _import_in_fresh_interpreter("tai42_agents.tools_agent", "tai42_agents.deep_agent")
+    result = _import_in_fresh_interpreter("tai42_agents.tools_agent", "tai42_agents.langchain_deep_agent")
     assert _resume_registrations(result) == 1

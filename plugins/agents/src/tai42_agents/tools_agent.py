@@ -23,7 +23,7 @@ This agent wires no HITL approval interrupt (its ``langchain`` ``create_agent``
 runtime has no ``interrupt_on``), so the stream never contains an
 ``InterruptFinal``. It CAN park, though: an async ``ask_user`` a tool raises parks
 the run through the shared park middleware — the caller gets a suspended RECEIPT and
-the durable index resumes it by id out of band, exactly as ``deep_agent`` does. A park
+the durable index resumes it by id out of band, exactly as ``langchain_deep_agent`` does. A park
 is recorded only when the run is park-capable AND a resume path is bound: the ``run``
 face always binds one, and the ``astream`` face binds one only when a completion tool is
 bound in context (the conversation turn binds one to deliver the resumed answer). With
@@ -54,7 +54,13 @@ from tai42_agents._internal.base_tool_agent import (
     ainvoke_tools_agent,
 )
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
-from tai42_agents._internal.park import ParkIdentity, build_park_identity, finalize_drive, park_continuation
+from tai42_agents._internal.park import (
+    ParkIdentity,
+    build_park_identity,
+    finalize_drive,
+    park_continuation,
+    register_agent_resume_tool,
+)
 from tai42_agents._internal.park.driver import _collect_pending_interrupts
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
@@ -79,12 +85,14 @@ from tai42_agents._internal.stream_events import astream_tools_agent_events
 # so a caller-driven ``Command(resume=...)`` is honored (the park itself resumes out
 # of band through the ``agent_resume`` continuation).
 _UNHONORED_REASONS: dict[str, str] = {
-    "subagents": "sub-agent delegation is deep_agent's domain; this agent never exposes sub-agents as callable tools",
+    "subagents": (
+        "sub-agent delegation is langchain_deep_agent's domain; this agent never exposes sub-agents as callable tools"
+    ),
     "strategy": "it applies no composition strategy and will not silently ignore one",
-    "skills": "skill backends are deep_agent's domain; this agent loads none",
-    "inline_skills": "skill backends are deep_agent's domain; this agent loads none",
+    "skills": "skill backends are langchain_deep_agent's domain; this agent loads none",
+    "inline_skills": "skill backends are langchain_deep_agent's domain; this agent loads none",
     "interrupt_on": (
-        "HITL approval interrupts are deep_agent's domain; this agent's create_agent runtime wires none "
+        "HITL approval interrupts are langchain_deep_agent's domain; this agent's create_agent runtime wires none "
         "(an async ask_user parks instead, resumed by id)"
     ),
     "store_provider": "this agent wires no long-term store",
@@ -172,6 +180,13 @@ class ToolsAgentInput(BaseModel):
         """An empty dict carries no content-block keys — normalize {} to None so it
         reads as unset, matching the builders that treat {} as no mark."""
         return value or None
+
+
+# A parking agent must bind the hidden ``agent_resume`` continuation from its OWN
+# registration: the park package no longer binds it as a module-import side effect, so a box
+# loading this agent (even with no deep engine present) still resumes its async parks. The
+# call is per-epoch idempotent, so a combined box binds it exactly once.
+register_agent_resume_tool()
 
 
 @tai42_app.agents.agent("tools_agent", tags={"agents"})
@@ -265,10 +280,10 @@ class ToolsAgent(Agent):
         last user message; a key the provider does not know surfaces as a loud
         provider error rather than a silent drop. The ABC ``run`` parameters this
         agent's runtime cannot honor are rejected loudly rather than silently
-        dropped: ``subagents`` (sub-agent delegation is deep_agent's domain —
+        dropped: ``subagents`` (sub-agent delegation is langchain_deep_agent's domain —
         tools_agent never exposes them as callable tools), ``strategy`` (no
         composition strategy is applied), ``skills`` / ``inline_skills`` (skill
-        backends are deep_agent's domain), ``interrupt_on`` (no HITL approval
+        backends are langchain_deep_agent's domain), ``interrupt_on`` (no HITL approval
         interrupt is wired), and ``store_provider`` (no long-term store is wired).
 
         Provide exactly one of ``user_message`` (a fresh turn) or ``resume``
@@ -426,8 +441,8 @@ class ToolsAgent(Agent):
         error rather than a silent drop. The ABC parameters this agent's
         runtime cannot honor are rejected loudly here too — in parity with
         :meth:`run` — rather than silently dropped: ``subagents`` (delegation is
-        deep_agent's domain), ``strategy`` (no composition strategy is applied),
-        ``skills`` / ``inline_skills`` (skill backends are deep_agent's domain),
+        langchain_deep_agent's domain), ``strategy`` (no composition strategy is applied),
+        ``skills`` / ``inline_skills`` (skill backends are langchain_deep_agent's domain),
         ``interrupt_on`` (no HITL approval interrupt is wired), and
         ``store_provider`` (no long-term store is wired).
 
@@ -620,7 +635,6 @@ class ToolsAgent(Agent):
         *,
         rebuild_kwargs: dict[str, Any],
         thread_id: str,
-        recursion_limit: int | None,
         resume_map: dict[str, dict[str, Any]],
     ) -> Any:
         """Rebuild the parked graph from its stored identity and resume its park interrupts BY
@@ -634,8 +648,14 @@ class ToolsAgent(Agent):
         so the caller releases the drive lease and the reaper redelivers), then drives one
         ``Command(resume=resume_map)`` under the drive wrapper — a re-park re-persists a fresh
         index (carrying the completion tool the driver rebound) and returns the suspended
-        receipt, completion returns the final value."""
-        validated = ToolsAgentInput.model_validate(rebuild_kwargs)
+        receipt, completion returns the final value.
+
+        The LangGraph ``recursion_limit`` is an engine extra carried INSIDE ``rebuild_kwargs``
+        (the provider-free park identity holds no engine facts), popped out here before the
+        JSON inputs validate against ``ToolsAgentInput``."""
+        rebuild = dict(rebuild_kwargs)
+        recursion_limit = rebuild.pop("recursion_limit", None)
+        validated = ToolsAgentInput.model_validate(rebuild)
         resolved_tools = await resolve_tools(
             tai42_app.tools, list(validated.tool_names), [], list(validated.presets or [])
         )

@@ -36,7 +36,7 @@ from tai42_agents._internal.usage import AgentInvokeResult, aggregate_usage
 
 # One shared, stateless park hook leading the tools-agent stack, so an async
 # ``ask_user`` parked inside a run interrupts its own graph and resumes by id. The
-# SAME hook class deep_agent mounts (the park driver is shared, not forked per agent
+# SAME hook class langchain_deep_agent mounts (the park driver is shared, not forked per agent
 # type); a fresh stateless instance here keeps the tools-agent import graph a leaf.
 _async_park_middleware = AsyncParkMiddleware()
 

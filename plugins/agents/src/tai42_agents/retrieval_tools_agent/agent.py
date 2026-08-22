@@ -411,7 +411,7 @@ class RetrievalToolsAgent(Agent):
 # inputs / provider / message params go through ``_BUILD_PARAMS``, and
 # ``response_format`` is consumed by the finalization pass in ``astream``.
 _UNHONORED_REASONS: dict[str, str] = {
-    "subagents": "sub-agent delegation is deep_agent's domain; this agent never exposes sub-agents",
+    "subagents": "sub-agent delegation is langchain_deep_agent's domain; this agent never exposes sub-agents",
     "strategy": "it applies no composition strategy and will not silently ignore one",
     "skills": "it loads no skills backend",
     "inline_skills": "it loads no skills backend",

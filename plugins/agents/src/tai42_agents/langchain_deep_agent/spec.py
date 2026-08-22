@@ -3,7 +3,7 @@
 :class:`ResolvedSubAgentSpec` is the authoring shape: it names a provider (resolved
 through ``get_llm_async``) rather than a resolved model object, and carries live
 ``StructuredTool`` objects rather than tool names. The async resolution to a
-deepagents ``SubAgent`` dict happens in :mod:`tai42_agents.deep_agent.factory`.
+deepagents ``SubAgent`` dict happens in :mod:`tai42_agents.langchain_deep_agent.factory`.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Agent async ``ask_user`` park/resume over a REAL deep-agent graph.
 
-Every test drives a real ``build_deep_agent`` graph with a scripted fake chat model and
+Every test drives a real ``build_langchain_deep_agent`` graph with a scripted fake chat model and
 an in-memory checkpointer/store, so the ``AsyncParkMiddleware`` before-model hook, the
 messages reducer, and the interrupt/resume routing land exactly as a live run — no LLM,
 no network. Async is driven with ``asyncio.run`` (the repo does not use pytest-asyncio).
@@ -29,7 +29,7 @@ from tai42_contract.interactions import EXPIRY_ANSWER, suspended_interaction_mar
 
 from tai42_agents._internal.park.driver import _collect_pending_interrupts, _park_interactions
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
-from tai42_agents.deep_agent.factory import build_deep_agent
+from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -78,7 +78,7 @@ class _CountingAsk:
 
 def _build(model: BaseChatModel, tools: list[StructuredTool], **kwargs: Any) -> Any:
     return asyncio.run(
-        build_deep_agent(
+        build_langchain_deep_agent(
             llm=model,
             store=InMemoryStore(),
             checkpointer=InMemorySaver(),
@@ -232,7 +232,7 @@ def test_park_middleware_is_the_leading_before_model_hook() -> None:
 def test_park_inside_a_subagent_propagates_and_resumes_by_id() -> None:
     # Probe gate 1: an async ask parked inside a subagent stack surfaces its interrupt id
     # (namespaced through the parent task tool) and resumes back into the subgraph by id.
-    from tai42_agents.deep_agent.spec import ResolvedSubAgentSpec
+    from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
     ask = _CountingAsk("i-sub")
     subagent = ResolvedSubAgentSpec(
@@ -274,7 +274,7 @@ def test_two_parallel_subagent_parks_surface_and_resume_by_id() -> None:
     # Two parallel task-tool subagents that each async-ask surface TWO DISTINCT park interrupts
     # in ONE parent super-step (empirically reachable). langgraph's resume map feeds each
     # interrupt its own answers in one resume, and both subagents finalize back to the parent.
-    from tai42_agents.deep_agent.spec import ResolvedSubAgentSpec
+    from tai42_agents.langchain_deep_agent.spec import ResolvedSubAgentSpec
 
     calls = {"n": 0}
     seq = ["iA", "iB"]

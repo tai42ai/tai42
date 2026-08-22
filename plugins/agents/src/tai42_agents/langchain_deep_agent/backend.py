@@ -2,9 +2,13 @@
 
 Serves two needs through one interface:
 
-* **Skills** — read-only ``SKILL.md`` artifacts, read live from the app's template
-  provider (``tai42_app.storage.resource_manager``) and managed through the
-  template tools (``upload_template`` / ``list_resources``).
+* **Skills** — read-only skill BUNDLES, read live from the app's template provider
+  (``tai42_app.storage.resource_manager``) and managed through the template tools
+  (``upload_template`` / ``list_resources``). A skill is a directory
+  ``skills/<name>/`` holding a ``SKILL.md`` plus any bundled reference files and
+  scripts; the backend serves the WHOLE tree (per the Agent Skills spec, which lets
+  a bundle reference files and scripts), so ``ls``/``read``/``glob``/``grep`` over
+  the skills mount see every bundled file, not only ``SKILL.md``.
 * **Scratch filesystem** — the files the agent writes while it works. These live in
   per-thread agent state so concurrent sessions never clobber each other.
 
@@ -119,33 +123,64 @@ def _glob_skill_paths(paths: Iterable[str], pattern: str, path: str) -> list[str
 class TemplateSkillsBackend(BackendProtocol):
     """Read-only deepagents backend backed by the app's template provider.
 
-    Serves ``SKILL.md`` artifacts live from ``tai42_app.storage.resource_manager``
-    with the provider's raw loader (``fetch_template``), never jinja-rendered. Every
+    Serves whole skill bundles live from ``tai42_app.storage.resource_manager``
+    with the provider's raw loader (``fetch_template``), never jinja-rendered:
+    every key under ``skills/<name>/`` (``SKILL.md`` plus bundled reference files
+    and scripts) is listable, readable, globbable, and greppable. Every
     write/edit/upload path raises loudly; skills are managed through the
     ``upload_template`` / ``list_resources`` tools.
     """
 
     async def _list_skill_keys(self) -> list[str]:
-        """Return all ``skills/<name>/SKILL.md`` keys in the template provider."""
+        """Return every served skill-bundle key under ``skills/`` in the provider.
+
+        Serving is not ``SKILL.md``-gated: a bundle's reference files and scripts
+        are served under their real keys too (a file under a directory that lacks
+        ``SKILL.md`` is still listed, never silently dropped). The narrower
+        "which directories are skills" question stays ``SKILL.md``-gated and is
+        answered where it is asked (:meth:`als`'s skill-directory self entry).
+        """
         keys = await tai42_app.storage.resource_manager.list_resources()
-        return [key for key in keys if key.startswith(_SKILLS_KEY_PREFIX) and key.endswith("/" + _SKILL_FILENAME)]
+        return [key for key in keys if key.startswith(_SKILLS_KEY_PREFIX) and len(key) > len(_SKILLS_KEY_PREFIX)]
 
     async def als(self, path: str) -> LsResult:
-        """List skill directories visible under ``path``.
+        """List the DIRECT children of ``path`` across the served skill bundles.
 
-        ``path`` is rooted at the skills mount (e.g. ``"/"`` for the whole
-        skills tree, or ``"/jq/"`` for one skill). Returns one ``is_dir`` entry
-        per skill directory whose ``SKILL.md`` exists at or below ``path``; the
-        skills middleware then downloads ``<dir>/SKILL.md`` for each.
+        ``path`` is rooted at the skills mount (e.g. ``"/"`` for the whole skills
+        tree, ``"/jq/"`` for one skill, or ``"/jq/references/"`` for a subdir).
+        Each direct child is emitted once: a file key as a file entry, and an
+        intermediate directory (``references/``, ``scripts/``) as an ``is_dir``
+        entry SYNTHESIZED from the flat key set (a directory exists iff some key
+        extends ``path`` through it).
+
+        In addition, when ``path`` is itself a skill directory (its ``SKILL.md``
+        is served) the directory's OWN entry is emitted alongside its children.
+        The skills middleware discovers a per-skill source ``/skills/<name>/`` by
+        calling ``als`` on it and downloading ``<is_dir>/SKILL.md`` for each
+        ``is_dir`` entry it returns; the self entry is what keeps that source
+        discoverable, while extra bundle subdirs it also finds carry no
+        ``SKILL.md`` and are harmlessly skipped (an expected ``file_not_found``).
         """
         normalized = path if path.endswith("/") else path + "/"
-        entries: list[FileInfo] = []
-        for key in await self._list_skill_keys():
-            skill_dir = _key_to_backend_path(key)[: -len(_SKILL_FILENAME)]
-            if skill_dir.startswith(normalized):
-                entries.append(FileInfo(path=skill_dir, is_dir=True, size=0, modified_at=""))
-        entries.sort(key=lambda info: info["path"])
-        return LsResult(entries=entries)
+        key_set = set(await self._list_skill_keys())
+        entries: dict[str, FileInfo] = {}
+        for key in key_set:
+            backend_path = _key_to_backend_path(key)
+            if not backend_path.startswith(normalized):
+                continue
+            head, sep, _rest = backend_path[len(normalized) :].partition("/")
+            if not head:
+                continue
+            if sep:
+                dir_path = normalized + head + "/"
+                entries[dir_path] = FileInfo(path=dir_path, is_dir=True, size=0, modified_at="")
+            else:
+                file_path = normalized + head
+                entries[file_path] = FileInfo(path=file_path, is_dir=False, size=0, modified_at="")
+        if normalized != "/" and _backend_path_to_key(normalized + _SKILL_FILENAME) in key_set:
+            entries[normalized] = FileInfo(path=normalized, is_dir=True, size=0, modified_at="")
+        ordered = sorted(entries.values(), key=lambda info: info["path"])
+        return LsResult(entries=ordered)
 
     def ls(self, path: str) -> LsResult:
         """Async-only; use :meth:`als`.
@@ -200,7 +235,11 @@ class TemplateSkillsBackend(BackendProtocol):
         raise NotImplementedError("TemplateSkillsBackend is async-only; use als/aread/adownload_files.")
 
     async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
-        """Find skill ``SKILL.md`` files matching a glob pattern."""
+        """Find served skill-bundle files matching a glob pattern.
+
+        Globs over EVERY served file key (``SKILL.md`` plus bundled reference
+        files and scripts), not only ``SKILL.md``.
+        """
         skill_paths = [_key_to_backend_path(key) for key in await self._list_skill_keys()]
         matches = [
             FileInfo(path=p, is_dir=False, size=0, modified_at="")
@@ -297,23 +336,27 @@ class InlineSkillsBackend(BackendProtocol):
         return f"/{name}/"
 
     async def als(self, path: str) -> LsResult:
-        """List inline and template skill directories visible under ``path``.
+        """List the direct children of ``path`` across inline and template skills.
 
-        Returns one ``is_dir`` entry per skill directory at or below ``path``,
-        merging inline skill names with the template provider's skills. An inline
-        name shadows a template skill of the same name.
+        Delegates to the template backend's direct-children listing (files,
+        synthesized bundle subdirs, and the skill-directory self entry) and
+        overlays each inline skill's ``is_dir`` directory entry at or below
+        ``path`` — an inline skill is a single ``SKILL.md`` body, so it
+        contributes only its directory (the middleware discovers it by
+        downloading ``<dir>/SKILL.md``, which the inline overlay serves). An
+        inline name shadows a template skill of the same name.
         """
         normalized = path if path.endswith("/") else path + "/"
-        dirs: dict[str, FileInfo] = {}
+        entries: dict[str, FileInfo] = {}
         template_result = await self._template.als(path)
         for entry in template_result.entries or []:
-            dirs[entry["path"]] = entry
+            entries[entry["path"]] = entry
         for name in self._inline:
             skill_dir = self._inline_skill_dir(name)
             if skill_dir.startswith(normalized):
-                dirs[skill_dir] = FileInfo(path=skill_dir, is_dir=True, size=0, modified_at="")
-        entries = sorted(dirs.values(), key=lambda info: info["path"])
-        return LsResult(entries=entries)
+                entries[skill_dir] = FileInfo(path=skill_dir, is_dir=True, size=0, modified_at="")
+        ordered = sorted(entries.values(), key=lambda info: info["path"])
+        return LsResult(entries=ordered)
 
     def ls(self, path: str) -> LsResult:
         """Async-only; use :meth:`als`."""
@@ -372,7 +415,11 @@ class InlineSkillsBackend(BackendProtocol):
         raise NotImplementedError("InlineSkillsBackend is async-only; use als/aread/adownload_files.")
 
     async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
-        """Find inline and template skill ``SKILL.md`` files matching a glob."""
+        """Find inline and template skill files matching a glob.
+
+        Unions the template backend's served files (whole bundles) with each
+        inline skill's ``SKILL.md`` path.
+        """
         template_matches = await self._template.aglob(pattern, path)
         matched_paths = {match["path"] for match in template_matches.matches or []}
         inline_paths = [self._inline_skill_md_path(name) for name in self._inline]
