@@ -25,6 +25,7 @@ import contextlib
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
@@ -67,7 +68,13 @@ SKIP_REASON = (
 requires_engine = pytest.mark.skipif(not TEST_HOST, reason=SKIP_REASON)
 
 
-def _shared_cert_settings() -> dict[str, str]:
+class _CertOverrides(TypedDict, total=False):
+    tls_cert_path: str
+    tls_key_path: str
+    tls_ca_path: str
+
+
+def _shared_cert_settings() -> _CertOverrides:
     """Point the host-run SUT at the mTLS client certs the ``sandbox-engine`` shares
     through the compose bind mount (``./.sandbox-certs`` -> ``/certs/client``).
 
@@ -80,10 +87,13 @@ def _shared_cert_settings() -> dict[str, str]:
     configured = os.environ.get("TAI_E2E_SANDBOX_CERT_DIR", "")
     cert_dir = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2] / ".sandbox-certs"
     cert_dir = cert_dir.resolve()
-    overrides: dict[str, str] = {}
-    for key, filename in (("tls_cert_path", "cert.pem"), ("tls_key_path", "key.pem"), ("tls_ca_path", "ca.pem")):
-        if f"SANDBOX_DOCKER_{key.upper()}" not in os.environ:
-            overrides[key] = str(cert_dir / filename)
+    overrides: _CertOverrides = {}
+    if "SANDBOX_DOCKER_TLS_CERT_PATH" not in os.environ:
+        overrides["tls_cert_path"] = str(cert_dir / "cert.pem")
+    if "SANDBOX_DOCKER_TLS_KEY_PATH" not in os.environ:
+        overrides["tls_key_path"] = str(cert_dir / "key.pem")
+    if "SANDBOX_DOCKER_TLS_CA_PATH" not in os.environ:
+        overrides["tls_ca_path"] = str(cert_dir / "ca.pem")
     return overrides
 
 
