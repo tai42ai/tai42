@@ -24,7 +24,9 @@ provides:
   - kind: sandbox
     name: docker
     module: tai42_sandbox_docker.provider
-    description: Docker sandbox provider — per-session containers on a remote engine over the Docker Engine API.
+    description: >-
+      Docker sandbox provider — per-session containers on a remote engine over
+      the Docker Engine API.
     tags:
       - sandbox
       - docker
