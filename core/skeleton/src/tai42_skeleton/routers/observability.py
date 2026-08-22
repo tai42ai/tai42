@@ -43,7 +43,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.monitoring import (
     MonitoringReadNotSupportedError,
-    MonitoringTrace,
+    MonitoringTraceSummary,
     TraceNotFoundError,
 )
 
@@ -79,11 +79,9 @@ _CSV_COLUMNS = [
     "traceId",
     "createdAt",
     "status",
-    "fetchError",
     "cost",
     "latencyMs",
     "totalTokens",
-    "model",
     "inputPreview",
     "outputPreview",
 ]
@@ -226,10 +224,10 @@ async def export_runs(request: Request) -> Response:
     reader = get_monitoring().reader
     # Drain pages of ``PAGE_CHUNK`` (the reader rejects oversized pages) until the
     # cap is exceeded or a short/empty page signals the end.
-    traces: list[MonitoringTrace] = []
+    summaries: list[MonitoringTraceSummary] = []
     page = 1
     try:
-        while len(traces) <= _EXPORT_CAP:
+        while len(summaries) <= _EXPORT_CAP:
             batch = await reader.list_traces(
                 from_timestamp=t0,
                 to_timestamp=t1,
@@ -238,15 +236,15 @@ async def export_runs(request: Request) -> Response:
                 filter=run_filter,
                 order_by=order_by,
             )
-            traces.extend(batch)
+            summaries.extend(batch)
             if len(batch) < PAGE_CHUNK:
                 break
             page += 1
     except MonitoringReadNotSupportedError as exc:
         return _not_supported(exc)
 
-    truncated = len(traces) > _EXPORT_CAP
-    rows = [derive_run(t) for t in traces[:_EXPORT_CAP]]
+    truncated = len(summaries) > _EXPORT_CAP
+    rows = [derive_run(t) for t in summaries[:_EXPORT_CAP]]
     if truncated:
         logger.warning("runs export truncated at %d rows", _EXPORT_CAP)
 

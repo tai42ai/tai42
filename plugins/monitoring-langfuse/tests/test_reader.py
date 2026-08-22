@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -244,18 +244,79 @@ async def test_get_trace_transient_error_propagates(manager, mock_client):
         await LangfuseReader(manager).get_trace("t")
 
 
-async def test_list_traces_lists_then_hydrates(manager, mock_client):
-    mock_client.api.trace.list.return_value = SimpleNamespace(data=[SimpleNamespace(id="a"), SimpleNamespace(id="b")])
+def _trace_row(**kw):
+    """A trace.list summary row (``TraceWithDetails``), snake_case as the SDK model
+    exposes it: carries the io + metrics field groups, no observation bodies."""
+    base = {
+        "id": "t1",
+        "timestamp": datetime(2026, 1, 1, tzinfo=UTC),
+        "name": None,
+        "tags": [],
+        "metadata": None,
+        "input": None,
+        "output": None,
+        "latency": None,
+        "total_cost": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
 
-    def _get(tid, request_options=None):
-        return SimpleNamespace(model_dump=lambda: {"id": tid, "observations": []})
 
-    mock_client.api.trace.get.side_effect = _get
+def _list_returns(mock_client, rows, *, total_pages=1):
+    mock_client.api.trace.list.return_value = SimpleNamespace(data=rows, meta=SimpleNamespace(total_pages=total_pages))
+
+
+def _route_metrics(mock_client, *, ranking=None, tokens=None):
+    """Route ``metrics_v1.metrics``: the ranking query (carries ``orderBy``) versus
+    the token join query (``totalTokens``, no ``orderBy``)."""
+    ranking = ranking if ranking is not None else []
+    tokens = tokens if tokens is not None else {}
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=list(ranking))
+        return SimpleNamespace(data=[{"id": k, "sum_totalTokens": v} for k, v in tokens.items()])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+
+
+def _errors_for(mock_client, trace_ids=(), *, total_pages=1):
+    obs = [_obs(id=f"err-{i}", trace_id=tid, level="ERROR") for i, tid in enumerate(trace_ids)]
+    mock_client.api.legacy.observations_v1.get_many.return_value = _obs_page(obs, total_pages=total_pages)
+
+
+async def test_list_traces_summarizes_without_bodies(manager, mock_client):
     now = datetime(2026, 1, 1, tzinfo=UTC)
+    _list_returns(
+        mock_client,
+        [
+            _trace_row(id="a", latency=1.5, total_cost=0.25, input="hi", output={"r": 1}, tags=["run:7"]),
+            _trace_row(id="b", latency=None, total_cost=0.0),
+        ],
+    )
+    _route_metrics(mock_client, tokens={"a": 42})
+    _errors_for(mock_client, ["b"])
+
     result = await LangfuseReader(manager).list_traces(
         from_timestamp=now, limit=5, page=2, filter=MonitoringFilter(tags=["x"])
     )
-    assert {t.id for t in result} == {"a", "b"}
+    assert [t.id for t in result] == ["a", "b"]
+    a, b = result
+    assert a.latency_ms == 1500.0
+    assert a.total_cost == 0.25
+    assert a.total_tokens == 42
+    assert a.input_preview == "hi"
+    assert a.output_preview == {"r": 1}
+    assert a.tags == ["run:7"]
+    assert a.status == "ok"
+    # b carries an error observation and no usage row.
+    assert b.status == "error"
+    assert b.total_tokens is None
+    assert b.latency_ms is None
+
+    # A trace body is NEVER fetched while listing — get_trace is the only body door.
+    mock_client.api.trace.get.assert_not_called()
 
     # The bounded-history guard lives or dies on from_timestamp reaching
     # trace.list — an unbounded scan is what times out. Assert the forwarding.
@@ -265,30 +326,147 @@ async def test_list_traces_lists_then_hydrates(manager, mock_client):
     assert list_kwargs["limit"] == 5
     assert list_kwargs["page"] == 2
     assert list_kwargs["order_by"] == "timestamp.desc"
+    assert list_kwargs["fields"] == "core,io,metrics"
     # every read is scoped to the active source via environment
     assert list_kwargs["environment"] == "tai"
 
 
-async def test_list_traces_marks_unfetchable(manager, mock_client):
-    # NATIVE path: a body that fails to hydrate is kept in place with
-    # fetch_error set, not dropped — count unchanged, order preserved.
-    mock_client.api.trace.list.return_value = SimpleNamespace(
-        data=[SimpleNamespace(id="ok"), SimpleNamespace(id="bad")]
-    )
-
-    def _get(tid, request_options=None):
-        if tid == "bad":
-            raise ConnectionError("boom")
-        return SimpleNamespace(model_dump=lambda: {"id": tid, "observations": []})
-
-    mock_client.api.trace.get.side_effect = _get
+async def test_list_traces_token_join_absent_is_none_not_zero(manager, mock_client):
+    _list_returns(mock_client, [_trace_row(id="a"), _trace_row(id="b")])
+    # only "a" has a usage row; "b" is absent from the metrics result.
+    _route_metrics(mock_client, tokens={"a": 7})
+    _errors_for(mock_client, [])
     result = await LangfuseReader(manager).list_traces()
-    assert [t.id for t in result] == ["ok", "bad"]
-    ok, bad = result
-    assert ok.fetch_error is None
-    assert bad.fetch_error
-    assert bad.total_cost is None
-    assert bad.observations == []
+    by_id = {t.id: t for t in result}
+    assert by_id["a"].total_tokens == 7
+    assert by_id["b"].total_tokens is None
+
+
+async def test_list_traces_page_is_at_most_three_calls(manager, mock_client):
+    _list_returns(mock_client, [_trace_row(id="a"), _trace_row(id="b")])
+    _route_metrics(mock_client, tokens={"a": 1, "b": 2})
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces()
+    # One list call, one token metrics call, one (single-page) observations call.
+    assert mock_client.api.trace.list.call_count == 1
+    assert mock_client.api.legacy.metrics_v1.metrics.call_count == 1
+    assert mock_client.api.legacy.observations_v1.get_many.call_count == 1
+    mock_client.api.trace.get.assert_not_called()
+
+
+async def test_list_traces_error_status_drains_all_observation_pages(manager, mock_client):
+    _list_returns(mock_client, [_trace_row(id="a"), _trace_row(id="b")])
+    _route_metrics(mock_client, tokens={})
+    page1 = _obs_page([_obs(id="e1", trace_id="a", level="ERROR")], page=1, total_pages=2)
+    page2 = _obs_page([_obs(id="e2", trace_id="b", level="ERROR")], page=2, total_pages=2)
+    mock_client.api.legacy.observations_v1.get_many.side_effect = [page1, page2]
+    result = await LangfuseReader(manager).list_traces()
+    assert {t.id: t.status for t in result} == {"a": "error", "b": "error"}
+    assert mock_client.api.legacy.observations_v1.get_many.call_count == 2
+
+
+async def test_list_traces_token_truncation_raises(manager, mock_client):
+    _list_returns(mock_client, [_trace_row(id="uncovered")])
+    # The token query hits the row cap yet the page id is absent from the result:
+    # the join cannot tell "no usage" from "truncated" — it must raise, not None.
+    from tai42_monitoring_langfuse.reader import _METRIC_ROW_LIMIT_MAX
+
+    def _call(query, request_options=None):
+        rows = [{"id": f"other-{i}", "sum_totalTokens": 1} for i in range(_METRIC_ROW_LIMIT_MAX)]
+        return SimpleNamespace(data=rows)
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces()
+
+
+async def test_list_traces_token_measure_unrecognised_raises(manager, mock_client):
+    # Rows come back but none carry a totalTokens-like measure key: the query
+    # shape is wrong — raise rather than report every trace as usage-less.
+    _list_returns(mock_client, [_trace_row(id="a")])
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=[])
+        return SimpleNamespace(data=[{"id": "a", "someOtherColumn": 5}])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces()
+
+
+async def test_list_traces_token_query_carries_page_filter(manager, mock_client):
+    # The token metrics population is scoped by the page's own filter, so a cap
+    # truncation reflects the filtered rows, not the whole window.
+    _list_returns(mock_client, [_trace_row(id="a", tags=["run:7"])])
+    captured: dict = {}
+
+    def _call(query, request_options=None):
+        q = json.loads(query)
+        if "orderBy" in q:
+            return SimpleNamespace(data=[])
+        captured["filters"] = q["filters"]
+        return SimpleNamespace(data=[{"id": "a", "sum_totalTokens": 5}])
+
+    mock_client.api.legacy.metrics_v1.metrics.side_effect = _call
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(tags=["run:7"]))
+    assert {"column": "tags", "operator": "any of", "value": ["run:7"], "type": "arrayOptions"} in captured["filters"]
+
+
+async def test_list_traces_error_window_reaches_now_for_in_flight_row(manager, mock_client):
+    # A row with no latency is in flight; the error window's upper bound must reach
+    # the present so a late error observation is still caught.
+    now = datetime.now(UTC)
+    _list_returns(mock_client, [_trace_row(id="a", timestamp=now - timedelta(hours=1), latency=None)])
+    _route_metrics(mock_client, tokens={"a": 1})
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces()
+    to_start = mock_client.api.legacy.observations_v1.get_many.call_args.kwargs["to_start_time"]
+    assert to_start >= now
+
+
+async def test_list_traces_error_window_covers_long_latency(manager, mock_client):
+    # A completed row's error window extends past its estimated end
+    # (timestamp + latency), not just its timestamp.
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    _list_returns(mock_client, [_trace_row(id="a", timestamp=ts, latency=3600.0)])
+    _route_metrics(mock_client, tokens={"a": 1})
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces()
+    to_start = mock_client.api.legacy.observations_v1.get_many.call_args.kwargs["to_start_time"]
+    assert to_start >= ts + timedelta(seconds=3600)
+
+
+async def test_list_traces_error_pages_exceed_budget_raises(manager, mock_client):
+    # The error walk is bounded: pages reported past the budget stop with a loud
+    # error, never an unbounded scan.
+    from tai42_monitoring_langfuse.reader import _ERROR_PAGE_BUDGET
+
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _route_metrics(mock_client, tokens={"a": 1})
+    mock_client.api.legacy.observations_v1.get_many.return_value = _obs_page(
+        [_obs(id="e", trace_id="a", level="ERROR")], total_pages=_ERROR_PAGE_BUDGET + 5
+    )
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces()
+    assert mock_client.api.legacy.observations_v1.get_many.call_count <= _ERROR_PAGE_BUDGET
+
+
+async def test_list_traces_error_full_page_without_count_raises(manager, mock_client):
+    # A full page but no page count to bound the walk: raise, never stop quietly
+    # on a partial error set.
+    from tai42_monitoring_langfuse.reader import _PAGE_SIZE
+
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _route_metrics(mock_client, tokens={"a": 1})
+    full = [_obs(id=f"e{i}", trace_id="a", level="ERROR") for i in range(_PAGE_SIZE)]
+    mock_client.api.legacy.observations_v1.get_many.return_value = SimpleNamespace(data=full, meta=None)
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces()
 
 
 # --- source / environment scoping --------------------------------------------
@@ -469,37 +647,28 @@ _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _metric_query(mock_client):
-    return json.loads(mock_client.api.legacy.metrics_v1.metrics.call_args.kwargs["query"])
-
-
-def _hydrate_each(mock_client, costs=None, timestamps=None):
-    """trace.get returning a body per id (snake_case, as model_dump emits)."""
-
-    def _get(tid, request_options=None):
-        body = {"id": tid, "observations": []}
-        if costs is not None:
-            body["total_cost"] = costs[tid]
-        if timestamps is not None:
-            body["timestamp"] = timestamps[tid]
-        return SimpleNamespace(model_dump=lambda body=body: body)
-
-    mock_client.api.trace.get.side_effect = _get
+    """The most recent ranking metrics query (the one carrying ``orderBy``) —
+    distinct from the token-join query issued on the same metrics endpoint."""
+    for call in reversed(mock_client.api.legacy.metrics_v1.metrics.call_args_list):
+        q = json.loads(call.kwargs["query"])
+        if "orderBy" in q:
+            return q
+    raise AssertionError("no ranking metrics query was issued")
 
 
 async def test_trace_native_sort_forwarded(manager, mock_client):
     mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
     await LangfuseReader(manager).list_traces(order_by=OrderBy(field="name", direction="asc"))
     assert mock_client.api.trace.list.call_args.kwargs["order_by"] == "name.asc"
-    # native sort never touches the metrics endpoint
+    # native sort never touches the metrics endpoint (empty page -> no enrichment)
     mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
 
 
 async def test_native_sort_preserves_trace_list_order(manager, mock_client):
-    # Hydrate-order guard: native path returns trace.list order untouched.
-    mock_client.api.trace.list.return_value = SimpleNamespace(
-        data=[SimpleNamespace(id="c"), SimpleNamespace(id="a"), SimpleNamespace(id="b")]
-    )
-    _hydrate_each(mock_client)
+    # Order guard: native path returns trace.list order untouched.
+    _list_returns(mock_client, [_trace_row(id="c"), _trace_row(id="a"), _trace_row(id="b")])
+    _route_metrics(mock_client, tokens={})
+    _errors_for(mock_client, [])
     result = await LangfuseReader(manager).list_traces(order_by=OrderBy(field="name"))
     assert [t.id for t in result] == ["c", "a", "b"]
 
@@ -516,8 +685,9 @@ async def test_native_sort_allows_none_from_timestamp(manager, mock_client):
     [("total_cost", "totalCost"), ("latency", "latency"), ("total_tokens", "totalTokens")],
 )
 async def test_metric_sort_builds_query(manager, mock_client, field, measure):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[{"id": "a", f"sum_{measure}": 5}])
-    _hydrate_each(mock_client)
+    _route_metrics(mock_client, ranking=[{"id": "a", f"sum_{measure}": 5}], tokens={})
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _errors_for(mock_client, [])
     await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field=field, direction="desc"), from_timestamp=_NOW, limit=5
     )
@@ -530,12 +700,13 @@ async def test_metric_sort_builds_query(manager, mock_client, field, measure):
     assert q["fromTimestamp"] == _NOW.isoformat()
     assert q["toTimestamp"]
     assert q["config"]["row_limit"] == 5
-    # metric sort never touches trace.list
-    mock_client.api.trace.list.assert_not_called()
+    # metric sort resolves the ranked ids' rows via trace.list, never trace.get.
+    mock_client.api.trace.list.assert_called()
+    mock_client.api.trace.get.assert_not_called()
 
 
 async def test_metric_sort_direction_asc(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[])
+    _route_metrics(mock_client, ranking=[], tokens={})
     await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field="total_cost", direction="asc"), from_timestamp=_NOW, limit=5
     )
@@ -543,7 +714,7 @@ async def test_metric_sort_direction_asc(manager, mock_client):
 
 
 async def test_metric_sort_filters_exact_clauses(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[])
+    _route_metrics(mock_client, ranking=[], tokens={})
     await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field="total_cost"),
         from_timestamp=_NOW,
@@ -565,34 +736,35 @@ async def test_metric_sort_filters_exact_clauses(manager, mock_client):
 
 
 async def test_metric_sort_preserves_ranked_order(manager, mock_client):
-    # Rows in non-alphabetical rank order; hydrated cost and timestamp
-    # deliberately disagree with the rank, so any client re-sort would break it.
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(
-        data=[
+    # Rows in non-alphabetical rank order; the resolved rows' cost deliberately
+    # disagrees with the rank, so any client re-sort would break the order.
+    _route_metrics(
+        mock_client,
+        ranking=[
             {"id": "c", "sum_totalCost": 9},
             {"id": "a", "sum_totalCost": 5},
             {"id": "b", "sum_totalCost": 1},
-        ]
+        ],
+        tokens={},
     )
-    costs = {"c": 1.0, "a": 9.0, "b": 5.0}
-    timestamps = {
-        "c": datetime(2026, 1, 1, tzinfo=UTC),
-        "a": datetime(2026, 1, 3, tzinfo=UTC),
-        "b": datetime(2026, 1, 2, tzinfo=UTC),
-    }
-    _hydrate_each(mock_client, costs=costs, timestamps=timestamps)
+    _list_returns(
+        mock_client,
+        [_trace_row(id="c", total_cost=1.0), _trace_row(id="a", total_cost=9.0), _trace_row(id="b", total_cost=5.0)],
+    )
+    _errors_for(mock_client, [])
     result = await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field="total_cost", direction="desc"), from_timestamp=_NOW, limit=5
     )
     assert [t.id for t in result] == ["c", "a", "b"]
-    # the hydrated cost survives, distinct from the rank
+    # the resolved row's cost survives, distinct from the rank
     assert result[0].total_cost == 1.0
 
 
 async def test_metric_sort_page_slice(manager, mock_client):
-    rows = [{"id": f"r{i}", "sum_totalCost": 10 - i} for i in range(10)]
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=rows)
-    _hydrate_each(mock_client)
+    ranking = [{"id": f"r{i}", "sum_totalCost": 10 - i} for i in range(10)]
+    _route_metrics(mock_client, ranking=ranking, tokens={})
+    _list_returns(mock_client, [_trace_row(id=f"r{i}") for i in range(10)])
+    _errors_for(mock_client, [])
     r = LangfuseReader(manager)
     res = await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=3, page=2)
     assert [t.id for t in res] == ["r3", "r4", "r5"]
@@ -605,23 +777,25 @@ async def test_metric_sort_page_slice(manager, mock_client):
 
 
 async def test_metric_sort_page_past_end_is_empty(manager, mock_client):
-    rows = [
+    ranking = [
         {"id": "r0", "sum_totalCost": 3},
         {"id": "r1", "sum_totalCost": 2},
         {"id": "r2", "sum_totalCost": 1},
     ]
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=rows)
-    _hydrate_each(mock_client)
+    _route_metrics(mock_client, ranking=ranking, tokens={})
     res = await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=3, page=2
     )
     assert res == []
+    # An empty ranked slice never walks trace.list.
+    mock_client.api.trace.list.assert_not_called()
 
 
 async def test_metric_sort_partial_last_page(manager, mock_client):
-    rows = [{"id": f"r{i}", "sum_totalCost": 4 - i} for i in range(4)]
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=rows)
-    _hydrate_each(mock_client)
+    ranking = [{"id": f"r{i}", "sum_totalCost": 4 - i} for i in range(4)]
+    _route_metrics(mock_client, ranking=ranking, tokens={})
+    _list_returns(mock_client, [_trace_row(id=f"r{i}") for i in range(4)])
+    _errors_for(mock_client, [])
     res = await LangfuseReader(manager).list_traces(
         order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=3, page=2
     )
@@ -629,7 +803,7 @@ async def test_metric_sort_partial_last_page(manager, mock_client):
 
 
 async def test_metric_sort_row_limit_cap_inclusive(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[])
+    _route_metrics(mock_client, ranking=[], tokens={})
     r = LangfuseReader(manager)
     await r.list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=1000, page=1)
     assert _metric_query(mock_client)["config"]["row_limit"] == 1000
@@ -697,28 +871,72 @@ async def test_metric_sort_filter_ok_on_default_sort(manager, mock_client):
     mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
 
 
-async def test_metric_sort_marks_unfetchable_top_in_rank(manager, mock_client):
-    # METRIC path: the top-ranked id fails to hydrate -> kept at result[0] in
-    # rank order with fetch_error; the neighbor is fully mapped.
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(
-        data=[{"id": "top", "sum_totalCost": 9}, {"id": "next", "sum_totalCost": 5}]
-    )
+def _token_query(mock_client):
+    """The token-join metrics query (the one with no ``orderBy``)."""
+    for call in reversed(mock_client.api.legacy.metrics_v1.metrics.call_args_list):
+        q = json.loads(call.kwargs["query"])
+        if "orderBy" not in q:
+            return q
+    raise AssertionError("no token-join metrics query was issued")
 
-    def _get(tid, request_options=None):
-        if tid == "top":
-            raise ConnectionError("observations too large")
-        return SimpleNamespace(model_dump=lambda: {"id": tid, "total_cost": 5.0, "observations": []})
 
-    mock_client.api.trace.get.side_effect = _get
+async def test_native_sort_token_query_drops_unsupported_filter(manager, mock_client):
+    # The token join populates a native (default) sort page. A level/cost filter is
+    # legal on that sort (trace.list honours it), so the token query must narrow its
+    # population by the view-supported clauses and DROP the unsupported ones rather
+    # than raise — correctness is the per-id join, not this filter.
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _route_metrics(mock_client, tokens={"a": 5})
+    _errors_for(mock_client, [])
     result = await LangfuseReader(manager).list_traces(
-        order_by=OrderBy(field="total_cost", direction="desc"), from_timestamp=_NOW, limit=5
+        filter=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, min_tokens=10, max_latency=100.0)
     )
-    assert [t.id for t in result] == ["top", "next"]
-    assert result[0].fetch_error
-    assert result[0].total_cost is None
-    assert result[0].observations == []
-    assert result[1].fetch_error is None
-    assert result[1].total_cost == 5.0
+    assert [t.id for t in result] == ["a"]
+    filters = _token_query(mock_client)["filters"]
+    columns = {c["column"] for c in filters}
+    assert "level" not in columns
+    assert "totalCost" not in columns
+    assert "totalTokens" not in columns
+    assert "latency" not in columns
+
+
+async def test_native_sort_token_query_keeps_supported_filter(manager, mock_client):
+    # The view-supported clauses (name / tags) DO ride the token population query.
+    _list_returns(mock_client, [_trace_row(id="a", tags=["run:7"])])
+    _route_metrics(mock_client, tokens={"a": 5})
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(name="flow-a", tags=["run:7"]))
+    filters = _token_query(mock_client)["filters"]
+    cols = {c["column"]: c for c in filters}
+    assert cols["name"]["value"] == "flow-a"
+    assert cols["tags"] == {"column": "tags", "operator": "any of", "value": ["run:7"], "type": "arrayOptions"}
+
+
+async def test_metric_sort_ranked_id_absent_from_window_raises(manager, mock_client):
+    # METRIC path coverage: a ranked id the list window never surfaces cannot be
+    # resolved into a row — the page raises loudly rather than returning short.
+    _route_metrics(mock_client, ranking=[{"id": "ghost", "sum_totalCost": 9}], tokens={})
+    _list_returns(mock_client, [])  # a single short page ends the walk
+    _errors_for(mock_client, [])
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5)
+    mock_client.api.trace.get.assert_not_called()
+
+
+async def test_metric_sort_walk_page_budget_raises(manager, mock_client):
+    # The walk is bounded: full pages that never carry the ranked id stop at the
+    # page budget with a loud error, never an unbounded scan.
+    from tai42_monitoring_langfuse.reader import _METRIC_LIST_PAGE_BUDGET, _PAGE_SIZE
+
+    _route_metrics(mock_client, ranking=[{"id": "ghost", "sum_totalCost": 9}], tokens={})
+    full = [_trace_row(id=f"x{i}") for i in range(_PAGE_SIZE)]
+    mock_client.api.trace.list.return_value = SimpleNamespace(
+        data=full, meta=SimpleNamespace(total_pages=_METRIC_LIST_PAGE_BUDGET + 5)
+    )
+    _errors_for(mock_client, [])
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await LangfuseReader(manager).list_traces(order_by=OrderBy(field="total_cost"), from_timestamp=_NOW, limit=5)
+    assert mock_client.api.trace.list.call_count <= _METRIC_LIST_PAGE_BUDGET + 1
 
 
 async def test_trace_sort_unknown_field_raises(manager, mock_client):

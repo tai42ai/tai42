@@ -7,11 +7,13 @@ pure-tracing backend (no LLM-observability extension) still fits.
 
 from __future__ import annotations
 
+import ast
+import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 
 class SpanKind(StrEnum):
@@ -212,11 +214,7 @@ class MonitoringObservation(BaseModel):
 class MonitoringTrace(BaseModel):
     """A complete trace: its top-level attributes plus every observation.
 
-    The neutral return of ``MonitoringReader.get_trace`` / ``list_traces``.
-
-    ``fetch_error`` is set when the trace body could not be loaded (e.g. the
-    backend rejected the read). When set, the other fields are empty/partial and
-    only ``id`` is reliable. None on a fully-loaded trace.
+    The neutral return of ``MonitoringReader.get_trace`` (the only body door).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -229,7 +227,103 @@ class MonitoringTrace(BaseModel):
     metadata: dict[str, Any] | None = None
     total_cost: float | None = None
     observations: list[MonitoringObservation] = Field(default_factory=list[MonitoringObservation])
-    fetch_error: str | None = None
+
+
+# Structural bounds for a run-list preview: keep the row payload small while
+# staying VALID JSON (clip at the structure level, not mid-string), so the client
+# always renders the preview as a parsed tree. The full value lives on
+# ``get_trace``. ``TRACE_PREVIEW_MAX_CHARS`` caps a string leaf; the field name
+# says "preview", so the cut is explicit, not a silent truncation of a complete
+# value.
+TRACE_PREVIEW_MAX_CHARS = 512  # max chars per string leaf
+_PREVIEW_ITEMS = 20  # max entries per object / array
+_PREVIEW_DEPTH = 6  # max nesting depth
+_PREVIEW_PARSE_MAX = 20_000  # never structurally parse a string larger than this
+
+
+def _maybe_json(text: str) -> Any:
+    """Parse a string that is itself an object/array — JSON first, then a Python
+    ``repr`` (single quotes, ``True``/``False``/``None``) via ``literal_eval`` —
+    else ``None``. Lets a stringified structure be bounded structurally (and
+    rendered as a tree) instead of char-clipped into garbage. A string over
+    ``_PREVIEW_PARSE_MAX`` is not parsed — it would be fully materialized just to
+    keep a few items — so the caller char-clips it instead."""
+    s = text.strip()
+    if len(s) < 2 or len(s) > _PREVIEW_PARSE_MAX or s[0] not in "{[":
+        return None
+    try:
+        return json.loads(s)
+    except ValueError:
+        pass
+    try:
+        # literal_eval is safe — only Python literals, no code execution.
+        return ast.literal_eval(s)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+
+
+def preview(value: Any, depth: int = 0) -> JsonValue:
+    """A structurally-bounded run-list preview of a trace's input/output: string
+    leaves cut to ``TRACE_PREVIEW_MAX_CHARS``, objects/arrays capped at
+    ``_PREVIEW_ITEMS`` entries, nesting elided past ``_PREVIEW_DEPTH`` — each with
+    a terminal marker — so the result is small but still valid JSON the client
+    renders as a tree. ``None`` stays ``None``; a stringified structure is parsed
+    and bounded, a plain string or non-JSON leaf (dates, etc.) char-clipped. The
+    cut is by design — the full value lives on ``get_trace``."""
+    if isinstance(value, str):
+        parsed = _maybe_json(value)
+        if isinstance(parsed, (dict, list)):
+            return preview(parsed, depth)
+        return value if len(value) <= TRACE_PREVIEW_MAX_CHARS else value[:TRACE_PREVIEW_MAX_CHARS] + "…"
+    if isinstance(value, dict):
+        obj = cast("dict[Any, Any]", value)
+        if depth >= _PREVIEW_DEPTH:
+            return {"…": "…"}
+        out: dict[str, JsonValue] = {}
+        for i, (k, v) in enumerate(obj.items()):
+            if i >= _PREVIEW_ITEMS:
+                out["…"] = f"+{len(obj) - _PREVIEW_ITEMS} more"
+                break
+            out[str(k)] = preview(v, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        seq = cast("list[Any] | tuple[Any, ...]", value)
+        if depth >= _PREVIEW_DEPTH:
+            return ["…"]
+        items: list[JsonValue] = [preview(v, depth + 1) for v in seq[:_PREVIEW_ITEMS]]
+        if len(seq) > _PREVIEW_ITEMS:
+            items.append(f"+{len(seq) - _PREVIEW_ITEMS} more")
+        return items
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    text = str(value)  # dates, etc. — JSON-safe fallback
+    return text if len(text) <= TRACE_PREVIEW_MAX_CHARS else text[:TRACE_PREVIEW_MAX_CHARS] + "…"
+
+
+class MonitoringTraceSummary(BaseModel):
+    """One run-list row: the backend's list-surface attributes plus its batched
+    aggregates, never a per-trace body.
+
+    ``input_preview`` / ``output_preview`` are server-bounded previews (see
+    ``preview``) — a structurally-clipped JSON value; the full input/output are
+    read through ``get_trace``. ``total_tokens`` is ``None`` when the backend
+    returned no usage for the trace (never coerced to ``0``). ``status`` is
+    ``error`` when the run carries an error observation, ``ok`` otherwise — a
+    malformed backend row fails the page loudly rather than being kept as a
+    partial row."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: str
+    timestamp: datetime | None = None
+    name: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    input_preview: JsonValue = None
+    output_preview: JsonValue = None
+    latency_ms: float | None = None
+    total_cost: float | None = None
+    total_tokens: int | None = None
+    status: Literal["ok", "error"]
 
 
 class MetricsResult(BaseModel):
@@ -254,14 +348,13 @@ class OrderBy(BaseModel):
     A field a backend cannot sort on raises ``MonitoringReadNotSupportedError``.
 
     Sortable keys:
-    - ``list_traces`` (over ``MonitoringTrace``): ``timestamp`` (default),
+    - ``list_traces`` (over ``MonitoringTraceSummary``): ``timestamp`` (default),
       ``total_cost``, ``name``, ``id``, ``latency``, ``total_tokens``.
       ``total_cost`` / ``latency`` / ``total_tokens`` are aggregated-metric
       sorts: the backend ranks GLOBALLY and returns the requested ``limit`` /
-      ``page`` slice of that ranking, not a re-rank of one fetched page. Like
-      ``duration`` below, ``latency`` and ``total_tokens`` are sort-only derived
-      keys — sorted by, but NOT fields on the returned ``MonitoringTrace`` (only
-      ``total_cost`` is); not read back.
+      ``page`` slice of that ranking, not a re-rank of one fetched page. All
+      three are read back on the summary (``total_cost``, ``latency_ms``,
+      ``total_tokens``).
     - ``list_spans_in_window`` (over ``SpanWindowItem``): ``start`` (default),
       ``end``, ``duration`` (derived ``end - start``), ``name``, ``id``.
 

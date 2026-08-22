@@ -198,7 +198,7 @@ async def list_observability_runs(
     (``tags`` may be a JSON list ``["a","b"]`` or a comma-separated string)."""
     reader = get_monitoring().reader
     try:
-        traces = await reader.list_traces(
+        summaries = await reader.list_traces(
             from_timestamp=t0,
             to_timestamp=t1,
             limit=page_size,
@@ -209,8 +209,8 @@ async def list_observability_runs(
     except MonitoringReadNotSupportedError as exc:
         raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
-    items = [derive_run(t) for t in traces]
-    next_page = page + 1 if len(traces) >= page_size else None
+    items = [derive_run(s) for s in summaries]
+    next_page = page + 1 if len(summaries) >= page_size else None
     return {"items": items, "page": page, "nextPage": next_page}
 
 
