@@ -85,13 +85,18 @@ class DeclaredRouteMetadata:
 
 @runtime_checkable
 class AppAgents(Protocol):
-    def agent(self, name: str, tags: set[str] | None = None) -> Callable[[type[_AgentT]], type[_AgentT]]:
+    def agent(
+        self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> Callable[[type[_AgentT]], type[_AgentT]]:
         """Register an :class:`Agent` subclass under ``name`` and auto-register
         its JSON ``run`` tool.
 
         ``tags`` are the run tool's native tags, set on its constructed tool object.
-        The decorator returns the class unchanged, so the decorated symbol keeps
-        its concrete subclass type."""
+        ``meta`` is generic registration metadata threaded onto the same constructed
+        run-tool object (naming no consumer concept — a registrant attaches any generic
+        ``tai42/*`` key, e.g. a crash-resume flag the run-dispatch seam reads). The
+        decorator returns the class unchanged, so the decorated symbol keeps its
+        concrete subclass type."""
         ...
 
     def get_agent(self, name: str) -> Agent:
@@ -353,19 +358,21 @@ class AppConnectors(Protocol):
         """The connector token store (single-namespace, keyed by ``connection_id``)."""
         ...
 
-    def resolve_connection_auth(
+    async def resolve_connection_auth(
         self, connection_id: str, provider_id: str, sub_service: str
     ) -> ResolvedConnectionAuth | None:
         """Resolve the credential a connection injects, for the CURRENT caller.
 
         The facade accessor an in-process plugin uses to read a skeleton-resolved
         credential (OAuth token / static env / static headers) without importing the
-        skeleton — refreshing an expired OAuth token under the connection lock.
-        Returns ``None`` when the connection injects nothing.
+        skeleton — refreshing an expired OAuth token under the connection lock. Async
+        because resolution performs I/O (the OAuth refresh under the connection lock);
+        callers ``await`` it. Returns ``None`` when the connection injects nothing.
 
         GUARANTEE (enforced by the skeleton implementation): (1) it RAISES a loud
-        constant-message error when NO execution identity is bound — it fails close
-        BEFORE resolving, so an identity-less door never gets creds injected; and
+        constant-message error when NO execution identity is bound — the fail-close
+        raise fires as the awaited coroutine runs, BEFORE resolving, so an
+        identity-less door never gets creds injected; and
         (2) ``connection_id`` is a REFERENCE supplied by operator settings, NEVER
         session-supplied, so a session can neither reach an identity-less door's
         creds nor name another connection. The contract carries no logic — the

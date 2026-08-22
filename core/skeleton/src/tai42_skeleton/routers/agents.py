@@ -64,6 +64,7 @@ from tai42_skeleton.operations import agents as agent_ops
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.agents import list_agents as _list_agents_op
 from tai42_skeleton.operations.agents import list_spec_runnable_agents as _list_spec_runnable_agents_op
+from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,10 @@ async def _produce(agent: Agent, run_kwargs: dict[str, Any], queue: asyncio.Queu
     ``("error", exc)``. A cancellation (client disconnect) propagates into
     ``astream`` and re-raises so the abandoned run stops."""
     try:
-        async for event in agent.astream(**run_kwargs):
+        # Route the live-caller drive through the shared budget+attribution seam: this
+        # SSE route holds a live client connection, so it is not detached-exempt and its
+        # turn must be budgeted (and its trace attributed), never an unbudgeted astream.
+        async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
             await queue.put(("event", event))
     except asyncio.CancelledError:
         raise

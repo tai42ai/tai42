@@ -330,6 +330,40 @@
         }
       ]
     },
+    "plugins/sandbox-docker": {
+      "package-name": "tai42-sandbox-docker",
+      "component": "tai42-sandbox-docker",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_sandbox_docker/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/sandbox-local": {
+      "package-name": "tai42-sandbox-local",
+      "component": "tai42-sandbox-local",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "tai-plugin.yml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "src/tai42_sandbox_local/tai-plugin.yml",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "plugins/storage-github": {
       "package-name": "tai42-storage-github",
       "component": "tai42-storage-github",

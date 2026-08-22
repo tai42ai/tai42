@@ -148,6 +148,14 @@ def _backend_row() -> KindStatus:
     return KindStatus(kind="backend", state="active", plugin=cls.__module__, detail=cls.__qualname__)
 
 
+def _sandbox_row() -> KindStatus:
+    sandbox = tai42_app.sandboxes.sandbox
+    if sandbox is None:
+        return KindStatus(kind="sandbox", state="off", plugin=None, detail="no sandbox provider installed")
+    cls = type(sandbox)
+    return KindStatus(kind="sandbox", state="active", plugin=cls.__module__, detail=cls.__qualname__)
+
+
 def _channels_row() -> KindStatus:
     names = tai42_app.channels.names()
     if not names:
@@ -320,8 +328,8 @@ def _connectors_row(feature: GatedFeature) -> KindStatus:
 def collect_kind_status() -> list[KindStatus]:
     """Snapshot every pluggable kind's live status, read-only.
 
-    Nine pluggable-kind rows (identity, accounts, monitoring, storage, backend,
-    channels, webhook verifiers, config, studio plugins) plus one row per DB-backed
+    Ten pluggable-kind rows (identity, accounts, monitoring, storage, backend,
+    sandbox, channels, webhook verifiers, config, studio plugins) plus one row per DB-backed
     gated feature (tool_runs, interactions, rate_limit, marketplace store, tool_meta,
     connectors, versioning) whose ``off`` state is the honest answer when no store is
     configured. Reads the process/app registries and the feature settings as they
@@ -335,6 +343,7 @@ def collect_kind_status() -> list[KindStatus]:
         _monitoring_row(),
         _storage_row(),
         _backend_row(),
+        _sandbox_row(),
         _channels_row(),
         _webhook_verifiers_row(),
         _config_row(),

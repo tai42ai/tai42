@@ -102,6 +102,20 @@ def _derive_under_ignore(tool: Tool) -> dict:
         return _derive_input_schema(cast(FunctionTool, tool).fn)
 
 
+def test_agent_meta_threads_onto_the_run_tool():
+    async def run() -> None:
+        manifest = Manifest.model_validate(
+            {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["meta_carrier"]}]}
+        )
+        async with app.app_context(manifest):
+            tool = await app.tools.get_tool("meta_carrier")
+            # The generic registration meta rode the ``FunctionTool`` constructor (the ONE
+            # effective place for a prebuilt tool), naming no consumer concept.
+            assert (tool.meta or {}).get("tai42/crash_resume") is True
+
+    asyncio.run(run())
+
+
 def test_run_tool_advertises_typed_schema_and_forwards_only_set_fields():
     async def run() -> None:
         async with app.app_context(_manifest()):

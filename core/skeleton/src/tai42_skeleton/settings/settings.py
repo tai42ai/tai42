@@ -1,6 +1,9 @@
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from tai42_cli.context import DEFAULT_LOCAL_PORT
+from tai42_contract.sandbox import SandboxIsolation
 from tai42_kit.settings import TaiBaseSettings
 
 
@@ -19,6 +22,28 @@ class CoreSettings(TaiBaseSettings):
     # converges through a process recycle, not an in-process flip.
     backend: str | None = Field(default=None, json_schema_extra={"reload": "recycle"})
     template: str | None = Field(default=None, json_schema_extra={"reload": "recycle"})
+    # The scalar sandbox-provider slot loads via the manifest ``sandbox_module``
+    # exactly as the backend does; this env selects nothing on its own and only
+    # names the slot in the ``require_sandbox`` unavailable message. Binds pooled
+    # runtime built at boot, so a change converges through a process recycle.
+    sandbox: str | None = Field(default=None, json_schema_extra={"reload": "recycle"})
+    # Security-as-config: the four PLATFORM-owned sandbox policy knobs the skeleton
+    # resolves into one ``SandboxPolicy`` and binds to the kit session-create
+    # chokepoint at provider registration. ALL FOUR are recycle-class: the policy is
+    # bound ONCE at registration and never re-bound on a hot apply, so a hot change
+    # would leave the kit enforcing the boot snapshot while the identity door reports
+    # the new value — recycle re-imports the scalar ``sandbox_module`` and re-binds
+    # the freshly-resolved policy, keeping enforcement and the door consistent.
+    # ``sandbox_egress`` is the network CEILING (default OPEN); ``sandbox_isolation``
+    # is the strength FLOOR; ``sandbox_scrub_transcript`` is carried for the consumer
+    # to apply (off by default); ``sandbox_durable`` gates whether a persistent
+    # session is permitted at all.
+    sandbox_egress: Literal["none", "internal", "egress"] = Field(
+        default="egress", json_schema_extra={"reload": "recycle"}
+    )
+    sandbox_isolation: SandboxIsolation = Field(default="container", json_schema_extra={"reload": "recycle"})
+    sandbox_scrub_transcript: bool = Field(default=False, json_schema_extra={"reload": "recycle"})
+    sandbox_durable: bool = Field(default=True, json_schema_extra={"reload": "recycle"})
     # Max seconds to spend on a single MCP server viability check (connect +
     # list_tools) at COLD BOOT. A server that exceeds this is skipped and
     # recorded instead of blocking the whole server.

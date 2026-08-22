@@ -35,7 +35,7 @@ The six patch shapes:
   NO module, so the payload is the descriptor itself). Deduped by ``id``; an ``id``
   already present (hand-written or previously installed) is a collision, never an
   overwrite; uninstall removes by ``id``, convergently.
-- ``scalar_module`` (``backend_module``, ``storage_module``,
+- ``scalar_module`` (``backend_module``, ``sandbox_module``, ``storage_module``,
   ``monitoring_module``) — a single-module slot; a second plugin claiming an
   occupied slot is a collision, as is one spec providing two distinct modules for
   the same slot.

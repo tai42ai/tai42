@@ -96,7 +96,9 @@ class AgentBinding:
         """Drop every registered agent (start/reload re-imports their modules)."""
         self._agents = {}
 
-    def agent(self, name: str, tags: set[str] | None = None) -> Callable[[type[_AgentT]], type[_AgentT]]:
+    def agent(
+        self, name: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> Callable[[type[_AgentT]], type[_AgentT]]:
         """Register an :class:`Agent` subclass under ``name`` and synthesize its
         JSON ``run`` tool.
 
@@ -106,10 +108,12 @@ class AgentBinding:
         auto-registers a ``run`` tool whose signature == the agent's ``ToolInput``
         and whose body drives ``run`` to its final value.
 
-        ``tags`` are the run tool's native tags. An agent registers as a prebuilt
-        ``FunctionTool`` and the bind path takes that object as-is (kwargs are NOT
-        forwarded for a prebuilt tool), so the tags must ride on the constructed
-        object — set here, at the only effective site.
+        ``tags`` are the run tool's native tags. ``meta`` is generic registration
+        metadata threaded onto the same constructed object (naming no consumer concept,
+        exactly as ``tags`` threads) — an agent registers as a prebuilt ``FunctionTool``
+        and the bind path takes that object as-is (kwargs are NOT forwarded for a prebuilt
+        tool), so both must ride on the constructed object, set here at the only effective
+        site (the run-tool ``FunctionTool`` constructor).
 
         Enforces the ``preset_bakeable_fields`` invariant at registration: every
         declared name must be a real ``ToolInput`` field. A stray name could never
@@ -145,7 +149,7 @@ class AgentBinding:
 
             instance: Agent = agent_cls()
             self._agents[name] = instance
-            self._register_agent_tool(name, agent_cls.__module__, tags)
+            self._register_agent_tool(name, agent_cls.__module__, tags, meta)
             return agent_cls
 
         return decorator
@@ -165,7 +169,9 @@ class AgentBinding:
         """
         return dict(self._agents)
 
-    def _register_agent_tool(self, name: str, module: str, tags: set[str] | None = None) -> None:
+    def _register_agent_tool(
+        self, name: str, module: str, tags: set[str] | None = None, meta: dict[str, Any] | None = None
+    ) -> None:
         """Build + bind the JSON ``run`` tool for a registered agent.
 
         The tool advertises the agent's ``ToolInput`` schema (live ``tools=`` is
@@ -227,6 +233,9 @@ class AgentBinding:
             # registered as-is (bind drops kwargs for a prebuilt object), so this
             # constructor is the ONLY effective place tags can be set.
             tags=tags or set(),
+            # Generic registration metadata threaded the same way as ``tags``; a
+            # registrant attaches any generic meta key here (e.g. a crash-resume flag).
+            meta=meta,
         )
         # Bind through the shared extension-capable path: the base registers as this
         # prebuilt ``FunctionTool`` (advertised schema exact by construction) and one

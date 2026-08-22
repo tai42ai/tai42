@@ -176,11 +176,12 @@ async def check_workspace_path(sandbox: ManagedSandbox, config: SandboxConforman
 async def check_labels_round_trip(sandbox: ManagedSandbox, config: SandboxConformanceConfig) -> None:
     """A consumer's labels round-trip exactly through ``info().labels`` — the
     reserved ``tai42.sandbox`` markers stay on the runtime resource and never leak
-    back to the consumer."""
+    back to the consumer — and the requested ``image`` is surfaced on ``info()``."""
     session = await sandbox.create_session(_spec(config, labels={"team": "conf"}))
     try:
         info = await session.info()
         assert info.labels == {"team": "conf"}, "consumer labels did not round-trip through info()"
+        assert info.image == config.image, "the requested image was not surfaced on info()"
     finally:
         await session.destroy()
 

@@ -110,6 +110,12 @@ class SandboxSessionInfo(BaseModel):
     """The observable state of a live session, returned by ``info()`` / ``list_sessions()``."""
 
     id: str
+    # The image reference the consumer requested at create (``spec.image``),
+    # round-tripped so ``info()`` / ``list_sessions()`` surface what was asked for.
+    # It is the REQUESTED reference, never an engine attestation of what is
+    # running: under a host/direct provider the image is inert, but the request
+    # stays traceable here. Required because ``SandboxSessionSpec.image`` is.
+    image: str
     workspace_key: str
     # The provider's ABSOLUTE root path for this session's workspace — the same
     # value the session exposes as its ``workspace_path`` property, so a caller can

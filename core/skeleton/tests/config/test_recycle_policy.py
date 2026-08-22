@@ -129,6 +129,22 @@ def test_compose_tier2_enumerates_the_anchor_verbatim() -> None:
     assert {"TAI_CONFIG_MODE", "TAI_BUS_REDIS_URL", "PROMETHEUS_MULTIPROC_DIR"} <= TIER2_COMPOSE_REFUSED_KEYS
 
 
+def test_both_sandbox_provider_keys_are_tier2_recycle_class_on_both_shapes() -> None:
+    # Both sandbox providers' connection keys are recycle-class regardless of which is
+    # active (mutually exclusive at runtime via the scalar module), so both coexist in
+    # both tier-2 lists — mirroring the ARQ_REDIS_URL precedent.
+    for key in ("SANDBOX_DOCKER_HOST", "SANDBOX_LOCAL_ROOT"):
+        assert key in TIER2_K8S_REFUSED_KEYS
+        assert key in TIER2_COMPOSE_REFUSED_KEYS
+
+
+def test_sandbox_selecting_env_is_not_recycle_class() -> None:
+    # The provider loads via the manifest ``sandbox_module``, not this env — so it is
+    # deliberately absent from both lists, mirroring ``TAI_MCP_BACKEND`` / ``TAI_BACKEND_MODULE``.
+    assert "TAI_MCP_SANDBOX" not in TIER2_K8S_REFUSED_KEYS
+    assert "TAI_MCP_SANDBOX" not in TIER2_COMPOSE_REFUSED_KEYS
+
+
 # -- census kinds -------------------------------------------------------------
 
 

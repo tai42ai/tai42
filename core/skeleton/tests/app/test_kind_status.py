@@ -27,6 +27,7 @@ _PLUGGABLE_KINDS = [
     "monitoring",
     "storage",
     "backend",
+    "sandbox",
     "channels",
     "webhook_verifiers",
     "config",
@@ -258,6 +259,27 @@ def test_backend_active_when_registered(bound_app, monkeypatch: pytest.MonkeyPat
     assert row.state == "active"
     assert row.plugin == _FakeBackend.__module__
     assert row.detail == "_FakeBackend"
+
+
+# -- sandbox -------------------------------------------------------------------
+
+
+class _FakeSandbox:
+    """Stand-in for a registered sandbox provider (kind-status reads only its type)."""
+
+
+def test_sandbox_off_when_empty(bound_app) -> None:
+    row = _row("sandbox")
+    assert row.state == "off"
+    assert row.detail == "no sandbox provider installed"
+
+
+def test_sandbox_active_when_registered(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bound_app._sandbox_holder, "_sandbox", _FakeSandbox())
+    row = _row("sandbox")
+    assert row.state == "active"
+    assert row.plugin == _FakeSandbox.__module__
+    assert row.detail == "_FakeSandbox"
 
 
 # -- channels ------------------------------------------------------------------

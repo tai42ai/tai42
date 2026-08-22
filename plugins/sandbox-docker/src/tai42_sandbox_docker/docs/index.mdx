@@ -1,0 +1,74 @@
+---
+title: Docker sandbox
+description: Configure the Docker sandbox provider — per-session containers on a remote engine over the Docker Engine API, the SANDBOX_DOCKER_ env group, and the isolation model.
+---
+
+The Docker sandbox provider runs each session as its own container on a REMOTE
+Docker engine, reached over the Docker Engine API. The app container drives that
+engine over mTLS: it spawns no local process, holds no host Docker socket, and
+mounts no host path. Real work in a session is driven through the engine's exec
+API against a hardened, idle session container.
+
+## Enable it
+
+```yaml manifest.yml
+sandbox_module: tai42_sandbox_docker
+```
+
+## Configuration
+
+The `SANDBOX_DOCKER_` env group. `SANDBOX_DOCKER_HOST` is the only variable that
+enters the recycle-pinned app env; the mTLS client certificates are read from the
+canonical `/certs/client` mount, never from the environment.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SANDBOX_DOCKER_HOST` | required | The remote engine: a `unix:///var/run/...` socket path or a `tcp://host:port`. No default — a mis-wired deployment fails loudly at first use. |
+| `SANDBOX_DOCKER_TLS_VERIFY` | `true` | Verify the engine over mTLS for a `tcp://` host. An unauthenticated `tcp://` endpoint is never the documented shape. |
+| `SANDBOX_DOCKER_TLS_CERT_PATH` | `/certs/client/cert.pem` | The mTLS client certificate that speaks the engine control API. |
+| `SANDBOX_DOCKER_TLS_KEY_PATH` | `/certs/client/key.pem` | The mTLS client key. |
+| `SANDBOX_DOCKER_TLS_CA_PATH` | `/certs/client/ca.pem` | The CA that anchors the engine's server certificate. |
+| `SANDBOX_DOCKER_DEFAULT_CPU` | unset | Fallback CPU cap (cores) applied only when a session spec leaves `cpu` unset. |
+| `SANDBOX_DOCKER_DEFAULT_MEMORY_MB` | unset | Fallback memory cap (MiB) applied only when a session spec leaves `memory_mb` unset. |
+| `SANDBOX_DOCKER_PULL_POLICY` | `missing` | `missing` pulls an image only when absent; `never` refuses to pull (airgapped) and a missing image raises. |
+| `SANDBOX_DOCKER_DEFAULT_TTL_SECONDS` | `3600` | Default reap deadline for an idle session. |
+| `SANDBOX_DOCKER_REAP_INTERVAL_SECONDS` | `300` | Sweep interval for reaping expired sessions. |
+| `SANDBOX_DOCKER_EXEC_DEFAULT_TIMEOUT_SECONDS` | `300` | Default per-`exec` timeout. |
+
+A session spec's `cpu` / `memory_mb` always win over the defaults; the provider
+never silently runs uncapped when a cap was requested, and rejects a cap it
+cannot express rather than downgrading it.
+
+## Security model
+
+- **Remote engine over mTLS.** The app container talks to a remote engine; it
+  never holds a host Docker socket and never runs privileged.
+- **Per-session containers, hardened.** Every session container is created with
+  `no-new-privileges`, all Linux capabilities dropped, never privileged, and no
+  host bind mount of any path.
+- **Single-workspace-mount isolation invariant.** A session container mounts ONLY
+  its own workspace volume — never the engine client-certs volume, never a host
+  path — so a session can never read the mTLS client identity that speaks the
+  control API.
+- **Network tiers.** `none` attaches no network beyond loopback; `internal` joins
+  an isolated bridge with no external routing; `egress` joins the engine's NAT'd
+  bridge with the public internet reachable. Egress default is OPEN.
+- **Honest residual.** Under open egress, tool-RESULT data a session produces is
+  exfiltratable — egress is default-open by design. The egress firewall that
+  drops the control plane, RFC1918 ranges, and cloud metadata is provisioned at
+  the tai-distribution layer, not by this provider.
+
+## Durability model
+
+- **Ephemeral** sessions get an anonymous workspace volume that is reaped with the
+  session — scratch that dies with it.
+- **Persistent** sessions bind a named `tai-sbx-<workspace_key>` volume that
+  survives the session and its reap. Only an explicit teardown removes it, and even
+  then unforced, so the engine's own "volume in use" guard blocks removal while
+  another worker still references it.
+
+The persistent store is backed by REAL block storage provisioned at the
+tai-distribution layer (a PVC on the chart, a named docker volume on compose). If
+that layer does not present durable, node-independent volume storage, a persistent
+session's data does not actually survive a node move. See the tai-docs operate page
+for the deployment topology.

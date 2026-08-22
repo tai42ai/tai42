@@ -48,6 +48,7 @@ class _LedgerRecord:
     it); everything else is fixed at create."""
 
     session: ManagedSandboxSession
+    image: str
     workspace_key: str
     durability: str
     ttl_seconds: int
@@ -112,6 +113,8 @@ class ManagedSandbox(Sandbox):
         # finds it), but info().labels must round-trip exactly what create() was given.
         self._ledger[session.id] = _LedgerRecord(
             session=session,
+            # Policy never rewrites image, so this is exactly the consumer request.
+            image=effective_spec.image,
             workspace_key=effective_spec.workspace_key,
             durability=effective_spec.durability,
             ttl_seconds=effective_spec.ttl_seconds,
@@ -200,6 +203,7 @@ class ManagedSandbox(Sandbox):
     def _build_info(self, record: _LedgerRecord) -> SandboxSessionInfo:
         return SandboxSessionInfo(
             id=record.session.id,
+            image=record.image,
             workspace_key=record.workspace_key,
             workspace_path=record.session.workspace_path,
             durability=record.durability,  # pyright: ignore[reportArgumentType]

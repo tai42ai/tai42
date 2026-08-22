@@ -72,6 +72,14 @@ TIER2_K8S_REFUSED_KEYS: frozenset[str] = frozenset(
         "CELERY_RESULT_BACKEND",
         "CELERY_REDBEAT_REDIS_URL",
         "ARQ_REDIS_URL",
+        # Sandbox provider connection env. Both keys are recycle-class regardless of
+        # which provider is active: ``SANDBOX_DOCKER_HOST`` is the sandbox-docker engine
+        # connection, ``SANDBOX_LOCAL_ROOT`` binds the sandbox-local host workspace root.
+        # The providers are mutually exclusive at RUNTIME (the scalar ``sandbox_module``),
+        # so both coexist here. ``TAI_MCP_SANDBOX`` is deliberately absent (the provider
+        # loads via the manifest module, not that env), mirroring ``TAI_MCP_BACKEND``.
+        "SANDBOX_DOCKER_HOST",
+        "SANDBOX_LOCAL_ROOT",
     }
 )
 
@@ -113,6 +121,11 @@ TIER2_COMPOSE_REFUSED_KEYS: frozenset[str] = frozenset(
         "STORAGE_S3_SECRET_KEY",
         "STORAGE_S3_SECURE",
         "STORAGE_S3_REGION",
+        # Sandbox provider connection env — both recycle-class regardless of which
+        # provider is active (see the k8s list note above). ``TAI_MCP_SANDBOX`` stays
+        # absent from the anchor and this list, mirroring ``TAI_BACKEND_MODULE``'s env.
+        "SANDBOX_DOCKER_HOST",
+        "SANDBOX_LOCAL_ROOT",
     }
 )
 

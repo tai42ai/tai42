@@ -1,0 +1,30 @@
+spec_version: 1
+namespace: tai42
+name: sandbox-docker
+package: tai42-sandbox-docker
+version: 1.0.0
+description: >-
+  Docker sandbox provider for the TAI ecosystem — per-session containers on a
+  remote engine over the Docker Engine API.
+license: Apache-2.0
+homepage: https://tai42.ai
+repository: https://github.com/tai42ai/tai42/tree/main/plugins/sandbox-docker
+contract: '>=3.1,<4'
+categories:
+  - execution
+tags:
+  - sandbox
+  - docker
+  - container
+permissions:
+  network: true
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: sandbox
+    name: docker
+    module: tai42_sandbox_docker.provider
+    description: Docker sandbox provider — per-session containers on a remote engine over the Docker Engine API.
+    tags:
+      - sandbox
+      - docker

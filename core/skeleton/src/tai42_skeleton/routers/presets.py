@@ -64,6 +64,7 @@ from tai42_skeleton.operations.presets import (
 from tai42_skeleton.operations.presets import (
     read_create_extensions,
     read_edit_extensions,
+    read_input_schema,
     read_output_schema,
 )
 from tai42_skeleton.operations.presets import (
@@ -128,6 +129,7 @@ async def _extract_create(request: Request) -> dict[str, Any]:
         "fixed_kwargs": _optional_dict(body, "fixed_kwargs"),
         "extensions": read_create_extensions("extensions" in body, body.get("extensions")),
         "output_schema": read_output_schema(body.get("output_schema")),
+        "input_schema": read_input_schema(body.get("input_schema")),
     }
 
 
