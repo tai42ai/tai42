@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract these tools and tool extensions register through
     # — the tai42_app handle, ExtensionKind, and the tool/extension facets.
-    "tai42-contract>=3.0,<4",
+    "tai42-contract>=4.0,<5",
     # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
     # llm/embedding factories the extra-gated modules wire to.
     "tai42-kit>=3.5,<4",
