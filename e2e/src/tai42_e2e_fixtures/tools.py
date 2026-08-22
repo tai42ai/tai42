@@ -577,6 +577,145 @@ async def e2e_record_identity(thread_id: str) -> dict:
     return {"recorded": True}
 
 
+# The process-level live-session registry the sandbox probe drives a multi-step lifecycle
+# through: ``create`` returns a ``session_id`` a later ``exec`` / ``put`` / ``get`` addresses.
+# A session lives in ONE process, so the sandbox-probe suites ride the single-worker
+# ``build_sandbox_stack`` where every probe call lands in the same server process.
+_SANDBOX_SESSIONS: dict[str, object] = {}
+
+# The default digest-pinned image reference the probe requests (inert under the fake/local
+# providers, but the model demands a digest, never a bare tag).
+_PROBE_IMAGE = "img@sha256:" + "0" * 64
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_sandbox_probe(
+    op: str,
+    *,
+    session_id: str | None = None,
+    workspace_key: str = "e2e-probe",
+    durability: str = "ephemeral",
+    network: str = "egress",
+    image: str = _PROBE_IMAGE,
+    argv: list[str] | None = None,
+    path: str | None = None,
+    data: str | None = None,
+    ttl_seconds: int = 300,
+    timeout_seconds: float = 30,
+    record_key: str | None = None,
+) -> dict:
+    """Drive one sandbox lifecycle step through the ONE acquisition chokepoint.
+
+    Acquires the provider via ``tai42_app.sandboxes.require_sandbox()`` (so a provider-less
+    stack surfaces the typed loud ``SandboxUnavailableError`` through this tool's OWN
+    error path — never a 501 route) and performs ``op``:
+    ``create`` / ``exec`` / ``put`` / ``get`` / ``touch`` / ``info`` / ``list`` / ``reap`` /
+    ``destroy``. The outcome is returned AND, when ``record_key`` is set, RPUSHed onto
+    ``e2e:rec:{record_key}`` so a spec reads it back through ``stack.records``.
+    """
+    from tai42_contract.sandbox import SandboxSessionSpec
+
+    sandbox = tai42_app.sandboxes.require_sandbox()
+
+    if op == "create":
+        spec = SandboxSessionSpec(
+            image=image,
+            workspace_key=workspace_key,
+            durability=durability,  # type: ignore[arg-type]  # validated by the model
+            network=network,  # type: ignore[arg-type]  # validated by the model
+            ttl_seconds=ttl_seconds,
+        )
+        session = await sandbox.create_session(spec)
+        _SANDBOX_SESSIONS[session.id] = session
+        outcome = {"session_id": session.id, "workspace_path": session.workspace_path}
+    elif op == "list":
+        infos = await sandbox.list_sessions()
+        outcome = {"sessions": [info.id for info in infos]}
+    elif op == "reap":
+        outcome = {"reaped": await sandbox.reap()}
+    else:
+        session = _require_probe_session(session_id)
+        if op == "exec":
+            result = await session.exec(argv or [], timeout_seconds=timeout_seconds)  # type: ignore[attr-defined]
+            outcome = {"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr}
+        elif op == "put":
+            await session.put_file(_require(path, "path"), (data or "").encode("utf-8"))  # type: ignore[attr-defined]
+            outcome = {"put": path}
+        elif op == "get":
+            payload = await session.get_file(_require(path, "path"))  # type: ignore[attr-defined]
+            outcome = {"data": payload.decode("utf-8", "replace")}
+        elif op == "touch":
+            await session.touch()  # type: ignore[attr-defined]
+            outcome = {"touched": True}
+        elif op == "info":
+            info = await session.info()  # type: ignore[attr-defined]
+            outcome = {"session_id": info.id, "workspace_path": info.workspace_path, "durability": info.durability}
+        elif op == "destroy":
+            await session.destroy()  # type: ignore[attr-defined]
+            _SANDBOX_SESSIONS.pop(session_id or "", None)
+            outcome = {"destroyed": True}
+        else:
+            raise ValueError(f"unknown sandbox probe op {op!r}")
+
+    if record_key is not None:
+        await _record_probe(record_key, outcome)
+    return {"op": op, "pid": os.getpid(), **outcome}
+
+
+def _require_probe_session(session_id: str | None) -> object:
+    if session_id is None:
+        raise ValueError("this sandbox probe op requires a session_id from a prior create")
+    session = _SANDBOX_SESSIONS.get(session_id)
+    if session is None:
+        raise ValueError(f"no live probe session {session_id!r} in this process")
+    return session
+
+
+def _require(value: str | None, name: str) -> str:
+    if value is None:
+        raise ValueError(f"this sandbox probe op requires {name!r}")
+    return value
+
+
+async def _record_probe(key: str, outcome: dict) -> None:
+    from collections.abc import Awaitable
+    from typing import cast
+
+    from tai42_kit.clients import client_ctx
+    from tai42_kit.clients.impl.redis import RedisClient
+
+    record = json.dumps({"value": outcome, "pid": os.getpid()})
+    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_sandbox_attribution_probe(
+    tags: list[str], metadata: dict, *, inner_tool: str = "e2e_echo", inner_arguments: dict | None = None
+) -> dict:
+    """Deposit a ``RunAttribution`` on the ambient ContextVar, then run a tool through the
+    shared run chokepoint so its stamp is observable on the fixture monitoring backend.
+
+    The chokepoint (``ToolBinding.run_tool``) wraps the inner dispatch in ``attribute_run``, so
+    a span the inner tool opens WHILE the deposited attribution is live is recorded
+    attribution-stamped on ``e2e:rec:monitor_spans`` (and the block itself on
+    ``e2e:rec:trace_attrs``). ``inner_tool`` defaults to the trivial echo; a suite passes a
+    span-opening tool to observe the stamped span."""
+    from tai42_contract.monitoring import RunAttribution
+    from tai42_skeleton.tools.attribution import run_attribution
+
+    attribution = RunAttribution(tags=list(tags), metadata=dict(metadata))
+    with run_attribution(attribution):
+        result = await tai42_app.tools.run_tool(inner_tool, inner_arguments or {"payload": "attributed"})
+    return {
+        "tags": list(tags),
+        "metadata": dict(metadata),
+        "inner_tool": inner_tool,
+        "result": result,
+        "pid": os.getpid(),
+    }
+
+
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_resolve_connector(connection_id: str, provider_id: str = "e2e_idp", sub_service: str = "default") -> dict:
     """Resolve a managed-connector token for ``connection_id`` in this process.

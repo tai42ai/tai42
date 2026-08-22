@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 PROTOCOL_VERSION = 1
 
 # The pinned Claude Agent SDK version the runner payload is written against. Coordinated with
-# PLAN_6's session-image ``claude-agent-sdk==<PIN>``; the ``hello`` mismatch makes drift loud.
-CLAUDE_AGENT_SDK_VERSION = "0.1.0"
+# the session image's ``claude-agent-sdk`` pin; the ``hello`` mismatch makes drift loud.
+CLAUDE_AGENT_SDK_VERSION = "0.2.144"
 
 
 class ProtocolError(RuntimeError):

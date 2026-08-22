@@ -234,11 +234,18 @@ def _bind_with_input_schema(
             validate_against_json_schema(result.structured_content, output_schema)
         return result
 
+    # When the author declares NO output_schema, advertise the BASE tool's own output
+    # schema (its typed result — e.g. ``ExecResult``) so the exposed preset reconstructs to
+    # the same typed value the base does, matching the plain-preset path (which inherits it
+    # via FastMCP's fallback). A custom transform_fn otherwise defaults the exposed schema to
+    # nothing, leaving the caller a raw dict. The base's own result already conforms, so this
+    # is advertisement only — ``_route`` validates against the AUTHORED schema alone.
+    advertised_output_schema = output_schema if output_schema is not None else base.output_schema
     tool = Tool.from_tool(
         base,
         name=name,
         description=description,
-        output_schema=output_schema,
+        output_schema=advertised_output_schema,
         transform_fn=_route,
     )
     # The exposed tool advertises the AUTHORED schema as its input contract. FastMCP does

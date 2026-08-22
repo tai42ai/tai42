@@ -2,7 +2,7 @@
 # whatever Redis + Postgres these services (or the CI `services:` block) provide
 # and owns only logical isolation on top of them.
 #
-# Four profiles:
+# Profiles (opt in with `--profile <name>`, except the always-on core):
 #   core       — always needed: a plain module-free redis:7-alpine (access
 #                control needs only hashes + counters, no modules) +
 #                postgres:16-alpine. This is the default `docker compose up -d`
@@ -21,6 +21,11 @@
 #                entrypoint + bucket); the axis bucket is created in fixture setup.
 #   monitoring — opt-in: the self-hosted Langfuse stack for the monitoring
 #                suite (`docker compose --profile monitoring up -d`).
+#   sandbox    — opt-in: a rootless Docker-in-Docker engine for the one
+#                docker-gated sandbox leg (`tests/sandbox_docker`), reached over
+#                its mTLS control API published on loopback (`docker compose
+#                --profile sandbox up -d`). Off on every other leg — the
+#                process-based fake sandbox_provider carries the sandbox surface.
 #
 # Every port is env-overridable so a busy host can remap without editing this
 # file.
@@ -270,3 +275,144 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  # ---- sandbox profile: rootless-dind coding-session engine ------------
+  # The REAL container engine the one docker-gated sandbox leg
+  # (`tests/sandbox_docker`) runs the sandbox-docker provider against: kit
+  # conformance + the four session-isolation NEGATIVES that only a true topology
+  # can prove. Off unless `--profile sandbox`; the process-based fake
+  # `sandbox_provider` fixture carries the sandbox surface on every other leg.
+  #
+  # BYTE-FAITHFUL to the deployment reference compose's `sandbox-engine` service
+  # (the sibling distribution repo's compose/docker-compose.yml): the SAME pinned
+  # rootless-dind image digest, the SAME DOCKER_TLS_CERTDIR + client cert
+  # filenames/path (/certs/client → cert.pem/key.pem/ca.pem), the SAME
+  # `sandbox-ctrl` network split (the engine off the datastore network so an
+  # inner session — a container of this daemon — reaches nothing of the
+  # deployment), and the SAME inner-bridge egress firewall (RFC1918 + link-local/
+  # metadata denied, internet OPEN). Keeping it byte-faithful is what makes the
+  # four isolation negatives assert the topology that actually SHIPS, not a
+  # look-alike (the PLAN_5 §4 / PLAN_6 cross-plan lockstep). The firewall is
+  # INLINED into the entrypoint here (the reference bind-mounts a script file)
+  # because this e2e leg owns only this single compose file.
+  #
+  # e2e adaptations (topology-neutral): the mTLS control API is PUBLISHED on a
+  # loopback port so the host-run SUT can dial it as SANDBOX_DOCKER_TEST_HOST, and
+  # the self-generated client certs are shared to the host through a bind mount —
+  # the CI step pre-creates that dir world-writable so the rootless daemon's
+  # mapped uid can write into it, and the entrypoint relaxes the *.pem to
+  # world-readable so the host SUT can read them for its mTLS dial. Acceptable for
+  # a throwaway loopback engine; the deployment shares certs over a named volume
+  # to in-cluster consumers instead.
+  #
+  # Rootless-dind posture (NOT --privileged): the nested user namespace +
+  # inner-bridge iptables need seccomp/apparmor unconfined on the ENGINE only.
+  sandbox-engine:
+    # tag 28-dind-rootless, pinned by digest so the engine base cannot float
+    # across a pull — byte-identical to the reference compose's pin.
+    image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
+    profiles: ["sandbox"]
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    environment:
+      # dind self-generates the CA + server + CLIENT certs under this dir; the
+      # client dir ($DOCKER_TLS_CERTDIR/client) holds cert.pem/key.pem/ca.pem —
+      # the three filenames the sandbox-docker provider consumes. Byte-for-byte
+      # the reference compose's path + filenames.
+      DOCKER_TLS_CERTDIR: /certs
+    # sandbox-ctrl ONLY — deliberately OFF the default (datastore) network, so an
+    # inner session cannot address the e2e redis/postgres. Mirrors the reference
+    # network split; the published port still maps host->container regardless.
+    networks:
+      - sandbox-ctrl
+    ports:
+      # mTLS control API on loopback for the host SUT (SANDBOX_DOCKER_TEST_HOST).
+      - "127.0.0.1:${TAI_E2E_SANDBOX_PORT:-2376}:2376"
+    volumes:
+      # Generated client certs (cert.pem/key.pem/ca.pem) shared to the host SUT.
+      # A bind (not a named volume) so a host process can read them; the CI step
+      # pre-creates the source world-writable for the rootless daemon's uid.
+      - "${TAI_E2E_SANDBOX_CERT_DIR:-./.sandbox-certs}:/certs/client"
+    # Install the inner-bridge egress firewall (inlined byte-for-byte from the
+    # reference script), relax the client certs for the host reader, then exec the
+    # stock rootless dind entrypoint. Both helpers background themselves so the
+    # daemon starts immediately; the firewall installs its DROP rules before the
+    # first session create can succeed (the app only dials once the daemon is up).
+    # Every shell `$` is escaped `$$` so Compose interpolation leaves it for the
+    # shell — the reason the reference keeps this in a separate mounted file.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        cat > /tmp/dind-egress-firewall.sh <<'FW'
+        #!/bin/sh
+        # dind inner-bridge egress firewall — programmed at daemon start, BEFORE
+        # the daemon accepts any session create. Installs DROP rules at the top of
+        # the DOCKER-USER chain (docker traverses it FIRST in FORWARD and never
+        # flushes it on reloads) so ALL inner-session egress is filtered: the
+        # deployment-internal RFC1918 ranges (the sandbox-ctrl subnet is one) and
+        # cloud metadata / link-local are denied; everything else (internet + DNS)
+        # is OPEN. The control path is unaffected: serve/backend -> engine:2376
+        # hits INPUT (not FORWARD), so mTLS is the only backstop there. Errors
+        # surface LOUDLY (any failed step aborts — never a daemon whose sessions
+        # are unconfined).
+        set -eu
+        log() { echo "[dind-egress-firewall] $$*" >&2; }
+        fail() { log "FATAL: $$*"; exit 1; }
+        INTERNAL_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
+        i=0
+        DOCKERD_PID=""
+        while [ -z "$$DOCKERD_PID" ]; do
+          DOCKERD_PID="$$(pidof dockerd 2>/dev/null || true)"
+          [ -n "$$DOCKERD_PID" ] && break
+          i=$$((i + 1))
+          [ "$$i" -gt 120 ] && fail "dockerd did not start within 120s"
+          sleep 1
+        done
+        DOCKERD_PID="$${DOCKERD_PID%% *}"
+        log "dockerd pid=$$DOCKERD_PID"
+        in_netns() { nsenter -t "$$DOCKERD_PID" -n "$$@"; }
+        i=0
+        while ! in_netns iptables -w -n -L DOCKER-USER >/dev/null 2>&1; do
+          i=$$((i + 1))
+          [ "$$i" -gt 120 ] && fail "DOCKER-USER chain not present within 120s of dockerd start"
+          sleep 1
+        done
+        add_drop() {
+          _cidr="$$1"
+          if in_netns iptables -w -C DOCKER-USER -d "$$_cidr" -j DROP 2>/dev/null; then
+            log "already denied -> $$_cidr"
+            return 0
+          fi
+          in_netns iptables -w -I DOCKER-USER 1 -d "$$_cidr" -j DROP \
+            || fail "could not install DROP rule for $$_cidr"
+          log "deny egress -> $$_cidr"
+        }
+        for cidr in $$INTERNAL_CIDRS; do
+          add_drop "$$cidr"
+        done
+        log "egress firewall active: internal ranges + metadata denied, internet OPEN"
+        FW
+        chmod +x /tmp/dind-egress-firewall.sh
+        /tmp/dind-egress-firewall.sh &
+        ( until [ -f /certs/client/key.pem ]; do sleep 1; done; chmod 0644 /certs/client/*.pem ) &
+        exec dockerd-entrypoint.sh "$$@"
+      - sh
+    # Ready when the daemon answers over its TLS socket using the client certs it
+    # generated into /certs/client. Generous start_period covers first-boot cert
+    # generation. Byte-identical probe to the reference compose.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "docker --tlsverify --tlscacert /certs/client/ca.pem --tlscert /certs/client/cert.pem --tlskey /certs/client/key.pem -H tcp://127.0.0.1:2376 info >/dev/null 2>&1"
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+# The sandbox control network, declared so the sandbox-engine can sit OFF the
+# implicit `default` network the datastore services ride. Only the sandbox
+# profile uses it; every other service still joins `default` automatically.
+networks:
+  sandbox-ctrl:

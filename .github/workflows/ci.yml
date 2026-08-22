@@ -499,6 +499,28 @@ jobs:
         env:
           TAI_E2E_STORAGE: github
         run: uv run --no-sync pytest -x -q --timeout=120 tests/storage
+      - name: Run the docker sandbox isolation leg (default leg)
+        # The one docker-gated sandbox leg (tests/sandbox_docker): the real
+        # sandbox-docker provider driven against a REAL rootless-dind engine, for
+        # the kit conformance pass + the four session-isolation negatives that
+        # only a true network-split + egress-firewall + mTLS topology can prove
+        # (PLAN_5 §4). The process-based fake sandbox carries the sandbox surface
+        # on every other leg, so — like the isolation topology — this is
+        # backend-invariant and one leg suffices: the default (arq) leg, shard 1.
+        # The compose `sandbox` profile self-generates the dind mTLS client certs
+        # into the bind-mounted dir; it is pre-created world-writable so the
+        # rootless daemon's mapped uid can write into it (the entrypoint then
+        # relaxes the *.pem to world-readable for the host SUT's mTLS dial).
+        if: matrix.backend == 'arq' && matrix.shard == 1
+        working-directory: e2e
+        env:
+          TAI_E2E_SANDBOX_DOCKER: "1"
+          SANDBOX_DOCKER_TEST_HOST: tcp://127.0.0.1:2376
+        run: |
+          mkdir -p .sandbox-certs && chmod 0777 .sandbox-certs
+          docker compose --profile sandbox up -d --wait sandbox-engine
+          uv run --no-sync pytest -x -q --timeout=120 tests/sandbox_docker
+          docker compose --profile sandbox down -v
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

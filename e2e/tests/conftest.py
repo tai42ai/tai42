@@ -41,8 +41,10 @@ from tai42_e2e.manifests import (
     build_bare_stack,
     build_bridge_stack,
     build_channel_stack,
+    build_claude_agent_stack,
     build_connectors_stack,
     build_core_stack,
+    build_deep_agent_durable_stack,
     build_default_router_stack,
     build_embed_stack,
     build_extensions_stack,
@@ -56,6 +58,10 @@ from tai42_e2e.manifests import (
     build_projection_stack,
     build_recycle_stack,
     build_replicas_stack,
+    build_sandbox_local_claude_stack,
+    build_sandbox_local_deep_stack,
+    build_sandbox_local_stack,
+    build_sandbox_stack,
     build_schedule_stack,
     build_shipped_connectors_stack,
 )
@@ -77,7 +83,12 @@ from tai42_e2e.stack import Infra, StackResources, TaiStack
 # on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
 _gate = HarnessSettings()
 collect_ignore_glob: list[str] = gated_collect_ignore(
-    {"monitoring": _gate.monitoring, "marketplace": _gate.marketplace, "fleet": _gate.fleet}
+    {
+        "monitoring": _gate.monitoring,
+        "marketplace": _gate.marketplace,
+        "fleet": _gate.fleet,
+        "sandbox_docker": _gate.sandbox_docker,
+    }
 )
 
 
@@ -325,7 +336,7 @@ def bridge_stack(
     REPLICAS + backend + metrics, access control ON, the redis conversations backend, the
     memory checkpoint provider, the twilio + whatsapp + web channel plugins (twilio/whatsapp
     outbound pointed at their in-process stubs; web has no vendor — its public chat doors ARE
-    the medium), and the ``tools_agent`` + ``deep_agent`` agents on
+    the medium), and the ``tools_agent`` + ``langchain_deep_agent`` agents on
     the scripted LLM stub. Seeded BEFORE boot with a root ``*`` key and a route table that
     pins the unauthenticated channel webhook doors + the readiness probes public and maps
     every other path to the ``e2e-all`` scope the root satisfies and tests mint against."""
@@ -592,3 +603,85 @@ def admin_bypass_authz_stack(
         stack.auth_token = admin_token
         with diagnostics.track(stack):
             yield stack, admin_token, scoped_token
+
+
+# ---- sandbox / agent-implementation stacks ------------------------------
+
+
+@pytest.fixture(scope="module")
+def sandbox_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """MULTIWORKER(1), no backend — the deterministic sandbox-kind surface over the process-based
+    fake provider (the ``e2e_sandbox_probe`` + ``sandbox_exec`` doors, the kit conformance through
+    the running SUT). Single worker so the probe's process-level session registry is coherent."""
+    yield from _boot(infra, tmp_path_factory.mktemp("sandbox"), build_sandbox_stack)
+
+
+@pytest.fixture(scope="module")
+def sandbox_local_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """MULTIWORKER(1), no backend — the REAL direct/host ``sandbox-local`` provider (host-subprocess
+    exec, host-dir workspaces, no docker). The sandbox-kind doors against the real provider."""
+    yield from _boot(infra, tmp_path_factory.mktemp("sandbox-local"), build_sandbox_local_stack)
+
+
+@pytest.fixture(scope="module")
+def sandbox_local_deep_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """The ``sandbox-local`` provider plus the ``langchain_deep_agent`` entry — the deep agent runs
+    end to end under the direct/host provider on the scripted LLM stub (deterministic)."""
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("sandbox-local-deep"),
+        build_sandbox_local_deep_stack,
+        resource_kwargs=resource_kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def sandbox_local_claude_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """The ``sandbox-local`` provider plus the ``claude_code`` entry — the direct-mode claude leg,
+    which runs its one real turn only on the creds host (gated on ``ANTHROPIC_API_KEY``)."""
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("sandbox-local-claude"),
+        build_sandbox_local_claude_stack,
+        resource_kwargs=resource_kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def claude_agent_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub) -> Iterator[TaiStack]:
+    """MULTIWORKER(1), no backend — the ``claude_code`` agent over the process-based fake sandbox,
+    with the fixture monitoring backend for the attribution/cost leg. A scripted runner is selected
+    per test via ``SANDBOX_FAKE_RUNNER``; the real leg (``TAI_E2E_REAL=claude_agent``) runs the real
+    materialized payload instead."""
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra, tmp_path_factory.mktemp("claude-agent"), build_claude_agent_stack, resource_kwargs=resource_kwargs
+    )
+
+
+@pytest.fixture(scope="module")
+def deep_agent_durable_stack(
+    infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
+) -> Iterator[TaiStack]:
+    """REPLICAS + redis checkpoint + fake persistent sandbox — the ``langchain_deep_agent`` durable
+    parity home (workspace-survives-turn, cross-worker resume, the per-workspace lease). Gated on
+    the module-capable checkpoint Redis, like ``agent_async_park_stack``."""
+    if infra.checkpoint_redis is None:
+        pytest.skip(
+            "checkpoint Redis not configured; set TAI_E2E_CHECKPOINT_REDIS_URL and start "
+            "`docker compose --profile agents-redis up -d`"
+        )
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    yield from _boot(
+        infra,
+        tmp_path_factory.mktemp("deep-agent-durable"),
+        build_deep_agent_durable_stack,
+        resource_kwargs=resource_kwargs,
+        allocate_checkpoint_db=True,
+    )
