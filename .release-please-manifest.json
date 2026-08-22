@@ -1,11 +1,11 @@
 {
-  "core/contract": "4.0.0",
+  "core/contract": "4.1.0",
   "core/kit": "3.5.1",
   "core/cli": "3.5.0",
-  "core/skeleton": "7.0.0",
+  "core/skeleton": "7.1.0",
   "plugins/accounts-oidc": "1.0.5",
   "plugins/accounts-postgres": "2.1.2",
-  "plugins/agents": "3.0.2",
+  "plugins/agents": "3.0.3",
   "plugins/backend-arq": "2.0.2",
   "plugins/backend-celery": "2.0.2",
   "plugins/backend-rq": "2.0.2",
@@ -22,8 +22,8 @@
   "plugins/identity-oidc": "1.0.5",
   "plugins/identity-redis": "1.0.5",
   "plugins/monitoring-langfuse": "2.0.0",
-  "plugins/sandbox-docker": "1.0.0",
-  "plugins/sandbox-local": "1.0.0",
+  "plugins/sandbox-docker": "1.1.0",
+  "plugins/sandbox-local": "1.1.0",
   "plugins/storage-github": "1.0.5",
   "plugins/storage-local": "1.0.5",
   "plugins/storage-s3": "1.0.5",
@@ -34,5 +34,5 @@
   "plugins/tools-whatsapp": "1.0.5",
   "plugins/webhook-verifier-github": "1.1.2",
   "plugins/webhook-verifier-stripe": "1.1.2",
-  "e2e": "4.0.0"
+  "e2e": "4.0.1"
 }

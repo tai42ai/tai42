@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-sandbox-docker"
-version = "1.0.0"
+version = "1.1.0"
 description = "Docker sandbox provider for the TAI ecosystem — per-session containers on a remote engine over the Docker Engine API."
 readme = "README.md"
 requires-python = ">=3.13"
