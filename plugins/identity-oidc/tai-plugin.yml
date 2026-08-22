@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: identity-oidc
 package: tai42-identity-oidc
-version: 1.0.3
+version: 1.0.4
 description: >-
   Validate-only OIDC identity provider for the TAI ecosystem: an installable
   plugin that registers itself as the "identity-oidc" identity provider and
