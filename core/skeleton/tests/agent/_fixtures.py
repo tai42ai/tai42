@@ -174,3 +174,30 @@ class ConfigFieldsAgent(Agent):
     async def run(self, **kwargs) -> str:
         config = kwargs.get("langgraph_config") or {}
         return str(config.get("configurable", {}).get("thread_id", ""))
+
+
+# Records the ``thread_id`` each ``ThreadRecorderAgent`` run actually received, so a test
+# can observe whether the synthesized run tool injected the ambient session thread (deposited
+# out-of-band) and that a caller-pinned ``thread_id`` still wins over the deposit.
+thread_recorder_seen: list[str | None] = []
+
+
+class ThreadInput(BaseModel):
+    """A ``ToolInput`` whose optional ``thread_id`` lets a caller pin the run thread
+    directly, standing in for an agent input that already carries one."""
+
+    text: str
+    thread_id: str | None = None
+
+
+@tai42_app.agents.agent("thread_recorder")
+class ThreadRecorderAgent(Agent):
+    tool_name = "thread_recorder"
+    tool_description = "Record the thread id the run received."
+    ToolInput = ThreadInput
+
+    async def run(self, *, text: str = "", thread_id: str | None = None, **kwargs) -> str:
+        # ``from_tool_input`` forwards set fields only, so ``thread_id`` arrives here ONLY
+        # when the caller pinned it OR the run tool injected the ambient session thread.
+        thread_recorder_seen.append(thread_id)
+        return thread_id or ""

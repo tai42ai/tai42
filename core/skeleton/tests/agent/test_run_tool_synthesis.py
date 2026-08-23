@@ -31,6 +31,7 @@ from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
+from tai42_skeleton.agent.session_thread import agent_session_thread
 from tai42_skeleton.agent.thread_reservation import ReservedThreadNamespaceError
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
@@ -418,6 +419,80 @@ def test_the_run_tool_allows_an_unreserved_thread():
                 {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "user-42"}}},
             )
             assert answer == "user-42"
+
+    asyncio.run(run())
+
+
+# -- the ambient in-process session thread ------------------------------------
+
+
+def _thread_recorder_manifest() -> Manifest:
+    return Manifest.model_validate(
+        {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["thread_recorder"]}]}
+    )
+
+
+def _thread_recorder_seen() -> list[str | None]:
+    # The fixtures module is re-imported on each app_context enter, so read the thread log
+    # off the LIVE module object rather than a stale import binding.
+    return _fixture_flag("tests.agent._fixtures", "thread_recorder_seen")
+
+
+def test_run_tool_injects_the_ambient_session_thread_when_caller_pins_none():
+    # A driver deposits an ambient session thread (naming no consumer) and the caller pins
+    # no thread of its own: the synthesized run tool threads the deposit onto the run, so
+    # the agent runs under the deposited id.
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            with agent_session_thread("flow:run-1:node-a"):
+                answer = await app.tools.run_tool("thread_recorder", {"text": "hi"})
+            assert answer == "flow:run-1:node-a"
+            assert _thread_recorder_seen() == ["flow:run-1:node-a"]
+
+    asyncio.run(run())
+
+
+def test_run_tool_injects_nothing_without_a_deposit_fresh():
+    # No deposit: the contextvar stays None, the run tool injects no thread_id, and the run
+    # is byte-identical to the pre-deposit behavior (the agent mints its own fresh thread).
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            answer = await app.tools.run_tool("thread_recorder", {"text": "hi"})
+            assert answer == ""
+            assert _thread_recorder_seen() == [None]
+
+    asyncio.run(run())
+
+
+def test_a_caller_pinned_thread_wins_over_the_ambient_deposit():
+    # The deposit only fills an ABSENT thread_id: a caller that pinned its own thread keeps
+    # it, so the deposit never overrides an explicit choice.
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            with agent_session_thread("flow:run-1:node-a"):
+                answer = await app.tools.run_tool("thread_recorder", {"text": "hi", "thread_id": "caller-pinned"})
+            assert answer == "caller-pinned"
+            assert _thread_recorder_seen() == ["caller-pinned"]
+
+    asyncio.run(run())
+
+
+def test_a_reserved_bridge_deposit_is_still_refused():
+    # The deposit is a caller-external steering vector like any thread id, so it passes the
+    # SAME reserved-namespace guard: a ``bridge:`` deposit is refused however it arrives.
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            with (
+                agent_session_thread("bridge:chat:+15550001111"),
+                pytest.raises(ReservedThreadNamespaceError, match="thread_id"),
+            ):
+                await app.tools.run_tool("thread_recorder", {"text": "hi"})
+            # The run was refused before reaching the agent — nothing was recorded.
+            assert _thread_recorder_seen() == []
 
     asyncio.run(run())
 

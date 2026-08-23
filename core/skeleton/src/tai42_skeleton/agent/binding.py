@@ -18,7 +18,12 @@ from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
 from tai42_kit.utils.data import makefun_func_name
 
-from tai42_skeleton.agent.thread_reservation import run_kwargs_from_tool_input
+from tai42_skeleton.agent.session_thread import get_agent_session_thread
+from tai42_skeleton.agent.thread_reservation import (
+    ReservedThreadNamespaceError,
+    reserved_thread_namespace_error,
+    run_kwargs_from_tool_input,
+)
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 
 if TYPE_CHECKING:
@@ -203,6 +208,25 @@ class AgentBinding:
             supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
+            # Thread the ambient in-process session thread onto the run when one is deposited
+            # and the caller pinned no ``thread_id`` of its own — so an out-of-band driver
+            # (today the flows iterate engine) can carry an agent's memory across successive
+            # runs without the run tool advertising a thread parameter. The deposit is a
+            # caller-external steering vector like any thread id, so it passes the SAME
+            # reserved-namespace guard: a ``bridge:`` deposit stays refused however it
+            # arrives. Absent a deposit this is a no-op and the run mints its own fresh
+            # thread (config_util) — byte-identical to the pre-deposit behavior.
+            session_thread = get_agent_session_thread()
+            if session_thread is not None and "thread_id" not in run_kwargs:
+                # Reuse the shared reservation guard as the single source of truth for the
+                # refused ``bridge:`` prefix — it scans config-shaped run-kwarg values, so
+                # wrap the deposit in the same ``{"configurable": {"thread_id": ...}}`` shape
+                # a config-bearing kwarg carries.
+                deposited_config = {"session_thread": {"configurable": {"thread_id": session_thread}}}
+                message = reserved_thread_namespace_error(deposited_config)
+                if message is not None:
+                    raise ReservedThreadNamespaceError(message)
+                run_kwargs["thread_id"] = session_thread
             return await self.get_agent(name).run(**run_kwargs)
 
         # makefun's ``func_impl`` is typed ``Callable[[Any], Any]`` but it accepts

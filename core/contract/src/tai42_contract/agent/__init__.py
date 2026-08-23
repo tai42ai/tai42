@@ -26,6 +26,16 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 
+# The ambient in-process session-thread door: a logic-free channel both the skeleton
+# run-tool binding (reader) and a contract-facing plugin (writer) reach through the one
+# package they share.
+from tai42_contract.agent.session_thread import (
+    agent_session_thread,
+    get_agent_session_thread,
+    reset_agent_session_thread,
+    set_agent_session_thread,
+)
+
 __all__ = [
     "Agent",
     "AgentInterruptedError",
@@ -41,4 +51,8 @@ __all__ = [
     "SuspendedFinal",
     "ToolCallStep",
     "ToolResultStep",
+    "agent_session_thread",
+    "get_agent_session_thread",
+    "reset_agent_session_thread",
+    "set_agent_session_thread",
 ]
