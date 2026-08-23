@@ -48,7 +48,27 @@ a real interrupt is left untouched.
 
 ## langchain_deep_agent
 
-Runs a deep agent with planning, subagents, skills, and a filesystem backend.
+Runs a deep agent with planning, one level of nested subagents, skills,
+human-in-the-loop interrupts (resumed with a LangGraph `Command`), and a per-thread
+scratch filesystem.
+
+### Sandbox requirement
+
+The scratch filesystem **is** a durable [sandbox](/concepts/sandbox) backend over the
+same `SandboxSession` contract, so a run requires a registered sandbox provider — with
+none installed it fails loudly at `require_sandbox()`. Its working files persist and
+reap under the operator's durability settings, so installing a sandbox provider is a
+hard prerequisite, not an optional add-on.
+
+### Structured output
+
+A `response_format` is validated up front: the JSON Schema must carry a top-level
+`title`, and every `oneOf` variant must carry a non-empty `title` of its own — a schema
+missing either raises a `ValueError` before the run starts. When a run requests a
+`response_format` but produces no structured output, **both faces raise rather than
+silently omitting the structured frame**: the JSON `run` face raises on drain, and the
+streaming face raises after the stream drains — unless the run paused on a pending
+interrupt, which takes precedence over the missing-structured raise.
 
 ## claude_code
 
