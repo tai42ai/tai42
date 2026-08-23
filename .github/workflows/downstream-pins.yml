@@ -1,0 +1,54 @@
+# When a CORE fleet member (contract/kit/skeleton/cli/agents) cuts a release, a
+# downstream repo still carrying an EXCLUDING pin (e.g. tai42-mcp-dynamic-postgres's
+# `tai42-contract>=1.5,<2`) silently fails to resolve the new version — a class of
+# breakage that used to surface only by hand-audit after the downstream went red or
+# latent-stale. This dispatch reads each known downstream manifest, extracts every
+# tai42-<core> requirement, checks the JUST-RELEASED version against it, and opens
+# (or updates) a tracking issue on THIS repo per stale pin. It never edits a
+# downstream repo — widening a downstream pin is the downstream maintainer's call.
+name: downstream-pins
+
+on:
+  push:
+    # CORE members only: only these can strand a downstream. The component tag
+    # release.yml publishes (tai42-<package>-v<version>) carries the released
+    # version the checker parses out of the tag name.
+    tags:
+      - "tai42-contract-v*"
+      - "tai42-kit-v*"
+      - "tai42-skeleton-v*"
+      - "tai42-cli-v*"
+      - "tai42-agents-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One sweep at a time; a release wave's burst of core tags collapses to a single
+# convergent check. Never cancel an in-flight sweep (matches release-repin.yml).
+concurrency:
+  group: downstream-pins
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # The tree carries the checker and — for a manual dispatch — the current CORE
+      # member versions (release-please-config.json + each member's pyproject.toml).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      # Pure stdlib + packaging; --no-project skips resolving the workspace just to
+      # run it. RELEASE_PLEASE_TOKEN reads the private downstreams (tai42-premium,
+      # babelfish) and opens the tracking issue; the public downstreams read with it
+      # too — it is the broadest-scoped token available to this repo.
+      - name: Check downstream pins against the released core version(s)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: uv run --python 3.13 --no-project --with packaging python scripts/downstream_pins.py
