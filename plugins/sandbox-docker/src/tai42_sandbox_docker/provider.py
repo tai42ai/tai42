@@ -59,7 +59,7 @@ IDLE_COMMAND = ("sleep", "infinity")
 INTERNAL_NETWORK = "tai-sbx-internal"
 
 # The neutral network tier → engine NetworkMode. ``egress`` joins the engine's default
-# NAT'd bridge (the PLAN_6 egress firewall NATs it out); ``internal`` joins an isolated
+# NAT'd bridge (the deployment's egress firewall NATs it out); ``internal`` joins an isolated
 # bridge with no external routing; ``none`` attaches no network beyond loopback.
 _NETWORK_MODES = {"none": "none", "egress": "bridge", "internal": INTERNAL_NETWORK}
 
@@ -95,10 +95,12 @@ def resolve_engine_url(host: str, *, tls: bool) -> str:
 
 
 def container_name(workspace_key: str) -> str:
+    """The deterministic engine container name for ``workspace_key``."""
     return f"{RESOURCE_PREFIX}{workspace_key}"
 
 
 def volume_name(workspace_key: str) -> str:
+    """The deterministic engine volume name for ``workspace_key``."""
     return f"{RESOURCE_PREFIX}{workspace_key}"
 
 

@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 
 from tai42_contract.sandbox import (
     Sandbox,
+    SandboxDurability,
     SandboxPolicy,
     SandboxSessionInfo,
     SandboxSessionNotFoundError,
@@ -50,7 +51,7 @@ class _LedgerRecord:
     session: ManagedSandboxSession
     image: str
     workspace_key: str
-    durability: str
+    durability: SandboxDurability
     ttl_seconds: int
     labels: dict[str, str]
     created_at: datetime
@@ -206,7 +207,7 @@ class ManagedSandbox(Sandbox):
             image=record.image,
             workspace_key=record.workspace_key,
             workspace_path=record.session.workspace_path,
-            durability=record.durability,  # pyright: ignore[reportArgumentType]
+            durability=record.durability,
             created_at=record.created_at,
             expires_at=record.expires_at,
             labels=dict(record.labels),

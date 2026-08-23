@@ -102,7 +102,7 @@ class InteractionsSettings(TaiBaseSettings):
     # Must be positive.
     delivery_retry_backoff_seconds: float = Field(default=1.0, gt=0)
 
-    # Slack past a legitimately-blocking command's own server-side block window
+    # Grace past a legitimately-blocking command's own server-side block window
     # after which its connection is presumed stalled: the BLPOP reply wait and the
     # keepalive XREAD tail run with no socket read timeout, so this bounds them via
     # an outer ``asyncio.wait_for`` (budget/keepalive + grace). Must be positive.

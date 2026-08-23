@@ -25,6 +25,7 @@ from aiodocker.exceptions import DockerError  # pyright: ignore[reportMissingImp
 from pydantic import SecretStr
 from tai42_contract.sandbox import (
     ExecResult,
+    SandboxDurability,
     SandboxError,
     SandboxExecHandle,
     SandboxExecTimeoutError,
@@ -100,7 +101,7 @@ async def half_close_stdin(stream: Any) -> None:
 
     The aiodocker ``Stream`` exposes only a full ``close()`` (which tears down the
     read side too), so the half-close is issued on the underlying transport directly
-    (the ``aiodocker~=0.27`` pin fixes this shape):
+    (the ``aiodocker~=0.27`` pin holds this private ``_resp`` shape stable):
 
     - Plain TCP: ``write_eof()`` sends a FIN on the write half — the clean half-close.
     - mTLS (``tcp://`` normalized to ``https://``): an asyncio SSL transport reports
@@ -264,13 +265,13 @@ class DockerSandboxSession(ManagedSandboxSession):
         session_id: str,
         container: Any,
         workspace_key: str,
-        durability: str,
+        durability: SandboxDurability,
         base_env: Mapping[str, SecretStr],
     ) -> None:
         super().__init__(sandbox=sandbox, session_id=session_id)
         self._container = container
         self._workspace_key = workspace_key
-        self._durability = durability
+        self._durability: SandboxDurability = durability
         self._base_env = dict(base_env)
 
     @property
@@ -332,7 +333,7 @@ class DockerSandboxSession(ManagedSandboxSession):
             member = target[len(WORKSPACE_PATH) :].lstrip("/")
         else:
             # An absolute path outside the workspace: its parent is the caller's own
-            # responsibility (the contract path rule), matching prior behavior.
+            # responsibility (the contract path rule).
             base, member = posixpath.split(target)
             base = base or "/"
         archive = _tar_single_member(member, data)

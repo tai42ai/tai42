@@ -7,8 +7,8 @@ Doors:
   applying the live stream. Audience-filtered before paging so the totals are honest.
 * ``GET /api/interactions/stream`` — the authenticated TAIL-ONLY SSE feed: a live
   tail of add/answered/removed events from the cursor captured at connect. It
-  carries no backlog and no ``backlog_done`` marker (the paged list door is the
-  initial-load surface).
+  carries no historical backlog and no end-of-backlog marker (the paged list door
+  is the initial-load surface).
 * ``GET /api/interactions/media/{media_id}`` — the UNAUTHENTICATED served-media
   door: the media id is the capability secret (a vendor fetches the url from its
   own servers, a browser ``<img>`` from the inbox origin). Serves the stored bytes
@@ -355,17 +355,19 @@ def _frame(event: str, data: dict) -> str:
 
 
 async def _stream_events(request: Request, store: InteractionStore, settings: InteractionsSettings, cursor: str):
-    # Resolve the caller's isolation identity once. A RESTRICTED caller (owner claim
-    # present) sees ONLY interactions addressed to it: an ``add`` frame is filtered on
-    # the record's ``audience == <own id>``, and an ``answered``/``removed`` frame on
-    # the audience the store stamps into the event payload — so a terminal frame is
-    # filtered directly, with no record left to read. An UNRESTRICTED caller sees every
-    # frame (the operator inbox). This is a TAIL-ONLY stream: the pending set is served
-    # by the paged ``GET /api/interactions`` door, so the stream carries no backlog and
-    # no ``backlog_done`` marker — only the live add/answered/removed tail. ``cursor`` is
-    # the events-stream tail the route handler captured BEFORE returning the response, so
-    # any add published after the client has the response headers has an id past it and
-    # is guaranteed delivered (the generator body runs only once the response iterates).
+    """Resolve the caller's isolation identity once. A RESTRICTED caller (owner claim
+    present) sees ONLY interactions addressed to it: an ``add`` frame is filtered on
+    the record's ``audience == <own id>``, and an ``answered``/``removed`` frame on
+    the audience the store stamps into the event payload — so a terminal frame is
+    filtered directly, with no record left to read. An UNRESTRICTED caller sees every
+    frame (the operator inbox). This is a TAIL-ONLY stream: the pending set is served
+    by the paged ``GET /api/interactions`` door, so the stream carries no historical
+    backlog and no end-of-backlog marker — only the live add/answered/removed tail.
+    ``cursor`` is the events-stream tail the route handler captured BEFORE returning the
+    response, so any add published after the client has the response headers has an id
+    past it and is guaranteed delivered (the generator body runs only once the response
+    iterates).
+    """
     _user_id, restricted_id = request_identity()
     restricted = restricted_id is not None
 

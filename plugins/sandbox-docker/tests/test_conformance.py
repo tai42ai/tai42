@@ -1,6 +1,6 @@
 """The kit conformance suite against a REAL Docker engine.
 
-Runs ONLY when ``SANDBOX_DOCKER_TEST_HOST`` names a live engine (PLAN_5's e2e leg
+Runs ONLY when ``SANDBOX_DOCKER_TEST_HOST`` names a live engine (the e2e leg
 wires it); otherwise it skips LOUDLY with the reason. The unit suite stays green with
 no docker anywhere, so this leg is additionally gated behind the ``docker`` marker.
 """
@@ -26,7 +26,7 @@ _TEST_IMAGE = os.environ.get("SANDBOX_DOCKER_TEST_IMAGE", "busybox:latest")
     not _TEST_HOST,
     reason=(
         "SANDBOX_DOCKER_TEST_HOST is not set: the live-engine sandbox conformance leg "
-        "needs a real Docker engine and runs at the PLAN_5 e2e stage, not the unit gate."
+        "needs a real Docker engine and runs at the live-engine e2e stage, not the unit gate."
     ),
 )
 async def test_docker_sandbox_conformance() -> None:

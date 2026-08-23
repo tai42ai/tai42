@@ -27,9 +27,11 @@ _ALLOWED_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
 def _parse_data_image(data_url: str) -> tuple[str, bytes]:
-    # Split a ``data:image/<subtype>;base64,<payload>`` URI into (mime, decoded bytes).
-    # A non-image mime, a missing ``;base64`` marker, an unlisted subtype, empty or
-    # non-strict-base64 payload raises ValueError — never a silent skip.
+    """Split a ``data:image/<subtype>;base64,<payload>`` URI into (mime, decoded bytes).
+
+    A non-image mime, a missing ``;base64`` marker, an unlisted subtype, empty or
+    non-strict-base64 payload raises ValueError — never a silent skip.
+    """
     if not data_url.startswith("data:"):
         raise ValueError("media data url must start with 'data:'")
     header, sep, payload = data_url[len("data:") :].partition(",")
