@@ -39,7 +39,7 @@ __all__ = [
 
 # A digest reference pins the exact image bytes: ``<name>@sha256:<64 hex>``. A bare tag is
 # mutable, so it is rejected loudly at run start — the published lean exec image is signed
-# and referenced by digest (PLAN_6).
+# and referenced by digest.
 _DIGEST_REFERENCE_RE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 
 
@@ -53,7 +53,7 @@ class LangchainDeepAgentSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="TAI_AGENTS_LANGCHAIN_DEEP_")
 
     # REQUIRED, digest-pinned. Points at the lean python3 + coreutils exec session image
-    # (PLAN_6) — NOT a coding-agent image; the deep agent's scratch backend needs only
+    # — NOT a coding-agent image; the deep agent's scratch backend needs only
     # python3/coreutils for BaseSandbox's shell-derived file ops and its built-in shell. The
     # empty default is not a usable value: the digest validator below rejects it LOUDLY at run
     # start, so an unconfigured deployment fails rather than silently running an unpinned image.
@@ -76,7 +76,7 @@ class LangchainDeepAgentSettings(TaiBaseSettings):
     cpu: float | None = Field(default=None, gt=0)
     memory_mb: int | None = Field(default=None, gt=0)
 
-    # PARITY with the coding agent (ruling 2): the per-agent re-dispatch declaration, DECLARED
+    # PARITY with the coding agent: the per-agent re-dispatch declaration, DECLARED
     # to the skeleton at registration as ``meta={"tai42/crash_resume": <setting>}``. RECYCLE-class
     # so a hot change re-registers and re-declares the meta (it is captured once at registration,
     # so a hot change would otherwise leave the registered meta stale — the same staleness argument
