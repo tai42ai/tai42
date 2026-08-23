@@ -7,7 +7,7 @@ thread (memory carries across them). This module owns that ambient deposit — a
 mirroring the run-attribution discipline — and the context manager that sets/resets it.
 
 The channel lives in the CONTRACT (not the skeleton) on purpose: the reader (the skeleton
-run-tool binding) and the writer (a contract-facing plugin such as the flows iterate engine)
+run-tool binding) and the writer (a contract-facing driver plugin)
 sit in different packages that share only :mod:`tai42_contract`, so the ambient channel both
 address must live in the layer both may import. The contract interprets NOTHING about the
 deposited id — it is a logic-free channel, exactly like the neutral ``Agent`` vocabulary

@@ -184,10 +184,13 @@ thread_recorder_seen: list[str | None] = []
 
 class ThreadInput(BaseModel):
     """A ``ToolInput`` whose optional ``thread_id`` lets a caller pin the run thread
-    directly, standing in for an agent input that already carries one."""
+    directly, standing in for an agent input that already carries one. The optional
+    ``langgraph_config`` stands in for the config-shaped spelling of the same pin
+    (``configurable.thread_id``), which the ambient-deposit gate must also yield to."""
 
     text: str
     thread_id: str | None = None
+    langgraph_config: dict | None = None
 
 
 @tai42_app.agents.agent("thread_recorder")
@@ -196,8 +199,9 @@ class ThreadRecorderAgent(Agent):
     tool_description = "Record the thread id the run received."
     ToolInput = ThreadInput
 
-    async def run(self, *, text: str = "", thread_id: str | None = None, **kwargs) -> str:
+    async def run(self, **kwargs) -> str:
         # ``from_tool_input`` forwards set fields only, so ``thread_id`` arrives here ONLY
         # when the caller pinned it OR the run tool injected the ambient session thread.
+        thread_id = kwargs.get("thread_id")
         thread_recorder_seen.append(thread_id)
         return thread_id or ""

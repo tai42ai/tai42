@@ -2,7 +2,7 @@
 
 The door itself — the ContextVar deposit + the :func:`agent_session_thread` context manager
 — is owned by :mod:`tai42_contract.agent.session_thread` because its reader (the run-tool
-binding here) and its writer (a contract-facing plugin such as the flows iterate engine)
+binding here) and its writer (a contract-facing driver plugin)
 share only the contract package. The skeleton re-exports it so its own code and consumers
 import the whole agent seam through one cohesive ``tai42_skeleton.agent`` namespace.
 
