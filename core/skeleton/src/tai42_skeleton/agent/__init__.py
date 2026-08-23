@@ -30,6 +30,16 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 
+# The ambient in-process session-thread deposit is a skeleton-owned agent seam (not a
+# contract re-export); surface it in the same cohesive ``tai42_skeleton.agent`` namespace
+# so a consumer (the flows iterate engine) imports session continuity through one door.
+from tai42_skeleton.agent.session_thread import (
+    agent_session_thread,
+    get_agent_session_thread,
+    reset_agent_session_thread,
+    set_agent_session_thread,
+)
+
 __all__ = [
     "Agent",
     "AgentInterruptedError",
@@ -44,4 +54,8 @@ __all__ = [
     "SubAgentSpec",
     "ToolCallStep",
     "ToolResultStep",
+    "agent_session_thread",
+    "get_agent_session_thread",
+    "reset_agent_session_thread",
+    "set_agent_session_thread",
 ]
