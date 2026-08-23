@@ -480,6 +480,26 @@ def test_a_caller_pinned_thread_wins_over_the_ambient_deposit():
     asyncio.run(run())
 
 
+def test_a_config_shaped_caller_pin_also_wins_over_the_ambient_deposit():
+    # The caller-pinned check covers the config-shaped spelling too: a
+    # ``configurable.thread_id`` on a config-bearing kwarg means the deposit must NOT
+    # inject a top-level ``thread_id`` (which build_run_config would let override the
+    # caller's config-shaped pin). The recorder sees no top-level thread at all — the
+    # caller's config rides through untouched.
+    async def run() -> None:
+        async with app.app_context(_thread_recorder_manifest()):
+            _thread_recorder_seen().clear()
+            with agent_session_thread("flow:run-1:node-a"):
+                answer = await app.tools.run_tool(
+                    "thread_recorder",
+                    {"text": "hi", "langgraph_config": {"configurable": {"thread_id": "cfg-pinned"}}},
+                )
+            assert answer == ""
+            assert _thread_recorder_seen() == [None]
+
+    asyncio.run(run())
+
+
 def test_a_reserved_bridge_deposit_is_still_refused():
     # The deposit is a caller-external steering vector like any thread id, so it passes the
     # SAME reserved-namespace guard: a ``bridge:`` deposit is refused however it arrives.

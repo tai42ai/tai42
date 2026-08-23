@@ -209,15 +209,27 @@ class AgentBinding:
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
             # Thread the ambient in-process session thread onto the run when one is deposited
-            # and the caller pinned no ``thread_id`` of its own — so an out-of-band driver
-            # (today the flows iterate engine) can carry an agent's memory across successive
-            # runs without the run tool advertising a thread parameter. The deposit is a
-            # caller-external steering vector like any thread id, so it passes the SAME
-            # reserved-namespace guard: a ``bridge:`` deposit stays refused however it
-            # arrives. Absent a deposit this is a no-op and the run mints its own fresh
-            # thread (config_util) — byte-identical to the pre-deposit behavior.
+            # and the caller pinned no thread of its own — so an out-of-band in-process
+            # driver can carry an agent's memory across successive runs without the run
+            # tool advertising a thread parameter. The deposit is a caller-external
+            # steering vector like any thread id, so it passes the SAME reserved-namespace
+            # guard: a ``bridge:`` deposit stays refused however it arrives. Absent a
+            # deposit this is a no-op and the run mints its own fresh thread (config_util)
+            # — byte-identical to the pre-deposit behavior.
+            #
+            # "Caller pinned" covers EVERY spelling a thread can arrive in: the top-level
+            # ``thread_id`` kwarg AND a ``configurable.thread_id`` on ANY config-shaped
+            # kwarg (``langgraph_config``, a voting agent's variants — the same breadth
+            # the reservation guard scans). An injected top-level value would override a
+            # config-shaped pin in ``build_run_config``, so the deposit yields to all forms.
             session_thread = get_agent_session_thread()
-            if session_thread is not None and "thread_id" not in run_kwargs:
+            caller_pinned_thread = "thread_id" in run_kwargs or any(
+                isinstance(value, dict)
+                and isinstance(value.get("configurable"), dict)
+                and "thread_id" in value["configurable"]
+                for value in run_kwargs.values()
+            )
+            if session_thread is not None and not caller_pinned_thread:
                 # Reuse the shared reservation guard as the single source of truth for the
                 # refused ``bridge:`` prefix — it scans config-shaped run-kwarg values, so
                 # wrap the deposit in the same ``{"configurable": {"thread_id": ...}}`` shape
