@@ -2,11 +2,10 @@ spec_version: 1
 namespace: tai42
 name: agents
 package: tai42-agents
-version: 4.0.0
+version: 4.0.1
 description: >-
   Ready-made agents for the TAI ecosystem — coding/deep agents, tool-calling,
-  retrieval, voting, refinement, and vision agents — opt-in and
-  manifest-loaded.
+  retrieval, voting, refinement, and vision agents — opt-in and manifest-loaded.
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/agents
