@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tai42-agents"
 version = "4.0.0"
-description = "Ready-made agents for the TAI ecosystem — claude_code, langchain_deep_agent, tools_agent, mcp_tools_agent, retrieval_tools_agent, voting_agent, refine_agent, and vqa_agent — opt-in and manifest-loaded."
+description = "Ready-made agents for the TAI ecosystem — coding/deep agents, tool-calling, retrieval, voting, refinement, and vision agents — opt-in and manifest-loaded."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
