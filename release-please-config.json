@@ -6,26 +6,22 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
-      "skip-changelog": true,
-      "release-as": "4.1.0"
+      "skip-changelog": true
     },
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "skip-changelog": true,
-      "release-as": "3.6.0"
+      "skip-changelog": true
     },
     "core/cli": {
       "package-name": "tai42-cli",
       "component": "tai42-cli",
-      "skip-changelog": true,
-      "release-as": "3.6.0"
+      "skip-changelog": true
     },
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
-      "skip-changelog": true,
-      "release-as": "7.1.0"
+      "skip-changelog": true
     },
     "plugins/accounts-oidc": {
       "package-name": "tai42-accounts-oidc",
@@ -76,8 +72,7 @@
           "path": "src/tai42_agents/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "4.0.0"
+      ]
     },
     "plugins/backend-arq": {
       "package-name": "tai42-backend-arq",
@@ -350,8 +345,7 @@
           "path": "src/tai42_sandbox_docker/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.0.0"
+      ]
     },
     "plugins/sandbox-local": {
       "package-name": "tai42-sandbox-local",
@@ -368,8 +362,7 @@
           "path": "src/tai42_sandbox_local/tai-plugin.yml",
           "jsonpath": "$.version"
         }
-      ],
-      "release-as": "1.0.0"
+      ]
     },
     "plugins/storage-github": {
       "package-name": "tai42-storage-github",
