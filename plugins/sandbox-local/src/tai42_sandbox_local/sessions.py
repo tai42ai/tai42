@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 from pydantic import SecretStr
 from tai42_contract.sandbox import (
     ExecResult,
+    SandboxDurability,
     SandboxError,
     SandboxExecHandle,
     SandboxExecTimeoutError,
@@ -184,7 +185,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         sandbox: LocalSandbox,
         session_id: str,
         workspace_path: str,
-        durability: str,
+        durability: SandboxDurability,
         base_path: str,
         spec_env: dict[str, SecretStr],
         teardown_dir: str,
@@ -194,7 +195,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         # The ABSOLUTE, realpath-resolved workspace root (equal to the child's cwd for
         # an unset cwd, and the anchor for workspace-relative path resolution).
         self._workspace_path = workspace_path
-        self._durability = durability
+        self._durability: SandboxDurability = durability
         self._base_path = base_path
         self._spec_env = dict(spec_env)
         # The directory to remove on teardown (the workspace for ephemeral, the named
@@ -208,7 +209,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         return self._workspace_path
 
     @property
-    def durability(self) -> str:
+    def durability(self) -> SandboxDurability:
         return self._durability
 
     @property

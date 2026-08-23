@@ -81,7 +81,7 @@ _UNHONORED_REASONS: dict[str, str] = {
     "resume_checkpoint_id": (
         "the durable sandbox WORKSPACE volume cannot be forked alongside the LangGraph checkpoint, so "
         "forking the checkpoint past an aborted turn would run a forked graph over post-abort workspace "
-        "state — a silent divergence; it is unhonored on the durable deep agent (user ruling 2026-08-21)"
+        "state — a silent divergence; it is unhonored on the durable deep agent"
     ),
 }
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"presets"})

@@ -30,6 +30,8 @@ from tai42_kit.settings import settings_cache
 
 
 class SandboxLocalSettings(SandboxDispatchSettings):
+    """The ``SANDBOX_LOCAL_`` env group backing the direct/host sandbox provider."""
+
     model_config = SettingsConfigDict(env_prefix="SANDBOX_LOCAL_")
 
     # The host workspace root every provisioned workspace lives under. RECYCLE-class:

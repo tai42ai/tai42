@@ -10,7 +10,7 @@ acquired, so a misconfiguration fails loudly at run start rather than mid-drive:
   config error (no silent precedence). The matching env var (``ANTHROPIC_API_KEY`` XOR
   ``CLAUDE_CODE_OAUTH_TOKEN``) is the ONLY model credential injected into the session.
 * **Digest-only session image** — ``session_image`` MUST be a ``...@sha256:<64 hex>`` digest
-  reference; a bare tag is rejected (PLAN_6 publishes the claude session image by digest).
+  reference; a bare tag is rejected (the claude session image is published and pinned by digest).
 
 ``SessionCredSpec`` is the operator's session-cred entry (a discriminated union of a plain
 static value and a per-caller connection reference); the agent injects ONLY this list plus the

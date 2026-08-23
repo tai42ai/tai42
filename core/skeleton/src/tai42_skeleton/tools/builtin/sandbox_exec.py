@@ -16,7 +16,7 @@ The base tool reads NO policy knobs and builds NO policy of its own: it acquires
 session through the SAME kit session-create policy chokepoint, so the platform policy
 (the network ceiling, the isolation floor, the durable gate) governs it AUTOMATICALLY.
 ``isolation`` is LEFT UNSET so it inherits the platform floor; ``network`` defaults to a
-FIXED ``"egress"`` (ruling 4's OPEN posture, NOT a read of the egress knob) — the kit
+FIXED ``"egress"`` (the OPEN default posture, NOT a read of the egress knob) — the kit
 create ceiling still loudly rejects anything looser than the operator's egress.
 """
 
@@ -71,7 +71,7 @@ async def sandbox_exec(
     Returns:
         The command's :class:`ExecResult` (exit code, stdout, stderr).
     """
-    # Invocation fence (ruling 14 on invocation): a bare direct edge call by a
+    # Invocation fence: a bare direct edge call by a
     # tool-capable NON-admin would bypass the authoring fence with arbitrary argv/image,
     # so the base tool admin-fences its own DIRECT invocation. A preset-forwarded call
     # arms the in-process reveal gate (a ``TransformedTool`` dispatch) and its authoring

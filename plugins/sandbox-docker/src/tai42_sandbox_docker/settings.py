@@ -38,7 +38,7 @@ class DockerSandboxSettings(SandboxDispatchSettings):
 
     # mTLS for a ``tcp://`` host. ``tls_verify`` off is never the documented shape;
     # an unauthenticated ``tcp://`` endpoint is not supported. The three cert paths
-    # sit under the canonical ``/certs/client`` mount PLAN_6 provisions, so they are
+    # sit under the canonical ``/certs/client`` mount the deployment provisions, so they are
     # NOT env-configured and never enter the recycle-pinned app env.
     tls_verify: bool = True
     tls_cert_path: str = "/certs/client/cert.pem"
