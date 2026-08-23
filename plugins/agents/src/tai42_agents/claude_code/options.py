@@ -6,8 +6,8 @@ runner constructs ``ClaudeAgentOptions`` from it. Two security invariants are ba
 
 * **Default-deny tools** — the payload names the allowed WRITE root (``{ws}/project``) and the
   excluded subtree (``{ws}/project/.claude``); the runner enforces a ``can_use_tool``
-  allowlist, NEVER ``allowed_tools`` for a path-checked tool (strata's bypass trap). An
-  adapter-written file can never configure the next turn.
+  allowlist, NEVER ``allowed_tools`` for a path-checked tool (which ``allowed_tools`` would
+  bypass). An adapter-written file can never configure the next turn.
 * **Fixed env allowlist** — the host env is NEVER spread. ``env`` carries only the non-secret
   fixed vars (HOME / ``CLAUDE_CONFIG_DIR`` / XDG targets / telemetry-off); the secret
   credential VALUES ride the session ``spec.env`` the provider injects on every exec, and
@@ -25,7 +25,7 @@ from tai42_agents.claude_code.settings import ANTHROPIC_API_KEY_ENV, CLAUDE_CODE
 # the SDK never prompts. The real gate is the runner's default-deny ``can_use_tool`` allowlist.
 PERMISSION_MODE = "bypassPermissions"
 
-# Telemetry/updater kill switches every session pins (strata ``spawn-env.ts``).
+# Telemetry/updater kill switches every session pins.
 _TELEMETRY_ENV = {
     "DISABLE_TELEMETRY": "1",
     "DISABLE_ERROR_REPORTING": "1",
@@ -35,7 +35,7 @@ _TELEMETRY_ENV = {
 
 def build_home_env(ws: str) -> dict[str, str]:
     """The HOME / ``CLAUDE_CONFIG_DIR`` / XDG targets, all pinned at ``{ws}/.claude-home`` so no
-    host-user directory is ever read or written (strata ``spawn-env.ts:54-63``)."""
+    host-user directory is ever read or written."""
     home = f"{ws}/.claude-home"
     return {
         "HOME": home,
