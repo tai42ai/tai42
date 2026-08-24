@@ -759,8 +759,8 @@ def test_correlation_types_exported():
 # -- InboundBridge + InboundAnswerResult: the shared inbound-answer models --------
 
 
-def _inbound_bridge_kwargs(**overrides):
-    base = {
+def _inbound_bridge_kwargs(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
         "channel_id": "telegram",
         "our_identity": "op-1",
         "client_address": "+15550001111",
