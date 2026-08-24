@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the accounts
     # ABCs, the login-method metadata models, and the module-level accounts registry.
-    "tai42-contract>=4.2,<5",
+    "tai42-contract>=5.0,<6",
     # The Postgres and Redis clients plus the session/invite token hash. The
     # `postgres` extra (psycopg[binary,pool]) backs the user/session/invite store;
     # the `redis` extra backs the login rate limiter and the shared bootstrap

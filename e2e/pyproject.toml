@@ -28,14 +28,14 @@ dependencies = [
     # below — a lower floor lets an older wheel back in and makes the published
     # harness unresolvable.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=4.2,<5",
+    "tai42-contract>=5.0,<6",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.6,<4",
-    "tai42-skeleton[toolbox,files]>=7.2,<8",
-    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=1.0,<2",
+    "tai42-skeleton[toolbox,files]>=8.0,<9",
+    "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=2.0,<3",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=1.0,<2",
-    "tai42-agents>=4.0,<5",
+    "tai42-agents>=5.0,<6",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.
@@ -67,7 +67,7 @@ dependencies = [
     "tai42-channel-slack>=1.1,<2",
     "tai42-channel-twilio>=1.1,<2",
     "tai42-channel-whatsapp>=1.3,<2",
-    "tai42-channel-web>=2.1,<3",
+    "tai42-channel-web>=3.0,<4",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=2.0,<3",
     # The Kubernetes config-source plugin; the [k8s] extra pulls the kubernetes
