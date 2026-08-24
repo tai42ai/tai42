@@ -105,7 +105,7 @@ def _entry(**overrides) -> Correlation:
     return Correlation(**base)
 
 
-def _bridge() -> InboundBridge:
+def _bridge(*, owns_retry_notice: bool = False) -> InboundBridge:
     return InboundBridge(
         channel_id="fakechan",
         our_identity="op-1",
@@ -113,6 +113,7 @@ def _bridge() -> InboundBridge:
         cap_key="+15550001111",
         provider_message_id="prov-msg-1",
         bridge_text="hello there",
+        owns_retry_notice=owns_retry_notice,
     )
 
 
@@ -271,7 +272,64 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
         "reason": "Please answer with yes or no.",
         "field": "reply",
         "retry_in_place": True,
+        # Default bridge: core sent the generic notice, so it owns it.
+        "notice_owner": "core",
     }
+
+
+# -- 4b. 400 retryable with owns_retry_notice: KEPT, NO core notice, event tagged --
+
+
+async def test_400_retryable_owns_retry_notice_skips_core_notice_keeps_and_alerts(wired, monkeypatch):
+    # A channel that owns its correction surface (owns_retry_notice=True) must NOT be
+    # double-messaged: core SKIPS its guest notice, but still keeps the correlation and
+    # still emits the operator event tagged notice_owner="channel".
+    store = FakeStore(_entry())
+    _stub_forward(
+        monkeypatch,
+        httpx.Response(400, json={"error": "Please pick a listed option.", "field": "choice", "retry_in_place": True}),
+    )
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan",
+        correlation_key="k",
+        answer="maybe",
+        store=store,
+        bridge=_bridge(owns_retry_notice=True),
+    )
+
+    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    # Correlation KEPT so the channel's re-ask resolves the same ask.
+    assert store.released == []
+    # Core sent NO guest notice — the channel owns it.
+    assert wired.channel.notifications == []
+    # The operator event still fires, tagged with the channel as the notice owner.
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["notice_owner"] == "channel"
+    assert wired.events[0].payload["retry_in_place"] is True
+    assert wired.events[0].payload["reason"] == "Please pick a listed option."
+
+
+async def test_400_hard_mismatch_ignores_owns_retry_notice_and_core_notices(wired, monkeypatch):
+    # owns_retry_notice applies ONLY to the retryable path: a closed ask's correction
+    # surface is moot, so core ALWAYS sends the final notice and owns it.
+    store = FakeStore(_entry())
+    _stub_forward(
+        monkeypatch,
+        httpx.Response(400, json={"error": "This question is closed.", "retry_in_place": False}),
+    )
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan",
+        correlation_key="k",
+        answer="nope",
+        store=store,
+        bridge=_bridge(owns_retry_notice=True),
+    )
+
+    assert outcome is InboundAnswerOutcome.BRIDGED
+    assert len(wired.channel.notifications) == 1  # core still notices on a hard mismatch
+    assert wired.events[0].payload["notice_owner"] == "core"
 
 
 # -- 5. 400 non-retryable: released + final notice + alert + bridged -------------
@@ -294,11 +352,12 @@ async def test_400_non_retryable_releases_notifies_alerts_and_bridges(wired, mon
     assert store.released == ["k"]
     assert len(wired.channel.notifications) == 1
     assert "That question no longer accepts this answer." in wired.channel.notifications[0].message
-    # The hard-mismatch event carries retry_in_place=False.
+    # The hard-mismatch event carries retry_in_place=False and core owns the notice.
     assert len(wired.events) == 1
     assert wired.events[0].topic == ANSWER_REJECTED_EVENT_TOPIC
     assert wired.events[0].payload["retry_in_place"] is False
     assert wired.events[0].payload["reason"] == "That question no longer accepts this answer."
+    assert wired.events[0].payload["notice_owner"] == "core"
     assert len(wired.accept_calls) == 1
     assert wired.accept_calls[0].text == "hello there"
 

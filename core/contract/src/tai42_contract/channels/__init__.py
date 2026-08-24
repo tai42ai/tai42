@@ -494,6 +494,17 @@ class InboundBridge(BaseModel):
     ``provider_message_id`` dedupes a provider redelivery at the conversation seam;
     ``bridge_text`` is the channel's faithful rendering of the guest's message for a
     bridged turn.
+
+    ``owns_retry_notice`` lets a channel OWN the guest-facing correction message on a
+    retryable rejection. The default (False) is that the ladder sends the generic
+    "that didn't match, try again" notice on :attr:`InboundAnswerOutcome.RETRY_KEPT`.
+    When True, the channel's correction surface IS a re-ask the channel renders off
+    RETRY_KEPT (a re-opened WhatsApp Flow, a Slack modal's inline Block-Kit error), so
+    the ladder SKIPS its notice to avoid double-messaging — it still keeps the
+    correlation and still emits the operator event (tagged ``notice_owner="channel"``).
+    It applies ONLY to the retryable path: on a hard mismatch (a closed ask) the
+    channel's re-ask surface is moot, so the ladder always sends the final "question is
+    closed" notice regardless of this flag.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -504,6 +515,7 @@ class InboundBridge(BaseModel):
     cap_key: str
     provider_message_id: str
     bridge_text: str
+    owns_retry_notice: bool = False
 
 
 __all__ = [

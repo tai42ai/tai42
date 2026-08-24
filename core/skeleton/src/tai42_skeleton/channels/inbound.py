@@ -185,13 +185,18 @@ async def _emit_answer_rejected(
     error: str,
     field: str | None,
     retry_in_place: bool,
+    notice_owner: str,
 ) -> None:
     """Emit the ``interactions.answer_rejected`` platform event ONCE for a
     door-rejected answer.
 
     Core states the fact; a deployment wires a hook on this topic (e.g. a
-    ``notify_user`` tool) to decide what an operator sees. Best-effort: a
-    hooks-manager failure is logged and swallowed so it never fails the inbound
+    ``notify_user`` tool) to decide what an operator sees. ``notice_owner`` records
+    WHO messaged the guest about this rejection — ``"core"`` when this handler sent
+    the generic retry/final notice, ``"channel"`` when the channel owns the guest
+    correction surface (a re-opened Flow/modal) and core skipped its notice — so an
+    operator reading the event knows whether the guest was already told. Best-effort:
+    a hooks-manager failure is logged and swallowed so it never fails the inbound
     webhook — the guest notice and the ladder outcome are unaffected.
     """
     # Local import: reach the hooks-manager accessor only when emitting, keeping
@@ -207,6 +212,7 @@ async def _emit_answer_rejected(
         "reason": error,
         "field": field,
         "retry_in_place": retry_in_place,
+        "notice_owner": notice_owner,
     }
     try:
         await get_hooks_manager().on_event(topic=ANSWER_REJECTED_EVENT_TOPIC, payload=payload)
@@ -306,26 +312,36 @@ async def handle_inbound_answer(
         error, field, retry_in_place = _parse_rejection(forwarded)
         if retry_in_place:
             # KEEP the correlation so the guest's next reply resolves the same ask.
+            # When the channel owns the retry notice (its correction surface is a
+            # re-opened Flow/modal it renders off RETRY_KEPT), core skips its generic
+            # guest notice so the guest is messaged exactly once — but still keeps the
+            # correlation and still emits the operator event (tagged notice_owner).
             reason = error or "The answer wasn't in the expected format."
-            await _notify_guest(bridge, ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason))
+            if not bridge.owns_retry_notice:
+                await _notify_guest(bridge, ANSWER_REJECTED_RETRY_NOTICE.format(reason=reason))
             await _emit_answer_rejected(
                 bridge,
                 interaction_id=entry.interaction_id,
                 error=error,
                 field=field,
                 retry_in_place=True,
+                notice_owner="channel" if bridge.owns_retry_notice else "core",
             )
             logger.warning(
                 "inbound: answer door rejected the answer for interaction %s on channel %r (400, retry-in-place); "
-                "correlation kept so the guest can answer again",
+                "correlation kept so the guest can answer again (notice owner: %s)",
                 entry.interaction_id,
                 channel_id,
+                "channel" if bridge.owns_retry_notice else "core",
             )
             return InboundAnswerOutcome.RETRY_KEPT
 
         # Non-retryable hard mismatch: the ask cannot take this answer and cannot be
-        # re-answered in place. Release, tell the guest the question is closed, alert
-        # the operator, and bridge the reply as a fresh turn.
+        # re-answered in place. The channel's correction surface is moot for a closed
+        # ask, so ``owns_retry_notice`` does not apply here — core ALWAYS sends the
+        # final notice (the guest must be told the question is closed) and owns it.
+        # Release, tell the guest the question is closed, alert the operator, and
+        # bridge the reply as a fresh turn.
         reason = error or "The answer wasn't accepted."
         await store.release_correlation(correlation_key)
         await _notify_guest(bridge, ANSWER_REJECTED_FINAL_NOTICE.format(reason=reason))
@@ -335,6 +351,7 @@ async def handle_inbound_answer(
             error=error,
             field=field,
             retry_in_place=False,
+            notice_owner="core",
         )
         logger.warning(
             "inbound: answer door rejected the answer for interaction %s on channel %r (400, non-retryable); "

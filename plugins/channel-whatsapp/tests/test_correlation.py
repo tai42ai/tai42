@@ -1,4 +1,7 @@
-"""The pending-question correlation store — reservation, claim, restore, dedupe."""
+"""The WhatsApp correlation store — the contract port + the adapter-private rich
+record (options/schema/question/rejections), plus the flow-id cache, dedupe set, and
+known-contact marker.
+"""
 
 from __future__ import annotations
 
@@ -6,21 +9,23 @@ import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, Correlation
 
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     PendingQuestionExistsError,
     already_seen,
+    bump_rejections,
     cache_flow_id,
+    correlation_key,
     get_cached_flow_id,
     is_known_contact,
     mark_known_contact,
     mark_seen,
-    pop_pending,
+    peek_pending,
     release_pending,
     reserve_pending,
-    restore_pending,
+    whatsapp_correlation_store,
 )
 
 from .conftest import FakeRedis
@@ -29,7 +34,8 @@ pytestmark = pytest.mark.usefixtures("whatsapp_env")
 
 _PNID = "10000000000001"
 _WA = "15559990001"
-_KEY = f"channel:whatsapp:pending:{_PNID}:{_WA}"
+_OKEY = correlation_key(_PNID, _WA)
+_KEY = f"channel:whatsapp:pending:{_OKEY}"
 _CALLBACK = "https://app.example/api/interactions/callback/ticket-1"
 
 
@@ -37,19 +43,76 @@ def _deadline(seconds: float = 300) -> datetime:
     return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
-async def test_reserve_pop_round_trip(fake_redis: FakeRedis):
+def _corr(callback_url: str = _CALLBACK, interaction_id: str = "int-1") -> Correlation:
+    return Correlation(callback_url=callback_url, interaction_id=interaction_id, ttl_deadline=_deadline())
+
+
+# -- the contract port: set (NX) / get (peek, port fields) / release -------------
+
+
+async def test_port_set_get_round_trips_port_fields(fake_redis: FakeRedis):
+    stored = await whatsapp_correlation_store.set_correlation(_OKEY, _corr(interaction_id="int-9"), ttl_seconds=300)
+    assert stored is True
+    got = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert got is not None
+    assert got.callback_url == _CALLBACK
+    assert got.interaction_id == "int-9"
+    # Non-destructive peek: the reservation survives.
+    assert await whatsapp_correlation_store.get_correlation(_OKEY) is not None
+
+
+async def test_port_get_unknown_returns_none(fake_redis: FakeRedis):
+    assert await whatsapp_correlation_store.get_correlation(_OKEY) is None
+
+
+async def test_port_set_is_nx_one_pending_per_pair(fake_redis: FakeRedis):
+    first = await whatsapp_correlation_store.set_correlation(_OKEY, _corr(interaction_id="first"), ttl_seconds=300)
+    assert first is True
+    second = await whatsapp_correlation_store.set_correlation(_OKEY, _corr(interaction_id="second"), ttl_seconds=300)
+    assert second is False
+    held = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert held is not None
+    assert held.interaction_id == "first"
+
+
+async def test_port_release_is_idempotent(fake_redis: FakeRedis):
+    await whatsapp_correlation_store.set_correlation(_OKEY, _corr(), ttl_seconds=300)
+    await whatsapp_correlation_store.release_correlation(_OKEY)
+    assert not fake_redis.store
+    await whatsapp_correlation_store.release_correlation(_OKEY)  # no-op, never an error
+
+
+async def test_ladder_peek_reads_the_rich_reserve_record(fake_redis: FakeRedis):
+    # The ladder's port get projects the SAME record reserve_pending wrote down to the
+    # three port fields, so a form ask reserved with schema is still forwardable.
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-9", schema=schema, question="Q?")
+    got = await whatsapp_correlation_store.get_correlation(_OKEY)
+    assert got is not None
+    assert got.callback_url == _CALLBACK
+    assert got.interaction_id == "int-9"
+
+
+# -- the deliver-path front door + adapter-private rich peek ---------------------
+
+
+async def test_reserve_peek_round_trip(fake_redis: FakeRedis):
     timeout_at = _deadline()
-    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at)
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-1")
 
-    popped = await pop_pending(_PNID, _WA)
+    peeked = await peek_pending(_PNID, _WA)
 
-    assert popped == PendingQuestion(callback_url=_CALLBACK, timeout_at=timeout_at)
+    assert peeked is not None
+    assert peeked.callback_url == _CALLBACK
+    assert peeked.interaction_id == "int-1"
+    # A peek is non-destructive — the record survives a second read.
+    assert await peek_pending(_PNID, _WA) is not None
 
 
 async def test_reservation_ttl_is_remaining_budget(fake_redis: FakeRedis):
     before = datetime.now(UTC)
     timeout_at = _deadline(120)
-    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at)
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-1")
     after = datetime.now(UTC)
 
     ttl = fake_redis.ttls[_KEY]
@@ -57,77 +120,92 @@ async def test_reservation_ttl_is_remaining_budget(fake_redis: FakeRedis):
 
 
 async def test_double_reserve_rejected(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-1")
 
     with pytest.raises(PendingQuestionExistsError, match="already pending"):
-        await reserve_pending(_PNID, _WA, "https://app.example/other", _deadline())
+        await reserve_pending(_PNID, _WA, "https://app.example/other", _deadline(), interaction_id="int-2")
 
 
 async def test_reserve_past_deadline_raises_and_stores_nothing(fake_redis: FakeRedis):
     with pytest.raises(ChannelDeliveryError, match="already passed"):
-        await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(-1))
+        await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(-1), interaction_id="int-1")
 
     assert not fake_redis.store  # nothing reserved for an expired budget
 
 
-async def test_pop_claim_is_atomic(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
-
-    assert await pop_pending(_PNID, _WA) is not None
-    assert await pop_pending(_PNID, _WA) is None
-
-
 async def test_release_frees_the_pair(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-1")
     await release_pending(_PNID, _WA)
 
-    await reserve_pending(_PNID, _WA, "https://app.example/next", _deadline())
+    await reserve_pending(_PNID, _WA, "https://app.example/next", _deadline(), interaction_id="int-2")
 
 
-async def test_restore_uses_remaining_ttl(fake_redis: FakeRedis):
+async def test_select_pending_round_trips_options_and_interaction_id(fake_redis: FakeRedis):
+    timeout_at = _deadline()
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, options=["staging", "production"], interaction_id="int-9")
+
+    peeked = await peek_pending(_PNID, _WA)
+
+    assert peeked == PendingQuestion(
+        callback_url=_CALLBACK, timeout_at=timeout_at, options=["staging", "production"], interaction_id="int-9"
+    )
+
+
+async def test_text_pending_has_no_options_or_schema(fake_redis: FakeRedis):
+    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-1")
+
+    peeked = await peek_pending(_PNID, _WA)
+
+    assert peeked is not None
+    assert peeked.options is None
+    assert peeked.schema is None
+
+
+async def test_form_pending_round_trips_schema(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+    timeout_at = _deadline()
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-9", schema=schema, question="Q?")
+
+    peeked = await peek_pending(_PNID, _WA)
+
+    assert peeked == PendingQuestion(
+        callback_url=_CALLBACK, timeout_at=timeout_at, interaction_id="int-9", schema=schema, question="Q?"
+    )
+
+
+# -- bump_rejections: the in-place counter on the still-held record --------------
+
+
+async def test_bump_rejections_increments_and_preserves_the_record(fake_redis: FakeRedis):
+    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
     timeout_at = _deadline(600)
-    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at)
-    original_ttl = fake_redis.ttls[_KEY]
-    popped = await pop_pending(_PNID, _WA)
-    assert popped is not None
+    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-9", schema=schema, question="Q?")
+    held = await peek_pending(_PNID, _WA)
+    assert held is not None
+    assert held.rejections == 0
 
     before = datetime.now(UTC)
-    await restore_pending(_PNID, _WA, popped)
+    await bump_rejections(_PNID, _WA, held)
     after = datetime.now(UTC)
 
-    restored_ttl = fake_redis.ttls[_KEY]
-    assert restored_ttl <= original_ttl
-    assert (
-        math.ceil((timeout_at - after).total_seconds())
-        <= restored_ttl
-        <= math.ceil((timeout_at - before).total_seconds())
-    )
-    assert await pop_pending(_PNID, _WA) == popped
+    updated = await peek_pending(_PNID, _WA)
+    assert updated is not None
+    assert updated.rejections == 1
+    # Everything else survives, and the TTL stays the remaining budget.
+    assert updated.interaction_id == "int-9"
+    assert updated.schema == schema
+    assert updated.question == "Q?"
+    ttl = fake_redis.ttls[_KEY]
+    assert math.ceil((timeout_at - after).total_seconds()) <= ttl <= math.ceil((timeout_at - before).total_seconds())
 
 
-async def test_restore_past_deadline_stores_nothing(fake_redis: FakeRedis):
+async def test_bump_rejections_past_deadline_writes_nothing(fake_redis: FakeRedis):
     stale = PendingQuestion(callback_url=_CALLBACK, timeout_at=datetime.now(UTC) - timedelta(seconds=1))
-
-    await restore_pending(_PNID, _WA, stale)
-
+    await bump_rejections(_PNID, _WA, stale)
     assert not fake_redis.store
 
 
-async def test_restore_never_clobbers_a_new_reservation(fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
-    popped = await pop_pending(_PNID, _WA)
-    assert popped is not None
-    new_callback = "https://app.example/api/interactions/callback/ticket-2"
-    await reserve_pending(_PNID, _WA, new_callback, _deadline())
-
-    with caplog.at_level("ERROR"):
-        await restore_pending(_PNID, _WA, popped)
-
-    # The NEW question's reservation is intact — never a blind overwrite.
-    still_pending = await pop_pending(_PNID, _WA)
-    assert still_pending is not None
-    assert still_pending.callback_url == new_callback
-    assert any("could not restore" in record.message for record in caplog.records)
+# -- the dedupe set, flow-id cache, known-contact marker (unchanged families) ----
 
 
 async def test_seen_round_trip_uses_dedupe_ttl(fake_redis: FakeRedis):
@@ -137,58 +215,6 @@ async def test_seen_round_trip_uses_dedupe_ttl(fake_redis: FakeRedis):
 
     assert await already_seen("wamid.ABC") is True
     assert fake_redis.ttls["channel:whatsapp:seen:wamid.ABC"] == 172_800
-
-
-async def test_select_pending_round_trips_options_and_interaction_id(fake_redis: FakeRedis):
-    timeout_at = _deadline()
-    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, options=["staging", "production"], interaction_id="int-9")
-
-    popped = await pop_pending(_PNID, _WA)
-
-    assert popped == PendingQuestion(
-        callback_url=_CALLBACK, timeout_at=timeout_at, options=["staging", "production"], interaction_id="int-9"
-    )
-
-
-async def test_restore_preserves_options_and_interaction_id(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline(600), options=["a", "b"], interaction_id="int-9")
-    popped = await pop_pending(_PNID, _WA)
-    assert popped is not None
-
-    await restore_pending(_PNID, _WA, popped)
-
-    assert await pop_pending(_PNID, _WA) == popped
-
-
-async def test_text_pending_has_no_options_or_interaction_id(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
-
-    popped = await pop_pending(_PNID, _WA)
-
-    assert popped is not None
-    assert popped.options is None
-    assert popped.interaction_id is None
-
-
-async def test_form_pending_round_trips_schema(fake_redis: FakeRedis):
-    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
-    timeout_at = _deadline()
-    await reserve_pending(_PNID, _WA, _CALLBACK, timeout_at, interaction_id="int-9", schema=schema)
-
-    popped = await pop_pending(_PNID, _WA)
-
-    assert popped == PendingQuestion(
-        callback_url=_CALLBACK, timeout_at=timeout_at, interaction_id="int-9", schema=schema
-    )
-
-
-async def test_non_form_pending_has_no_schema(fake_redis: FakeRedis):
-    await reserve_pending(_PNID, _WA, _CALLBACK, _deadline())
-
-    popped = await pop_pending(_PNID, _WA)
-
-    assert popped is not None
-    assert popped.schema is None
 
 
 async def test_flow_id_cache_round_trip_has_no_ttl(fake_redis: FakeRedis):
@@ -229,12 +255,15 @@ async def test_missing_redis_url_raises_on_every_store_function(fake_redis: Fake
     monkeypatch.delenv("CHANNEL_WHATSAPP_REDIS_URL")
     reset_all_settings()
 
-    question = PendingQuestion(callback_url=_CALLBACK, timeout_at=_deadline())
+    question = PendingQuestion(callback_url=_CALLBACK, timeout_at=_deadline(), interaction_id="int-1")
     for call in (
-        reserve_pending(_PNID, _WA, _CALLBACK, _deadline()),
+        whatsapp_correlation_store.set_correlation(_OKEY, _corr(), ttl_seconds=300),
+        whatsapp_correlation_store.get_correlation(_OKEY),
+        whatsapp_correlation_store.release_correlation(_OKEY),
+        reserve_pending(_PNID, _WA, _CALLBACK, _deadline(), interaction_id="int-1"),
         release_pending(_PNID, _WA),
-        pop_pending(_PNID, _WA),
-        restore_pending(_PNID, _WA, question),
+        peek_pending(_PNID, _WA),
+        bump_rejections(_PNID, _WA, question),
         already_seen("wamid.ABC"),
         mark_seen("wamid.ABC"),
         mark_known_contact(_PNID, _WA),

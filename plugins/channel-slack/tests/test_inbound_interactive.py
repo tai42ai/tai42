@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 
 from tai42_channel_slack.correlation import store_form_record
 from tai42_channel_slack.forms import (
@@ -20,6 +21,7 @@ from tai42_channel_slack.forms import (
     FORM_SUBMIT_CALLBACK_ID,
     build_modal_view,
 )
+from tai42_channel_slack.inbound import _MODAL_RETRY_TEXT as _RETRY_TEXT
 from tai42_channel_slack.inbound import slack_interactive
 
 from .conftest import (
@@ -191,114 +193,84 @@ async def test_failed_views_open_surfaces_loudly(fake_redis, http_script):
 # -- view_submission ----------------------------------------------------------
 
 
-async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, http_script):
+async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, channels):
     await _seed_form(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     response = await slack_interactive(_signed(_view_submission()))
 
     assert response.status_code == 200
     assert body_json(response) == {}  # empty body closes the modal
-    (forward,) = http_script.requests
-    assert str(forward.url) == _CALLBACK
-    assert json.loads(forward.content) == {"answer": {"full_name": "Alice", "count": 3}}
-    assert _FORM_KEY not in fake_redis.store  # dropped after the forward
+    (call,) = channels.inbound_calls
+    assert call.correlation_key == _INTERACTION_ID
+    assert call.answer == {"full_name": "Alice", "count": 3}  # coerced per the schema
+    # A completed modal has no re-reply surface — the channel owns the retry notice.
+    assert call.bridge.owns_retry_notice is True
+    assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
 
 
-async def test_view_submission_door_400_shows_error_keeps_record(fake_redis, http_script):
+async def test_view_submission_retry_kept_shows_inline_error_keeps_record(fake_redis, channels):
+    # RETRY_KEPT: the ladder kept the record and sent NO guest notice (owns_retry_notice
+    # =True), so the channel renders its own inline Block-Kit error under the first field
+    # and the modal stays open — one guest surface, never a double message.
     await _seed_form(fake_redis)
-    http_script.results.append(httpx.Response(400, json={"error": "full_name is required"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
     response = await slack_interactive(_signed(_view_submission()))
 
     assert body_json(response) == {
         "response_action": "errors",
-        "errors": {"full_name": "full_name is required"},
+        "errors": {"full_name": _RETRY_TEXT},
     }
     assert fake_redis.store[_FORM_KEY]  # kept: the human can correct and resubmit
 
 
-async def test_view_submission_door_400_pins_named_field_block(fake_redis, http_script):
-    # The door names the SECOND field: the error pins under its block_id, not the
-    # first field's, so the human sees it on the control that failed.
+async def test_view_submission_bridged_shows_expired_drops_record(fake_redis, channels):
+    # BRIDGED: the ask is gone (a 404) — the ladder released the record and bridged the
+    # submission; the modal shows the expired notice.
     await _seed_form(fake_redis)
-    http_script.results.append(
-        httpx.Response(400, json={"error": "answer does not match schema at count: ...", "field": "count"})
-    )
-
-    response = await slack_interactive(_signed(_view_submission()))
-
-    assert body_json(response) == {
-        "response_action": "errors",
-        "errors": {"count": "answer does not match schema at count: ..."},
-    }
-    assert fake_redis.store[_FORM_KEY]
-
-
-async def test_view_submission_door_400_unknown_field_falls_back_to_first(fake_redis, http_script):
-    # A ``field`` that is not a declared schema property (or a nested path) has no
-    # matching block_id: the error pins under the first field as before.
-    await _seed_form(fake_redis)
-    http_script.results.append(httpx.Response(400, json={"error": "bad", "field": "not_a_field"}))
-
-    response = await slack_interactive(_signed(_view_submission()))
-
-    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "bad"}}
-    assert fake_redis.store[_FORM_KEY]
-
-
-async def test_view_submission_door_404_shows_expired_drops_record(fake_redis, http_script):
-    await _seed_form(fake_redis)
-    http_script.results.append(httpx.Response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
     response = await slack_interactive(_signed(_view_submission()))
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _EXPIRED_TEXT}}
-    assert _FORM_KEY not in fake_redis.store
+    assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
 
 
-async def test_view_submission_door_500_raises(fake_redis, http_script):
+async def test_view_submission_no_correlation_shows_expired(fake_redis, channels):
+    # The record lapsed between the channel's read and the ladder's peek: NO_CORRELATION
+    # — the modal shows the expired notice.
     await _seed_form(fake_redis)
-    http_script.results.append(httpx.Response(500))
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
 
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _EXPIRED_TEXT}}
+
+
+async def test_view_submission_forward_error_raises(fake_redis, channels):
+    await _seed_form(fake_redis)
+    channels.inbound_error = AnswerForwardError("callback forward failed: HTTP 500 from the interactions door")
+
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await slack_interactive(_signed(_view_submission()))
 
     assert fake_redis.store[_FORM_KEY]  # kept for Slack's implicit resubmit
 
 
-async def test_view_submission_missing_record_shows_expired(fake_redis, http_script):
-    # The form record lapsed between opening the modal and submitting it.
+async def test_view_submission_missing_record_shows_expired(fake_redis, channels):
+    # The form record lapsed between opening the modal and submitting it — the channel
+    # never reaches the ladder.
     response = await slack_interactive(_signed(_view_submission()))
 
     assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _EXPIRED_TEXT}}
-    assert http_script.requests == []
+    assert channels.inbound_calls == []
 
 
 async def test_view_submission_missing_record_and_empty_state_raises(fake_redis):
     # No record and no input block to pin the error on: malformed, raised loudly.
     with pytest.raises(ValueError, match="no input block"):
         await slack_interactive(_signed(_view_submission(state={})))
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        pytest.param(httpx.Response(400, text="boom"), id="non-json-body"),
-        pytest.param(httpx.Response(400, json={"detail": "nope"}), id="json-without-error"),
-    ],
-)
-async def test_view_submission_door_400_without_usable_error_uses_fallback(fake_redis, http_script, response):
-    await _seed_form(fake_redis)
-    http_script.results.append(response)
-
-    result = await slack_interactive(_signed(_view_submission()))
-
-    assert body_json(result) == {
-        "response_action": "errors",
-        "errors": {"full_name": "The form could not be submitted."},
-    }
-    assert fake_redis.store[_FORM_KEY]
 
 
 async def test_view_submission_wrong_callback_id_is_ignored(fake_redis, http_script):

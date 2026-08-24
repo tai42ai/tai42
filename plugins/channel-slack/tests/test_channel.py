@@ -150,7 +150,10 @@ async def test_ok_true_stores_correlation_with_budget_ttl(http_script, fake_redi
     await SlackChannel().deliver(delivery)
 
     key = "channel:slack:corr:123.456"
-    assert fake_redis.store[key] == delivery.callback_url
+    # The corr value is now a JSON {callback_url, interaction_id, timeout_at} record.
+    record = json.loads(fake_redis.store[key])
+    assert record["callback_url"] == delivery.callback_url
+    assert record["interaction_id"] == delivery.interaction_id
     assert fake_redis.ttls[key] == remaining_seconds(delivery.timeout_at)
 
 

@@ -25,7 +25,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery
+from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -72,10 +72,22 @@ class _StubClients:
 
 
 class _StubChannels:
-    """Records every channel registered through ``tai42_app.channels.register``."""
+    """Records channel registrations and stands in for the shared inbound-answer ladder
+    the real skeleton exposes on ``app.channels`` — the plugin's test venv cannot import
+    the skeleton, so the ladder is faked at this contract seam. A test sets the outcome
+    (or an error) and reads back the recorded call; a terminal outcome mirrors the
+    ladder's ONE store side-effect (release) so store-state assertions hold."""
 
     def __init__(self) -> None:
         self.registered: dict[str, Any] = {}
+        self.inbound_calls: list[SimpleNamespace] = []
+        self.inbound_outcome: InboundAnswerOutcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_error: BaseException | None = None
+
+    def reset(self) -> None:
+        self.inbound_calls.clear()
+        self.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_error = None
 
     def register(self, name: str, channel: Any) -> None:
         # A real app raises on a duplicate name; the capture mirrors that so a
@@ -83,6 +95,20 @@ class _StubChannels:
         if name in self.registered:
             raise ValueError(f"channel {name!r} is already registered")
         self.registered[name] = channel
+
+    async def handle_inbound_answer(
+        self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
+    ) -> InboundAnswerOutcome:
+        self.inbound_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
+            )
+        )
+        if self.inbound_error is not None:
+            raise self.inbound_error
+        if self.inbound_outcome in (InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED):
+            await store.release_correlation(correlation_key)
+        return self.inbound_outcome
 
 
 class _StubHttp:
@@ -250,6 +276,18 @@ def stub_conversations() -> Iterator[_StubConversations]:
         yield conversations
     finally:
         conversations.reset()
+
+
+@pytest.fixture
+def channels() -> Iterator[_StubChannels]:
+    """The inbound-answer-ladder stub on ``app.channels``, state reset around each
+    test so outcome/call assertions never leak."""
+    stub = _stub_app.channels
+    stub.reset()
+    try:
+        yield stub
+    finally:
+        stub.reset()
 
 
 @pytest.fixture

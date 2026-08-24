@@ -33,12 +33,12 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_whatsapp.settings import (
@@ -74,8 +74,14 @@ class PendingQuestion:
     rejections: int = 0
 
 
+def correlation_key(phone_number_id: str, wa_id: str) -> str:
+    """The opaque correlation key for a ``(phone_number_id, wa_id)`` pair — the
+    contract store's ``key``. WhatsApp replies carry no thread, so the pair is the key."""
+    return f"{phone_number_id}:{wa_id}"
+
+
 def _pending_key(phone_number_id: str, wa_id: str) -> str:
-    return f"channel:whatsapp:pending:{phone_number_id}:{wa_id}"
+    return f"channel:whatsapp:pending:{correlation_key(phone_number_id, wa_id)}"
 
 
 def _flow_key(waba_id: str, schema_hash: str) -> str:
@@ -171,12 +177,16 @@ def _decode_pending(raw: str | bytes) -> PendingQuestion:
 
 
 async def peek_pending(phone_number_id: str, wa_id: str) -> PendingQuestion | None:
-    """Read the pending question WITHOUT claiming it (``GET``, no ``DEL``); ``None``
-    when there is none.
+    """Read the FULL pending record WITHOUT claiming it (``GET``, no ``DEL``);
+    ``None`` when there is none.
 
-    Lets a caller decide whether an inbound tap is a real answer before the
-    destructive ``pop_pending``, so a stale/malformed tap never removes a live ask
-    that a concurrent genuine reply could still claim.
+    The adapter-private decode surface: the shared ladder reads only the port fields
+    (via :meth:`WhatsAppCorrelationStore.get_correlation`), but the channel needs the
+    rich record — ``options`` to map an interactive tap to its answer, ``schema`` to
+    coerce a Flow response and to know the ask is form-shaped, ``question`` +
+    ``rejections`` to re-send a fresh Flow on a rejection. Non-destructive, so a
+    stale/malformed reply never removes a live ask a concurrent genuine reply could
+    still answer.
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_pending_key(phone_number_id, wa_id))
@@ -185,36 +195,78 @@ async def peek_pending(phone_number_id: str, wa_id: str) -> PendingQuestion | No
     return _decode_pending(raw)
 
 
-async def pop_pending(phone_number_id: str, wa_id: str) -> PendingQuestion | None:
-    """Atomically claim-and-remove the pending question; ``None`` when there is
-    none (``GETDEL`` — a concurrent duplicate webhook gets ``None``)."""
-    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        raw = await redis.getdel(_pending_key(phone_number_id, wa_id))
-    if raw is None:
-        return None
-    return _decode_pending(raw)
+async def bump_rejections(phone_number_id: str, wa_id: str, question: PendingQuestion) -> None:
+    """Record one more door rejection on the STILL-HELD pending record (rejections+1),
+    preserving its remaining budget as the TTL.
 
-
-async def restore_pending(phone_number_id: str, wa_id: str, question: PendingQuestion) -> None:
-    """Put a popped question back with its remaining TTL after a failed forward.
-
-    A ``SET NX``: if a NEW question reserved the pair in the gap, the restore is
-    refused with a loud log rather than misrouting the new question's reply. A
-    question past its deadline is not restored.
+    Called after the shared ladder returned RETRY_KEPT for a form ask and the channel
+    re-sent a fresh Flow: the ladder kept the reservation, so this is an in-place
+    overwrite (no NX guard needed — the one-pending NX means no other reservation can
+    take the pair while ours is held). A record past its deadline is left to expire.
     """
     remaining = math.ceil((question.timeout_at - datetime.now(UTC)).total_seconds())
     if remaining <= 0:
         return
-    value = _encode_pending(question)
+    value = _encode_pending(replace(question, rejections=question.rejections + 1))
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
-        stored = await redis.set(_pending_key(phone_number_id, wa_id), value, nx=True, ex=remaining)
-    if not stored:
-        logger.error(
-            "could not restore the pending question for (%s, %s): a new question has since "
-            "reserved the pair; the old ask will resolve by its own timeout",
-            phone_number_id,
-            wa_id,
+        await redis.set(_pending_key(phone_number_id, wa_id), value, ex=remaining)
+
+
+class WhatsAppCorrelationStore:
+    """Satisfies the contract :class:`~tai42_contract.channels.CorrelationStore` over
+    the plugin-owned ``channel:whatsapp:pending:{pnid}:{wa_id}`` keys.
+
+    The shared inbound-answer ladder uses ONLY this port surface (a non-destructive
+    ``get`` peek and an idempotent ``release``). The channel keeps its richer decode
+    state — ``options``/``schema``/``question``/``rejections`` — in the SAME stored
+    record and reads it through the adapter-private :func:`peek_pending`; this port
+    projects that record down to the three :class:`Correlation` fields the ladder
+    needs. ``set_correlation`` (used for conformance and by any port-only caller)
+    writes a minimal text-ask-shaped record — the rich deliver path uses
+    :func:`reserve_pending` instead.
+    """
+
+    async def set_correlation(self, key: str, entry: Correlation, *, ttl_seconds: int) -> bool:
+        """Reserve ``key`` for ``entry`` NX with a ``ttl_seconds`` expiry; True when it
+        was free and is now held, False when a question is already pending for the pair."""
+        value = _encode_pending(
+            PendingQuestion(
+                callback_url=entry.callback_url,
+                timeout_at=entry.ttl_deadline,
+                interaction_id=entry.interaction_id,
+            )
         )
+        async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+            stored = await redis.set(_pending_key_from_opaque(key), value, nx=True, ex=ttl_seconds)
+        return bool(stored)
+
+    async def get_correlation(self, key: str) -> Correlation | None:
+        """The pending record's port fields under ``key``, or ``None`` — a
+        non-destructive peek the ladder forwards from."""
+        async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+            raw = await redis.get(_pending_key_from_opaque(key))
+        if raw is None:
+            return None
+        record = _decode_pending(raw)
+        return Correlation(
+            callback_url=record.callback_url,
+            interaction_id=record.interaction_id or "",
+            ttl_deadline=record.timeout_at,
+        )
+
+    async def release_correlation(self, key: str) -> None:
+        """Drop any reservation under ``key``, idempotently (a no-op when free)."""
+        async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+            await redis.delete(_pending_key_from_opaque(key))
+
+
+def _pending_key_from_opaque(key: str) -> str:
+    return f"channel:whatsapp:pending:{key}"
+
+
+# Module-level singleton: the store is stateless, so one instance serves the deliver
+# and inbound paths (the channel hands it to the shared ladder explicitly).
+whatsapp_correlation_store = WhatsAppCorrelationStore()
 
 
 async def get_cached_flow_id(waba_id: str, schema_hash: str) -> str | None:
