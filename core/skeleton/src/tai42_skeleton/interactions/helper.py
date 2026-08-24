@@ -36,6 +36,7 @@ from tai42_contract.interactions import (
     MediaItem,
     SuspendedInteraction,
     check_ask_timing,
+    get_park_completion,
     get_resume_continuation_tool,
 )
 from tai42_contract.secrets import SecretValue
@@ -172,6 +173,58 @@ async def _prune(
     missing/expired."""
     async with client_ctx(RedisClient, settings.redis) as conn:
         return await store.prune_pending(conn, interaction_id, group_id)
+
+
+# The park-completion context key a tool/flow route target binds the delivery thread under
+# (see ``conversations.turn._run_tool_turn``'s ``set_park_completion``). Kept as a named
+# constant so the read here and the turn-layer write name the same field.
+_PARK_COMPLETION_THREAD_KEY = "delivery_thread_id"
+
+
+def _bound_park_thread_id() -> str | None:
+    """The conversation thread this async park belongs to, or ``None`` when none is bound
+    (a background tool run, a direct/agent-less ask). Two turn-layer bindings expose it and
+    this reads whichever is set, staying engine-agnostic (it names no engine, only the
+    generic bindings):
+
+    * a TOOL/flow route target binds the thread as the park-completion context's
+      ``delivery_thread_id`` (``conversations.turn._run_tool_turn``), read here off
+      :func:`get_park_completion`;
+    * an AGENT route target runs inside the bridge turn context that carries the thread
+      (``conversations.turn._run_agent_turn``), read here off ``current_bridge_turn``.
+
+    Never fabricates a thread id — an unbound park indexes nothing."""
+    _completion_tool, completion_ctx = get_park_completion()
+    if completion_ctx is not None:
+        candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    # Function-local, mirroring the ``get_execution_identity`` import below: a module-level
+    # edge from interactions into conversations would couple two peer packages at import time.
+    from tai42_skeleton.conversations.turn_context import current_bridge_turn
+
+    bridge = current_bridge_turn()
+    if bridge is not None:
+        return bridge.thread_id
+    return None
+
+
+async def cancel_parks_for_thread(thread_id: str) -> list[str]:
+    """Cancel every async ``ask_user`` park bound to ``thread_id`` — the entry point a
+    conversation thread/person/route delete calls so a parked question the deletion would
+    orphan is torn down (via the store's status-gated ``prune_pending``, firing NO
+    continuation) instead of lingering muted until its expiry deadline. Runs on its own
+    connection, like :func:`_prune`. A no-op when the interactions store is unconfigured
+    (nothing could have been parked) or the thread holds no parks. Idempotent — safe to
+    re-run under a delete's retry. Returns the cancelled interaction ids."""
+    settings = interactions_settings()
+    if not settings.redis.redis_url:
+        # Interactions off: no park could ever have been persisted, so there is nothing
+        # to cancel (and no Redis to reach for). The delete op proceeds unaffected.
+        return []
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as conn:
+        return await store.cancel_thread_parks(conn, thread_id)
 
 
 async def ask_user(
@@ -400,6 +453,9 @@ async def ask_user(
     continuation_tool: str | None = None
     continuation_identity: str | None = None
     continuation_fingerprint: str | None = None
+    # The conversation thread this park binds to (None for a sync ask or an unbound run):
+    # captured so a later thread delete can cascade-cancel the park via its reverse index.
+    park_thread_id: str | None = None
     if mode == "async":
         continuation_tool = get_resume_continuation_tool()
         if continuation_tool is None:
@@ -417,6 +473,11 @@ async def ask_user(
         # continuation under the SAME fire authority the ask ran under; gate-off
         # fires carry no fingerprint, recorded as "" (the bind ignores it there).
         continuation_fingerprint = identity.execution_key_fingerprint or ""
+        # The bound conversation thread (from the turn layer's park-completion / bridge
+        # context), so this park joins its thread's reverse index and a thread delete can
+        # cancel it. ``None`` outside a bound conversation turn — indexed then only by its
+        # own expiry, exactly as today.
+        park_thread_id = _bound_park_thread_id()
 
     budget = settings.answer_timeout_seconds if timeout is None else timeout
     if budget <= 0:
@@ -555,6 +616,7 @@ async def ask_user(
                 open_member_reserved=True,
                 continuation_fingerprint=continuation_fingerprint,
                 expiry_ttl_margin_seconds=park_ttl_margin_seconds,
+                thread_id=park_thread_id,
             )
         else:
             await store.add(
@@ -565,6 +627,7 @@ async def ask_user(
                 ticket_ttl=ticket_ttl,
                 continuation_fingerprint=continuation_fingerprint,
                 expiry_ttl_margin_seconds=park_ttl_margin_seconds,
+                thread_id=park_thread_id,
             )
 
     # Deliver through the channel AFTER the question is persisted (the callback

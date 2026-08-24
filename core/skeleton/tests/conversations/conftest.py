@@ -10,6 +10,24 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_interactions_settings_cache():
+    """Isolate the interactions store the conversation delete ops now consult.
+
+    ``delete_conversation_{thread,person,route}`` cancel every async ``ask_user`` parked on a
+    deleted thread via ``cancel_parks_for_thread`` → ``interactions_settings()``. That accessor
+    is PROCESS-cached and many sibling suites set ``INTERACTIONS_REDIS_URL``, so a *configured*
+    value cached by an earlier test would make a delete op here reach for a real Redis. Clearing
+    that one cache before each conversations test makes each start from the unconfigured
+    interactions store its own env implies (cancel then no-ops); a test that wants the
+    interactions store wired does so explicitly through the helper's ``client_ctx`` seam."""
+    from tai42_skeleton.interactions.settings import interactions_settings
+
+    interactions_settings.cache_clear()
+
 
 class FakeRedis:
     def __init__(self) -> None:

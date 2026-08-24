@@ -387,6 +387,24 @@ class InteractionStore:
         durable record points at outlive no shorter than the group stream."""
         return f"{self._p}media-index:{group_id}"
 
+    def thread_parks_key(self, thread_id: str) -> str:
+        """SET of the interaction ids of the async PARKS bound to one conversation
+        thread — the reverse index a thread delete reads to cascade-cancel every
+        parked ``ask_user`` the deletion would otherwise ORPHAN (its expiry reaper
+        later firing a continuation into a thread that no longer exists, its channel
+        correlation muted until the deadline). There is otherwise no thread→interaction
+        edge: the state is keyed by interaction id alone.
+
+        A member is written in the park's OWN ``add`` pipeline — only for an async park
+        that carries a bound thread (a background tool run with no thread writes none) —
+        so it commits atomically with the ``state``/``pending``/expiry writes. It is
+        dropped wherever the interaction leaves pending (``record_answer`` and
+        ``prune_pending``), keyed off the ``thread_id`` denormalized on the state hash.
+        The set's TTL is set-or-extended to the park's own ``_key_ttl`` (the same NX+GT
+        discipline the group stream uses), so it outlives the longest-lived park it
+        indexes; drained empty it simply expires."""
+        return f"{self._p}thread-parks:{thread_id}"
+
     # -- writes --------------------------------------------------------------
 
     async def add(
@@ -399,6 +417,7 @@ class InteractionStore:
         open_member_reserved: bool = False,
         continuation_fingerprint: str | None = None,
         expiry_ttl_margin_seconds: int = _DEFAULT_EXPIRY_TTL_MARGIN_SECONDS,
+        thread_id: str | None = None,
     ) -> None:
         """Persist a new question: stream entry, state, pending index + deadline
         index + count, the open-index ZSET member, add-event, and refreshed TTLs.
@@ -511,6 +530,13 @@ class InteractionStore:
             state_mapping["continuation_identity"] = request.continuation_identity
             if continuation_fingerprint is not None:
                 state_mapping["continuation_fingerprint"] = continuation_fingerprint
+            if thread_id is not None:
+                # The conversation thread this park is bound to, denormalized like
+                # ``continuation_tool`` so a terminal claim (record_answer/prune_pending)
+                # can read WHICH thread-parks SET to drop this interaction from with a
+                # single ``hget`` inside its WATCH loop. Present only for an async park
+                # that carries a bound thread; a park with no thread never indexes.
+                state_mapping["thread_id"] = thread_id
         new_media_ids = _media_ids_of(request)
         if new_media_ids:
             # This question's own served-media ids, comma-joined and denormalized like
@@ -537,6 +563,15 @@ class InteractionStore:
             # terminal exit (answer/expiry/prune). An async park always carries an
             # ``expiry_at``, so this guard is always true for async.
             pipe.zadd(self.pending_expiry_key, {request.interaction_id: _expiry_ms(request)})
+        # The thread→interaction reverse index: only an async park with a bound thread
+        # joins it (a background tool run passes no thread and indexes nothing). Rides
+        # THIS same atomic pipeline as the state/pending/expiry writes so the index is
+        # consistent with them; its TTL is set-or-extended below alongside the group
+        # stream's, so it never expires before a park it indexes.
+        thread_parks_key: str | None = None
+        if request.mode == "async" and thread_id is not None:
+            thread_parks_key = self.thread_parks_key(thread_id)
+            pipe.sadd(thread_parks_key, request.interaction_id)
         if not open_member_reserved:
             # The atomic guard (``reserve_open_slot``) already added this member;
             # re-adding here would double-count the open index.
@@ -576,6 +611,14 @@ class InteractionStore:
         pipe.expire(group_key, new_ttl, gt=True)
         pipe.expire(count_key, new_ttl, nx=True)
         pipe.expire(count_key, new_ttl, gt=True)
+        if thread_parks_key is not None:
+            # The reverse index takes the SAME set-or-extend-to-greater TTL as the group
+            # stream, so it outlives the longest-lived park it indexes: ``NX`` sets the
+            # first horizon (a bare ``GT`` treats a no-expiry set as infinity and would
+            # leave it unbounded), ``GT`` raises it only when this park's horizon is
+            # longer. A later co-thread park can only push it LATER, never shrink it.
+            pipe.expire(thread_parks_key, new_ttl, nx=True)
+            pipe.expire(thread_parks_key, new_ttl, gt=True)
         # Media the group's questions reference must outlive no shorter than the group
         # stream: this question's own ids join the group media index, and every member
         # media key (plus the index) takes the same SET-OR-EXTEND-TO-GREATER TTL as the
@@ -702,6 +745,11 @@ class InteractionStore:
                     # TTL). Absent when the question referenced no stored media.
                     media_ids_field = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
                     media_ids = media_ids_field.split(",") if media_ids_field else []
+                    # The conversation thread this park is bound to, read from the
+                    # denormalized ``thread_id`` field so the thread→interaction reverse
+                    # index drops this member as the question leaves pending. Absent for
+                    # a sync question or a park with no bound thread.
+                    park_thread_id = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "thread_id")))
                     # An async park carries a denormalized continuation tool + identity
                     # (+ fingerprint); their presence is the signal to enqueue the durable
                     # continuation-due record in THIS claim's MULTI. Read them in the
@@ -749,6 +797,12 @@ class InteractionStore:
                     # Drop any async-expiry member so the reaper never re-fires an
                     # answered question (a no-op for a sync question, never a member).
                     pipe.zrem(self.pending_expiry_key, interaction_id)
+                    if park_thread_id is not None:
+                        # Drop this park from its thread's reverse index in the SAME MULTI
+                        # as the expiry-member drop, so a thread delete racing this answer
+                        # can never cancel an already-resolved park: both paths share this
+                        # status gate. Absent for a sync question / an unbound park.
+                        pipe.srem(self.thread_parks_key(park_thread_id), interaction_id)
                     if media_ids:
                         pipe.srem(self.media_index_key(group_id), *media_ids)
                     if ticket is not None:
@@ -840,6 +894,10 @@ class InteractionStore:
                     # keys expire on their group TTL. Absent when the question had no stored media.
                     media_ids_field = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "media_ids")))
                     media_ids = media_ids_field.split(",") if media_ids_field else []
+                    # The bound conversation thread, read from the denormalized ``thread_id``
+                    # field so the thread→interaction reverse index drops this member as the
+                    # park is pruned. Absent for a sync question or a park with no thread.
+                    park_thread_id = as_str(await cast("Awaitable[str | None]", pipe.hget(state_key, "thread_id")))
                     current = await pipe.get(count_key)
                     if current is None:
                         # count_key is set-or-extended to cover the group's
@@ -856,6 +914,11 @@ class InteractionStore:
                     # Drop any async-expiry member alongside the state (a no-op for
                     # a sync question, never a member).
                     pipe.zrem(self.pending_expiry_key, interaction_id)
+                    if park_thread_id is not None:
+                        # Drop this park from its thread's reverse index in the SAME MULTI
+                        # as the expiry-member drop — the cascade a thread delete drives
+                        # runs through here, so the index self-heals as each park is pruned.
+                        pipe.srem(self.thread_parks_key(park_thread_id), interaction_id)
                     if media_ids:
                         pipe.srem(self.media_index_key(group_id), *media_ids)
                     pipe.decr(count_key)
@@ -873,6 +936,40 @@ class InteractionStore:
                     return "pruned"
                 except WatchError:
                     continue
+
+    async def cancel_thread_parks(self, r: Redis, thread_id: str) -> list[str]:
+        """Cancel every async park bound to ``thread_id`` — the ONE cascade a conversation
+        thread delete (admin-delete, forget-me, route-delete) fires so a parked ``ask_user``
+        the deletion would ORPHAN is torn down instead of lingering (its expiry reaper later
+        firing a continuation into a thread that no longer exists → a delivery retry storm,
+        its channel correlation muting the guest's number until the ~24h deadline).
+
+        Reads the thread's reverse-index members and runs the EXISTING ``prune_pending`` for
+        each: status-gated and idempotent, it removes a still-pending park WITHOUT firing any
+        continuation — deliberately not ``record_answer`` (which would enqueue a dead
+        completion), so no continuation fires and no ``PARK_COMPLETION_FAILED`` is needed — and
+        is a clean no-op on a park already answered or gone. A member whose state already
+        vanished is skipped (nothing to prune); the index key is deleted LAST so such an
+        orphan member is reconciled off too. Returns the interaction ids read from the index.
+
+        Idempotent: cancelling a thread with no parks (a missing set) is a no-op, and
+        cancelling twice finds the set drained/absent the second time. The recovery is proven:
+        once the interaction state is gone the answer-door returns not-found, and each channel
+        bridges the next reply as a fresh turn and self-releases its correlation — so this
+        cancellation is channel-blind and enumerates no channels."""
+        key = self.thread_parks_key(thread_id)
+        members = [as_str(member) for member in await cast("Awaitable[set[str | bytes]]", r.smembers(key))]
+        for interaction_id in members:
+            group_id = as_str(
+                await cast("Awaitable[str | bytes | None]", r.hget(self.state_key(interaction_id), "group_id"))
+            )
+            if group_id is None:
+                # The park's state already vanished (answered/expired/pruned): nothing to
+                # prune, and the trailing delete reconciles the orphan member off.
+                continue
+            await self.prune_pending(r, interaction_id, group_id)
+        await r.delete(key)
+        return members
 
     # -- reads ---------------------------------------------------------------
 

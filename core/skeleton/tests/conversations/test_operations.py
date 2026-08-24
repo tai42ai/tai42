@@ -1277,3 +1277,186 @@ async def test_delete_thread_rejects_a_blank_thread_id(wired):
 async def test_delete_thread_rejects_a_bad_route_slug(wired):
     with pytest.raises(BadRequestError, match="route_name"):
         await ops.delete_conversation_thread("Chat Room", _THREAD)
+
+
+# -- the parked-ask cascade (Phase 1: parked-ask orphaned by thread deletion) --
+#
+# A conversation thread delete must cascade-cancel every async ``ask_user`` parked on the
+# thread, or the deletion orphans the park: its expiry reaper later fires a continuation
+# into the now-deleted thread (a delivery retry storm) and its channel correlation stays
+# muted until the ~24h deadline. Each delete op wires the shared ``cancel_parks_for_thread``
+# entry point; these prove the park's state + its ``pending:expiry`` member + the reverse
+# index are all gone after the op.
+
+
+@pytest.fixture
+def interactions_parks(monkeypatch):
+    """Wire the ``ask_user`` interactions store the delete-op cascade reaches to a fake
+    Redis, and return ``(store, fake)`` so a test can seed a park bound to a thread and
+    assert it was cancelled. Mirrors the async-park store harness the interactions suite
+    uses (fakeredis via the helper's ``client_ctx`` seam)."""
+    from contextlib import asynccontextmanager
+
+    from tai42_skeleton.interactions import helper as interactions_helper
+    from tai42_skeleton.interactions.settings import InteractionsSettings
+    from tai42_skeleton.interactions.store import InteractionStore
+
+    from .._fakes.interactions_redis import FakeRedis
+
+    monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
+    fake = FakeRedis()
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake
+
+    settings = InteractionsSettings()
+    monkeypatch.setattr(interactions_helper, "client_ctx", _ctx)
+    monkeypatch.setattr(interactions_helper, "interactions_settings", lambda: settings)
+    return InteractionStore(settings.key_prefix), fake
+
+
+async def _seed_park(store, fake, *, interaction_id: str, group_id: str, thread_id: str) -> None:
+    """Persist one async park bound to ``thread_id`` in the fake interactions store — the
+    exact ``add`` the ``ask_user`` async branch performs, carrying the thread id."""
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_contract.interactions import AnswerFormat, InteractionRequest
+
+    now = datetime.now(UTC)
+    expiry = now + timedelta(hours=1)
+    request = InteractionRequest(
+        interaction_id=interaction_id,
+        group_id=group_id,
+        question="proceed?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=store.reply_key(interaction_id),
+        created_at=now,
+        timeout_at=expiry,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=expiry,
+    )
+    await store.add(fake, request, idle_ttl=86400, continuation_fingerprint="fp-1", thread_id=thread_id)
+
+
+async def _assert_park_cancelled(store, fake, *, interaction_id: str, thread_id: str) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    # The park's state is gone, its expiry member dropped (reaper fires nothing for it), and
+    # the thread reverse index cleared.
+    assert await store.get_state(fake, interaction_id) is None
+    assert interaction_id not in await store.due_expiries(fake, datetime.now(UTC) + timedelta(days=1))
+    assert await fake.smembers(store.thread_parks_key(thread_id)) == set()
+
+
+async def test_delete_thread_cascade_cancels_a_parked_ask(wired, record_redis, checkpoint_saver, interactions_parks):
+    store, fake = interactions_parks
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_record(message_id="m0", route_name="chat", thread_id=_THREAD)
+    await _seed_park(store, fake, interaction_id="i1", group_id="g1", thread_id=_THREAD)
+    # A park on an UNRELATED thread must survive the delete untouched.
+    other_thread = "bridge:chat:+15559990000"
+    await _seed_park(store, fake, interaction_id="keep", group_id="kg", thread_id=other_thread)
+
+    result = await ops.delete_conversation_thread("chat", _THREAD)
+
+    assert result == {"removed": 1, "route_name": "chat", "thread_id": _THREAD}
+    await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_THREAD)
+    # The unrelated thread's park is fully intact.
+    assert await store.get_state(fake, "keep") is not None
+    assert await fake.smembers(store.thread_parks_key(other_thread)) == {"keep"}
+
+
+async def test_delete_thread_cascade_is_idempotent_on_rerun(wired, record_redis, checkpoint_saver, interactions_parks):
+    store, fake = interactions_parks
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    await _seed_park(store, fake, interaction_id="i1", group_id="g1", thread_id=_THREAD)
+
+    await ops.delete_conversation_thread("chat", _THREAD)
+    # A retry of the absolute-forget delete re-runs the cascade cleanly (a no-op second time).
+    rerun = await ops.delete_conversation_thread("chat", _THREAD)
+    assert rerun == {"removed": 0, "route_name": "chat", "thread_id": _THREAD}
+    await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_THREAD)
+
+
+async def test_delete_person_cascade_cancels_a_parked_ask(
+    wired, record_redis, checkpoint_saver, interactions_parks, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from tai42_contract.conversations import Person, PersonAddress
+
+    store, fake = interactions_parks
+    person = Person(
+        person_id="p1",
+        target_kind="agent",
+        target_name="relay",
+        created_at=datetime.now(UTC),
+        addresses=[
+            PersonAddress(
+                door="channel",
+                routes=["chat-a"],
+                channel="twilio",
+                our_identity="+1",
+                address="+1000",
+                linked_at=datetime.now(UTC),
+            ),
+        ],
+    )
+
+    class _FakePersonStore:
+        async def get_by_id(self, person_id: str) -> Person | None:
+            return person if person_id == person.person_id else None
+
+        async def erase(self, p: Person):
+            return True, 1
+
+    monkeypatch.setattr(ops, "_person_store", lambda: _FakePersonStore())
+    record_redis.seed_route("chat-a")
+    await _seed_record(message_id="pa", route_name="chat-a", thread_id=_PERSON_THREAD)
+    await _seed_park(store, fake, interaction_id="i1", group_id="g1", thread_id=_PERSON_THREAD)
+
+    result = await ops.delete_conversation_person("p1")
+
+    assert result == {"person_id": "p1", "removed": 1, "erased": True}
+    await _assert_park_cancelled(store, fake, interaction_id="i1", thread_id=_PERSON_THREAD)
+
+
+async def test_delete_route_cascade_cancels_every_thread_park(wired, record_redis, interactions_parks):
+    store, fake = interactions_parks
+    await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    thread_a = "bridge:chat:alice/user-0"
+    thread_b = "bridge:chat:alice/user-1"
+    await _seed_thread_on("chat", door="api", thread_id=thread_a)
+    await _seed_thread_on("chat", door="api", thread_id=thread_b)
+    await _seed_park(store, fake, interaction_id="ia", group_id="ga", thread_id=thread_a)
+    await _seed_park(store, fake, interaction_id="ib", group_id="gb", thread_id=thread_b)
+
+    assert (await ops.delete_conversation_route("chat"))["removed"] is True
+
+    # Every thread the route owned had its park cancelled.
+    await _assert_park_cancelled(store, fake, interaction_id="ia", thread_id=thread_a)
+    await _assert_park_cancelled(store, fake, interaction_id="ib", thread_id=thread_b)
