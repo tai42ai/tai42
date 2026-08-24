@@ -6544,7 +6544,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-whatsapp"
-version = "1.0.6"
+version = "1.0.7"
 source = { editable = "plugins/tools-whatsapp" }
 dependencies = [
     { name = "pydantic" },
