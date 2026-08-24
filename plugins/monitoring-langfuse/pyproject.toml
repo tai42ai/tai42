@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the plugin registers through — the Monitoring
     # protocols, the neutral data models, and the tai42_app handle.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.6,<4",

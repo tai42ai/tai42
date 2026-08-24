@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — the Storage ABC, ObjectStat, assert_not_root,
     # and the tai42_app handle the backend registers through.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # PooledClient + TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.6,<4",
