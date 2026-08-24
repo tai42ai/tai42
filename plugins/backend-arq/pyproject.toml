@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the plugin registers through — the Backend ABC,
     # CallbackSchema, the Manifest model, and the tai42_app handle.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # TaiBaseSettings + settings cache, schedule normalization, signature
     # helpers; the jq extra backs the callback condition/expression evaluation.

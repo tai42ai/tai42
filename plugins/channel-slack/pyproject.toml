@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError
     # and the tai42_app handle the plugin registers through.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # HttpxClient + RedisClient pooling, TaiBaseSettings + the settings cache
     # registry. The [redis] extra carries the correlation store's driver.

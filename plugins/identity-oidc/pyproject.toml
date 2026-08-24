@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract the provider registers through — the identity
     # ABCs and the module-level identity-provider registry.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # The OIDC discovery / JWKS / JWT-verify helper (tai42_kit.net.jwt). The `jwt`
     # extra is REQUIRED, not optional: that module imports joserfc at module top,
