@@ -78,6 +78,17 @@ class FormChannel(FakeChannel):
     supports_form_delivery = True
 
 
+class RecordingHooks:
+    """Captures every ``on_event`` the helper emits, to prove the delivery-failed
+    platform event fires (or does not) on the terminal-abandonment path."""
+
+    def __init__(self) -> None:
+        self.events: list[SimpleNamespace] = []
+
+    async def on_event(self, topic, payload, *, tool_kwargs_override=None) -> None:
+        self.events.append(SimpleNamespace(topic=topic, payload=payload))
+
+
 @pytest.fixture
 def wired(monkeypatch, fake_redis, fake_client_ctx):
     settings = InteractionsSettings(public_base_url="https://cb.example")
@@ -592,6 +603,100 @@ async def test_delivery_bug_prunes_and_raises(wired):
         app._channel_registry.reset()
 
 
+# -- delivery_failed platform event on terminal abandonment ---------------------
+
+
+async def test_terminal_delivery_failure_emits_delivery_failed_once(wired, monkeypatch):
+    # A send that fails for good (question pruned, nothing answered) STATES the fact as
+    # exactly one ``interactions.delivery_failed`` event carrying the channel, the
+    # interaction id, the recipient, and the error text — and the original delivery
+    # error still propagates unchanged (the event rides alongside, never replaces it).
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+    captured: dict[str, str] = {}
+
+    class CapturingFailer(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            captured["iid"] = delivery.interaction_id
+            raise ChannelDeliveryError("provider unreachable")
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("boom", CapturingFailer())
+    try:
+        with pytest.raises(ChannelDeliveryError, match="provider unreachable"):
+            await ask_user("q", channel="boom", recipient="@ops", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert len(hooks.events) == 1
+    event = hooks.events[0]
+    assert event.topic == helper_module.DELIVERY_FAILED_EVENT_TOPIC == "interactions.delivery_failed"
+    assert event.payload == {
+        "channel": "boom",
+        "interaction_id": captured["iid"],
+        "recipient": "@ops",
+        "error": "provider unreachable",
+    }
+    # The question was still pruned — the event does not change the terminal cleanup.
+    assert await wired.store.count_open(wired.fake) == 0
+
+
+async def test_delivery_success_after_retry_emits_no_delivery_failed(wired, monkeypatch):
+    # A transient failure that RECOVERS on the retry (the second attempt delivers and
+    # the answer lands) is not a terminal abandonment: no ``delivery_failed`` event.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+    _tune(monkeypatch, wired, delivery_retry_backoff_seconds=0.01)
+    attempts: list[ChannelDelivery] = []
+
+    class FlakyChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            attempts.append(delivery)
+            if len(attempts) == 1:
+                raise ChannelDeliveryError("provider throttled", retryable=True)
+            resp = await router.callback(
+                _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "second"}')
+            )
+            assert resp.status_code == 200
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("flaky", FlakyChannel())
+    try:
+        assert await ask_user("q", channel="flaky", timeout=5) == "second"
+    finally:
+        app._channel_registry.reset()
+
+    assert len(attempts) == 2
+    assert hooks.events == []  # the recovered delivery never states a terminal failure
+
+
+async def test_cancelled_delivery_emits_no_delivery_failed(wired, monkeypatch):
+    # Cancellation is not a delivery failure — the caller went away — so the terminal
+    # path propagates the CancelledError WITHOUT stating a ``delivery_failed`` event.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+
+    class CancelledChannel(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> None:
+            raise asyncio.CancelledError
+
+    app._channel_registry.reset()
+    tai42_app.channels.register("cancelled", CancelledChannel())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await ask_user("q", channel="cancelled", timeout=5)
+    finally:
+        app._channel_registry.reset()
+
+    assert hooks.events == []
+
+
 async def test_failed_delivery_ticket_unclaimable(wired):
     # After the prune, the minted ticket resolves to a dead interaction: the
     # callback door answers the uniform 404 — no late answer can resurrect it.
@@ -616,11 +721,18 @@ async def test_failed_delivery_ticket_unclaimable(wired):
     assert resp.status_code == 404
 
 
-async def test_delivery_failure_after_recorded_answer_falls_through(wired):
+async def test_delivery_failure_after_recorded_answer_falls_through(wired, monkeypatch):
     # A fast reply can land before the delivery failure surfaces (e.g. the
     # provider accepted the message, the human answered, and only then the send
     # call errored). ``prune_pending`` then reports already-answered — the
-    # recorded answer is returned, never discarded, and nothing raises.
+    # recorded answer is returned, never discarded, and nothing raises. And the
+    # answered/gone fall-through emits NO delivery_failed event: the human WAS
+    # reached, so there is no guest-impacting failure fact to state.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+
     class AnswerThenFail(DeliverOnlyChannel):
         async def deliver(self, delivery: ChannelDelivery) -> None:
             resp = await router.callback(
@@ -635,6 +747,8 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired):
         assert await ask_user("q", channel="racy", timeout=5) == "fast"
     finally:
         app._channel_registry.reset()
+
+    assert hooks.events == []
 
 
 async def test_hung_delivery_times_out_prunes_and_raises(wired):

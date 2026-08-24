@@ -17,7 +17,7 @@ import logging
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
-from tai42_contract.interactions import InteractionResponse
+from tai42_contract.interactions import InteractionRequest, InteractionResponse
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -36,6 +36,42 @@ from tai42_skeleton.interactions.settings import (
 from tai42_skeleton.interactions.store import CONTINUATION_DROPPED, InteractionStore
 
 logger = logging.getLogger(__name__)
+
+# The platform-event topic emitted when a parked ask expires UNANSWERED — the reaper
+# has just claimed it by the EXPIRY sentinel. Core states the fact; a deployment wires a
+# hook on this topic in config to decide what an operator sees. It RIDES ALONGSIDE the
+# expiry continuation the reaper fires — it never perturbs the claim/continuation flow.
+ASK_EXPIRED_UNANSWERED_EVENT_TOPIC = "interactions.ask_expired_unanswered"
+
+
+async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: str, expired_at: datetime) -> None:
+    """Emit the ``interactions.ask_expired_unanswered`` platform event ONCE for a park
+    the reaper has just claimed by expiry.
+
+    Core states the fact; a deployment wires a hook on this topic to decide what an
+    operator sees. Best-effort: a hooks-manager failure is logged and swallowed so it
+    never perturbs the reaper's claim/continuation flow or aborts the pass — the expiry
+    continuation has already been dispatched when this runs."""
+    # Local import: reach the hooks-manager accessor only when emitting, mirroring the
+    # inbound ladder's pattern (keeps a module-load import edge out of this module).
+    from tai42_skeleton.hooks.cache import get_hooks_manager
+
+    payload = {
+        "interaction_id": request.interaction_id,
+        "group_id": group_id,
+        "channel": request.channel,
+        "recipient": request.recipient,
+        "expired_at": expired_at.isoformat(),
+    }
+    try:
+        await get_hooks_manager().on_event(topic=ASK_EXPIRED_UNANSWERED_EVENT_TOPIC, payload=payload)
+    except Exception:
+        logger.warning(
+            "interactions expiry reaper: failed to emit %r for expired park %s",
+            ASK_EXPIRED_UNANSWERED_EVENT_TOPIC,
+            request.interaction_id,
+            exc_info=True,
+        )
 
 
 async def reap_expired_parks_once() -> int:
@@ -103,6 +139,10 @@ async def _reap_one_expired_park(
         # (or a sibling reaper) that claimed first returns False here and its
         # own door fired the continuation.
         dispatch_continuation(store, state.request, fingerprint, EXPIRY_ANSWER)
+        # State the expiry as a best-effort platform event AFTER the continuation is
+        # dispatched, so a hooks failure (swallowed inside) can never come between the
+        # claim and the continuation fire. Rides alongside; never perturbs the flow.
+        await _emit_ask_expired_unanswered(state.request, state.group_id, now)
         return True
     return False
 
