@@ -2000,3 +2000,96 @@ async def test_callback_post_oversized_query_413_when_off(wired):
     _off(wired)
     resp = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, query="a=" + "z" * 100))
     assert resp.status_code == 413
+
+
+# -- parked-interactions audit door (GET /api/interactions/pending) -------------
+
+
+def _async_park(store, *, iid="p1", gid="pg", channel=None, recipient=None) -> InteractionRequest:
+    now = datetime.now(UTC)
+    future = now + timedelta(hours=1)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="proceed?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=future,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=future,
+        channel=channel,
+        recipient=recipient,
+    )
+
+
+async def test_pending_operator_gets_items_and_count(wired):
+    park = _async_park(wired.store, iid="p1", channel="telegram", recipient="@ops")
+    await wired.store.add(wired.fake, park, idle_ttl=86400)
+    with _identity(user_id="op1", owner=None):
+        result = await ops.list_pending_interactions()
+    assert result["count"] == 1
+    assert result["items"][0]["interaction_id"] == "p1"
+    assert result["items"][0]["channel"] == "telegram"
+    assert result["items"][0]["recipient"] == "@ops"
+
+
+async def test_pending_restricted_caller_forbidden(wired):
+    from tai42_skeleton.operations import ForbiddenError
+
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="p1"), idle_ttl=86400)
+    with _identity(user_id="u1", owner="owner-1"), pytest.raises(ForbiddenError, match="restricted to operators"):
+        await ops.list_pending_interactions()
+
+
+async def test_pending_route_returns_data_envelope(wired):
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="p1"), idle_ttl=86400)
+    resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 200
+    body = _json(resp)["data"]
+    assert body["count"] == 1
+    assert body["items"][0]["interaction_id"] == "p1"
+
+
+async def test_pending_route_restricted_maps_to_403(wired):
+    with _identity(user_id="u1", owner="owner-1"):
+        resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 403
+
+
+async def test_pending_route_clamps_limit(wired, monkeypatch):
+    captured: dict[str, int] = {}
+    real = InteractionStore.list_pending
+
+    async def spy(self, r, *, now, limit):
+        captured["limit"] = limit
+        return await real(self, r, now=now, limit=limit)
+
+    monkeypatch.setattr(InteractionStore, "list_pending", spy)
+    # Above the cap clamps down; below 1 clamps up — never refused.
+    high = await router.list_pending_interactions(make_request("GET", query="limit=5000"))
+    assert high.status_code == 200
+    assert captured["limit"] == 1000
+    low = await router.list_pending_interactions(make_request("GET", query="limit=0"))
+    assert low.status_code == 200
+    assert captured["limit"] == 1
+
+
+async def test_pending_route_non_integer_limit_400(wired):
+    resp = await router.list_pending_interactions(make_request("GET", query="limit=abc"))
+    assert resp.status_code == 400
+
+
+async def test_pending_route_default_limit_500(wired, monkeypatch):
+    captured: dict[str, int] = {}
+
+    async def spy(self, r, *, now, limit):
+        captured["limit"] = limit
+        return []
+
+    monkeypatch.setattr(InteractionStore, "list_pending", spy)
+    resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 200
+    assert captured["limit"] == 500

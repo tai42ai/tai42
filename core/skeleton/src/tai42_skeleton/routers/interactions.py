@@ -108,6 +108,7 @@ from tai42_skeleton.operations.interactions import (
 )
 from tai42_skeleton.operations.interactions import answer_interaction as _answer_interaction_op
 from tai42_skeleton.operations.interactions import list_interactions as _list_interactions_op
+from tai42_skeleton.operations.interactions import list_pending_interactions as _list_pending_interactions_op
 
 logger = logging.getLogger(__name__)
 
@@ -568,6 +569,32 @@ list_interactions = register_operation_route(
     path="/api/interactions",
     method="GET",
     context_extractor=_extract_page_window,
+    action="read",
+)
+
+
+# -- parked-interactions audit door — an operation adapter -------------------
+
+
+async def _extract_pending_limit(request: Request) -> dict:
+    """The ``?limit=`` slice as the audit door's flat argument (a GET reads its
+    parameters from the query string, never a body). A non-integer is a loud 400 here;
+    the operation clamps the value into range."""
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return {}
+    try:
+        return {"limit": int(raw)}
+    except ValueError as exc:
+        raise BadRequestError(f"limit must be an integer: limit={raw!r}") from exc
+
+
+list_pending_interactions = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_pending_interactions_op),
+    path="/api/interactions/pending",
+    method="GET",
+    context_extractor=_extract_pending_limit,
     action="read",
 )
 

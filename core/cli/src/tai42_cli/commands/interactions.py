@@ -1,8 +1,9 @@
 """``tai interactions`` — list, stream and answer pending interactions.
 
 ``list`` reads one page of the pending questions from ``GET /api/interactions``;
-``stream`` tails the inbox live (a tail-only add/answered/removed feed, no backlog);
-``answer`` posts a human answer.
+``pending`` reads the operator-only audit of PARKED (async) asks awaiting an answer
+from ``GET /api/interactions/pending``; ``stream`` tails the inbox live (a tail-only
+add/answered/removed feed, no backlog); ``answer`` posts a human answer.
 """
 
 from __future__ import annotations
@@ -45,6 +46,28 @@ def list_interactions(
         params["pageSize"] = str(page_size)
     with ctx_obj.client() as client:
         data = client.get("/api/interactions", params=params or None)
+    emit_result(ctx_obj, data)
+
+
+@app.command("pending")
+@covers(("GET", "/api/interactions/pending"))
+def list_pending_interactions(
+    ctx: typer.Context,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Max parked asks to return, 1..1000 (default 500).")
+    ] = None,
+) -> None:
+    """Print the parked (async) interactions awaiting an answer — the operator-only
+    audit a watchdog reads to spot asks nearing or past their expiry.
+
+    Example: ``tai interactions pending --limit 100``
+    """
+    ctx_obj = app_context(ctx)
+    params: dict[str, str] = {}
+    if limit is not None:
+        params["limit"] = str(limit)
+    with ctx_obj.client() as client:
+        data = client.get("/api/interactions/pending", params=params or None)
     emit_result(ctx_obj, data)
 
 
