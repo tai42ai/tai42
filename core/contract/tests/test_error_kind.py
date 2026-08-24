@@ -13,6 +13,17 @@ import pytest
 
 from tai42_contract.agent.base import AgentInterruptedError
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
+from tai42_contract.connectors.errors import (
+    ConnectorError,
+    MalformedConnectionIdError,
+    OperatorMisconfiguredError,
+)
+from tai42_contract.conversations import (
+    CrossTargetMergeError,
+    MultichannelDisabledError,
+    NotLinkedError,
+    PairCodeInvalidError,
+)
 from tai42_contract.errors import (
     ERROR_KIND_ATTR,
     ClientConnectError,
@@ -59,6 +70,7 @@ from tai42_contract.versioning.errors import (
     DocumentStoreError,
     DocumentVersionNotFoundError,
 )
+from tai42_contract.webhooks import WebhookVerificationError
 
 # -- Closed-set compatibility snapshot -----------------------------------------
 
@@ -130,6 +142,17 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (MonitoringError("m"), ErrorKind.UPSTREAM_ERROR),
     (TraceNotFoundError("m"), ErrorKind.NOT_FOUND),
     (MonitoringReadNotSupportedError("m"), ErrorKind.UNAVAILABLE),
+    # connectors family
+    (ConnectorError("c"), ErrorKind.UPSTREAM_ERROR),
+    (OperatorMisconfiguredError("ENV_VAR", "provider"), ErrorKind.UNAVAILABLE),
+    (MalformedConnectionIdError("bad-id"), ErrorKind.NOT_FOUND),
+    # conversations pairing family
+    (PairCodeInvalidError("nope"), ErrorKind.BAD_INPUT),
+    (NotLinkedError("solo"), ErrorKind.CONFLICT),
+    (MultichannelDisabledError("off"), ErrorKind.UNAVAILABLE),
+    (CrossTargetMergeError("cross"), ErrorKind.BAD_INPUT),
+    # webhooks
+    (WebhookVerificationError("sig"), ErrorKind.UNAUTHORIZED),
 ]
 
 
@@ -183,7 +206,7 @@ def test_builtin_registry_seeds():
     assert error_kind(ValueError("x")) is ErrorKind.BAD_INPUT
     assert error_kind(TypeError("x")) is ErrorKind.BAD_INPUT
     assert error_kind(PermissionError()) is ErrorKind.UNAUTHORIZED
-    assert error_kind(NotImplementedError()) is ErrorKind.BAD_INPUT
+    assert error_kind(NotImplementedError()) is ErrorKind.UNAVAILABLE
 
 
 # -- __cause__ recursion + the depth bound -------------------------------------

@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from tai42_contract.errors import ErrorKind
+
 
 class WebhookVerificationError(Exception):
     """Raised by a :class:`WebhookVerifier` when an inbound webhook fails
@@ -24,6 +26,9 @@ class WebhookVerificationError(Exception):
     single typed error. A verifier NEVER returns a bool: a forgotten check must
     not read as a silent pass, so the only success signal is a plain return.
     """
+
+    # A failed signature/secret verification is an authentication failure.
+    __tai_error_kind__ = ErrorKind.UNAUTHORIZED
 
 
 class ReplayDefense:

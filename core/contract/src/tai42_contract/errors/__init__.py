@@ -129,7 +129,7 @@ register_error_kind(ConnectionError, ErrorKind.UNAVAILABLE)
 register_error_kind(ValueError, ErrorKind.BAD_INPUT)
 register_error_kind(TypeError, ErrorKind.BAD_INPUT)
 register_error_kind(PermissionError, ErrorKind.UNAUTHORIZED)
-register_error_kind(NotImplementedError, ErrorKind.BAD_INPUT)
+register_error_kind(NotImplementedError, ErrorKind.UNAVAILABLE)
 
 
 class ClientDisconnectedError(Exception):
