@@ -127,7 +127,7 @@ async def _resolve_answer(
     except ValueError:
         return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
 
-    outcome = await tai42_app.channels.handle_inbound_answer(
+    result = await tai42_app.channels.handle_inbound_answer(
         channel_id="telegram",
         correlation_key=str(replied_id),
         answer=text,
@@ -143,9 +143,9 @@ async def _resolve_answer(
             bridge_text=text,
         ),
     )
-    if outcome is InboundAnswerOutcome.NO_CORRELATION:
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         return None
-    return JSONResponse({"data": {"status": _ACK_STATUS[outcome]}}, status_code=200)
+    return JSONResponse({"data": {"status": _ACK_STATUS[result.outcome]}}, status_code=200)
 
 
 async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: dict[str, object]) -> Response:

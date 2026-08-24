@@ -518,6 +518,27 @@ class InboundBridge(BaseModel):
     owns_retry_notice: bool = False
 
 
+class InboundAnswerResult(BaseModel):
+    """The result of one inbound-answer ladder run.
+
+    ``outcome`` is the ladder's decision. ``retry_reason`` and ``retry_field`` carry the
+    door's OWN (already length-bounded) rejection message and the failing field name so a
+    channel that OWNS its correction surface (a re-opened WhatsApp Flow, a Slack modal's
+    inline Block-Kit error) can render the door's SPECIFIC message rather than a generic
+    line. Both are populated when the door rejected the answer's content — on
+    :attr:`InboundAnswerOutcome.RETRY_KEPT` (either ``notice_owner`` variant) and on a
+    hard-mismatch :attr:`InboundAnswerOutcome.BRIDGED` — and are ``None`` on every other
+    outcome (no correlation, a clean forward, a gone-ask 404 bridge). A channel that
+    renders no correction of its own simply ignores them and maps ``outcome``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: InboundAnswerOutcome
+    retry_reason: str | None = None
+    retry_field: str | None = None
+
+
 __all__ = [
     "AnswerForwardError",
     "Channel",
@@ -529,5 +550,6 @@ __all__ = [
     "Correlation",
     "CorrelationStore",
     "InboundAnswerOutcome",
+    "InboundAnswerResult",
     "InboundBridge",
 ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerOutcome, InboundBridge
+from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -43,7 +43,7 @@ class ChannelsFacet:
         answer: Any,
         store: CorrelationStore,
         bridge: InboundBridge,
-    ) -> InboundAnswerOutcome:
+    ) -> InboundAnswerResult:
         """The ONE shared inbound-answer ladder (see :meth:`AppChannels.handle_inbound_answer`).
 
         The policy lives in :mod:`tai42_skeleton.channels.inbound`; this facet is the

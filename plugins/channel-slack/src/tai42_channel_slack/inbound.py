@@ -63,6 +63,7 @@ from tai42_channel_slack.forms import (
     build_modal_view,
     extract_answer,
     first_field_name,
+    is_declared_field,
 )
 from tai42_channel_slack.settings import slack_settings
 
@@ -325,7 +326,9 @@ async def _resolve_answer(
     # The forward path needs no bot user id — it rides only into the bridge context the
     # ladder uses ONLY on a terminal 404 (BRIDGED). An unset id there degrades that rare
     # bridge, never the common forward; the NO_CORRELATION bridge path still requires it.
-    outcome = await tai42_app.channels.handle_inbound_answer(
+    # A threaded reply is re-answered in place, so the ladder owns the retry notice and
+    # the door reason it carries back is ignored here.
+    result = await tai42_app.channels.handle_inbound_answer(
         channel_id="slack",
         correlation_key=thread_ts,
         answer=text,
@@ -342,9 +345,9 @@ async def _resolve_answer(
             owns_retry_notice=False,
         ),
     )
-    if outcome is InboundAnswerOutcome.NO_CORRELATION:
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         return await _bridge(our_identity, channel, text, event_id)
-    return JSONResponse({"status": _EVENTS_ACK[outcome]})
+    return JSONResponse({"status": _EVENTS_ACK[result.outcome]})
 
 
 # Shown in the modal when the question's form record is gone (TTL lapsed between
@@ -385,6 +388,13 @@ def _state_values(view: dict[str, Any]) -> dict[str, Any]:
     state = view.get("state")
     values = state.get("values") if isinstance(state, dict) else None
     return values if isinstance(values, dict) else {}
+
+
+def _field_has_block(schema: dict[str, Any], field: str | None) -> bool:
+    """Whether the door-named ``field`` is a declared schema property, so its name is a
+    valid modal block_id to pin the inline error under (else the caller falls back to the
+    first field). A None/absent/nested field has no matching block."""
+    return isinstance(field, str) and is_declared_field(schema, field)
 
 
 def _render_form_answer_for_bridge(answer: dict[str, Any], schema: dict[str, Any]) -> str:
@@ -518,7 +528,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     our_identity = slack_settings().bot_user_id
     raw_view_id = view.get("id")
     view_id = raw_view_id if isinstance(raw_view_id, str) and raw_view_id else interaction_id
-    outcome = await tai42_app.channels.handle_inbound_answer(
+    result = await tai42_app.channels.handle_inbound_answer(
         channel_id="slack",
         correlation_key=interaction_id,
         answer=answer,
@@ -535,14 +545,21 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
             owns_retry_notice=True,
         ),
     )
-    if outcome is InboundAnswerOutcome.FORWARDED:
+    if result.outcome is InboundAnswerOutcome.FORWARDED:
         # An empty body closes the modal.
         return JSONResponse({})
-    if outcome is InboundAnswerOutcome.RETRY_KEPT:
-        # The channel owns the correction: the modal stays open with an inline error.
+    if result.outcome is InboundAnswerOutcome.RETRY_KEPT:
+        # The channel owns the correction: the modal stays open with an inline error
+        # carrying the door's OWN reason, pinned under the door-named field's block when
+        # it is a declared schema property (restoring the pre-migration fidelity), else
+        # the first field.
         logger.warning("slack interactive: door rejected form %s (retry-in-place); record kept", interaction_id)
-        return _errors_response(first_block, _MODAL_RETRY_TEXT)
+        error_text = result.retry_reason or _MODAL_RETRY_TEXT
+        block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block
+        return _errors_response(block, error_text)
     # NO_CORRELATION / BRIDGED: the ask is gone. The ladder released the record (and, on
     # a 404, bridged the submission); tell the guest the question is closed.
-    logger.warning("slack interactive: form %s ask is gone (%s); showing the expired notice", interaction_id, outcome)
+    logger.warning(
+        "slack interactive: form %s ask is gone (%s); showing the expired notice", interaction_id, result.outcome
+    )
     return _errors_response(first_block, _FORM_EXPIRED_TEXT)

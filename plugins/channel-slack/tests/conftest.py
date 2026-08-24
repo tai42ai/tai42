@@ -25,7 +25,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome
+from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -82,11 +82,15 @@ class _StubChannels:
         self.registered: dict[str, Any] = {}
         self.inbound_calls: list[SimpleNamespace] = []
         self.inbound_outcome: InboundAnswerOutcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_retry_reason: str | None = None
+        self.inbound_retry_field: str | None = None
         self.inbound_error: BaseException | None = None
 
     def reset(self) -> None:
         self.inbound_calls.clear()
         self.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_retry_reason = None
+        self.inbound_retry_field = None
         self.inbound_error = None
 
     def register(self, name: str, channel: Any) -> None:
@@ -98,7 +102,7 @@ class _StubChannels:
 
     async def handle_inbound_answer(
         self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
-    ) -> InboundAnswerOutcome:
+    ) -> InboundAnswerResult:
         self.inbound_calls.append(
             SimpleNamespace(
                 channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
@@ -108,7 +112,11 @@ class _StubChannels:
             raise self.inbound_error
         if self.inbound_outcome in (InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED):
             await store.release_correlation(correlation_key)
-        return self.inbound_outcome
+        return InboundAnswerResult(
+            outcome=self.inbound_outcome,
+            retry_reason=self.inbound_retry_reason,
+            retry_field=self.inbound_retry_field,
+        )
 
 
 class _StubHttp:

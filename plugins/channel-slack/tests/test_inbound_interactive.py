@@ -209,20 +209,64 @@ async def test_view_submission_forwards_coerced_answer_and_closes(fake_redis, ch
     assert _FORM_KEY not in fake_redis.store  # released by the ladder (mirrored)
 
 
-async def test_view_submission_retry_kept_shows_inline_error_keeps_record(fake_redis, channels):
+async def test_view_submission_retry_kept_shows_door_reason_keeps_record(fake_redis, channels):
     # RETRY_KEPT: the ladder kept the record and sent NO guest notice (owns_retry_notice
-    # =True), so the channel renders its own inline Block-Kit error under the first field
-    # and the modal stays open — one guest surface, never a double message.
+    # =True), so the channel renders its own inline Block-Kit error carrying the DOOR'S
+    # specific reason and the modal stays open — one guest surface, no double message.
     await _seed_form(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "full_name is required"
 
     response = await slack_interactive(_signed(_view_submission()))
 
     assert body_json(response) == {
         "response_action": "errors",
-        "errors": {"full_name": _RETRY_TEXT},
+        "errors": {"full_name": "full_name is required"},  # the door's own message, not generic text
     }
     assert fake_redis.store[_FORM_KEY]  # kept: the human can correct and resubmit
+
+
+async def test_view_submission_retry_kept_pins_door_named_field_block(fake_redis, channels):
+    # The door names the SECOND field: the error pins under its block_id, not the first
+    # field's, so the human sees it on the control that failed (restored fidelity).
+    await _seed_form(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "answer does not match schema at count: ..."
+    channels.inbound_retry_field = "count"
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {
+        "response_action": "errors",
+        "errors": {"count": "answer does not match schema at count: ..."},
+    }
+    assert fake_redis.store[_FORM_KEY]
+
+
+async def test_view_submission_retry_kept_unknown_field_falls_back_to_first(fake_redis, channels):
+    # A door ``field`` that is not a declared schema property has no matching block_id:
+    # the error pins under the first field.
+    await _seed_form(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "bad"
+    channels.inbound_retry_field = "not_a_field"
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": "bad"}}
+
+
+async def test_view_submission_retry_kept_without_reason_uses_generic_text(fake_redis, channels):
+    # When the door gave no usable reason, the inline error falls back to generic text
+    # under the first field.
+    await _seed_form(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = None
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {"response_action": "errors", "errors": {"full_name": _RETRY_TEXT}}
+    assert fake_redis.store[_FORM_KEY]
 
 
 async def test_view_submission_bridged_shows_expired_drops_record(fake_redis, channels):

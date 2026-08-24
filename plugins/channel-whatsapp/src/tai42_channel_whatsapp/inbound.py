@@ -573,7 +573,7 @@ async def _resolve_answer(
       ladder's own peek: bridge the reply as a fresh turn (never lost).
     * ``RETRY_KEPT`` on a FORM ask — the channel owns the correction surface
       (``owns_retry_notice=True``, so the ladder sent NO guest notice): re-send a fresh
-      Flow so the guest can answer again in place.
+      Flow carrying the door's own reason so the guest can answer again in place.
     * ``FORWARDED`` / ``BRIDGED`` / ``RETRY_KEPT`` on a text/select ask (the ladder sent
       the generic notice) — mark the wamid seen so a redelivery is not re-processed.
 
@@ -582,7 +582,7 @@ async def _resolve_answer(
     """
     is_form = pending.schema is not None
     bridge_text = _render_answer_for_bridge(answer, pending)
-    outcome = await tai42_app.channels.handle_inbound_answer(
+    result = await tai42_app.channels.handle_inbound_answer(
         channel_id="whatsapp",
         correlation_key=correlation_key(phone_number_id, wa_id),
         answer=answer,
@@ -603,25 +603,35 @@ async def _resolve_answer(
             owns_retry_notice=is_form,
         ),
     )
-    if outcome is InboundAnswerOutcome.NO_CORRELATION:
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid)
         return
-    if outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
-        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending)
+    if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
+        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason)
         return
     await mark_seen(wamid)
 
 
-async def _recover_form_rejection(phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion) -> None:
+def _door_error_line(retry_reason: str | None) -> str:
+    """The guest-facing error line for the re-sent Flow: the door's OWN reason (already
+    length-bounded by the ladder, re-capped here defensively at ``_DOOR_REJECTION_MAX_CHARS``
+    which names the failing field), or the fixed opaque line when the door gave none —
+    restoring the pre-migration ``_door_rejection_line`` fidelity."""
+    return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
+
+
+async def _recover_form_rejection(
+    phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, retry_reason: str | None
+) -> None:
     """Recover a door-rejected form answer by re-sending a fresh Flow for the SAME
     interaction, bounded by ``_MAX_FORM_REJECTIONS``.
 
     The shared ladder returned RETRY_KEPT: it KEPT the reservation and — because this
     channel owns the retry notice — sent NO guest message, so the fresh Flow is the
-    guest's single correction message (no double-messaging). The door's specific reason
-    rode the ``interactions.answer_rejected`` operator event the ladder emitted; the
-    re-sent Flow carries a generic "could not be accepted" line (the ladder abstracts
-    the door response away). Ordering is load-bearing for Meta's redelivery:
+    guest's single correction message (no double-messaging). ``retry_reason`` is the
+    door's own (already-truncated) message, which names the failing field and rides the
+    re-sent Flow's body — restoring the pre-migration behavior; a missing reason falls
+    back to a fixed opaque line. Ordering is load-bearing for Meta's redelivery:
 
     * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
       same cached flow id), then count the rejection on the STILL-HELD record and mark
@@ -652,7 +662,7 @@ async def _recover_form_rejection(phone_number_id: str, wa_id: str, wamid: str, 
         await mark_seen(wamid)
         return
 
-    body_text = _rejection_body(pending.question, _CALLBACK_REJECTION_OPAQUE)
+    body_text = _rejection_body(pending.question, _door_error_line(retry_reason))
     try:
         flow_id = await _cached_form_flow_id(pending.schema)
         await send_flow(

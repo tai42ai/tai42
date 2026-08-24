@@ -38,6 +38,7 @@ from tai42_contract.channels import (
     ChannelNotification,
     CorrelationStore,
     InboundAnswerOutcome,
+    InboundAnswerResult,
     InboundBridge,
 )
 from tai42_kit.clients.impl.http import HttpxClient
@@ -46,8 +47,7 @@ from tai42_skeleton.interactions.settings import interactions_settings
 
 logger = logging.getLogger(__name__)
 
-# ``AnswerForwardError``, ``InboundAnswerOutcome`` and ``InboundBridge`` are the
-# contract's shared inbound-answer types (channel plugins consume them without
+# The contract's shared inbound-answer types (channel plugins consume them without
 # importing the skeleton); re-exported here so this module — the ladder's home — and
 # its importers keep a single import site.
 __all__ = [
@@ -56,6 +56,7 @@ __all__ = [
     "ANSWER_REJECTED_RETRY_NOTICE",
     "AnswerForwardError",
     "InboundAnswerOutcome",
+    "InboundAnswerResult",
     "InboundBridge",
     "handle_inbound_answer",
 ]
@@ -233,13 +234,15 @@ async def handle_inbound_answer(
     answer: Any,
     store: CorrelationStore,
     bridge: InboundBridge,
-) -> InboundAnswerOutcome:
+) -> InboundAnswerResult:
     """Resolve one inbound guest reply against its pending ask — the shared ladder.
 
     ``correlation_key`` is the channel's opaque key for this address; ``answer`` is
     the value forwarded to the door as ``{"answer": answer}``; ``store`` is the
     channel's :class:`~tai42_contract.channels.CorrelationStore`; ``bridge`` carries
-    the fields a bridged turn needs.
+    the fields a bridged turn needs. Returns an
+    :class:`~tai42_contract.channels.InboundAnswerResult` — the outcome plus the door's
+    ``retry_reason``/``retry_field`` when it rejected the answer's content.
 
     The ladder:
 
@@ -253,12 +256,13 @@ async def handle_inbound_answer(
     * The door returns 400 (the LIVE ask rejected this answer's format) -> read the
       door's ``retry_in_place`` (default True):
 
-      - True: KEEP the correlation, notify the guest what's expected, fire ONE
-        operator alert, return :attr:`~InboundAnswerOutcome.RETRY_KEPT`. The guest
-        can answer again in place; nothing is silent.
+      - True: KEEP the correlation, notify the guest what's expected (unless the
+        channel owns its notice), fire ONE operator alert, return
+        :attr:`~InboundAnswerOutcome.RETRY_KEPT` carrying the door's reason/field. The
+        guest can answer again in place; nothing is silent.
       - False (a future hard mismatch): release, notify the guest the question is
         closed, fire the operator alert, bridge the reply, return
-        :attr:`~InboundAnswerOutcome.BRIDGED`.
+        :attr:`~InboundAnswerOutcome.BRIDGED` carrying the door's reason/field.
 
     * Anything else (401/413/5xx, or a transport fault) -> do NOT release; raise
       :class:`AnswerForwardError` so the channel's webhook redelivery re-runs the
@@ -268,7 +272,7 @@ async def handle_inbound_answer(
     if entry is None:
         # Side-effect-free miss: no pending ask on this key, so the caller bridges
         # the reply as a normal turn. The handler touches nothing.
-        return InboundAnswerOutcome.NO_CORRELATION
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
     if not _callback_host_pinned(entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id):
         # The stored callback host is not this platform's configured public base:
@@ -276,7 +280,7 @@ async def handle_inbound_answer(
         # and treat the reply as uncorrelated so the caller bridges it as a normal turn
         # (never lost) — the loud log is emitted by the pin check.
         await store.release_correlation(correlation_key)
-        return InboundAnswerOutcome.NO_CORRELATION
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
     try:
         forwarded = await _forward_answer(entry.callback_url, answer)
@@ -288,7 +292,7 @@ async def handle_inbound_answer(
     status = forwarded.status_code
     if status // 100 == 2:
         await store.release_correlation(correlation_key)
-        return InboundAnswerOutcome.FORWARDED
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.FORWARDED)
 
     if status == 404:
         # Terminal: the ask is gone (withdrawn/expired/cancelled/thread-deleted).
@@ -302,7 +306,8 @@ async def handle_inbound_answer(
         )
         await store.release_correlation(correlation_key)
         await _bridge(bridge)
-        return InboundAnswerOutcome.BRIDGED
+        # A gone-ask 404 carries no door reason — the ask never judged this answer.
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED)
 
     if status == 400:
         # THE SPLIT: the LIVE ask rejected this answer's format. The door is the
@@ -334,7 +339,11 @@ async def handle_inbound_answer(
                 channel_id,
                 "channel" if bridge.owns_retry_notice else "core",
             )
-            return InboundAnswerOutcome.RETRY_KEPT
+            # Carry the door's own (already-truncated) reason/field so a channel that
+            # owns its correction surface can render the door's specific message.
+            return InboundAnswerResult(
+                outcome=InboundAnswerOutcome.RETRY_KEPT, retry_reason=error or None, retry_field=field
+            )
 
         # Non-retryable hard mismatch: the ask cannot take this answer and cannot be
         # re-answered in place. The channel's correction surface is moot for a closed
@@ -360,7 +369,11 @@ async def handle_inbound_answer(
             channel_id,
         )
         await _bridge(bridge)
-        return InboundAnswerOutcome.BRIDGED
+        # The door judged this answer's content — carry its reason/field even though the
+        # ask is now closed (a channel may surface it before falling back to the bridge).
+        return InboundAnswerResult(
+            outcome=InboundAnswerOutcome.BRIDGED, retry_reason=error or None, retry_field=field
+        )
 
     # 401/413/5xx ambient failure — keep the correlation and fail loudly so the
     # channel's webhook redelivery re-runs the ladder.

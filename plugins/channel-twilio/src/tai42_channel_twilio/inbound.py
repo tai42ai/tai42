@@ -188,7 +188,7 @@ async def twilio_inbound(request: Request) -> Response:
     # Inbound direction: To = the deployment's Twilio number, From = the human.
     twilio_number = form.get("To", "")
     human_number = form.get("From", "")
-    outcome = await tai42_app.channels.handle_inbound_answer(
+    result = await tai42_app.channels.handle_inbound_answer(
         channel_id="twilio",
         correlation_key=correlation_key(twilio_number, human_number),
         # A typed SMS answers with its Body minus outer whitespace.
@@ -206,7 +206,7 @@ async def twilio_inbound(request: Request) -> Response:
             bridge_text=form.get("Body", ""),
         ),
     )
-    if outcome is InboundAnswerOutcome.NO_CORRELATION:
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         # No pending question (unrelated text or expired) — route to the bridge.
         return await _bridge_inbound(form, message_sid)
     # FORWARDED / RETRY_KEPT / BRIDGED: the ladder resolved (or already bridged) the

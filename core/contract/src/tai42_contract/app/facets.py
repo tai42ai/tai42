@@ -31,7 +31,7 @@ from tai42_contract.backup import BackupSectionInfo
 from tai42_contract.channels import (
     Channel,
     CorrelationStore,
-    InboundAnswerOutcome,
+    InboundAnswerResult,
     InboundBridge,
 )
 from tai42_contract.clients import BaseClient
@@ -287,10 +287,15 @@ class AppChannels(Protocol):
         answer: Any,
         store: CorrelationStore,
         bridge: InboundBridge,
-    ) -> InboundAnswerOutcome:
+    ) -> InboundAnswerResult:
         """Resolve one inbound guest reply against its pending ask — the ONE shared
         inbound-answer ladder every correlated channel calls instead of hand-rolling
         its own "forward → interpret 2xx/404/400 → release/bridge/keep" sequence.
+
+        Returns an :class:`InboundAnswerResult`: the ``outcome`` the channel maps to its
+        transport ack, plus the door's ``retry_reason``/``retry_field`` when it rejected
+        the answer's content, so a channel that owns its correction surface can render the
+        door's specific message.
 
         A channel computes its own opaque ``correlation_key`` for the guest's address,
         provides the ``answer`` value to forward to the door as ``{"answer": answer}``,

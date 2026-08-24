@@ -172,11 +172,11 @@ async def test_no_correlation_returns_and_touches_nothing(wired, monkeypatch):
     store = FakeStore(None)
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="hi", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
     # Zero side effects on the miss path: no forward, no release, no bridge, no
     # notice, no event.
     assert forward_calls == []
@@ -193,11 +193,13 @@ async def test_2xx_releases_and_forwards(wired, monkeypatch):
     store = FakeStore(_entry())
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.FORWARDED
+    assert result.outcome is InboundAnswerOutcome.FORWARDED
+    assert result.retry_reason is None  # a clean forward carries no door reason
+    assert result.retry_field is None
     # The answer reached the door verbatim; the correlation was released; nothing
     # else happened.
     assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes")]
@@ -214,11 +216,12 @@ async def test_404_releases_and_bridges(wired, monkeypatch):
     store = FakeStore(_entry())
     _stub_forward(monkeypatch, httpx.Response(404, json={"error": "not found"}))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="late reply", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.BRIDGED
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
+    assert result.retry_reason is None  # a gone-ask 404 carries no door reason
     assert store.released == ["k"]
     # The reply is bridged as a fresh turn with the bridge fields verbatim.
     assert len(wired.accept_calls) == 1
@@ -244,11 +247,14 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
         httpx.Response(400, json={"error": "Please answer with yes or no.", "field": "reply", "retry_in_place": True}),
     )
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="maybe", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
+    # The door's reason/field ride back on the result for a channel that owns its notice.
+    assert result.retry_reason == "Please answer with yes or no."
+    assert result.retry_field == "reply"
     # The correlation is KEPT so the guest's next reply resolves the same ask.
     assert store.released == []
     assert wired.accept_calls == []
@@ -290,7 +296,7 @@ async def test_400_retryable_owns_retry_notice_skips_core_notice_keeps_and_alert
         httpx.Response(400, json={"error": "Please pick a listed option.", "field": "choice", "retry_in_place": True}),
     )
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan",
         correlation_key="k",
         answer="maybe",
@@ -298,7 +304,10 @@ async def test_400_retryable_owns_retry_notice_skips_core_notice_keeps_and_alert
         bridge=_bridge(owns_retry_notice=True),
     )
 
-    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
+    # The door's specific reason/field ride back for the channel to render its own error.
+    assert result.retry_reason == "Please pick a listed option."
+    assert result.retry_field == "choice"
     # Correlation KEPT so the channel's re-ask resolves the same ask.
     assert store.released == []
     # Core sent NO guest notice — the channel owns it.
@@ -319,7 +328,7 @@ async def test_400_hard_mismatch_ignores_owns_retry_notice_and_core_notices(wire
         httpx.Response(400, json={"error": "This question is closed.", "retry_in_place": False}),
     )
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan",
         correlation_key="k",
         answer="nope",
@@ -327,7 +336,7 @@ async def test_400_hard_mismatch_ignores_owns_retry_notice_and_core_notices(wire
         bridge=_bridge(owns_retry_notice=True),
     )
 
-    assert outcome is InboundAnswerOutcome.BRIDGED
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
     assert len(wired.channel.notifications) == 1  # core still notices on a hard mismatch
     assert wired.events[0].payload["notice_owner"] == "core"
 
@@ -342,11 +351,14 @@ async def test_400_non_retryable_releases_notifies_alerts_and_bridges(wired, mon
         httpx.Response(400, json={"error": "That question no longer accepts this answer.", "retry_in_place": False}),
     )
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="nope", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.BRIDGED
+    assert result.outcome is InboundAnswerOutcome.BRIDGED
+    # A hard-mismatch BRIDGED still carries the door's reason (the ask judged the answer).
+    assert result.retry_reason == "That question no longer accepts this answer."
+    assert result.retry_field is None
     # The hard-mismatch seam: released, guest told the question is closed, operator
     # alerted, and the reply bridged as a fresh turn.
     assert store.released == ["k"]
@@ -413,11 +425,11 @@ async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
     store = FakeStore(_entry())
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "bad", "retry_in_place": True}))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="maybe", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
     assert failing.calls == 1  # the notice was attempted
     assert store.released == []
     assert len(hooks.events) == 1  # the event still fired despite the notify failure
@@ -445,11 +457,11 @@ async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wire
     store = FakeStore(_entry(callback_url="https://evil.example/api/interactions/callback/tkt"))
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="hi", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
     assert forward_calls == []  # the guest's answer was never shipped to the wrong host
     assert store.released == ["k"]  # the poisoned reservation is dropped
     assert wired.channel.notifications == []
@@ -463,11 +475,11 @@ async def test_callback_host_match_forwards(wired, monkeypatch):
     store = FakeStore(_entry())  # _CALLBACK_URL is on host.example
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.FORWARDED
+    assert result.outcome is InboundAnswerOutcome.FORWARDED
     assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes")]
     assert store.released == ["k"]
 
@@ -479,11 +491,11 @@ async def test_callback_host_pin_skipped_when_public_base_unset(wired, monkeypat
     store = FakeStore(_entry(callback_url="https://anything.example/api/interactions/callback/tkt"))
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.FORWARDED
+    assert result.outcome is InboundAnswerOutcome.FORWARDED
     assert len(forward_calls) == 1
 
 
@@ -497,12 +509,14 @@ async def test_400_reason_is_truncated_in_notice_and_event(wired, monkeypatch):
     store = FakeStore(_entry())
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": long_reason, "retry_in_place": True}))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="maybe", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
     truncated = "x" * 300
+    # The result carries the SAME truncated reason the notice/event use.
+    assert result.retry_reason == truncated
     assert len(wired.events) == 1
     assert wired.events[0].payload["reason"] == truncated
     assert len(wired.events[0].payload["reason"]) == 300
@@ -518,11 +532,12 @@ async def test_malformed_400_body_defaults_to_retry_in_place(wired, monkeypatch)
     store = FakeStore(_entry())
     _stub_forward(monkeypatch, httpx.Response(400, text="not json at all"))
 
-    outcome = await handle_inbound_answer(
+    result = await handle_inbound_answer(
         channel_id="fakechan", correlation_key="k", answer="x", store=store, bridge=_bridge()
     )
 
-    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.outcome is InboundAnswerOutcome.RETRY_KEPT
+    assert result.retry_reason is None  # an unreadable body yields no usable reason
     assert store.released == []
     assert len(wired.channel.notifications) == 1
     assert len(wired.events) == 1

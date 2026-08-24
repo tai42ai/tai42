@@ -928,6 +928,9 @@ async def test_form_reply_bad_coercion_forwards_raw_then_re_sends_flow(
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    # The ladder returns the door's own field-naming reason on RETRY_KEPT.
+    channels.inbound_retry_reason = "answer at qty: 3.5 is not an integer"
+    channels.inbound_retry_field = "qty"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "qty": "3.5"})))
@@ -940,7 +943,7 @@ async def test_form_reply_bad_coercion_forwards_raw_then_re_sends_flow(
     assert resend["interactive"]["action"]["parameters"]["flow_id"] == "flow-cached"
     body = resend["interactive"]["body"]["text"]
     assert _FORM_QUESTION in body  # the question is repeated
-    assert _CALLBACK_REJECTION_OPAQUE in body  # a generic line (the door's reason rides the operator event)
+    assert "qty" in body  # the door's field-naming reason rides the re-sent Flow body (parity restored)
     assert await _pending_intact(fake_redis)  # kept for the re-submission
     assert _stored_rejections(fake_redis) == 1
 
@@ -976,6 +979,7 @@ async def test_form_retry_kept_re_sends_fresh_flow(
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
@@ -988,12 +992,31 @@ async def test_form_retry_kept_re_sends_fresh_flow(
     params = resend["interactive"]["action"]["parameters"]
     assert params["flow_token"] == "int-1"  # same interaction — reply matching unchanged
     assert params["flow_id"] == "flow-cached"  # reuses the cached flow id
+    # The door's OWN reason rides the body (restored parity), not a generic line.
     assert resend["interactive"]["body"]["text"] == (
-        f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
+        f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} note: must not be blank"
     )
     assert _stored_rejections(fake_redis) == 1  # counter incremented
     assert await _pending_intact(fake_redis)  # pending kept
     assert _SEEN_KEY in fake_redis.store
+
+
+async def test_form_retry_kept_without_reason_uses_opaque_line(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # When the door gave no usable reason (retry_reason None), the re-sent Flow falls
+    # back to the fixed opaque line — the guest is never shown an intermediary's content.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = None
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
 
 
 async def test_form_rejection_long_question_drops_question_keeps_error(
@@ -1007,13 +1030,14 @@ async def test_form_rejection_long_question_drops_question_keeps_error(
     await _seed_pending_form(question=long_question)
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
     assert result.status_code == 200
     body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
-    assert body == f"{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"  # tail only — the question is gone
+    assert body == f"{_FORM_REJECTION_LEAD} note: must not be blank"  # tail only — the question is gone
     assert long_question not in body  # no question
     assert not body.startswith("Q")  # not even a chopped prefix of it
     assert "…" not in body  # no ellipsis
@@ -1029,11 +1053,13 @@ async def test_form_rejection_body_at_cap_boundary_keeps_question(
 ):
     # The cap is inclusive: a body whose length is EXACTLY the cap keeps the question,
     # and one char more would drop it. Pins the <= boundary against the constant.
-    tail = f"{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
+    error = "note: must not be blank"
+    tail = f"{_FORM_REJECTION_LEAD} {error}"
     question = "Q" * (_FLOW_BODY_MAX_CHARS - len(tail) - len("\n\n"))
     await _seed_pending_form(question=question)
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = error
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))

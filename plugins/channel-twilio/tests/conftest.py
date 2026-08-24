@@ -20,7 +20,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome
+from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -68,7 +68,7 @@ class _StubChannels:
 
     async def handle_inbound_answer(
         self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
-    ) -> Any:
+    ) -> InboundAnswerResult:
         self.inbound_calls.append(
             SimpleNamespace(
                 channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
@@ -76,7 +76,7 @@ class _StubChannels:
         )
         if self.inbound_error is not None:
             raise self.inbound_error
-        return self.inbound_outcome
+        return InboundAnswerResult(outcome=self.inbound_outcome)
 
 
 class _StubHttp:
