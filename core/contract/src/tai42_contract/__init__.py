@@ -16,7 +16,14 @@ from importlib.metadata import version
 from tai42_contract.agent import Agent
 from tai42_contract.app import DeclaredRouteMetadata, RouteAction, TaiApp, tai42_app
 from tai42_contract.backend import Backend
-from tai42_contract.errors import ClientConnectError, ClientDisconnectedError
+from tai42_contract.errors import (
+    ERROR_KIND_ATTR,
+    ClientConnectError,
+    ClientDisconnectedError,
+    ErrorKind,
+    error_kind,
+    register_error_kind,
+)
 from tai42_contract.manifest import Manifest
 from tai42_contract.storage import Storage
 from tai42_contract.tools import ToolInfo
@@ -24,16 +31,20 @@ from tai42_contract.tools import ToolInfo
 __version__ = version("tai42-contract")
 
 __all__ = [
+    "ERROR_KIND_ATTR",
     "Agent",
     "Backend",
     "ClientConnectError",
     "ClientDisconnectedError",
     "DeclaredRouteMetadata",
+    "ErrorKind",
     "Manifest",
     "RouteAction",
     "Storage",
     "TaiApp",
     "ToolInfo",
     "__version__",
+    "error_kind",
+    "register_error_kind",
     "tai42_app",
 ]

@@ -30,6 +30,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
+from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     AnswerFormat,
     InteractionRequest,
@@ -67,10 +68,17 @@ DELIVERY_FAILED_EVENT_TOPIC = "interactions.delivery_failed"
 class InteractionTimeoutError(Exception):
     """Raised when ``ask_user`` gets no answer within its timeout budget."""
 
+    # No answer arrived within the timeout budget.
+    __tai_error_kind__ = ErrorKind.TIMED_OUT
+
 
 class InteractionLimitError(Exception):
     """Raised when a new ``ask_user`` call is refused because too many questions
     are already open (the ``max_concurrent`` guard)."""
+
+    # Judgment call: the open-question ceiling is a saturated resource, so the ask is
+    # refused for now — UNAVAILABLE (a temporary refusal), not a caller BAD_INPUT.
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
 
 
 def _normalize_schema(schema: type[BaseModel] | dict[str, Any]) -> dict:

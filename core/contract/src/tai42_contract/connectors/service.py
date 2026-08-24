@@ -12,12 +12,17 @@ from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.connectors.models import UpstreamRevokeOutcome
+from tai42_contract.errors import ErrorKind
 
 # -- Errors ---------------------------------------------------------------
 
 
 class AliasInUseError(ValueError):
     """Alias collides with an existing connection (api → 409)."""
+
+    # A state-dependent collision, per its own documented 409 mapping — CONFLICT,
+    # overriding the BAD_INPUT its ValueError parentage would otherwise resolve to.
+    __tai_error_kind__ = ErrorKind.CONFLICT
 
 
 # -- Flow operation -------------------------------------------------------

@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
+from tai42_contract.errors import ErrorKind
+
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
 ConversationDoor = Literal["api", "channel"]
@@ -382,10 +384,16 @@ class PairCodeInvalidError(Exception):
     UNIFORM across unknown / expired / already-redeemed: the three are indistinguishable to
     the caller (no oracle), so a redeem reply never reveals whether a code ever existed."""
 
+    # The submitted code did not work; deliberately uniform across unknown/expired/redeemed (no oracle).
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
+
 
 class NotLinkedError(Exception):
     """An unlink was asked of an address that is not part of a multi-address person — it is
     already its own provisional person, so there is nothing to detach."""
+
+    # A state-dependent refusal: the address is not part of a multi-address person, so there is nothing to detach.
+    __tai_error_kind__ = ErrorKind.CONFLICT
 
 
 class MultichannelDisabledError(Exception):
@@ -393,11 +401,18 @@ class MultichannelDisabledError(Exception):
     The pairing tool refuses with this; the ``/link`` and ``/unlink`` commands instead pass
     through as ordinary text on such a target."""
 
+    # The target's multichannel capability is off — a capability refusal, mirroring NotSupported -> UNAVAILABLE.
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
 
 class CrossTargetMergeError(Exception):
     """A merge was attempted across two different targets. Persons are per-target and can
     never span targets; a NAMED type so a pairing turn scopes it distinctly from an
     infrastructure fault."""
+
+    # Structurally impossible by construction (persons never span targets) — an
+    # invalid request, not a current-state conflict.
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
 # The one placeholder a greeting template may reference — the mint-at-greeting-time pair

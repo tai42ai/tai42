@@ -25,6 +25,7 @@ from fastmcp.utilities.types import Audio, File, Image, get_cached_typeadapter
 from langchain_core.tools import StructuredTool, ToolException, tool
 from makefun import create_function
 from pydantic_core import PydanticSerializationError, to_jsonable_python
+from tai42_contract.errors import ErrorKind
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
@@ -82,6 +83,9 @@ class UnknownToolError(Exception):
     raises for a name the caller itself asked for — the single requested name, or the
     first missing name of a requested list — so a catch around a lookup needs no such
     comparison."""
+
+    # The requested tool name is not registered — a not-found target.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, tool_name: str) -> None:
         super().__init__(f"No such tool: {tool_name}.")
