@@ -1477,6 +1477,16 @@ class ConversationRecordStore:
         async with client_ctx(RedisClient, self.settings.redis) as r:
             return int(await awaited(r.zcard(self.settings.route_threads_key(route_name))))
 
+    async def route_thread_ids(self, route_name: str) -> list[str]:
+        """Every thread id currently in ``route_name``'s thread index — the route delete's
+        work list for a per-thread cascade (parked-ask cancellation) that must run BEFORE
+        :meth:`drop_route_threads` tears the indexes down. A plain read that reclaims
+        nothing; the index itself is walked and dropped by ``drop_route_threads``. Read in
+        full because the cascade must reach every thread the route owns, not a page of them."""
+        async with client_ctx(RedisClient, self.settings.redis) as r:
+            key = self.settings.route_threads_key(route_name)
+            return [_member(member) for member in await awaited(r.zrange(key, 0, -1))]
+
     async def drop_route_threads(self, route_name: str) -> None:
         """Delete a route's thread indexes — every per-thread transcript ZSET the route's
         thread index names and each thread's mode override, then the index itself. Neither the

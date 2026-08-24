@@ -747,6 +747,16 @@ async def delete_conversation_route(route_name: str) -> dict[str, Any]:
     # why the create writes the thread indexes only while the row stands and the completion
     # write re-stamps the route index only while the thread's own index still holds
     # members — either one unguarded would re-create a pair nothing walks and no TTL expires.
+    #
+    # Cancel every async ``ask_user`` parked on each of the route's threads BEFORE the
+    # indexes go, so deleting the route does not orphan a park (its expiry reaper would
+    # later fire a continuation into a thread whose route is gone, and its channel
+    # correlation would stay muted until the deadline). Enumerated up front from the route
+    # thread index; idempotent, so this door's own retry re-runs it cleanly.
+    from tai42_skeleton.interactions.helper import cancel_parks_for_thread
+
+    for thread_id in await store.route_thread_ids(route_name):
+        await cancel_parks_for_thread(thread_id)
     await store.drop_route_threads(route_name)
     return {"removed": removed, "route_name": route_name}
 
@@ -864,6 +874,14 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         # before any teardown, never left to run after the delete and re-create the checkpoint.
         if await store.thread_has_live_intake(thread_id):
             raise ConflictError(in_flight_409)
+        # Cancel every async ``ask_user`` parked on this thread BEFORE the indexes go, so
+        # the deletion does not orphan a park (its expiry reaper would later fire a
+        # continuation into this now-deleted thread — a delivery retry storm — and its
+        # channel correlation would mute the guest's number until the deadline). Runs under
+        # the same per-thread FIFO the teardown holds; idempotent, so a retry re-runs it.
+        from tai42_skeleton.interactions.helper import cancel_parks_for_thread
+
+        await cancel_parks_for_thread(thread_id)
         await _delete_thread_checkpoint(thread_id)
         removed = 0
         for name in route_names:
@@ -922,6 +940,12 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
         # so an in-flight turn on the aggregated thread cannot re-fork the memory behind it.
         caps.reserve_thread_slot(thread_id)
         async with caps.run_reserved(thread_id, acquire_timeout_seconds=caps.settings.sync_door_wait_seconds):
+            # Cancel any async park still bound to the aggregated thread even on the
+            # already-gone branch: the checkpoint is forgotten regardless, so a lingering
+            # park would otherwise be orphaned exactly as on the linked branch.
+            from tai42_skeleton.interactions.helper import cancel_parks_for_thread
+
+            await cancel_parks_for_thread(thread_id)
             await _delete_thread_checkpoint(thread_id)
         return {"person_id": person_id, "removed": 0, "erased": False}
     route_names = sorted(_person_routes(person))
@@ -935,6 +959,12 @@ async def delete_conversation_person(person_id: str) -> dict[str, Any]:
         # route index behind the erase.
         if await store.thread_has_live_intake(thread_id):
             raise ConflictError(in_flight_409)
+        # Cancel every async park on the aggregated thread BEFORE its indexes go, so the
+        # forget-me does not orphan a parked ``ask_user`` — the same cascade the thread
+        # delete runs, under the same per-thread FIFO.
+        from tai42_skeleton.interactions.helper import cancel_parks_for_thread
+
+        await cancel_parks_for_thread(thread_id)
         await _delete_thread_checkpoint(thread_id)
         removed = 0
         for name in route_names:

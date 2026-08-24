@@ -531,6 +531,9 @@ class FakeRedis:
     async def smembers(self, key) -> set[str]:
         return self._smembers(key)
 
+    async def delete(self, *keys) -> int:
+        return self._delete(*keys)
+
     async def ttl(self, key) -> int:
         # Mirror redis TTL: -2 for a missing key, -1 for a key with no expiry, else
         # the whole seconds remaining (ceil, floor 0) so a live media key reports a
