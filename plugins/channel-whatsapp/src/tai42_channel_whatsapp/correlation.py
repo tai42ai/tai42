@@ -7,10 +7,12 @@ A WhatsApp reply carries no thread, so the only correlation key is the pair
 the key TTL is the remaining answer budget, so an expired question cannot capture
 a later reply.
 
-``pop_pending`` claims with ``GETDEL`` (atomic — one of two concurrent webhooks
-wins). ``restore_pending`` puts a popped question back with its remaining TTL
-after a failed forward, itself a ``SET NX`` so it never overwrites a NEW
-reservation that took the pair in the gap (refused with a loud log instead).
+The record is read NON-DESTRUCTIVELY: ``peek_pending`` returns the rich record
+without claiming it, and the shared ladder (through the ``CorrelationStore``
+port's ``get_correlation``/``release_correlation``) decides when the reservation
+is released — a kept rejection leaves the record untouched, and only a terminal
+outcome deletes it. ``bump_rejections`` increments the re-ask counter in place on
+the still-held record. Exclusivity lives entirely on the ``SET NX`` reserve.
 
 A select ask also carries its ``options`` and ``interaction_id`` so an inbound
 interactive tap (whose id is ``{interaction_id}:{index}``) maps back to the exact
