@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-agents"
-version = "4.0.1"
+version = "5.0.0"
 description = "Ready-made agents for the TAI ecosystem — coding/deep agents, tool-calling, retrieval, voting, refinement, and vision agents — opt-in and manifest-loaded."
 readme = "README.md"
 requires-python = ">=3.13"
