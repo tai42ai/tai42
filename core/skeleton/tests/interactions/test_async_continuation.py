@@ -285,14 +285,21 @@ async def test_reaper_hooks_failure_does_not_break_continuation_fire(wired, capt
     assert len(captured) == 1  # the continuation still fired despite the hooks failure
 
 
-async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured):
+async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured, monkeypatch):
     # An expiry member whose state has vanished (idle-expired) is reconciled off the
-    # index without firing — never a phantom continuation.
+    # index without firing — never a phantom continuation, and never a phantom
+    # ``ask_expired_unanswered`` event either (the event states a successful expiry
+    # CLAIM; a vanished/lost-race member claims nothing).
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     await wired.fake.zadd(wired.store.pending_expiry_key, {"ghost": now_ms - 1000})
     assert await reaper_module.reap_expired_parks_once() == 0
     await _drain()
     assert captured == []
+    assert hooks.events == []
     assert await wired.store.due_expiries(wired.fake, datetime.now(UTC)) == []
 
 

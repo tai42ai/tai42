@@ -721,11 +721,18 @@ async def test_failed_delivery_ticket_unclaimable(wired):
     assert resp.status_code == 404
 
 
-async def test_delivery_failure_after_recorded_answer_falls_through(wired):
+async def test_delivery_failure_after_recorded_answer_falls_through(wired, monkeypatch):
     # A fast reply can land before the delivery failure surfaces (e.g. the
     # provider accepted the message, the human answered, and only then the send
     # call errored). ``prune_pending`` then reports already-answered — the
-    # recorded answer is returned, never discarded, and nothing raises.
+    # recorded answer is returned, never discarded, and nothing raises. And the
+    # answered/gone fall-through emits NO delivery_failed event: the human WAS
+    # reached, so there is no guest-impacting failure fact to state.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+
     class AnswerThenFail(DeliverOnlyChannel):
         async def deliver(self, delivery: ChannelDelivery) -> None:
             resp = await router.callback(
@@ -740,6 +747,8 @@ async def test_delivery_failure_after_recorded_answer_falls_through(wired):
         assert await ask_user("q", channel="racy", timeout=5) == "fast"
     finally:
         app._channel_registry.reset()
+
+    assert hooks.events == []
 
 
 async def test_hung_delivery_times_out_prunes_and_raises(wired):

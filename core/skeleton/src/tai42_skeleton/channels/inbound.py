@@ -40,8 +40,10 @@ from tai42_kit.clients.impl.http import HttpxClient
 logger = logging.getLogger(__name__)
 
 # Bound the forward to the answer door — a hung door must not pin the inbound
-# webhook open. Mirrors the per-channel http timeouts (~10s) the plugins use today.
-_FORWARD_TIMEOUT_SECONDS = 10.0
+# webhook open. 30s matches the channel plugins' http_timeout_seconds default, so
+# migrating a channel onto this ladder never flips a slow-but-successful door
+# response into a transport fault + provider redelivery loop.
+_FORWARD_TIMEOUT_SECONDS = 30.0
 
 # The guest-facing notice when the door rejects a still-live ask's answer and the
 # guest can answer again in place. Composed with the door's human-readable reason
