@@ -250,8 +250,15 @@ def main() -> int:
         return 0
     downstream = downstream_manifests()
     if not downstream:
-        print("no downstream manifests configured; nothing to audit.")
-        return 0
+        # We are past the ``no targets`` guard, so a release wave actually fired and a
+        # downstream pin audit IS expected — an empty/unset manifest map here is a
+        # misconfiguration, not a benign no-op. Fail LOUD (::error:: + nonzero) rather than
+        # silently skipping the audit and letting a stale downstream pin slip through green.
+        print(
+            "::error::a release wave fired but no downstream manifests are configured "
+            "(set DOWNSTREAM_PINS_MANIFESTS or DOWNSTREAM_PINS_FILE); refusing to skip the pin audit."
+        )
+        return 1
     print(f"checking downstream pins against released core version(s): {targets}")
     violations = find_violations(targets, token, downstream)
     if not violations:

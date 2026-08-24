@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final, cast
 from uuid import uuid4
@@ -42,7 +42,12 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
-from tai42_contract.interactions import SuspendedInteraction, get_park_completion
+from tai42_contract.interactions import (
+    SuspendedInteraction,
+    get_park_completion,
+    reset_resume_continuation_tool,
+    set_resume_continuation_tool,
+)
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import (
     SandboxExecTimeoutError,
@@ -52,6 +57,7 @@ from tai42_contract.sandbox import (
 )
 
 from tai42_agents._internal.park import (
+    AGENT_RESUME_TOOL_NAME,
     ParkIdentity,
     assert_park_capable,
     persist_park,
@@ -127,6 +133,27 @@ _UNHONORED_REASONS: dict[str, str] = {
     "system_content_kwargs": "the system prompt is passed to the SDK verbatim, never built as a content block",
 }
 _UNHONORED_COLLECTION_PARAMS: frozenset[str] = frozenset({"tools", "presets"})
+
+
+@contextlib.contextmanager
+def _resume_continuation(threaded: bool) -> Iterator[None]:
+    """Bind the agent-resume continuation for the duration of a THREADED drive.
+
+    A platform ``ask_user(mode="async")`` — the agent's OWN async ask (``_park_async_ask``)
+    OR one a proxied tool this drive runs raises — reads the bound continuation to stamp
+    ``continuation_tool`` onto the parked interaction, so a later ``agent_resume`` re-enters
+    this agent. Without it, the async ask refuses loudly ("async ask requires a resuming
+    driver") and no park is produced. Bound ONLY when the run is threaded: an ephemeral uuid4
+    workspace reaps and can never resume, so its async ask must refuse pre-persist rather than
+    bind an unresumable continuation. Mirrors the LangGraph driver's ``park_continuation``."""
+    if not threaded:
+        yield
+        return
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        yield
+    finally:
+        reset_resume_continuation_tool(token)
 
 
 class InlineSkillShape(BaseModel):
@@ -458,19 +485,24 @@ class ClaudeCodeAgent(Agent):
             )
             await handle.write_stdin(dump_frame(start))
 
-            async for event, is_park in self._drive_runner(
-                handle=handle,
-                session=session,
-                settings=settings,
-                thread_id=thread_id,
-                resume_id=resume_id,
-                tool_names=options_snapshot["tool_names"],
-                options_snapshot=options_snapshot,
-                terminal_key=terminal_key,
-            ):
-                if is_park:
-                    park_suspended = True
-                yield event
+            # Bind the resume continuation for the drive so a threaded run's async ask — the
+            # agent's OWN (_park_async_ask) or a proxied tool's — can actually park+resume
+            # (mirror the LangGraph driver's park_continuation). Threaded-only: an ephemeral run
+            # cannot resume, so its async ask refuses loudly rather than binding.
+            with _resume_continuation(threaded):
+                async for event, is_park in self._drive_runner(
+                    handle=handle,
+                    session=session,
+                    settings=settings,
+                    thread_id=thread_id,
+                    resume_id=resume_id,
+                    tool_names=options_snapshot["tool_names"],
+                    options_snapshot=options_snapshot,
+                    terminal_key=terminal_key,
+                ):
+                    if is_park:
+                        park_suspended = True
+                    yield event
         finally:
             # (i) kill the exec and AWAIT the runner's death before any volume-mutating cleanup.
             if handle is not None:

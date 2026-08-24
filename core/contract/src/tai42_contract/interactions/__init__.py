@@ -13,6 +13,8 @@ from __future__ import annotations
 from tai42_contract.interactions.asker import AskUser, check_ask_timing
 from tai42_contract.interactions.continuation import (
     EXPIRY_ANSWER,
+    PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_SUCCEEDED,
     SUSPENDED_INTERACTION_MARKER_KEY,
     get_park_completion,
     get_resume_continuation_tool,
@@ -48,6 +50,8 @@ __all__ = [
     "MEDIA_ROUTE_PREFIX",
     "MEDIA_TOTAL_URI_CHARS",
     "MEDIA_URL_MAX_CHARS",
+    "PARK_COMPLETION_FAILED",
+    "PARK_COMPLETION_SUCCEEDED",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "AnswerFormat",
     "AskUser",

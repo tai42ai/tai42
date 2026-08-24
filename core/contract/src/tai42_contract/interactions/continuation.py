@@ -31,6 +31,8 @@ from typing import Any, Final, cast
 
 __all__ = [
     "EXPIRY_ANSWER",
+    "PARK_COMPLETION_FAILED",
+    "PARK_COMPLETION_SUCCEEDED",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "get_park_completion",
     "get_resume_continuation_tool",
@@ -55,6 +57,28 @@ _park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completio
 # The answer value a continuation receives when its interaction expired unanswered — the
 # generic marker a resuming consumer reads to run its expiry branch instead of a real answer.
 EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
+
+
+# The shared terminal-status vocabulary a completion fire names its outcome with. The
+# resuming driver (which owns the parked run's terminal) and the delivery tool (which maps
+# the outcome back to the caller) both key on these SAME two strings, so neither side has to
+# name the other to agree on the wire vocabulary — the contract is the single shared point.
+#
+# The generic completion-fire payload a resuming driver dispatches the bound delivery tool
+# with is the opaque bound context merged with the terminal outcome:
+#
+#     {**bound_context, "result": <terminal outcome>, "completion_id": <str>, "status": <status>}
+#
+# where ``bound_context`` is the :func:`set_park_completion` context (opaque to the contract),
+# ``result`` is the run's terminal outcome value, ``completion_id`` is the stable idempotency
+# id of the resolved terminal, and ``status`` is one of the two constants below.
+# ``PARK_COMPLETION_SUCCEEDED`` names a clean-success terminal whose ``result`` the delivery
+# tool maps back to the caller; ``PARK_COMPLETION_FAILED`` names ANY non-success terminal
+# (failed/stopped/aborted/errored) the delivery tool surfaces as its uniform notice. A
+# delivery tool treats ``FAILED`` as the fail-safe default, so an unstamped fire never pushes
+# a non-success payload through the success mapping.
+PARK_COMPLETION_SUCCEEDED: Final[str] = "succeeded"
+PARK_COMPLETION_FAILED: Final[str] = "failed"
 
 
 # The reserved key a platform-produced async-park RESULT carries in place of an answer,

@@ -17,6 +17,7 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.agent import Agent
 from tai42_contract.conversations import ConversationRoute, DeliveryReceipt
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, PARK_COMPLETION_SUCCEEDED
 
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import caps as caps_module
@@ -441,6 +442,9 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
     assert tool_name == turn_module.DELIVER_TOOL_COMPLETION_NAME
     thread_id = context["delivery_thread_id"]
     assert thread_id == "bridge:tool-line:+15550002222"
+    # The ORIGINATING route is pinned into the completion context so the resumed outcome maps
+    # through THIS route's reply_expr, not the route a linked person last wrote from.
+    assert context["route_name"] == "tool-line"
 
     # The resumer drives to a clean terminal out of band and fires the completion; reply_expr
     # maps the terminal outcome and it is delivered back into the thread.
@@ -448,6 +452,7 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
         delivery_thread_id=thread_id,
         completion_id="c1",
         result={"result": {"reply": "the deferred answer"}},
+        status=PARK_COMPLETION_SUCCEEDED,
     )
     await _settle()
     assert out == {"message_id": "c1"}
@@ -460,7 +465,10 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
     # Idempotent: a redelivered fire under the same completion_id delivers nothing new.
     sends_before = len(channel.sends)
     out2 = await turn_module.deliver_tool_completion(
-        delivery_thread_id=thread_id, completion_id="c1", result={"result": {"reply": "SECOND"}}
+        delivery_thread_id=thread_id,
+        completion_id="c1",
+        result={"result": {"reply": "SECOND"}},
+        status=PARK_COMPLETION_SUCCEEDED,
     )
     await _settle()
     assert out2 == {"message_id": "c1"}
@@ -478,7 +486,7 @@ async def test_deliver_tool_completion_non_success_delivers_error_notice(env, mo
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="e1",
         result={"detail": "internal"},
-        status="errored",
+        status=PARK_COMPLETION_FAILED,
     )
     await _settle()
     assert out == {"message_id": "e1"}
@@ -499,6 +507,7 @@ async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="u1",
         result={"result": {"reply": {"not": "a string"}}},
+        status=PARK_COMPLETION_SUCCEEDED,
     )
     await _settle()
     assert out == {"message_id": "u1"}
@@ -518,6 +527,7 @@ async def test_deliver_tool_completion_silent_reply_delivers_nothing(env, monkey
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="s1",
         result={"result": {}},
+        status=PARK_COMPLETION_SUCCEEDED,
     )
     await _settle()
     assert out == {"message_id": None}
@@ -532,6 +542,77 @@ async def test_deliver_tool_completion_unresolvable_thread_raises(env, monkeypat
     with pytest.raises(turn_module.CompletionDeliveryError):
         await turn_module.deliver_tool_completion(
             delivery_thread_id="not-a-bridge-thread", completion_id="x1", result="hi"
+        )
+
+
+async def test_deliver_tool_completion_defaults_to_the_failed_fail_safe(env, monkeypatch):
+    # FAIL-SAFE: an unstamped fire (no status) defaults to FAILED, so it delivers the client-safe
+    # notice and NEVER pushes an unmapped payload through reply_expr as if it had succeeded.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="d1",
+        result={"result": {"reply": "would-map-if-success"}},
+    )
+    await _settle()
+    assert out == {"message_id": "d1"}
+    rec = await _store().get_record("d1")
+    assert rec is not None
+    # Delivered the notice, NOT the reply_expr-mapped success text.
+    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+
+
+async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env, monkeypatch):
+    # FINDING 3: a park started under route A; the linked person then wrote from route B, so
+    # _resolve_completion_target reverses the thread to route B (where they last wrote). The
+    # completion must still map the terminal through the ORIGINATING route A's reply_expr — not
+    # route B's, which would map the SAME result wrongly. Delivery still lands on route B's
+    # address (where the person is), but the mapped text comes from A.
+    channel = FakeChannel()
+    route_a = _tool_channel_route(route_name="tool-a", reply_expr=".a.text")
+    route_b = _tool_channel_route(route_name="tool-b", our_identity="+15550009999", reply_expr=".b.text")
+    _wire(monkeypatch, FakeManager(route_a, route_b), channel)
+
+    # Simulate the linked person having last written from route B: the thread reverses to B.
+    async def _resolve_to_b(_thread_id):
+        return route_b, "+15550002222"
+
+    monkeypatch.setattr(turn_module, "_resolve_completion_target", _resolve_to_b)
+
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id="bridge:@person:PID1",
+        completion_id="p1",
+        result={"a": {"text": "via-A"}, "b": {"text": "via-B"}},
+        status=PARK_COMPLETION_SUCCEEDED,
+        route_name="tool-a",
+    )
+    await _settle()
+    assert out == {"message_id": "p1"}
+    rec = await _store().get_record("p1")
+    assert rec is not None
+    # Mapped through route A's reply_expr (the originating route), NOT route B's.
+    assert rec.answer == "via-A"
+    # Delivered where the person last wrote (route B's reversed address).
+    assert rec.route_name == "tool-b"
+
+
+async def test_deliver_tool_completion_raises_on_vanished_originating_route(env, monkeypatch):
+    # The pinned originating route no longer exists (deleted between park and resume): raise
+    # loudly so the resumer retries rather than mapping through the wrong route.
+    channel = FakeChannel()
+    route = _tool_channel_route(route_name="tool-live", reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with pytest.raises(turn_module.CompletionDeliveryError):
+        await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-live:+15550002222",
+            completion_id="v1",
+            result={"result": {"reply": "x"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+            route_name="tool-gone",
         )
 
 

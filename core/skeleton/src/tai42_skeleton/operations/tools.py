@@ -75,7 +75,7 @@ class ToolReloadRequest(BaseModel):
     """Re-register or remove one app tool by ``kind`` and ``name``, optionally
     restricting the fleet fan-out to specific ``targets``."""
 
-    kind: str = Field(min_length=1, description='The tool kind (e.g. "flow").')
+    kind: str = Field(min_length=1, description='The tool kind (e.g. "example_tool").')
     name: str = Field(min_length=1, description="The tool name.")
     targets: list[str] | None = Field(default=None, description="Workers to restrict the fan-out to.")
 
@@ -206,7 +206,7 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     request_model=ToolReloadRequest,
 )
 async def reload_tool(kind: str, name: str, targets: list[str] | None = None) -> Any:
-    """Re-register one app tool (e.g. kind "flow") from its current stored definition.
+    """Re-register one app tool (e.g. kind "example_tool") from its current stored definition.
 
     Applied on this worker and broadcast to the fleet (all workers, or only
     ``targets``); each worker re-reads the definition itself, so the op carries only
@@ -227,7 +227,7 @@ async def reload_tool(kind: str, name: str, targets: list[str] | None = None) ->
     request_model=ToolReloadRequest,
 )
 async def remove_tool(kind: str, name: str, targets: list[str] | None = None) -> Any:
-    """Remove one app tool (e.g. kind "flow") from the live registry.
+    """Remove one app tool (e.g. kind "example_tool") from the live registry.
 
     Applied on this worker and broadcast to the fleet (all workers, or only
     ``targets``); the response embeds the per-worker fleet report.
