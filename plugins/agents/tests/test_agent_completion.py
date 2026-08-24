@@ -32,8 +32,8 @@ from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     get_resume_continuation_tool,
-    reset_park_completion_tool,
-    set_park_completion_tool,
+    reset_park_completion,
+    set_park_completion,
     suspended_interaction_marker,
 )
 
@@ -167,14 +167,14 @@ def _agent() -> tools_mod.ToolsAgent:
 async def _park_via_astream(agent: tools_mod.ToolsAgent, thread_id: str) -> None:
     """Drive a fresh turn through the astream face with the completion tool bound, so the
     run parks with a completion delivery path recorded on its park entry."""
-    token = set_park_completion_tool(_COMPLETION_TOOL)
+    token = set_park_completion(_COMPLETION_TOOL)
     try:
         async for _event in agent.astream(
             tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id
         ):
             pass
     finally:
-        reset_park_completion_tool(token)
+        reset_park_completion(token)
 
 
 def _expected_delivery(thread_id: str, interaction_ids: list[str], result: Any) -> dict[str, Any]:
@@ -273,14 +273,14 @@ def _wire_deep(
 async def _park_via_astream_deep(agent: Any, thread_id: str) -> None:
     """Drive a fresh langchain_deep_agent turn through the astream face with the completion tool bound,
     so the run parks with a completion delivery path recorded on its park entry."""
-    token = set_park_completion_tool(_COMPLETION_TOOL)
+    token = set_park_completion(_COMPLETION_TOOL)
     try:
         async for _event in agent.astream(
             tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id
         ):
             pass
     finally:
-        reset_park_completion_tool(token)
+        reset_park_completion(token)
 
 
 def test_langchain_deep_agent_completion_carried_forward_on_repark(

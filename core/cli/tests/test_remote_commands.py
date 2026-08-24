@@ -485,7 +485,7 @@ def test_hooks_create_trigger_link_permanent_null_ttl(monkeypatch: pytest.Monkey
 def test_hooks_create_trigger_link_params_land_in_body(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["tool_kwargs"] == {"flow_graph_kwargs": {"x": 1}}
+        assert body["tool_kwargs"] == {"example_config_kwargs": {"x": 1}}
         assert body["name"] == "mylink"
         assert body["execution_key"] == "svc-events"
         assert body["require_api_key"] is True
@@ -505,7 +505,7 @@ def test_hooks_create_trigger_link_params_land_in_body(monkeypatch: pytest.Monke
             "--name",
             "mylink",
             "--params",
-            '{"flow_graph_kwargs":{"x":1}}',
+            '{"example_config_kwargs":{"x":1}}',
         ],
     )
     assert result.exit_code == 0, result.output

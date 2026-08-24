@@ -116,7 +116,7 @@ delivers it in the link, and checks it in its own store. jq gating in
 `payload_expr` runs before the tool does:
 
 ```bash
---payload-expr 'if .params.key then {flow_graph_kwargs: {message: .message, token: .params.key}} else error("no key") end'
+--payload-expr 'if .params.key then {example_config_kwargs: {message: .message, token: .params.key}} else error("no key") end'
 ```
 </Warning>
 

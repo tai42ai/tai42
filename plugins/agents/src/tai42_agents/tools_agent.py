@@ -3,8 +3,8 @@
 The plain/advanced LangGraph tools agent. Its three tool inputs are uniform —
 ``tool_names`` (client tools resolved through the app registry), live ``tools``,
 and ``presets`` (a base tool bound to fixed kwargs, exposed as a callable tool) —
-and are resolved together by :func:`resolve_tools`. A sub-flow is just a preset:
-``base_tool="flow"`` with ``fixed_kwargs={"flow_graph": ...}``.
+and are resolved together by :func:`resolve_tools`. A preset is any base tool bound to
+fixed kwargs, e.g. ``base_tool="example_tool"`` with ``fixed_kwargs={"config": ...}``.
 
 Two faces:
 
@@ -42,7 +42,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.base import PresetSpec, SubAgentSpec
 from tai42_contract.agent.events import StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import get_park_completion_tool
+from tai42_contract.interactions import get_park_completion
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
@@ -602,8 +602,11 @@ class ToolsAgent(Agent):
         completion tool is bound in context (the conversation turn binds one). That
         completion tool is stored on the park entry and fired with the final answer on a
         clean terminal drive. With none bound, this returns ``None`` so an async ask
-        refuses loudly pre-persist."""
-        completion_tool = get_park_completion_tool()
+        refuses loudly pre-persist.
+
+        An agent delivers through the bridge thread it runs under, so it keeps only the
+        completion tool name and ignores the opaque completion context."""
+        completion_tool, _ = get_park_completion()
         if completion_tool is None:
             return None
 
@@ -691,6 +694,7 @@ class ToolsAgent(Agent):
         # through the agent's own bound entrypoint); the completion tool the driver
         # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
         # park-capable by construction.
+        completion_tool, _ = get_park_completion()
         park = build_park_identity(
             agent_name=self.tool_name,
             config=config,
@@ -698,7 +702,7 @@ class ToolsAgent(Agent):
             has_live_tools=False,
             rebuild_kwargs=rebuild_kwargs,
             recursion_limit=recursion_limit,
-            completion_tool=get_park_completion_tool(),
+            completion_tool=completion_tool,
             bind=True,
         )
         with park_continuation(park):

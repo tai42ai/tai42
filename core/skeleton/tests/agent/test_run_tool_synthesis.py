@@ -152,6 +152,24 @@ def test_client_tool_advertises_agent_tool_input_schema_and_runs():
     asyncio.run(run())
 
 
+def test_agent_run_tool_returns_suspended_interaction_when_the_run_parks():
+    # Producer sentinel: a park crossing the agent TOOL-face is the SuspendedInteraction
+    # sentinel (recognized by TYPE), never the internal suspended-receipt dict the agent's own
+    # driver consumes — so a caller running the agent as a tool recognizes the park uniformly.
+    from tai42_contract.interactions import SuspendedInteraction
+
+    async def run() -> None:
+        manifest = Manifest.model_validate(
+            {"agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["parking"]}]}
+        )
+        async with app.app_context(manifest):
+            result = await app.tools.run_tool("parking", {"text": "hi"})
+            assert isinstance(result, SuspendedInteraction)
+            assert result.interaction_id == "i-parked"
+
+    asyncio.run(run())
+
+
 def test_set_fields_only_preserved_for_scalar_nested_and_unset_fields():
     async def run() -> None:
         async with app.app_context(_nested_manifest()):

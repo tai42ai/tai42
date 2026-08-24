@@ -31,9 +31,9 @@ from langgraph.types import StateSnapshot
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
-    reset_park_completion_tool,
+    reset_park_completion,
     reset_resume_continuation_tool,
-    set_park_completion_tool,
+    set_park_completion,
     set_resume_continuation_tool,
 )
 from tai42_kit.llm.settings import llm_provider_settings
@@ -573,8 +573,10 @@ async def _drive_completed_barrier(
 
         # Bind the stored completion tool for the drive's duration so a re-park re-persists
         # a fresh index carrying it forward — the deferred-response delivery survives every
-        # re-park. ``None`` (the run face) binds nothing.
-        completion_token = set_park_completion_tool(entry.get("completion_tool"))
+        # re-park. An agent delivers through the bridge thread it runs under, so it carries no
+        # opaque completion context. ``None`` (the run face) binds nothing. The entry always
+        # carries the ``completion_tool`` field (written on every persisted park entry).
+        completion_token = set_park_completion(entry["completion_tool"])
         try:
             result = await resume_park(
                 rebuild_kwargs=entry["rebuild_kwargs"],
@@ -585,7 +587,7 @@ async def _drive_completed_barrier(
             await release_claim(thread_id, superstep_id, token)
             raise
         finally:
-            reset_park_completion_tool(completion_token)
+            reset_park_completion(completion_token)
     finally:
         await _stop_drive_heartbeat(heartbeat)
 

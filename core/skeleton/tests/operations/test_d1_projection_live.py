@@ -240,17 +240,20 @@ def test_d1_projected_surface_is_the_expected_op_count():
             assert len(projected) == 135, len(projected)
             assert total - len(tier2) - len(tier1) == 135
 
-            # The LIVE booted tool surface is the 135 projected ops PLUS the one
-            # force-registered hidden mechanism tool the conversations router installs
-            # at startup: ``conversation_deliver``, the completion continuation a resumed
-            # async turn's driver fires through ``run_tool``. It is NOT an api_tools
-            # projection (``projected`` stays 135) — it is a mandatory bridge registered
-            # independently of the api_tools toggle and carried on the live surface like
-            # any hidden tool, so the live count is 136.
+            # The LIVE booted tool surface is the 135 projected ops PLUS the two
+            # force-registered hidden mechanism tools the conversations router installs at
+            # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
+            # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
+            # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
+            # (``projected`` stays 135) — they are mandatory bridges registered independently of
+            # the api_tools toggle and carried on the live surface like any hidden tool, so the
+            # live count is 137.
+            hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
-            assert set(live) == set(projected) | {"conversation_deliver"}
-            assert (live["conversation_deliver"].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 136
+            assert set(live) == set(projected) | hidden_bridges
+            for name in hidden_bridges:
+                assert (live[name].meta or {}).get("tai42/hidden") is True
+            assert len(live) == 137
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -411,13 +414,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 135 projected ops plus the
-            # force-registered hidden ``conversation_deliver`` completion mechanism the
-            # conversations router installs at startup (136 live).
+            # api_tools projected the surface: the 135 projected ops plus the two
+            # force-registered hidden completion mechanisms the conversations router installs at
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 137 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 136
+            assert len(live) == 137
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process

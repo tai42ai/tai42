@@ -99,7 +99,7 @@ exactly the ones a deployment wants:
 - **`tools_agent`** (`tai42_agents.tools_agent`) — the plain/advanced LangGraph
   tools agent. Uniform tool inputs: `tool_names` (client tools resolved through
   the app registry), live `tools`, and `presets` (a base tool bound to fixed
-  kwargs; a sub-flow is `base_tool="flow"` with `fixed_kwargs={"flow_graph": ...}`).
+  kwargs, e.g. `base_tool="example_tool"` with `fixed_kwargs={"config": ...}`).
 - **`langchain_deep_agent`** (`tai42_agents.langchain_deep_agent`) — a deepagents-harness agent:
   planning, a per-thread scratch filesystem, skills (served live from the
   template provider or supplied inline), one level of nested subagents, and

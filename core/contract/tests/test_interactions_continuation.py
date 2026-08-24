@@ -9,11 +9,11 @@ from __future__ import annotations
 import asyncio
 
 from tai42_contract.interactions import (
-    get_park_completion_tool,
+    get_park_completion,
     get_resume_continuation_tool,
-    reset_park_completion_tool,
+    reset_park_completion,
     reset_resume_continuation_tool,
-    set_park_completion_tool,
+    set_park_completion,
     set_resume_continuation_tool,
 )
 
@@ -43,24 +43,34 @@ def test_reset_restores_previous_value():
 
 def test_completion_default_is_none():
     # No completion delivery bound: a resumed run's driver fires nothing.
-    assert get_park_completion_tool() is None
+    assert get_park_completion() == (None, None)
 
 
 def test_completion_set_get_reset_round_trip():
-    token = set_park_completion_tool("conversation_deliver")
-    assert get_park_completion_tool() == "conversation_deliver"
-    reset_park_completion_tool(token)
-    assert get_park_completion_tool() is None
+    token = set_park_completion("conversation_deliver")
+    # A bare bind carries no context; the tool name alone is bound.
+    assert get_park_completion() == ("conversation_deliver", None)
+    reset_park_completion(token)
+    assert get_park_completion() == (None, None)
+
+
+def test_completion_carries_opaque_context():
+    # The opaque context binds and reads back alongside the tool name, untouched.
+    context = {"delivery_thread_id": "thread-1"}
+    token = set_park_completion("deliver_tool_completion", context)
+    assert get_park_completion() == ("deliver_tool_completion", context)
+    reset_park_completion(token)
+    assert get_park_completion() == (None, None)
 
 
 def test_completion_is_independent_of_the_resume_continuation():
     # The two continuations are separate contextvars: binding one never affects the other.
-    completion = set_park_completion_tool("conversation_deliver")
+    completion = set_park_completion("conversation_deliver")
     assert get_resume_continuation_tool() is None
     resume = set_resume_continuation_tool("agent_resume")
-    assert get_park_completion_tool() == "conversation_deliver"
+    assert get_park_completion() == ("conversation_deliver", None)
     reset_resume_continuation_tool(resume)
-    reset_park_completion_tool(completion)
+    reset_park_completion(completion)
 
 
 def test_isolation_across_tasks():

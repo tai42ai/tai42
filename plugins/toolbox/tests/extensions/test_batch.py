@@ -2,14 +2,16 @@
 
 import asyncio
 import inspect
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.interactions import SuspendedInteraction
 
 import tai42_toolbox._internal.extensions.batch_executor as batch_executor
 import tai42_toolbox.extensions.batch as batch_module
-from tai42_toolbox._internal.extensions.batch_executor import BatchSettings, execute_batch
+from tai42_toolbox._internal.extensions.batch_executor import BatchMultiParkUnsupported, BatchSettings, execute_batch
 from tai42_toolbox.extensions.batch import batch
 
 from .conftest import FakeTools
@@ -72,6 +74,57 @@ def test_invalid_mode_raises(bind_fake_app):
         asyncio.run(execute_batch("tool", [], execution_mode="invalid"))  # type: ignore[arg-type]
 
 
+def _bind_parking_app(bind_fake_app) -> None:
+    # A body that carries ``park`` async-parks: its run_tool returns the SuspendedInteraction
+    # SIGNAL (as a real parking tool-face does) rather than an ordinary result.
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        if arguments.get("park"):
+            return SuspendedInteraction(interaction_id=arguments["park"], expiry_at=datetime(2026, 6, 1, tzinfo=UTC))
+        return arguments["n"]
+
+    bind_fake_app(FakeTools(run_tool=run_tool))
+
+
+@pytest.mark.parametrize("execution_mode", ["sequential", "parallel"])
+def test_a_single_parked_body_propagates_the_sentinel(bind_fake_app, execution_mode):
+    # One body parked: the batch parks AS A WHOLE, re-surfacing the sentinel verbatim so the
+    # caller's park recognition fires — not a partial result list burying a hidden pause.
+    _bind_parking_app(bind_fake_app)
+    params = [{"n": 1}, {"park": "i-batch"}, {"n": 3}]
+    result = asyncio.run(execute_batch("tool", params, execution_mode=execution_mode))
+    assert isinstance(result, SuspendedInteraction)
+    assert result.interaction_id == "i-batch"
+
+
+@pytest.mark.parametrize("execution_mode", ["sequential", "parallel"])
+def test_two_parked_bodies_raise_multi_park_unsupported(bind_fake_app, execution_mode):
+    # A batch is ONE tool call and surfaces ONE park signal: two-plus parks are unsupported and
+    # raise loudly, naming the parked interactions, rather than silently corrupting.
+    _bind_parking_app(bind_fake_app)
+    params = [{"park": "i-a"}, {"n": 2}, {"park": "i-b"}]
+    with pytest.raises(BatchMultiParkUnsupported) as excinfo:
+        asyncio.run(execute_batch("tool", params, execution_mode=execution_mode))
+    assert excinfo.value.interaction_ids == ["i-a", "i-b"]
+    assert excinfo.value.tool_name == "tool"
+
+
+def test_error_slots_never_trip_the_multi_park_guard(bind_fake_app):
+    # The guard keys on the SENTINEL count only: errored bodies (error strings under
+    # fail_fast=False) plus a single park propagate the ONE park, never a false multi-park.
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        if arguments.get("park"):
+            return SuspendedInteraction(interaction_id=arguments["park"])
+        if arguments.get("fail"):
+            raise RuntimeError("boom")
+        return arguments["n"]
+
+    bind_fake_app(FakeTools(run_tool=run_tool))
+    params = [{"fail": True, "n": 1}, {"park": "i-solo"}, {"fail": True, "n": 3}]
+    result = asyncio.run(execute_batch("tool", params, execution_mode="sequential", fail_fast=False))
+    assert isinstance(result, SuspendedInteraction)
+    assert result.interaction_id == "i-solo"
+
+
 @pytest.mark.parametrize("execution_mode", ["sequential", "parallel"])
 def test_fail_fast_false_fills_the_slot_with_the_error(bind_fake_app, execution_mode):
     # With fail_fast off, a failing item's error string takes its slot, keeping the list length and order.
@@ -122,7 +175,7 @@ def test_unset_max_concurrent_never_exceeds_default(bind_fake_app, monkeypatch):
     bind_fake_app(FakeTools(run_tool=run_tool))
     params = [{"n": i} for i in range(6)]
 
-    async def main() -> list[Any]:
+    async def main() -> list[Any] | SuspendedInteraction:
         return await asyncio.wait_for(execute_batch("tool", params, execution_mode="parallel"), timeout=5)
 
     results = asyncio.run(main())
@@ -152,7 +205,7 @@ def test_explicit_max_concurrent_wins_over_default(bind_fake_app, monkeypatch):
     bind_fake_app(FakeTools(run_tool=run_tool))
     params = [{"n": i} for i in range(3)]
 
-    async def main() -> list[Any]:
+    async def main() -> list[Any] | SuspendedInteraction:
         return await asyncio.wait_for(
             execute_batch("tool", params, execution_mode="parallel", max_concurrent=3), timeout=5
         )

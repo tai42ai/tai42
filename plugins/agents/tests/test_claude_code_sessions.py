@@ -19,7 +19,7 @@ from tai42_contract.access_control.context import reset_request_user_id, set_req
 from tai42_contract.agent.events import MessageFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import SuspendedInteraction, get_resume_continuation_tool
 from tai42_contract.sandbox import ExecResult, SandboxError, SandboxPolicy
 from tests._claude_app import LocalApp, build_local_app
 from tests._claude_stubs import (
@@ -30,6 +30,7 @@ from tests._claude_stubs import (
     REDACT_TRANSCRIPT,
     RESUME_ONCE,
     RESUME_REDRIVE,
+    TOOL_CALL_PARK,
     payload_for,
 )
 from tests._sandbox_fake import FakeSandboxSession
@@ -37,7 +38,7 @@ from tests._sandbox_fake import FakeSandboxSession
 import tai42_agents._internal.park.index as idx
 import tai42_agents._internal.park.lease as lease_mod
 import tai42_agents.claude_code.agent as agent_module
-from tai42_agents._internal.park import workspace_lease
+from tai42_agents._internal.park import agent_resume, workspace_lease
 from tai42_agents._internal.park.errors import WorkspaceLeaseHeldError
 from tai42_agents._internal.park.index import compute_superstep_id
 from tai42_agents._internal.sandbox_util import workspace_key_for
@@ -216,6 +217,41 @@ def test_held_lease_busy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("fake_redis")
+def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R4: a proxied tool that async-parks returns the generic SuspendedInteraction sentinel;
+    # _on_tool_call recognizes it by TYPE and drives the SAME park tail the agent's own ask
+    # takes — persist the durable index, stop the runner, surface one SuspendedFinal.
+    _settings(monkeypatch)
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL_PARK))
+    deadline = datetime.now(UTC) + timedelta(minutes=5)
+
+    def parking_tool(**_kwargs: Any) -> SuspendedInteraction:
+        return SuspendedInteraction(interaction_id="i-tool", expiry_at=deadline)
+
+    app = build_local_app(tool_runners={"parkingtool": parking_tool})
+
+    async def _park_then_read() -> tuple[list[Any], Any]:
+        # The astream drive and the index read share ONE event loop (the fakeredis client is
+        # loop-bound), so the persisted entry is read back on the same loop it was written on.
+        events = await _astream(app, user_message="deploy it", thread_id="t1", tool_names=["parkingtool"])
+        return events, await idx.read_park_entry("i-tool")
+
+    token = set_request_user_id("user-1")
+    try:
+        events, entry = asyncio.run(_park_then_read())
+    finally:
+        reset_request_user_id(token)
+    suspended = [e for e in events if isinstance(e, SuspendedFinal)]
+    assert len(suspended) == 1
+    assert suspended[0].interaction_ids == ["i-tool"]
+    assert suspended[0].thread_id == "t1"
+    # The park is recorded into the durable index, resumable by the tool's interaction id.
+    assert entry is not None
+    assert entry["agent_name"] == "claude_code"
+    assert entry["thread_id"] == "t1"
+
+
+@pytest.mark.usefixtures("fake_redis")
 def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
@@ -238,6 +274,60 @@ def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> Non
     # A park-suspend exit does NOT scrub the bearer file — it survives for the expiry resume.
     session = agent_module._LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     assert asyncio.run(session.get_file(_CREDS_PATH))  # present, no SandboxError
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R4 END-TO-END: a REAL async ask — one that ENFORCES the resume-continuation contract, NOT a
+    # stub that unconditionally returns a sentinel — parks ONLY because the threaded drive now
+    # binds the resume continuation; ``agent_resume`` then rebuilds the parked turn and drives it
+    # to a clean terminal. Without the drive's continuation binding the ask would refuse loudly
+    # ("async ask requires a resuming driver") and no park would ever be produced.
+    _settings(monkeypatch, creds=[_bearer_cred()])
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
+    deadline = datetime.now(UTC) + timedelta(hours=1)
+
+    async def real_ask_user(_question: str, *, expiry_at: datetime | None = None, mode: str = "sync", **_: Any) -> Any:
+        # Mirror the platform helper's async guard: an async ask REQUIRES a resuming driver bound
+        # in the resume-continuation context, else it refuses loudly and produces no park.
+        assert mode == "async"
+        if get_resume_continuation_tool() is None:
+            raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
+        return SuspendedInteraction(interaction_id="int-e2e", expiry_at=expiry_at or deadline)
+
+    agent = ClaudeCodeAgent()
+    app = build_local_app(
+        ask_user=real_ask_user,
+        resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1")),
+        agents={"claude_code": agent},
+    )
+
+    async def _park_then_resume() -> tuple[list[Any], Any, Any]:
+        with tai42_app.bound(app):
+            events = [event async for event in agent.astream(user_message="deploy it", thread_id="te2e")]
+            # The REAL async ask actually parked: the interaction is durable and resumable.
+            assert await idx.read_park_entry("int-e2e") is not None
+            # Resume drives a fresh session to a clean terminal (swap in the resume stub).
+            monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(RESUME_ONCE))
+            result = await agent_resume("int-e2e", "yes ship it")
+            entry = await idx.read_park_entry("int-e2e")
+            return events, result, entry
+
+    token = set_request_user_id("user-1")
+    try:
+        events, result, entry = asyncio.run(_park_then_resume())
+    finally:
+        reset_request_user_id(token)
+
+    suspended = [e for e in events if isinstance(e, SuspendedFinal)]
+    assert len(suspended) == 1
+    assert suspended[0].interaction_ids == ["int-e2e"]
+    # agent_resume rebuilt the parked turn and drove it to the clean terminal.
+    assert result == "done-once"
+    # The clean drive tombstoned the park entry (resolved, not absent), so a lapped redelivery
+    # clears benignly instead of storming on a vanished key.
+    assert entry is not None
+    assert idx.is_resolved_tombstone(entry)
 
 
 @pytest.mark.usefixtures("fake_redis")

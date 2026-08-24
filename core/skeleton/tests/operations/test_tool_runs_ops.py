@@ -102,6 +102,22 @@ async def test_submit_returns_run_id_and_runs_through_the_offload_seam(wired):
     assert record["status"] == "succeeded"
 
 
+async def test_background_run_of_a_parking_tool_records_parked_not_succeeded(wired):
+    # R8: a detached tool-run whose tool async-parks returns the generic SuspendedInteraction
+    # sentinel; the recorder reflects a PARKED terminal keyed by the parked interaction id —
+    # never a ``succeeded`` record over an unfinished run. GENERIC: any parking tool.
+    from tai42_contract.interactions import SuspendedInteraction
+
+    tools = wired.install()
+    tools.result = SuspendedInteraction(interaction_id="i-detached")
+    out = await ops.submit_run("alpha", {"x": 1})
+    await _drain()
+
+    record = await wired.store.get_run(wired.fake, out["run_id"])
+    assert record["status"] == "parked"
+    assert json.loads(record["result"]) == {"interaction_id": "i-detached", "expiry_at": None}
+
+
 async def test_background_run_masks_wrapped_secrets_in_the_stored_record(wired):
     # A background run has no live-caller door: a wrapped secret in the result is
     # masked to the placeholder before it lands in the durable record.
