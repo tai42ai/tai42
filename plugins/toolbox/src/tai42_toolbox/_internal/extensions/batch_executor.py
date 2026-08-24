@@ -27,8 +27,8 @@ class BatchMultiParkUnsupported(Exception):
 
     This is a LOUD guard, NOT a rollback: by the time a body's ``run_tool`` returned a
     sentinel its park was ALREADY durably persisted, and raising here does NOT unwind those —
-    so N parks may be left orphaned. Fan parking work out through a flow super-step, which
-    owns multi-park barriers; ``batch`` is single-park only."""
+    so N parks may be left orphaned. ``batch`` is single-park only; work that must fan out
+    multiple concurrent parks needs a purpose-built multi-park coordinator, not ``batch``."""
 
     def __init__(self, tool_name: str, interaction_ids: list[str]) -> None:
         self.tool_name = tool_name
@@ -37,7 +37,7 @@ class BatchMultiParkUnsupported(Exception):
             f"batch of '{tool_name}' had {len(interaction_ids)} bodies async-park in one call "
             f"(interactions {interaction_ids}); multi-park is unsupported at the batch layer. Those "
             f"parks are ALREADY persisted and are NOT unwound by this error, so they may be left "
-            f"orphaned — fan parking work out through a flow super-step, which owns multi-park barriers."
+            f"orphaned. batch is single-park only; multi-park fan-out needs a purpose-built coordinator."
         )
 
 
