@@ -18,6 +18,7 @@ from tai42_contract.connectors.errors import (
     MalformedConnectionIdError,
     OperatorMisconfiguredError,
 )
+from tai42_contract.connectors.service import AliasInUseError
 from tai42_contract.conversations import (
     CrossTargetMergeError,
     MultichannelDisabledError,
@@ -151,6 +152,8 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (NotLinkedError("solo"), ErrorKind.CONFLICT),
     (MultichannelDisabledError("off"), ErrorKind.UNAVAILABLE),
     (CrossTargetMergeError("cross"), ErrorKind.BAD_INPUT),
+    # connectors service protocol
+    (AliasInUseError("taken"), ErrorKind.CONFLICT),
     # webhooks
     (WebhookVerificationError("sig"), ErrorKind.UNAUTHORIZED),
 ]
