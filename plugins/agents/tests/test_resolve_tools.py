@@ -47,12 +47,12 @@ class FakeTools:
     async def get_client_tools(self, names=None):
         # Base tools a preset can bind to, keyed by name -> (props, required).
         # A ``required`` of ``None`` omits the schema's ``required`` key.
-        props = {"flow_graph": {"type": "object"}, "flow_graph_kwargs": {"type": "object"}}
+        props = {"example_config": {"type": "object"}, "example_config_kwargs": {"type": "object"}}
         schemas = {
-            # "flow" carries no ``required`` key.
-            "flow": (props, None),
-            # "flow_required" marks both runtime args as required.
-            "flow_required": (props, ["flow_graph", "flow_graph_kwargs"]),
+            # "example_tool" carries no ``required`` key.
+            "example_tool": (props, None),
+            # "example_required" marks both runtime args as required.
+            "example_required": (props, ["example_config", "example_config_kwargs"]),
         }
         return [make_tool(n, *schemas.get(n, (None, None))) for n in (names or [])]
 
@@ -75,22 +75,43 @@ def test_resolves_names_and_live_tools():
 def test_preset_hides_fixed_keys_and_binds():
     app = FakeTools()
     preset = PresetSpec(
-        name="my_flow",
-        description="run a flow",
-        base_tool="flow",
-        fixed_kwargs={"flow_graph": {"nodes": []}},
+        name="my_preset",
+        description="run a preset",
+        base_tool="example_tool",
+        fixed_kwargs={"example_config": {"nodes": []}},
     )
     out = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
     (tool,) = out
-    assert tool.name == "my_flow"
+    assert tool.name == "my_preset"
     # fixed key removed from the exposed schema; runtime key kept.
-    assert "flow_graph" not in tool.args
-    assert "flow_graph_kwargs" in tool.args
+    assert "example_config" not in tool.args
+    assert "example_config_kwargs" in tool.args
     # invoking merges fixed kwargs under runtime kwargs and calls the base tool.
-    asyncio.run(tool.arun({"flow_graph_kwargs": {"x": 1}}))
+    asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
     key, arguments = app.run_tool_calls[-1]
-    assert key == "flow"
-    assert arguments == {"flow_graph": {"nodes": []}, "flow_graph_kwargs": {"x": 1}}
+    assert key == "example_tool"
+    assert arguments == {"example_config": {"nodes": []}, "example_config_kwargs": {"x": 1}}
+
+
+def test_preset_over_a_parking_tool_stamps_the_park_marker():
+    # R3: a preset over ANY parking tool must surface the park. The base tool's async park
+    # returns the SuspendedInteraction sentinel through run_tool; the preset adapter (a plain
+    # langchain tool) converts it to the reserved contract park marker, so the in-graph park
+    # middleware recognizes the park by RESULT shape — exactly as the direct client-tool adapter.
+    from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+
+    class _ParkingTools(FakeTools):
+        async def run_tool(self, key, arguments):
+            self.run_tool_calls.append((key, arguments))
+            return SuspendedInteraction(interaction_id="i-preset")
+
+    app = _ParkingTools()
+    preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
+    (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
+    result = asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+    marker = read_suspended_interaction_marker(result)
+    assert marker is not None
+    assert marker["interaction_id"] == "i-preset"
 
 
 class _SecretReturningTools:
@@ -109,7 +130,7 @@ def test_preset_result_masks_secrets_before_the_model():
     result: a ``SecretValue`` in a tool return becomes the placeholder, so the
     model, checkpoint, and callback trace never see the real secret."""
     app = cast(AppTools, _SecretReturningTools())
-    preset = PresetSpec(name="p", description="d", base_tool="flow", fixed_kwargs={})
+    preset = PresetSpec(name="p", description="d", base_tool="example_tool", fixed_kwargs={})
     (tool,) = asyncio.run(resolve_tools(app, [], [], [preset]))
     result = asyncio.run(tool.arun({}))
     assert result == {"endpoint_id": "we_1", "secret": SECRET_PLACEHOLDER}
@@ -120,15 +141,15 @@ def test_preset_cannot_override_a_fixed_key():
     """A model that supplies a fixed key does not override the bound value."""
     app = FakeTools()
     preset = PresetSpec(
-        name="my_flow",
-        description="run a flow",
-        base_tool="flow",
-        fixed_kwargs={"flow_graph": {"nodes": []}},
+        name="my_preset",
+        description="run a preset",
+        base_tool="example_tool",
+        fixed_kwargs={"example_config": {"nodes": []}},
     )
     (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
-    asyncio.run(tool.arun({"flow_graph": {"nodes": ["evil"]}, "flow_graph_kwargs": {"x": 1}}))
+    asyncio.run(tool.arun({"example_config": {"nodes": ["evil"]}, "example_config_kwargs": {"x": 1}}))
     _key, arguments = app.run_tool_calls[-1]
-    assert arguments["flow_graph"] == {"nodes": []}  # bound value immutable
+    assert arguments["example_config"] == {"nodes": []}  # bound value immutable
 
 
 def test_preset_keeps_a_required_runtime_key_required():
@@ -136,14 +157,14 @@ def test_preset_keeps_a_required_runtime_key_required():
     preset tool, so the model cannot silently omit it."""
     app = FakeTools()
     preset = PresetSpec(
-        name="my_flow",
-        description="run a flow",
-        base_tool="flow_required",
-        fixed_kwargs={"flow_graph": {"nodes": []}},
+        name="my_preset",
+        description="run a preset",
+        base_tool="example_required",
+        fixed_kwargs={"example_config": {"nodes": []}},
     )
     (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
     assert isinstance(tool.args_schema, dict)
-    assert tool.args_schema["required"] == ["flow_graph_kwargs"]
+    assert tool.args_schema["required"] == ["example_config_kwargs"]
 
 
 def test_preset_drops_a_fixed_required_key():
@@ -151,14 +172,14 @@ def test_preset_drops_a_fixed_required_key():
     exposed schema's ``required`` list."""
     app = FakeTools()
     preset = PresetSpec(
-        name="my_flow",
-        description="run a flow",
-        base_tool="flow_required",
-        fixed_kwargs={"flow_graph": {"nodes": []}},
+        name="my_preset",
+        description="run a preset",
+        base_tool="example_required",
+        fixed_kwargs={"example_config": {"nodes": []}},
     )
     (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
     assert isinstance(tool.args_schema, dict)
-    assert "flow_graph" not in tool.args_schema["required"]
+    assert "example_config" not in tool.args_schema["required"]
 
 
 def test_preset_base_schema_without_required_key():
@@ -166,10 +187,10 @@ def test_preset_base_schema_without_required_key():
     ``required`` list rather than raising."""
     app = FakeTools()
     preset = PresetSpec(
-        name="my_flow",
-        description="run a flow",
-        base_tool="flow",
-        fixed_kwargs={"flow_graph": {"nodes": []}},
+        name="my_preset",
+        description="run a preset",
+        base_tool="example_tool",
+        fixed_kwargs={"example_config": {"nodes": []}},
     )
     (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
     assert isinstance(tool.args_schema, dict)
@@ -183,7 +204,7 @@ def test_rejects_duplicate_names():
     with pytest.raises(ValueError, match="duplicate tool names"):
         asyncio.run(resolve_tools(_app_tools(app), [], [a, b], []))
 
-    preset = PresetSpec(name="dup", base_tool="flow", fixed_kwargs={})
+    preset = PresetSpec(name="dup", base_tool="example_tool", fixed_kwargs={})
     with pytest.raises(ValueError, match="duplicate tool names"):
         asyncio.run(resolve_tools(_app_tools(app), [], [make_tool("dup")], [preset]))
 

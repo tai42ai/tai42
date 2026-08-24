@@ -45,10 +45,13 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       # Pure stdlib + packaging; --no-project skips resolving the workspace just to
-      # run it. RELEASE_PLEASE_TOKEN reads the private downstreams (tai42-premium,
-      # babelfish) and opens the tracking issue; the public downstreams read with it
-      # too — it is the broadest-scoped token available to this repo.
+      # run it. RELEASE_PLEASE_TOKEN reads the private downstreams and opens the
+      # tracking issue; the public downstreams read with it too — it is the
+      # broadest-scoped token available to this repo. The audited downstream manifest
+      # map is injected as config (DOWNSTREAM_PINS_MANIFESTS), so the checker source
+      # names no specific downstream.
       - name: Check downstream pins against the released core version(s)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          DOWNSTREAM_PINS_MANIFESTS: ${{ vars.DOWNSTREAM_PINS_MANIFESTS }}
         run: uv run --python 3.13 --no-project --with packaging python scripts/downstream_pins.py

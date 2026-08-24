@@ -9,6 +9,7 @@ import copy
 import inspect
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar, cast
 
 from fastmcp.tools.function_tool import FunctionTool
@@ -16,6 +17,7 @@ from makefun import create_function
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined, core_schema
 from tai42_contract.agent import Agent
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
@@ -62,6 +64,31 @@ _AGENT_RESULT_SCHEMA: dict[str, Any] = {
     "properties": {"result": {"title": "Result"}},
     "x-fastmcp-wrap-result": True,
 }
+
+
+def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInteraction:
+    """Convert an agent's suspended-RECEIPT dict into the tool-face park sentinel.
+
+    An agent's ``run`` returns ``{"status": "suspended", "interaction_ids": [...], ...}`` when
+    the run parks on an async ask — the shape the agent's OWN internal driver consumes. That
+    dict is INTERNAL: a park crossing a tool-face must be a :class:`SuspendedInteraction`
+    sentinel, recognized by type, so a caller (a tool-running tool, another agent, the
+    conversation turn) sees the park uniformly. This converts the receipt at the agent
+    tool-face only — the driver keeps its dict.
+
+    The sentinel is single-id; a run parking on one interaction (the common case) maps
+    cleanly. A run parking on several at once (parallel sub-agent asks) cannot be represented
+    at the single-id tool-face and raises loudly rather than silently surfacing only one park
+    while the siblings strand."""
+    ids = receipt["interaction_ids"]
+    if len(ids) != 1:
+        raise RuntimeError(
+            "an agent parked on multiple interactions at once cannot cross a single-id tool-face; "
+            f"got interaction_ids={ids!r}"
+        )
+    expiry_raw = receipt.get("expiry_at")
+    expiry = datetime.fromisoformat(expiry_raw) if expiry_raw else None
+    return SuspendedInteraction(interaction_id=ids[0], expiry_at=expiry)
 
 
 def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
@@ -239,7 +266,15 @@ class AgentBinding:
                 if message is not None:
                     raise ReservedThreadNamespaceError(message)
                 run_kwargs["thread_id"] = session_thread
-            return await self.get_agent(name).run(**run_kwargs)
+            result = await self.get_agent(name).run(**run_kwargs)
+            # A park crossing the agent TOOL-face is uniformly a SuspendedInteraction sentinel
+            # (recognized by type), never the internal suspended-receipt dict: convert it here
+            # so a caller running this agent as a tool (a flow, another agent) recognizes the
+            # park exactly as it recognizes any parking tool's. The agent's own driver keeps
+            # consuming its dict, untouched.
+            if isinstance(result, dict) and result.get("status") == "suspended":
+                return _suspended_interaction_from_receipt(result)
+            return result
 
         # makefun's ``func_impl`` is typed ``Callable[[Any], Any]`` but it accepts
         # any callable (it drives the separate ``signature`` above); the ``**arguments``

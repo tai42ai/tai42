@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.secrets import mask_secrets
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -102,6 +103,10 @@ _RUNNING = "running"
 _SUCCEEDED = "succeeded"
 _FAILED = "failed"
 _LOST = "lost"
+# A run whose tool async-parked (returned a ``SuspendedInteraction``): a terminal record that
+# did NOT succeed — the deferred answer is delivered out of band by the tool's own resumer, so
+# recording ``succeeded`` over the unfinished run would be a lie. GENERIC: any parking tool.
+_PARKED = "parked"
 
 # The platform-generic registration meta key a consumer sets to opt one of its runs
 # into crash-resume (``meta={"tai42/crash_resume": True}``), the existing ``tai42/*``
@@ -402,14 +407,23 @@ async def _supervise(
         # capability to — the capability follows the identity the run acts as.
         detached_token = mark_detached_run()
         tool_error: Exception | None = None
+        parked: SuspendedInteraction | None = None
+        result_json = ""
         try:
             try:
                 result = await tai42_app.tools.run_tool(tool_name, arguments, offload_sync=True)
-                # ``run_tool`` already json-normalizes the body; a residual dumps
-                # failure surfaces as a ``failed`` record rather than a lost run. A
-                # background run has no live-caller door, so any wrapped secret is
-                # masked to the placeholder before it lands in the durable record.
-                result_json = json.dumps(mask_secrets(result))
+                if isinstance(result, SuspendedInteraction):
+                    # The tool async-parked (a generic contract sentinel): the run has NOT
+                    # succeeded — its answer is delivered out of band by the tool's own resumer —
+                    # so it terminates PARKED, keyed by the parked interaction id, never a
+                    # succeeded record over an unfinished run.
+                    parked = result
+                else:
+                    # ``run_tool`` already json-normalizes the body; a residual dumps
+                    # failure surfaces as a ``failed`` record rather than a lost run. A
+                    # background run has no live-caller door, so any wrapped secret is
+                    # masked to the placeholder before it lands in the durable record.
+                    result_json = json.dumps(mask_secrets(result))
             except asyncio.CancelledError as cancel:
                 # A drain (process shutdown OR an epoch retire) cancelled this run
                 # mid-flight. Record it as ``failed`` through the same one-way CAS the
@@ -440,7 +454,19 @@ async def _supervise(
                 tool_error = exc
                 fields = {"status": _FAILED, "finished_at": _now().isoformat(), "error": str(exc)}
             else:
-                fields = {"status": _SUCCEEDED, "finished_at": _now().isoformat(), "result": result_json}
+                if parked is not None:
+                    fields = {
+                        "status": _PARKED,
+                        "finished_at": _now().isoformat(),
+                        "result": json.dumps(
+                            {
+                                "interaction_id": parked.interaction_id,
+                                "expiry_at": parked.expiry_at.isoformat() if parked.expiry_at is not None else None,
+                            }
+                        ),
+                    }
+                else:
+                    fields = {"status": _SUCCEEDED, "finished_at": _now().isoformat(), "result": result_json}
             # Gate the terminal write on the record still being ``running`` so it
             # can never overwrite a ``lost`` a reader already wrote (one-way lost).
             persisted = await store.mark_terminal_if_running(r, run_id, fields, settings.result_ttl_seconds)

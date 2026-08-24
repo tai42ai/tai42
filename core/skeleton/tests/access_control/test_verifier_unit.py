@@ -767,7 +767,7 @@ async def test_plugin_studio_asset_is_public(monkeypatch):
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
     for path in (
-        "/api/plugins/tai42_babelfish_flows/studio/main-abc123.css",
+        "/api/plugins/tai42_example_plugin/studio/main-abc123.css",
         "/api/plugins/x/studio/nested/asset.js",
     ):
         assert await v.resolve_resource_ids(path, method="GET") == [settings.public_resource_id]

@@ -566,18 +566,32 @@ async def send_conversation_message(request: Request) -> Response:
 
 @tai42_app.lifecycle.on_startup
 async def _register_conversation_completion_tool() -> None:
-    """Force-register the hidden ``conversation_deliver`` tool — the completion continuation
-    an async-parked agent turn's resumed answer is delivered through.
+    """Force-register the two hidden completion-delivery tools — the continuations a parked
+    turn's resumed outcome is delivered through: ``conversation_deliver`` for a parked AGENT
+    turn (the agent's own final answer) and ``deliver_tool_completion`` for a parked TOOL turn
+    (the terminal outcome mapped through the route's ``reply_expr``).
 
-    A mandatory bridge mechanism (never an operator-excludable catalog tool), so it is
+    Both are mandatory bridge mechanisms (never operator-excludable catalog tools), so each is
     registered ``force=True`` and ``tai42/hidden`` — never offered to a model, reached only
-    when a resumed run's driver fires it. Registered whenever the bridge is wired, so the
+    when a resumed run's resumer fires it. Registered whenever the bridge is wired, so the
     completion continuation the turn engine binds always resolves."""
-    from tai42_skeleton.conversations.turn import COMPLETION_TOOL_NAME, deliver_agent_completion
+    from tai42_skeleton.conversations.turn import (
+        COMPLETION_TOOL_NAME,
+        DELIVER_TOOL_COMPLETION_NAME,
+        deliver_agent_completion,
+        deliver_tool_completion,
+    )
 
     tai42_app.tools.tool(
         deliver_agent_completion,
         name=COMPLETION_TOOL_NAME,
+        tags={"conversations"},
+        meta={"tai42/hidden": True},
+        force=True,
+    )
+    tai42_app.tools.tool(
+        deliver_tool_completion,
+        name=DELIVER_TOOL_COMPLETION_NAME,
         tags={"conversations"},
         meta={"tai42/hidden": True},
         force=True,

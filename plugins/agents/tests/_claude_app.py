@@ -161,6 +161,19 @@ class _StorageFacet:
         self.resource_manager = _ResourceManager(templates)
 
 
+class _AgentsFacet:
+    """Resolve a registered agent by name — the seam ``agent_resume`` reads to reach the
+    parked agent's ``aresume_park`` face for the resume drive."""
+
+    def __init__(self, agents: dict[str, Any]) -> None:
+        self._agents = agents
+
+    def get_agent(self, name: str) -> Any:
+        if name not in self._agents:
+            raise KeyError(f"no agent registered as {name!r}")
+        return self._agents[name]
+
+
 class LocalApp:
     """A hand-composed app exposing exactly the facets ``claude_code`` reaches at run time."""
 
@@ -174,6 +187,7 @@ class LocalApp:
         tool_runners: dict[str, Callable[..., Any]],
         templates: dict[str, str],
         writer: RecordingWriter,
+        agents: dict[str, Any] | None = None,
     ) -> None:
         self.sandboxes = _SandboxesFacet(sandbox, policy)
         self.interactions = _InteractionsFacet(ask_user)
@@ -181,6 +195,7 @@ class LocalApp:
         self.tools = _ToolsFacet(tool_runners)
         self.storage = _StorageFacet(templates)
         self.monitoring = _MonitoringFacet(writer)
+        self.agents = _AgentsFacet(agents or {})
 
 
 async def _default_ask(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover - overridden per test
@@ -196,6 +211,7 @@ def build_local_app(
     tool_runners: dict[str, Callable[..., Any]] | None = None,
     templates: dict[str, str] | None = None,
     writer: RecordingWriter | None = None,
+    agents: dict[str, Any] | None = None,
 ) -> LocalApp:
     return LocalApp(
         sandbox=sandbox or make_fake_sandbox(),
@@ -205,4 +221,5 @@ def build_local_app(
         tool_runners=tool_runners or {},
         templates=templates or {},
         writer=writer or RecordingWriter(),
+        agents=agents,
     )

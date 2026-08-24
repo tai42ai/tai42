@@ -74,6 +74,40 @@ def test_chains_first_tool_through_jq_into_second(bind_fake_app):
     assert calls == [("get_user", {"user_id": 1}), ("greet", {"name": "Alice"})]
 
 
+def test_a_parked_first_stage_propagates_without_touching_jq_or_the_next_tool(bind_fake_app):
+    # The first stage async-parks: its run_tool returns the SuspendedInteraction SIGNAL. The
+    # chain must PROPAGATE it verbatim — never feed the sentinel into jq (which would fail to
+    # read it as data) nor hand it to the second tool. The chain parks as a whole.
+    from datetime import UTC, datetime
+
+    from tai42_contract.interactions import SuspendedInteraction
+
+    calls: list[str] = []
+
+    async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
+        calls.append(key)
+        if key == "source":
+            return SuspendedInteraction(interaction_id="i-chain", expiry_at=datetime(2026, 6, 1, tzinfo=UTC))
+        raise AssertionError(f"the next tool must not run on a parked first stage; got {key}")
+
+    bind_fake_app(FakeTools(run_tool=run_tool))
+
+    result = asyncio.run(
+        execute_chain(
+            tool_name="source",
+            tool_arguments={},
+            # A jq expression that WOULD fault on a non-object input, proving jq was skipped.
+            jq_expression=".name",
+            next_tool_name="sink",
+        )
+    )
+
+    assert isinstance(result, SuspendedInteraction)
+    assert result.interaction_id == "i-chain"
+    # Only the first stage ran; jq and the second tool were skipped.
+    assert calls == ["source"]
+
+
 def test_jq_expression_evaluates_off_loop_and_value_round_trips(bind_fake_app):
     # The jq expression is evaluated through the off-loop helper; a non-trivial transform must
     # compute the same result and reach the second tool intact.

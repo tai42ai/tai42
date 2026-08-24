@@ -29,7 +29,7 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_contract.agent.base import SubAgentSpec as NeutralSubAgentSpec
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import get_park_completion_tool
+from tai42_contract.interactions import get_park_completion
 from tai42_contract.sandbox import SandboxSession
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
@@ -583,8 +583,9 @@ class DeepAgent(Agent):
                 # with the final answer on a clean terminal drive. A run carrying live tools or
                 # neutral (live) subagents is not rebuildable, so it never parks; with no
                 # completion bound, an async ask refuses loudly pre-persist. The retention bound is
-                # min(checkpoint, workspace) (§B3.1).
-                completion_tool = get_park_completion_tool()
+                # min(checkpoint, workspace) (§B3.1). An agent delivers through the bridge thread it
+                # runs under, so it keeps only the tool name and ignores the opaque context.
+                completion_tool = get_park_completion()[0]
                 park: ParkIdentity | None = None
                 park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
                 if completion_tool is not None and park_rebuildable:
@@ -906,7 +907,7 @@ class DeepAgent(Agent):
                     has_live_tools=False,
                     rebuild_kwargs=rebuild_kwargs,
                     recursion_limit=recursion_limit,
-                    completion_tool=get_park_completion_tool(),
+                    completion_tool=get_park_completion()[0],
                     bind=True,
                     extra_retention_horizon=drive.workspace_retention_horizon,
                 )

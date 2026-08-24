@@ -96,6 +96,29 @@ class NestedFieldsAgent(Agent):
         return ",".join(sorted(kwargs))
 
 
+class ParkInput(BaseModel):
+    text: str = ""
+
+
+@tai42_app.agents.agent("parking")
+class ParkingAgent(Agent):
+    """A run that parks on an async ask: its ``run`` returns the INTERNAL suspended-receipt
+    dict (the shape ``Agent._drain`` yields), so a test can observe the agent tool-face convert
+    it to the ``SuspendedInteraction`` sentinel a caller recognizes by type."""
+
+    tool_name = "parking"
+    tool_description = "Park on an async ask and return the suspended receipt."
+    ToolInput = ParkInput
+
+    async def run(self, **kwargs) -> Any:
+        return {
+            "status": "suspended",
+            "interaction_ids": ["i-parked"],
+            "thread_id": "bridge:x:y",
+            "expiry_at": None,
+        }
+
+
 class NestedToolsInput(BaseModel):
     """The tool an agent resolves for itself mid-turn, plus the arguments it invokes
     it with."""

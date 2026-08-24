@@ -89,13 +89,13 @@ def test_tool_input_parses_presets_as_models() -> None:
     parsed = ToolsAgentInput.model_validate(
         {
             "tool_names": ["search"],
-            "presets": [{"name": "my_flow", "base_tool": "flow", "fixed_kwargs": {"flow_graph": {}}}],
+            "presets": [{"name": "my_preset", "base_tool": "example_tool", "fixed_kwargs": {"example_config": {}}}],
         }
     )
     assert parsed.tool_names == ["search"]
     assert parsed.presets is not None
     assert isinstance(parsed.presets[0], PresetSpec)
-    assert parsed.presets[0].base_tool == "flow"
+    assert parsed.presets[0].base_tool == "example_tool"
 
 
 def test_tool_input_rejects_wrong_typed_field() -> None:
@@ -127,7 +127,7 @@ def test_tool_input_advertises_only_the_honored_composable_fields() -> None:
     parsed = ToolsAgentInput.model_validate(
         {
             "tool_names": ["search"],
-            "presets": [{"name": "p", "base_tool": "flow", "fixed_kwargs": {}}],
+            "presets": [{"name": "p", "base_tool": "example_tool", "fixed_kwargs": {}}],
             "system_prompt": "you are helpful",
         }
     )
@@ -215,9 +215,11 @@ def test_run_resolves_tools_and_returns_final_text(
     the messages, and returns the invoked agent's user-facing output. The invoke
     seam is scripted; its captured arguments prove the wiring."""
     app_tools.client_tools["search"] = make_tool("search")
-    app_tools.client_tools["flow"] = make_tool("flow", {"flow_graph": {"type": "object"}, "q": {"type": "string"}})
+    app_tools.client_tools["example_tool"] = make_tool(
+        "example_tool", {"example_config": {"type": "object"}, "q": {"type": "string"}}
+    )
     routed: list[tuple[str, dict[str, Any]]] = []
-    app_tools.tool_runners["flow"] = lambda **kwargs: routed.append(("flow", kwargs)) or {"ok": True}
+    app_tools.tool_runners["example_tool"] = lambda **kwargs: routed.append(("example_tool", kwargs)) or {"ok": True}
 
     captured: dict[str, Any] = {}
 
@@ -227,7 +229,7 @@ def test_run_resolves_tools_and_returns_final_text(
 
     monkeypatch.setattr(tools_agent_module, "ainvoke_tools_agent", fake_invoke)
 
-    preset = PresetSpec(name="my_flow", base_tool="flow", fixed_kwargs={"flow_graph": {"nodes": []}})
+    preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
     agent = _get_agent()
     result = asyncio.run(
         agent.run(
@@ -241,18 +243,18 @@ def test_run_resolves_tools_and_returns_final_text(
     assert result == "the answer"
     # live tools = resolved client tool + the preset, deduped and in order.
     resolved = captured["tools"]
-    assert [tool.name for tool in resolved] == ["search", "my_flow"]
+    assert [tool.name for tool in resolved] == ["search", "my_preset"]
     # rendered messages threaded through as literal content.
     assert captured["system_message"] == "sys"
     assert captured["user_message"] == ["hi"]
 
     # the preset tool routes its call through the app's run_tool with fixed kwargs
     # merged under the runtime kwargs.
-    preset_tool = next(tool for tool in resolved if tool.name == "my_flow")
+    preset_tool = next(tool for tool in resolved if tool.name == "my_preset")
     asyncio.run(preset_tool.arun({"q": "search-term"}))
     key, arguments = routed[-1]
-    assert key == "flow"
-    assert arguments == {"flow_graph": {"nodes": []}, "q": "search-term"}
+    assert key == "example_tool"
+    assert arguments == {"example_config": {"nodes": []}, "q": "search-term"}
 
 
 def test_preset_tool_invocation_raises_on_unknown_base_tool(app_tools: Any) -> None:
@@ -261,8 +263,8 @@ def test_preset_tool_invocation_raises_on_unknown_base_tool(app_tools: Any) -> N
     unknown-base-tool ``RuntimeError`` when the bound tool is invoked: binding does
     not pre-check the runner map, so the failure lands at call time and propagates
     out of the bound tool rather than being swallowed into a result."""
-    app_tools.client_tools["flow"] = make_tool("flow", {"q": {"type": "string"}})
-    preset = PresetSpec(name="my_flow", base_tool="flow")
+    app_tools.client_tools["example_tool"] = make_tool("example_tool", {"q": {"type": "string"}})
+    preset = PresetSpec(name="my_preset", base_tool="example_tool")
     (preset_tool,) = asyncio.run(resolve_tools(tai42_app.tools, [], [], [preset]))
     with pytest.raises(RuntimeError, match="unknown base tool"):
         asyncio.run(preset_tool.arun({"q": "x"}))
@@ -787,13 +789,15 @@ def test_astream_resolves_baked_tool_names_and_presets(monkeypatch: pytest.Monke
     SAME resolution ``run`` applies — so a baked spec's tools drive the streamed run
     instead of being silently dropped."""
     app_tools.client_tools["search"] = make_tool("search")
-    app_tools.client_tools["flow"] = make_tool("flow", {"flow_graph": {"type": "object"}, "q": {"type": "string"}})
+    app_tools.client_tools["example_tool"] = make_tool(
+        "example_tool", {"example_config": {"type": "object"}, "q": {"type": "string"}}
+    )
     captured: dict[str, Any] = {}
     _script_astream(monkeypatch, [MessageFinal(text="ok")], captured)
     agent = _get_agent()
-    preset = PresetSpec(name="my_flow", base_tool="flow", fixed_kwargs={"flow_graph": {"nodes": []}})
+    preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
     _collect(agent, tool_names=["search"], presets=[preset], user_message="hi")
-    assert [tool.name for tool in captured["tools"]] == ["search", "my_flow"]
+    assert [tool.name for tool in captured["tools"]] == ["search", "my_preset"]
 
 
 def test_astream_with_subagents_raises_loudly() -> None:

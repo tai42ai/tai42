@@ -51,14 +51,20 @@ def order(monkeypatch) -> list[str]:
     return ran
 
 
-async def test_startup_registers_the_completion_tool(monkeypatch):
-    # The completion continuation (``conversation_deliver``) is force-registered at startup so
-    # the tool the turn engine binds always resolves. The hook runs cleanly under a bound app;
-    # its ``tool(...)`` call carries the exact name, hidden meta and force flag.
+async def test_startup_registers_the_completion_tools(monkeypatch):
+    # Both completion continuations are force-registered at startup so the tools the turn engine
+    # binds always resolve: ``conversation_deliver`` (a parked AGENT turn's own final answer) and
+    # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr). Each
+    # ``tool(...)`` call carries the exact name, hidden meta and force flag.
     from tai42_contract.app import tai42_app
 
     from tai42_skeleton.app.instance import app as skeleton_app
-    from tai42_skeleton.conversations.turn import COMPLETION_TOOL_NAME, deliver_agent_completion
+    from tai42_skeleton.conversations.turn import (
+        COMPLETION_TOOL_NAME,
+        DELIVER_TOOL_COMPLETION_NAME,
+        deliver_agent_completion,
+        deliver_tool_completion,
+    )
 
     calls: list = []
     original_tool = skeleton_app.tools.tool
@@ -76,12 +82,16 @@ async def test_startup_registers_the_completion_tool(monkeypatch):
         finally:
             monkeypatch.setattr(skeleton_app.tools, "tool", original_tool)
 
-    assert len(calls) == 1
-    func, kwargs = calls[0]
-    assert func is deliver_agent_completion
-    assert kwargs["name"] == COMPLETION_TOOL_NAME == "conversation_deliver"
-    assert kwargs["force"] is True
-    assert kwargs["meta"] == {"tai42/hidden": True}
+    assert len(calls) == 2
+    registered = {kwargs["name"]: (func, kwargs) for func, kwargs in calls}
+    assert set(registered) == {COMPLETION_TOOL_NAME, DELIVER_TOOL_COMPLETION_NAME}
+    agent_func, agent_kwargs = registered[COMPLETION_TOOL_NAME]
+    assert agent_func is deliver_agent_completion
+    tool_func, tool_kwargs = registered[DELIVER_TOOL_COMPLETION_NAME]
+    assert tool_func is deliver_tool_completion
+    for kwargs in (agent_kwargs, tool_kwargs):
+        assert kwargs["force"] is True
+        assert kwargs["meta"] == {"tai42/hidden": True}
 
 
 async def test_startup_redrives_intake_then_delivery(monkeypatch, order):
