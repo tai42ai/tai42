@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-cli"
-version = "4.0.0"
+version = "4.1.0"
 description = "Command-line client for operating a tai42 server over its HTTP API."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract — combo-element and channel/interaction models the
     # remote commands round-trip to the wire.
-    "tai42-contract>=5.0,<6",
+    "tai42-contract>=5.1,<6",
     "typer>=0.12",
     # Imported directly (TyperGroup/TyperOption plumbing, click.shell_completion).
     "click>=8.3",
