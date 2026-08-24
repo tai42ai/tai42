@@ -46,8 +46,8 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import (
     SuspendedInteraction,
-    reset_park_completion_tool,
-    set_park_completion_tool,
+    reset_park_completion,
+    set_park_completion,
 )
 from tai42_kit.utils.data import run_jq_bounded
 
@@ -73,7 +73,7 @@ from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 logger = logging.getLogger(__name__)
 
 # The registered name of the hidden completion-delivery tool. The conversation door binds it
-# (``set_park_completion_tool``) around an agent turn, so an async ``ask_user`` may park with a
+# (``set_park_completion``) around an agent turn, so an async ``ask_user`` may park with a
 # path back to this thread; a resumed run's driver fires it with ``{thread_id, result}`` and it
 # mints the answered record + spawns delivery. Must equal the registered tool name.
 COMPLETION_TOOL_NAME = "conversation_deliver"
@@ -412,11 +412,11 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
                 await authorize_execution_agent_run(identity, route.target_name)
                 # An agent target has no self-delivery — per the module docstring's park-delivery
                 # paths, the platform binds the completion tool so a resumed run posts back here.
-                completion_token = set_park_completion_tool(COMPLETION_TOOL_NAME)
+                completion_token = set_park_completion(COMPLETION_TOOL_NAME)
                 try:
                     answer = await _drain_answer(agent, text, thread_id)
                 finally:
-                    reset_park_completion_tool(completion_token)
+                    reset_park_completion(completion_token)
     except PermissionDenied as exc:
         return _tool_error(f"turn denied: {exc}")
     except Exception as exc:

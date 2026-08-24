@@ -8,18 +8,23 @@ Two generic context variables naming registered tools a resuming driver binds:
   onto the parked interaction as its ``continuation_tool``.
 * the COMPLETION continuation — the tool a driver fires with the FINAL answer when a
   resumed run drives to a clean terminal (not a re-park), so a deferred response is
-  delivered out of band. A driver binds it around a run and keeps it with its own resume
-  state — the platform stores no completion field on the interaction; ``None`` (the
-  default) means no completion delivery is wired.
+  delivered out of band, PLUS an opaque address context the delivery tool reads to route
+  that answer back. A driver binds both around a run and keeps them with its own resume
+  state — the platform stores no completion field on the interaction; a name of ``None``
+  (the default) means no completion delivery is wired.
 
-Both are bare tool names — a generic platform mechanism that never names a flow, a
-session, or any engine state. ``None`` (the resume default) means no resuming driver
-is bound, and an async ask raised there fails loudly.
+The resume continuation is a bare tool name; the completion continuation is a tool name
+paired with an opaque context. Both are a generic platform mechanism that never names a
+flow, a session, or any engine state — the context is fully opaque to this contract (it
+carries no route/flow/thread meaning here) and MUST be JSON-serializable, since a durable
+resume path round-trips it. A resume name of ``None`` (the default) means no resuming
+driver is bound, and an async ask raised there fails loudly.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any, Final, cast
@@ -27,19 +32,24 @@ from typing import Any, Final, cast
 __all__ = [
     "EXPIRY_ANSWER",
     "SUSPENDED_INTERACTION_MARKER_KEY",
-    "get_park_completion_tool",
+    "get_park_completion",
     "get_resume_continuation_tool",
     "read_suspended_interaction_marker",
-    "reset_park_completion_tool",
+    "reset_park_completion",
     "reset_resume_continuation_tool",
-    "set_park_completion_tool",
+    "set_park_completion",
     "set_resume_continuation_tool",
     "suspended_interaction_marker",
 ]
 
 _resume_continuation_tool: ContextVar[str | None] = ContextVar("tai42_resume_continuation_tool", default=None)
 
-_park_completion_tool: ContextVar[str | None] = ContextVar("tai42_park_completion_tool", default=None)
+# The completion binding: a (tool name, opaque context) pair a driver fires on a clean
+# terminal drive. Held as ONE immutable tuple so both halves bind and reset atomically. The
+# default ``(None, None)`` means no completion delivery is wired.
+_ParkCompletion = tuple[str | None, Mapping[str, Any] | None]
+
+_park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completion", default=(None, None))
 
 
 # The answer value a continuation receives when its interaction expired unanswered — the
@@ -108,21 +118,24 @@ def reset_resume_continuation_tool(token: Token[str | None]) -> None:
     _resume_continuation_tool.reset(token)
 
 
-def get_park_completion_tool() -> str | None:
-    """The tool a driver fires with a resumed run's FINAL answer, or ``None`` when no
-    completion delivery is bound (the default, and any code outside a bound run)."""
-    return _park_completion_tool.get()
+def get_park_completion() -> _ParkCompletion:
+    """The ``(tool, context)`` a driver fires with a resumed run's FINAL answer: the tool
+    that delivers the deferred answer and the opaque context it reads to route it. Both are
+    ``None`` when no completion delivery is bound (the default, and any code outside a bound
+    run)."""
+    return _park_completion.get()
 
 
-def set_park_completion_tool(tool_name: str | None) -> Token[str | None]:
-    """Bind ``tool_name`` as the current run's completion continuation and return the
-    reset token. A driver calls this around a run whose deferred final answer must be
-    delivered out of band; pass the returned token to
-    :func:`reset_park_completion_tool` to restore the previous value."""
-    return _park_completion_tool.set(tool_name)
+def set_park_completion(tool: str, context: Mapping[str, Any] | None = None) -> Token[_ParkCompletion]:
+    """Bind ``tool`` as the current run's completion continuation, carrying an opaque
+    ``context`` the delivery tool reads to route the answer, and return the reset token. A
+    driver calls this around a run whose deferred final answer must be delivered out of
+    band; ``context`` is treated as fully opaque here and MUST be JSON-serializable. Pass
+    the returned token to :func:`reset_park_completion` to restore the previous value."""
+    return _park_completion.set((tool, context))
 
 
-def reset_park_completion_tool(token: Token[str | None]) -> None:
+def reset_park_completion(token: Token[_ParkCompletion]) -> None:
     """Restore the completion continuation to the value captured in ``token`` by the
-    matching :func:`set_park_completion_tool` call."""
-    _park_completion_tool.reset(token)
+    matching :func:`set_park_completion` call."""
+    _park_completion.reset(token)

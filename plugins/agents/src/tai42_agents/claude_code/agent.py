@@ -42,7 +42,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
-from tai42_contract.interactions import SuspendedInteraction, get_park_completion_tool
+from tai42_contract.interactions import SuspendedInteraction, get_park_completion
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import (
     SandboxExecTimeoutError,
@@ -600,7 +600,7 @@ class ClaudeCodeAgent(Agent):
             thread_id=thread_id,
             rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
             bind=True,
-            completion_tool=get_park_completion_tool(),
+            completion_tool=get_park_completion()[0],
             retention_bound=horizon,
         )
         assert_park_capable(identity, durable=True, retention_bound=horizon)
