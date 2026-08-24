@@ -345,9 +345,7 @@ async def handle_inbound_answer(
         # the reply as a normal turn. The handler touches nothing.
         return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
-    pin_failure = _callback_pin_failure(
-        entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id
-    )
+    pin_failure = _callback_pin_failure(entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id)
     if pin_failure is not None:
         # The stored callback cannot be trusted (wrong host / unset base / malformed):
         # never POST the guest's answer to it. Release the poisoned/stale reservation,
@@ -446,9 +444,7 @@ async def handle_inbound_answer(
         await _bridge(bridge)
         # The door judged this answer's content — carry its reason/field even though the
         # ask is now closed (a channel may surface it before falling back to the bridge).
-        return InboundAnswerResult(
-            outcome=InboundAnswerOutcome.BRIDGED, retry_reason=error or None, retry_field=field
-        )
+        return InboundAnswerResult(outcome=InboundAnswerOutcome.BRIDGED, retry_reason=error or None, retry_field=field)
 
     # 401/413/5xx ambient failure — keep the correlation and fail loudly so the
     # channel's webhook redelivery re-runs the ladder.

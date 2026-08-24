@@ -447,9 +447,7 @@ async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
 
 def _pin_public_base(monkeypatch, base: str | None) -> None:
     """Point the handler's host-pinning at ``base`` (the configured public base)."""
-    monkeypatch.setattr(
-        inbound_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=base)
-    )
+    monkeypatch.setattr(inbound_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=base))
 
 
 # -- security carry-in (a): callback_url host pinning ----------------------------
