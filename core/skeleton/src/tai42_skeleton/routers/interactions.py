@@ -840,7 +840,10 @@ async def _callback_post(request: Request, r: Any, store: InteractionStore, sett
         except _AnswerInvalid as exc:
             # The failing field's dotted path rides as an optional ``field`` key so a
             # channel can pin the error on the right control; absent when unlocated.
-            body: dict[str, Any] = {"error": str(exc)}
+            # ``retry_in_place`` is the door's policy signal to a correlated channel:
+            # every current validation rejection is re-answerable in place (the live
+            # ask stands and the guest can answer again), so it is always True here.
+            body: dict[str, Any] = {"error": str(exc), "retry_in_place": True}
             if exc.field is not None:
                 body["field"] = exc.field
             return _callback_json(body, 400)

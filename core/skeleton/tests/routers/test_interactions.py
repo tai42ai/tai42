@@ -176,6 +176,9 @@ async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
     body = _json(resp)
     assert body["error"] == "answer does not match schema at count: 'abc' is not of type 'integer'"
     assert body["field"] == "count"
+    # The door signals a correlated channel that this rejection is re-answerable in
+    # place — the live ask stands, so the guest can answer again.
+    assert body["retry_in_place"] is True
 
 
 async def test_post_form_answer_root_mismatch_400_omits_field(wired):
@@ -188,6 +191,9 @@ async def test_post_form_answer_root_mismatch_400_omits_field(wired):
     body = _json(resp)
     assert body["error"] == "answer does not match schema: 'count' is a required property"
     assert "field" not in body
+    # The retry-in-place policy signal is present even when the failing field is
+    # unlocated (no ``field`` key).
+    assert body["retry_in_place"] is True
 
 
 async def test_post_unknown_ticket_404(wired):
@@ -1825,7 +1831,9 @@ async def test_callback_typed_wrong_type_400(wired):
     await _seed_typed(wired, AnswerFormat.TEXT)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": 7}'))
     assert resp.status_code == 400
-    assert _json(resp) == {"error": "answer must be a string"}
+    # A format-validation rejection is re-answerable in place: the door signals it
+    # with ``retry_in_place`` so a correlated channel keeps the ask live.
+    assert _json(resp) == {"error": "answer must be a string", "retry_in_place": True}
 
 
 async def test_callback_typed_missing_answer_key_400(wired):
