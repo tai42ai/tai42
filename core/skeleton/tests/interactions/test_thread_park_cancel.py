@@ -199,6 +199,40 @@ async def test_cancel_reconciles_an_orphan_index_member(fake_redis):
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == set()
 
 
+async def test_cancel_leaves_a_park_added_concurrently_with_the_cascade(fake_redis, monkeypatch):
+    # A park that arrives on the SAME thread DURING the cascade — after the members snapshot,
+    # before the index cleanup — must survive with its index member intact so a retry can
+    # still cancel it. The cascade must SREM only the members it snapshotted, never blind-
+    # DELETE the whole set (which would silently orphan the newcomer — the very bug this
+    # feature prevents). Simulated by injecting a new park mid prune-loop.
+    store = InteractionStore("t:")
+    await store.add(
+        fake_redis, _park_request(store, "a", "ga"), idle_ttl=86400, continuation_fingerprint="fp", thread_id=_THREAD
+    )
+
+    real_prune = store.prune_pending
+    injected = {"done": False}
+
+    async def prune_then_inject(r, interaction_id, group_id):
+        result = await real_prune(r, interaction_id, group_id)
+        if not injected["done"]:
+            injected["done"] = True
+            await store.add(
+                r, _park_request(store, "b", "gb"), idle_ttl=86400, continuation_fingerprint="fp", thread_id=_THREAD
+            )
+        return result
+
+    monkeypatch.setattr(store, "prune_pending", prune_then_inject)
+    cancelled = await store.cancel_thread_parks(fake_redis, _THREAD)
+
+    # 'a' (snapshotted) is cancelled; the concurrently-added 'b' survives in BOTH state and
+    # the reverse index — a blind DELETE would have wiped it, orphaning it.
+    assert cancelled == ["a"]
+    assert await store.get_state(fake_redis, "a") is None
+    assert await store.get_state(fake_redis, "b") is not None
+    assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {"b"}
+
+
 # -- helper: ask_user captures the bound thread -------------------------------
 
 
@@ -237,7 +271,11 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
-    # An AGENT route target runs inside the bridge turn context (no completion context).
+    # An AGENT route target runs inside the bridge turn context AND co-sets a park completion
+    # with NO context (exactly as _run_agent_turn does — set_park_completion(COMPLETION_TOOL_NAME)
+    # carries no delivery_thread_id). So the thread must come from the bridge, and this pins that
+    # a stray/empty agent completion context never shadows it.
+    park_token = set_park_completion("agent_completion")
     bridge = BridgeTurnContext(
         thread_id=_THREAD, route_name="chat", channel="twilio", our_identity="+1", client_address="+15550001111"
     )
@@ -245,6 +283,7 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(
         with bridge_turn_context(bridge):
             result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
     finally:
+        reset_park_completion(park_token)
         reset_execution_identity(id_token)
         reset_resume_continuation_tool(tool_token)
 

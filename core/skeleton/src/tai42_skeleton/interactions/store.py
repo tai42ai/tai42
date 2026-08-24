@@ -949,8 +949,10 @@ class InteractionStore:
         continuation — deliberately not ``record_answer`` (which would enqueue a dead
         completion), so no continuation fires and no ``PARK_COMPLETION_FAILED`` is needed — and
         is a clean no-op on a park already answered or gone. A member whose state already
-        vanished is skipped (nothing to prune); the index key is deleted LAST so such an
-        orphan member is reconciled off too. Returns the interaction ids read from the index.
+        vanished is skipped (nothing to prune); the snapshotted members are then SREM'd (NOT a
+        blind key delete) so such an orphan member is reconciled off while a park added to the
+        thread concurrently with the cascade keeps its member and stays cancellable on a retry.
+        Returns the interaction ids read from the index.
 
         Idempotent: cancelling a thread with no parks (a missing set) is a no-op, and
         cancelling twice finds the set drained/absent the second time. The recovery is proven:
@@ -968,7 +970,15 @@ class InteractionStore:
                 # prune, and the trailing delete reconciles the orphan member off.
                 continue
             await self.prune_pending(r, interaction_id, group_id)
-        await r.delete(key)
+        # Remove ONLY the members we snapshotted (SREM, not a blind DELETE of the key): a park
+        # added to this thread CONCURRENTLY with the cascade — between the smembers snapshot
+        # above and here — keeps its own index member, so it stays cascade-cancellable on a
+        # retry instead of being silently orphaned by wiping the whole set. prune_pending
+        # already SREM'd each park it pruned (repeating is a no-op); this additionally
+        # reconciles the snapshot's orphan members (state already gone, skipped above). The
+        # set auto-deletes once its last member is removed; its TTL backstops either way.
+        if members:
+            await cast("Awaitable[int]", r.srem(key, *members))
         return members
 
     # -- reads ---------------------------------------------------------------

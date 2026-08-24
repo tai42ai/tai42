@@ -193,7 +193,12 @@ def _bound_park_thread_id() -> str | None:
     * an AGENT route target runs inside the bridge turn context that carries the thread
       (``conversations.turn._run_agent_turn``), read here off ``current_bridge_turn``.
 
-    Never fabricates a thread id — an unbound park indexes nothing."""
+    Never fabricates a thread id — an unbound park indexes nothing. Both bindings are set only
+    on a LIVE turn; a park raised OUTSIDE one — a background tool run, or a re-park during an
+    out-of-band resume drive (which delivers via ``deliver_*_completion`` without re-wrapping
+    the turn) — is unbound and so is not thread-indexed / not cascade-cancellable. A known,
+    non-regressing boundary (nothing was indexed before this index existed); closing it would
+    mean the resume drive re-establishing the thread binding, left to a follow-up."""
     _completion_tool, completion_ctx = get_park_completion()
     if completion_ctx is not None:
         candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)
