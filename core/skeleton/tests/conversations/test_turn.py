@@ -344,16 +344,16 @@ async def test_tool_target_none_or_blank_reply_is_silent(env, monkeypatch, reply
 
 
 async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
-    # A flow-preset shape: an expr emitting {"flow_graph_kwargs": {...}}.
+    # A preset-shaped payload: an expr emitting {"example_config_kwargs": {...}}.
     channel = FakeChannel()
-    route = _tool_channel_route(payload_expr="{flow_graph_kwargs: {text: .message, from: .sender}}")
+    route = _tool_channel_route(payload_expr="{example_config_kwargs: {text: .message, from: .sender}}")
     _wire(monkeypatch, FakeManager(route), channel)
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
 
     await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
     await _settle()
 
-    assert tools.calls[0]["arguments"] == {"flow_graph_kwargs": {"text": "run it", "from": "+15550002222"}}
+    assert tools.calls[0]["arguments"] == {"example_config_kwargs": {"text": "run it", "from": "+15550002222"}}
 
 
 async def test_tool_target_reply_expr_over_an_envelope_dict(env, monkeypatch):
@@ -405,6 +405,134 @@ async def test_tool_target_suspended_interaction_ends_the_turn_silently(env, mon
     assert record.answer is None
     assert record.answer_status is None
     assert channel.sends == []
+
+
+async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env, monkeypatch):
+    # R1+D1: a conversation route to a GENERIC parking tool binds the generic tool-route
+    # completion (naming THIS thread as the opaque delivery address) around the dispatch and
+    # parks silently; when the tool's own resumer later fires deliver_tool_completion with the
+    # terminal outcome, the route's reply_expr maps it and it is delivered back into the thread,
+    # idempotent on completion_id.
+    from tai42_contract.interactions import SuspendedInteraction, get_park_completion
+
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    bound: list = []
+
+    def _park(kw):
+        bound.append(get_park_completion())
+        return SuspendedInteraction(interaction_id="i-async")
+
+    _wire_tool(monkeypatch, _park)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    # The dispatch parked silently; the completion was bound naming deliver_tool_completion and
+    # this turn's thread as the opaque delivery address.
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+    assert len(bound) == 1
+    tool_name, context = bound[0]
+    assert tool_name == turn_module.DELIVER_TOOL_COMPLETION_NAME
+    thread_id = context["delivery_thread_id"]
+    assert thread_id == "bridge:tool-line:+15550002222"
+
+    # The resumer drives to a clean terminal out of band and fires the completion; reply_expr
+    # maps the terminal outcome and it is delivered back into the thread.
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id=thread_id,
+        completion_id="c1",
+        result={"result": {"reply": "the deferred answer"}},
+    )
+    await _settle()
+    assert out == {"message_id": "c1"}
+    delivered = await _store().get_record("c1")
+    assert delivered is not None
+    assert delivered.answer == "the deferred answer"
+    assert delivered.delivery_status is DeliveryStatus.DELIVERED
+    assert "the deferred answer" in [n.message for n in channel.sends]
+
+    # Idempotent: a redelivered fire under the same completion_id delivers nothing new.
+    sends_before = len(channel.sends)
+    out2 = await turn_module.deliver_tool_completion(
+        delivery_thread_id=thread_id, completion_id="c1", result={"result": {"reply": "SECOND"}}
+    )
+    await _settle()
+    assert out2 == {"message_id": "c1"}
+    assert len(channel.sends) == sends_before
+
+
+async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch):
+    # A non-success terminal (the route carries no error mapping) delivers the uniform
+    # client-safe notice — never the raw internal detail, never a silent drop.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="e1",
+        result={"detail": "internal"},
+        status="errored",
+    )
+    await _settle()
+    assert out == {"message_id": "e1"}
+    rec = await _store().get_record("e1")
+    assert rec is not None
+    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(env, monkeypatch):
+    # A success terminal the route's reply_expr cannot map is delivered as the client-safe
+    # notice rather than crashing the resumer or dropping the outcome.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply")  # a non-string/non-null emit raises
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="u1",
+        result={"result": {"reply": {"not": "a string"}}},
+    )
+    await _settle()
+    assert out == {"message_id": "u1"}
+    rec = await _store().get_record("u1")
+    assert rec is not None
+    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+
+
+async def test_deliver_tool_completion_silent_reply_delivers_nothing(env, monkeypatch):
+    # A success whose reply_expr maps to null is a designed silent outcome: nothing delivered,
+    # and — naturally idempotent — no record anchors it.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id="bridge:tool-line:+15550002222",
+        completion_id="s1",
+        result={"result": {}},
+    )
+    await _settle()
+    assert out == {"message_id": None}
+    assert await _store().get_record("s1") is None
+    assert channel.sends == []
+
+
+async def test_deliver_tool_completion_unresolvable_thread_raises(env, monkeypatch):
+    # An unresolvable delivery address raises loudly so the resumer's at-least-once seam
+    # retains and retries rather than dropping the outcome.
+    _wire(monkeypatch, FakeManager(_tool_channel_route()))
+    with pytest.raises(turn_module.CompletionDeliveryError):
+        await turn_module.deliver_tool_completion(
+            delivery_thread_id="not-a-bridge-thread", completion_id="x1", result="hi"
+        )
 
 
 async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):

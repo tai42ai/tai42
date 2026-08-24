@@ -116,13 +116,13 @@ _TARGET_HELP = "A worker to restrict the fan-out to (repeatable)."
 @covers(("POST", "/api/tools/reload"))
 def reload_tool(
     ctx: typer.Context,
-    kind: Annotated[str, typer.Argument(help='Tool kind (e.g. "flow").')],
+    kind: Annotated[str, typer.Argument(help='Tool kind (e.g. "example_tool").')],
     name: Annotated[str, typer.Argument(help="Tool name.")],
     target: Annotated[list[str] | None, typer.Option("--target", help=_TARGET_HELP)] = None,
 ) -> None:
     """Re-register one app tool from its stored definition, fanning out to the fleet.
 
-    Example: ``tai tools reload flow my_flow``
+    Example: ``tai tools reload example_tool my_tool``
     """
     ctx_obj = app_context(ctx)
     targets = list(target) if target else None
@@ -135,13 +135,13 @@ def reload_tool(
 @covers(("POST", "/api/tools/remove"))
 def remove_tool(
     ctx: typer.Context,
-    kind: Annotated[str, typer.Argument(help='Tool kind (e.g. "flow").')],
+    kind: Annotated[str, typer.Argument(help='Tool kind (e.g. "example_tool").')],
     name: Annotated[str, typer.Argument(help="Tool name.")],
     target: Annotated[list[str] | None, typer.Option("--target", help=_TARGET_HELP)] = None,
 ) -> None:
     """Remove one app tool from the live registry, fanning out to the fleet.
 
-    Example: ``tai tools remove flow my_flow``
+    Example: ``tai tools remove example_tool my_tool``
     """
     ctx_obj = app_context(ctx)
     targets = list(target) if target else None

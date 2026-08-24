@@ -63,6 +63,20 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 """
 )
 
+# A proxied tool call whose tool async-parks: emit tool_call, then either read a stop (the
+# adapter parked the tool -> exit) or a tool_result (non-park -> terminate). Mirrors ASYNC_ASK's
+# stop handling, but the park is triggered by the TOOL, not the agent's own ask.
+TOOL_CALL_PARK = (
+    _PREAMBLE
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
+emit({"type": "tool_call", "call_id": "c1", "tool_name": options["proxy_tool_names"][0], "arguments": {"x": 1}})
+frame = readline()
+if frame.get("type") == "stop":
+    sys.exit(0)
+emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1", "result": "x", "is_structured": False})
+"""
+)
+
 # A tool call naming a tool OUTSIDE the granted allowlist — the adapter must reject it loudly.
 TOOL_CALL_UNGRANTED = (
     _PREAMBLE

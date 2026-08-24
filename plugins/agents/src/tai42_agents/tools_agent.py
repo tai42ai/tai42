@@ -3,8 +3,8 @@
 The plain/advanced LangGraph tools agent. Its three tool inputs are uniform —
 ``tool_names`` (client tools resolved through the app registry), live ``tools``,
 and ``presets`` (a base tool bound to fixed kwargs, exposed as a callable tool) —
-and are resolved together by :func:`resolve_tools`. A sub-flow is just a preset:
-``base_tool="flow"`` with ``fixed_kwargs={"flow_graph": ...}``.
+and are resolved together by :func:`resolve_tools`. A preset is any base tool bound to
+fixed kwargs, e.g. ``base_tool="example_tool"`` with ``fixed_kwargs={"config": ...}``.
 
 Two faces:
 

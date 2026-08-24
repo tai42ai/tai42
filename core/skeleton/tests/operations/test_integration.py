@@ -95,17 +95,19 @@ def test_disabled_api_tools_projects_empty_surface():
     disabled path is an empty PROJECTION, NOT an empty registry: the registry is
     fully repopulated at boot, and only the projection is gated off.
 
-    The one live tool is the force-registered hidden ``conversation_deliver`` completion
-    mechanism the conversations router installs at startup. It survives the api_tools
-    toggle by design — it is a mandatory bridge, registered by its own startup hook and
-    not by the projection — so a resumed async turn's ``run_tool`` continuation still
-    resolves with api_tools off."""
+    The live tools are the two force-registered hidden completion mechanisms the
+    conversations router installs at startup (``conversation_deliver`` for a parked AGENT
+    turn, ``deliver_tool_completion`` for a parked TOOL turn). They survive the api_tools
+    toggle by design — mandatory bridges registered by their own startup hook and not by the
+    projection — so a resumed async turn's ``run_tool`` continuation still resolves with
+    api_tools off."""
 
     async def run():
         async with app.app_context(Manifest.model_validate({"api_tools": {"enabled": False}})):
             tools = await app.tools.get_tools()
-            assert set(tools) == {"conversation_deliver"}
-            assert (tools["conversation_deliver"].meta or {}).get("tai42/hidden") is True
+            assert set(tools) == {"conversation_deliver", "deliver_tool_completion"}
+            for name in ("conversation_deliver", "deliver_tool_completion"):
+                assert (tools[name].meta or {}).get("tai42/hidden") is True
             # The registry IS populated (the boot repopulate ran); the empty PROJECTION
             # surface is the ``enabled=False`` gate, not the absence of operations.
             assert operation_registry.has("list_system_kinds")

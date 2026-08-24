@@ -1,7 +1,7 @@
 name: studio-spa
 description: >-
   Set up pnpm + Node and build the Studio SPA (and the @tai42/studio-sdk the
-  browser legs link against). Shared by the ui and babelfish legs.
+  browser legs link against). Shared by the browser build legs.
 
 runs:
   using: composite

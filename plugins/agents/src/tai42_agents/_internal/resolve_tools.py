@@ -17,6 +17,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 from tai42_contract.agent.base import PresetSpec
+from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools
 
@@ -48,6 +49,14 @@ async def _as_structured_tool(
         # fixed keys here to keep the bound values immutable on the merge below.
         runtime = {key: value for key, value in runtime.items() if key not in preset.fixed_kwargs}
         result = await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        if isinstance(result, SuspendedInteraction):
+            # The base tool async-parked and returned this sentinel through the direct-run
+            # seam (preserved by type, never flattened). This coroutine is a plain langchain
+            # tool, so — exactly as the direct client-tool langchain adapter does — convert the
+            # sentinel to the reserved contract park marker: the ToolMessage commits carrying
+            # it and the in-graph park middleware recognizes the park by RESULT shape (never a
+            # tool name), so a preset over ANY parking tool parks the agent. GENERIC.
+            return suspended_interaction_marker(result.interaction_id, result.expiry_at)
         # This coroutine is the tool adapter this plugin registers with langchain:
         # langchain turns whatever it returns into the model-visible ToolMessage
         # (checkpoint and callback trace included). Mask here so the model never

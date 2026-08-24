@@ -30,6 +30,7 @@ from tests._claude_stubs import (
     REDACT_TRANSCRIPT,
     RESUME_ONCE,
     RESUME_REDRIVE,
+    TOOL_CALL_PARK,
     payload_for,
 )
 from tests._sandbox_fake import FakeSandboxSession
@@ -213,6 +214,41 @@ def test_held_lease_busy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(WorkspaceLeaseHeldError):
         asyncio.run(_drive_while_held())
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R4: a proxied tool that async-parks returns the generic SuspendedInteraction sentinel;
+    # _on_tool_call recognizes it by TYPE and drives the SAME park tail the agent's own ask
+    # takes — persist the durable index, stop the runner, surface one SuspendedFinal.
+    _settings(monkeypatch)
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL_PARK))
+    deadline = datetime.now(UTC) + timedelta(minutes=5)
+
+    def parking_tool(**_kwargs: Any) -> SuspendedInteraction:
+        return SuspendedInteraction(interaction_id="i-tool", expiry_at=deadline)
+
+    app = build_local_app(tool_runners={"parkingtool": parking_tool})
+
+    async def _park_then_read() -> tuple[list[Any], Any]:
+        # The astream drive and the index read share ONE event loop (the fakeredis client is
+        # loop-bound), so the persisted entry is read back on the same loop it was written on.
+        events = await _astream(app, user_message="deploy it", thread_id="t1", tool_names=["parkingtool"])
+        return events, await idx.read_park_entry("i-tool")
+
+    token = set_request_user_id("user-1")
+    try:
+        events, entry = asyncio.run(_park_then_read())
+    finally:
+        reset_request_user_id(token)
+    suspended = [e for e in events if isinstance(e, SuspendedFinal)]
+    assert len(suspended) == 1
+    assert suspended[0].interaction_ids == ["i-tool"]
+    assert suspended[0].thread_id == "t1"
+    # The park is recorded into the durable index, resumable by the tool's interaction id.
+    assert entry is not None
+    assert entry["agent_name"] == "claude_code"
+    assert entry["thread_id"] == "t1"
 
 
 @pytest.mark.usefixtures("fake_redis")

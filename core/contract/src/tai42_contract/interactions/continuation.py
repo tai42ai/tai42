@@ -126,12 +126,16 @@ def get_park_completion() -> _ParkCompletion:
     return _park_completion.get()
 
 
-def set_park_completion(tool: str, context: Mapping[str, Any] | None = None) -> Token[_ParkCompletion]:
+def set_park_completion(tool: str | None = None, context: Mapping[str, Any] | None = None) -> Token[_ParkCompletion]:
     """Bind ``tool`` as the current run's completion continuation, carrying an opaque
     ``context`` the delivery tool reads to route the answer, and return the reset token. A
     driver calls this around a run whose deferred final answer must be delivered out of
     band; ``context`` is treated as fully opaque here and MUST be JSON-serializable. Pass
-    the returned token to :func:`reset_park_completion` to restore the previous value."""
+    the returned token to :func:`reset_park_completion` to restore the previous value.
+
+    ``tool`` defaults to ``None``: a driver on a run-face that carries no out-of-band
+    delivery still binds a completion (typically to reset a prior binding for the nested
+    run), naming no delivery tool."""
     return _park_completion.set((tool, context))
 
 

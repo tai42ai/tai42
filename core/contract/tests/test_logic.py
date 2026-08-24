@@ -85,14 +85,14 @@ def test_agent_interrupted_empty_ids_says_unknown():
 
 
 def test_from_tool_input_maps_only_set_fields():
-    validated = PresetSpec(name="x", base_tool="flow")
+    validated = PresetSpec(name="x", base_tool="example_tool")
     out = Agent.from_tool_input(validated)
     # description / fixed_kwargs were left at their defaults -> not in fields_set.
-    assert out == {"name": "x", "base_tool": "flow"}
+    assert out == {"name": "x", "base_tool": "example_tool"}
 
 
 def test_from_tool_input_keeps_nested_models_as_instances():
-    preset = PresetSpec(name="p", base_tool="flow")
+    preset = PresetSpec(name="p", base_tool="example_tool")
     spec = SubAgentSpec(name="agent", presets=[preset])
     out = Agent.from_tool_input(spec)
     assert set(out) == {"name", "presets"}

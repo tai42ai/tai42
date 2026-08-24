@@ -522,7 +522,28 @@ class ClaudeCodeAgent(Agent):
                 if frame.mode == "async" and thread_id is not None:
                     return  # parked: stop draining, the finally kills the runner
             elif isinstance(frame, ToolCallFrame):
-                await self._on_tool_call(frame, handle=handle, allowlist=allowlist)
+                parked = await self._on_tool_call(frame, handle=handle, allowlist=allowlist, thread_id=thread_id)
+                if parked is not None:
+                    # The tool async-parked: record it into the durable index, stop the runner,
+                    # and surface the suspended terminal — the same park tail the agent's own
+                    # async ask takes. thread_id is not None here (a thread-less park was refused
+                    # to the model inside _on_tool_call).
+                    assert thread_id is not None
+                    horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
+                    identity = ParkIdentity(
+                        agent_name=AGENT_NAME,
+                        thread_id=thread_id,
+                        rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
+                        bind=True,
+                        completion_tool=get_park_completion()[0],
+                        retention_bound=horizon,
+                    )
+                    assert_park_capable(identity, durable=True, retention_bound=horizon)
+                    async for event in self._park_on_interaction(
+                        parked, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
+                    ):
+                        yield event, True
+                    return  # parked: stop draining, the finally kills the runner
             elif isinstance(frame, ResultFrame):
                 self._emit_usage(frame, settings=settings)
                 event = _terminal_event(frame, text_parts)
@@ -612,14 +633,49 @@ class ClaudeCodeAgent(Agent):
             expiry_at=horizon,
         )
         assert isinstance(suspended, SuspendedInteraction)
-        interaction_id = suspended.interaction_id
-        # interrupt_id == interaction_id (a one-ask agent); persist BEFORE the stop/drain so an
-        # instant human answer never waits on the reaper.
-        await persist_park(identity, [(interaction_id, {interaction_id: horizon.isoformat()})])
-        await handle.write_stdin(dump_frame(StopFrame(reason="park")))
-        yield SuspendedFinal(interaction_ids=[interaction_id], thread_id=thread_id, expiry_at=horizon.isoformat())
+        async for event in self._park_on_interaction(
+            suspended, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
+        ):
+            yield event
 
-    async def _on_tool_call(self, frame: ToolCallFrame, *, handle: Any, allowlist: set[str]) -> None:
+    async def _park_on_interaction(
+        self,
+        suspended: SuspendedInteraction,
+        *,
+        identity: ParkIdentity,
+        handle: Any,
+        thread_id: str,
+        horizon: datetime,
+    ) -> AsyncIterator[StreamEvent]:
+        """Record an already-created parked interaction into the durable index, stop the
+        runner, and surface the suspended terminal. The shared park tail BOTH the agent's OWN
+        async ask and a tool the agent drives that async-parks cross into the index through —
+        each supplies its interaction, this persists + stops + suspends uniformly.
+
+        ``horizon`` is this session's retention bound; the interaction's own deadline (bounded
+        by the retention gate) is what the entry is keyed to, falling back to the horizon when
+        the sentinel carried none."""
+        interaction_id = suspended.interaction_id
+        deadline = (suspended.expiry_at or horizon).isoformat()
+        # interrupt_id == interaction_id (a one-ask park); persist BEFORE the stop/drain so an
+        # instant human answer never waits on the reaper.
+        await persist_park(identity, [(interaction_id, {interaction_id: deadline})])
+        await handle.write_stdin(dump_frame(StopFrame(reason="park")))
+        yield SuspendedFinal(interaction_ids=[interaction_id], thread_id=thread_id, expiry_at=deadline)
+
+    async def _on_tool_call(
+        self, frame: ToolCallFrame, *, handle: Any, allowlist: set[str], thread_id: str | None
+    ) -> SuspendedInteraction | None:
+        """Run one proxied tool call and write its result back to the runner. Returns the park
+        sentinel when the tool async-parked (so the drive loop stops the runner and suspends),
+        else ``None``.
+
+        A tool that returns a :class:`SuspendedInteraction` async-parked its caller (a generic
+        contract sentinel — this loop learns nothing of the tool's resume machinery). On a
+        threaded run it is surfaced UP as a park, exactly as the agent's own async ask is; on a
+        thread-less (ephemeral) run it can never be resumed, so it is refused loudly to the
+        model as a tool error, mirroring the ephemeral async-ask refusal — never a silent
+        unresumable park."""
         if frame.tool_name not in allowlist:
             # A compromised session cannot widen its declared tool set — a loud protocol error.
             raise ProtocolError(
@@ -627,9 +683,24 @@ class ClaudeCodeAgent(Agent):
             )
         try:
             result = await tai42_app.tools.run_tool(frame.tool_name, frame.arguments)
-            await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=result)))
         except Exception as exc:
             await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True)))
+            return None
+        if isinstance(result, SuspendedInteraction):
+            if thread_id is None:
+                await handle.write_stdin(
+                    dump_frame(
+                        ToolResultFrame(
+                            call_id=frame.call_id,
+                            result="claude_code cannot async-park a tool-face (thread-less) run",
+                            is_error=True,
+                        )
+                    )
+                )
+                return None
+            return result
+        await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=result)))
+        return None
 
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:
         """Emit the SDK-reported usage/cost into the ACTIVE trace (its model calls bypass the

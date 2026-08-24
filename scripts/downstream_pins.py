@@ -4,8 +4,10 @@ just-released CORE member version, and open a tracking issue on this repo when
 one does — so a downstream never goes red (or latent-stale) unnoticed after a
 core major/minor, the way it used to until a hand-audit caught it.
 
-The audited downstreams and the manifests to read are hardcoded (``DOWNSTREAM``)
-so adding one is a reviewed one-line change, never silent discovery. For each
+The audited downstreams and the manifests to read are supplied by CONFIG
+(``DOWNSTREAM_PINS_MANIFESTS`` JSON, or a ``DOWNSTREAM_PINS_FILE`` path to the
+same) so this source names no specific private downstream; the CI workflow
+injects the map from a repository variable. For each
 manifest we fetch it over the GitHub contents API, parse every requirement out
 of ``[project].dependencies`` / ``[project.optional-dependencies]`` /
 ``[dependency-groups]`` / ``[tool.uv].dev-dependencies`` with ``packaging`` (so
@@ -49,21 +51,32 @@ REPO = "tai42"
 # A tag outside this set (e.g. a plugin) is ignored by the trigger and here.
 CORE = ("tai42-contract", "tai42-kit", "tai42-skeleton", "tai42-cli", "tai42-agents")
 
-# repo -> the manifests to audit. Explicit, not discovered: a new downstream is
-# a reviewed addition, and we never scan a repo we were not told to.
-DOWNSTREAM: dict[str, list[str]] = {
-    "tai-docs": ["pyproject.toml"],
-    "tai42-premium": [
-        "plugins/accounts-auth0-invites/pyproject.toml",
-        "e2e/pyproject.toml",
-    ],
-    "tai42-mcp-dynamic-postgres": ["pyproject.toml"],
-    "babelfish": ["packages/flows/pyproject.toml"],
-}
-
 # Set to "1" to print the issues that WOULD be opened instead of writing them
 # (used to validate the checker without touching the tracker).
 DRY_RUN = os.environ.get("DOWNSTREAM_PINS_DRY_RUN") == "1"
+
+
+def downstream_manifests() -> dict[str, list[str]]:
+    """The downstream ``repo -> [manifest paths]`` map to audit, read from CONFIG so this
+    source names no specific private downstream. ``DOWNSTREAM_PINS_MANIFESTS`` carries the JSON
+    map inline; ``DOWNSTREAM_PINS_FILE`` points at a JSON file holding it (the inline var
+    wins). Explicit, not discovered: the map is a reviewed configuration value, never scanned
+    from a repo we were not told to read. Absent both, the map is empty and the sweep is a
+    harmless no-op, so an unconfigured checkout never crashes."""
+    raw = os.environ.get("DOWNSTREAM_PINS_MANIFESTS")
+    if not raw:
+        path = os.environ.get("DOWNSTREAM_PINS_FILE")
+        raw = Path(path).read_text() if path else None
+    if not raw:
+        print("::warning::no downstream manifests configured (DOWNSTREAM_PINS_MANIFESTS / DOWNSTREAM_PINS_FILE)")
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict) or not all(
+        isinstance(repo, str) and isinstance(paths, list) and all(isinstance(p, str) for p in paths)
+        for repo, paths in data.items()
+    ):
+        sys.exit("::error::downstream manifests config must be a JSON object of repo -> [manifest paths]")
+    return {repo: list(paths) for repo, paths in data.items()}
 
 
 def _token() -> str:
@@ -147,10 +160,10 @@ def resolve_targets() -> dict[str, str]:
     return current_core_versions()
 
 
-def find_violations(targets: dict[str, str], token: str) -> dict[str, list[str]]:
+def find_violations(targets: dict[str, str], token: str, downstream: dict[str, list[str]]) -> dict[str, list[str]]:
     """title -> sorted, de-duplicated ``repo/file:line — range`` rows."""
     violations: dict[str, set[str]] = {}
-    for repo, manifests in DOWNSTREAM.items():
+    for repo, manifests in downstream.items():
         for path in manifests:
             try:
                 text = fetch_manifest(repo, path, token)
@@ -235,8 +248,12 @@ def main() -> int:
     targets = resolve_targets()
     if not targets:
         return 0
+    downstream = downstream_manifests()
+    if not downstream:
+        print("no downstream manifests configured; nothing to audit.")
+        return 0
     print(f"checking downstream pins against released core version(s): {targets}")
-    violations = find_violations(targets, token)
+    violations = find_violations(targets, token, downstream)
     if not violations:
         print("All downstream pins admit the released core version(s); nothing to do.")
         return 0
