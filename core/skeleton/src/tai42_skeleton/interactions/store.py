@@ -936,9 +936,7 @@ class InteractionStore:
         items: list[dict[str, Any]] = []
         for raw_id in raw_ids:
             interaction_id = as_str(raw_id)
-            raw = await cast(
-                "Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id))
-            )
+            raw = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
             state = self._state_from_raw(raw)
             if state is None or state.status != "pending":
                 # Vanished, or an answered member lingering in the index before the

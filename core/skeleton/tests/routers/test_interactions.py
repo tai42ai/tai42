@@ -2005,7 +2005,7 @@ async def test_callback_post_oversized_query_413_when_off(wired):
 # -- parked-interactions audit door (GET /api/interactions/pending) -------------
 
 
-def _async_park(store, *, iid="p1", gid="pg", channel=None, recipient=None) -> InteractionRequest:
+def _async_park(store, *, iid="p1", gid="pg", channel=None, recipient=None, audience=None) -> InteractionRequest:
     now = datetime.now(UTC)
     future = now + timedelta(hours=1)
     return InteractionRequest(
@@ -2022,6 +2022,7 @@ def _async_park(store, *, iid="p1", gid="pg", channel=None, recipient=None) -> I
         expiry_at=future,
         channel=channel,
         recipient=recipient,
+        audience=audience,
     )
 
 
@@ -2036,12 +2037,19 @@ async def test_pending_operator_gets_items_and_count(wired):
     assert result["items"][0]["recipient"] == "@ops"
 
 
-async def test_pending_restricted_caller_forbidden(wired):
-    from tai42_skeleton.operations import ForbiddenError
-
-    await wired.store.add(wired.fake, _async_park(wired.store, iid="p1"), idle_ttl=86400)
-    with _identity(user_id="u1", owner="owner-1"), pytest.raises(ForbiddenError, match="restricted to operators"):
-        await ops.list_pending_interactions()
+async def test_pending_restricted_caller_sees_only_its_addressed_slice(wired):
+    # A restricted caller gets the inbox's audience filter, never a 403 — this
+    # operation is PROJECTED, and a projected route must agree with the gate for
+    # every identity it is projected to (the owned-keys e2e pins that invariant).
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="mine", audience="u1"), idle_ttl=86400)
+    await wired.store.add(
+        wired.fake, _async_park(wired.store, iid="other", gid="og", audience="owner-2"), idle_ttl=86400
+    )
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="broadcast", gid="bg"), idle_ttl=86400)
+    with _identity(user_id="u1", owner="owner-1"):
+        body = await ops.list_pending_interactions()
+    assert body["count"] == 1
+    assert [item["interaction_id"] for item in body["items"]] == ["mine"]
 
 
 async def test_pending_route_returns_data_envelope(wired):
@@ -2053,10 +2061,19 @@ async def test_pending_route_returns_data_envelope(wired):
     assert body["items"][0]["interaction_id"] == "p1"
 
 
-async def test_pending_route_restricted_maps_to_403(wired):
+async def test_pending_route_restricted_gets_filtered_200(wired):
+    # Through the route a restricted caller is served (200) with only its own
+    # addressed slice — the projected-route/gate agreement, not a denial.
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="mine", audience="u1"), idle_ttl=86400)
+    await wired.store.add(
+        wired.fake, _async_park(wired.store, iid="other", gid="og", audience="owner-2"), idle_ttl=86400
+    )
     with _identity(user_id="u1", owner="owner-1"):
         resp = await router.list_pending_interactions(make_request("GET"))
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    body = _json(resp)["data"]
+    assert body["count"] == 1
+    assert body["items"][0]["interaction_id"] == "mine"
 
 
 async def test_pending_route_clamps_limit(wired, monkeypatch):
