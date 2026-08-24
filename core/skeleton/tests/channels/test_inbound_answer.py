@@ -23,6 +23,7 @@ import httpx
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelNotification, Correlation
+from tai42_contract.conversations import BlankInboundTextError
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import inbound as inbound_module
@@ -144,6 +145,10 @@ def wired(monkeypatch):
 
     hooks = FakeHooksManager()
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+
+    # The host-pin fails CLOSED when the public base is unset, so configure it to the
+    # host _CALLBACK_URL is on; the pin-specific tests re-point it via _pin_public_base.
+    _pin_public_base(monkeypatch, "https://host.example")
 
     yield SimpleNamespace(channel=channel, accept_calls=accept_calls, events=hooks.events)
     app._channel_registry.reset()
@@ -421,6 +426,7 @@ async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
 
     hooks = FakeHooksManager()
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+    _pin_public_base(monkeypatch, "https://host.example")
 
     store = FakeStore(_entry())
     _stub_forward(monkeypatch, httpx.Response(400, json={"error": "bad", "retry_in_place": True}))
@@ -452,7 +458,8 @@ def _pin_public_base(monkeypatch, base: str | None) -> None:
 async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wired, monkeypatch):
     # A stored callback_url whose host is not the configured public base (a poisoned or
     # stale store entry) must NEVER be POSTed to: the reservation is released, the reply
-    # is treated as uncorrelated (the caller bridges it), and nothing is forwarded.
+    # is treated as uncorrelated (the caller bridges it), and nothing is forwarded. A
+    # best-effort operator event fires — carrying the reason, NEVER the URL/ticket.
     _pin_public_base(monkeypatch, "https://host.example")
     store = FakeStore(_entry(callback_url="https://evil.example/api/interactions/callback/tkt"))
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
@@ -466,7 +473,18 @@ async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wire
     assert store.released == ["k"]  # the poisoned reservation is dropped
     assert wired.channel.notifications == []
     assert wired.accept_calls == []
-    assert wired.events == []
+    # The callback-discarded event fired with the right payload and NO url/ticket.
+    assert len(wired.events) == 1
+    event = wired.events[0]
+    assert event.topic == inbound_module.CALLBACK_DISCARDED_EVENT_TOPIC == "interactions.callback_discarded"
+    assert event.payload == {
+        "channel": "fakechan",
+        "interaction_id": _INTERACTION_ID,
+        "client_address": "+15550001111",
+        "reason": "host_mismatch",
+    }
+    assert "callback_url" not in event.payload
+    assert "evil.example" not in str(event.payload)  # the URL never leaks into the event
 
 
 async def test_callback_host_match_forwards(wired, monkeypatch):
@@ -484,9 +502,9 @@ async def test_callback_host_match_forwards(wired, monkeypatch):
     assert store.released == ["k"]
 
 
-async def test_callback_host_pin_skipped_when_public_base_unset(wired, monkeypatch):
-    # No configured public base -> the check cannot run and is skipped (a correlated
-    # channel always sets one in practice); the forward still happens.
+async def test_callback_pin_fails_closed_when_public_base_unset(wired, monkeypatch):
+    # No configured public base -> FAIL-CLOSED (never forward to an unpinnable host):
+    # release, discard, and treat as no correlation; the discarded event names the reason.
     _pin_public_base(monkeypatch, None)
     store = FakeStore(_entry(callback_url="https://anything.example/api/interactions/callback/tkt"))
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
@@ -495,8 +513,53 @@ async def test_callback_host_pin_skipped_when_public_base_unset(wired, monkeypat
         channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
     )
 
-    assert result.outcome is InboundAnswerOutcome.FORWARDED
-    assert len(forward_calls) == 1
+    assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert forward_calls == []  # nothing forwarded
+    assert store.released == ["k"]
+    assert len(wired.events) == 1
+    assert wired.events[0].topic == inbound_module.CALLBACK_DISCARDED_EVENT_TOPIC
+    assert wired.events[0].payload["reason"] == "public_base_unset"
+
+
+async def test_callback_pin_fails_closed_on_malformed_url(wired, monkeypatch):
+    # A stored callback URL with a malformed port makes urlparse().port raise ValueError:
+    # FAIL-CLOSED (treat as a mismatch), release, discard, event reason "malformed_url".
+    _pin_public_base(monkeypatch, "https://host.example")
+    store = FakeStore(_entry(callback_url="https://host.example:notaport/api/interactions/callback/tkt"))
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert forward_calls == []
+    assert store.released == ["k"]
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["reason"] == "malformed_url"
+
+
+# -- _bridge tolerance parity (old channels ack'd blank/unrouted bridges) --------
+
+
+@pytest.mark.parametrize("error", [BlankInboundTextError("blank"), LookupError("no route")])
+async def test_404_bridge_tolerates_blank_or_unrouted_reply(wired, monkeypatch, error):
+    # Parity with the hand-rolled channels: a blank reply or an address with no bound
+    # route is nothing to bridge — the ladder acks it (BRIDGED) and never re-raises, so
+    # a permanently-blank/unrouted message can't provoke a provider retry-storm.
+    async def _raising_accept(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(app, "_conversation_accept", _raising_accept)
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(404))
+
+    result = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="x", store=store, bridge=_bridge()
+    )
+
+    assert result.outcome is InboundAnswerOutcome.BRIDGED  # handled, not rethrown
+    assert store.released == ["k"]
 
 
 # -- security carry-in (b): rejection-reason truncation --------------------------

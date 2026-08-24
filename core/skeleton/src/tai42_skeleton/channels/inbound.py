@@ -22,7 +22,9 @@ The operator is told of a rejected answer through a PLATFORM EVENT, not a wired
 call: core states the fact by emitting the ``interactions.answer_rejected`` topic
 on the hooks manager, and a deployment decides what to do with it (a hook that
 runs ``notify_user``, opens a ticket, ...) in config. Emission is best-effort —
-a hooks-manager failure never fails the inbound webhook.
+a hooks-manager failure never fails the inbound webhook. NOTE: a hostile guest can
+fire these topics (``interactions.answer_rejected``, ``interactions.callback_discarded``)
+once per inbound message, so a hook wired on either topic should be rate-limit-aware.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from tai42_contract.channels import (
     InboundAnswerResult,
     InboundBridge,
 )
+from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.clients.impl.http import HttpxClient
 
 from tai42_skeleton.interactions.settings import interactions_settings
@@ -54,6 +57,7 @@ __all__ = [
     "ANSWER_REJECTED_EVENT_TOPIC",
     "ANSWER_REJECTED_FINAL_NOTICE",
     "ANSWER_REJECTED_RETRY_NOTICE",
+    "CALLBACK_DISCARDED_EVENT_TOPIC",
     "AnswerForwardError",
     "InboundAnswerOutcome",
     "InboundAnswerResult",
@@ -84,6 +88,14 @@ ANSWER_REJECTED_FINAL_NOTICE = "Sorry, that answer wasn't accepted and this ques
 # hard-mismatch 400 variants emit it — the ``retry_in_place`` payload key distinguishes.
 ANSWER_REJECTED_EVENT_TOPIC = "interactions.answer_rejected"
 
+# The platform-event topic emitted when the handler DISCARDS a stored callback instead
+# of forwarding the guest's answer to it — because the callback's host is not the
+# configured public base, the public base is unset, or the stored URL is malformed
+# (fail-closed: the guest's answer is never shipped to a non-configured host). Best-effort
+# like the rejected-answer event; the payload carries the ``reason`` and NEVER the URL or
+# its ticket. A hook here should be rate-limit-aware (see the module docstring).
+CALLBACK_DISCARDED_EVENT_TOPIC = "interactions.callback_discarded"
+
 # Upper bound on the door's human-readable rejection reason as it rides into the
 # guest notice and the operator event payload. The door names the failing field in a
 # short sentence; a pathological or attacker-influenced body must not blow up a guest
@@ -92,48 +104,58 @@ ANSWER_REJECTED_EVENT_TOPIC = "interactions.answer_rejected"
 _REASON_MAX_CHARS = 300
 
 
-def _callback_host_pinned(callback_url: str, *, channel_id: str, interaction_id: str) -> bool:
-    """Whether ``callback_url``'s scheme+host+port matches the configured public base.
+def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id: str) -> str | None:
+    """The reason a stored ``callback_url`` must NOT receive the forwarded answer, or
+    ``None`` when it passes and the answer may be forwarded.
 
     A correlation's ``callback_url`` is a bearer capability THIS platform minted from
     ``INTERACTIONS_PUBLIC_BASE_URL`` (``helper.py`` builds it as
-    ``{public_base_url}/api/interactions/callback/{ticket}``). Before the handler POSTs
-    a guest's answer to it, the host is re-checked against the current public base: a
-    stored entry whose host no longer matches — a poisoned or stale store record, or a
-    misconfiguration — must NEVER receive the forwarded answer, because that POST would
-    ship the guest's reply to an attacker-chosen host. The offending host is logged
-    loudly (never the full URL: it embeds the callback ticket).
-
-    When no public base is configured the platform cannot have minted a callback and
-    the check cannot run; it is skipped with a warning rather than silently passing a
-    spoof — a correlated channel always sets a public base in practice.
+    ``{public_base_url}/api/interactions/callback/{ticket}``). Before the handler POSTs a
+    guest's answer to it, the URL is re-checked against the current public base — a stored
+    entry that does not match must NEVER receive the answer, because that POST would ship
+    the guest's reply to a non-configured (possibly attacker-chosen) host. FAIL-CLOSED on
+    every non-match: a host mismatch (``"host_mismatch"``), an unset public base the check
+    cannot run against (``"public_base_unset"``), or a malformed stored/base URL — a bad
+    port raises ``ValueError`` from ``urlparse().port`` (``"malformed_url"``). The offending
+    host is logged loudly, never the full URL (it embeds the callback ticket).
     """
     public_base = interactions_settings().public_base_url
     if public_base is None:
-        logger.warning(
+        logger.error(
             "inbound: INTERACTIONS_PUBLIC_BASE_URL is unset; cannot host-pin the callback for interaction %s "
-            "on channel %r — forwarding without the host check",
+            "on channel %r — discarding the stored callback and treating as no correlation (fail-closed)",
             interaction_id,
             channel_id,
         )
-        return True
-    base = urlparse(public_base)
-    target = urlparse(callback_url)
-    if (
-        target.scheme == base.scheme
-        and (target.hostname or "").lower() == (base.hostname or "").lower()
-        and target.port == base.port
-    ):
-        return True
+        return "public_base_unset"
+    try:
+        base = urlparse(public_base)
+        target = urlparse(callback_url)
+        matches = (
+            target.scheme == base.scheme
+            and (target.hostname or "").lower() == (base.hostname or "").lower()
+            and target.port == base.port  # accessing .port validates the port; may raise ValueError
+        )
+        target_netloc, base_netloc = target.netloc, base.netloc
+    except ValueError:
+        logger.error(
+            "inbound: correlation for interaction %s on channel %r carries a malformed callback URL "
+            "(unparseable host/port) — discarding it and treating as no correlation (fail-closed)",
+            interaction_id,
+            channel_id,
+        )
+        return "malformed_url"
+    if matches:
+        return None
     logger.error(
         "inbound: correlation for interaction %s on channel %r carries a callback host %r that is not the "
-        "configured public base host %r — releasing and treating as no correlation (possible poisoned store)",
+        "configured public base host %r — discarding it and treating as no correlation (possible poisoned store)",
         interaction_id,
         channel_id,
-        target.netloc,
-        base.netloc,
+        target_netloc,
+        base_netloc,
     )
-    return False
+    return "host_mismatch"
 
 
 async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
@@ -147,15 +169,35 @@ async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
 async def _bridge(bridge: InboundBridge) -> None:
     """Hand the reply to the conversation bridge as a fresh turn (the reply is not,
     or no longer, an answer). Idempotent on ``(channel, provider_message_id)`` at
-    the conversation seam, so a provider redelivery does not double-bridge."""
-    await tai42_app.conversations.accept(
-        channel=bridge.channel_id,
-        our_identity=bridge.our_identity,
-        client_address=bridge.client_address,
-        cap_key=bridge.cap_key,
-        text=bridge.bridge_text,
-        provider_message_id=bridge.provider_message_id,
-    )
+    the conversation seam, so a provider redelivery does not double-bridge.
+
+    Tolerant parity with the hand-rolled channels: a blank reply
+    (:class:`BlankInboundTextError`) or an address with no bound route
+    (:class:`LookupError`) is nothing to bridge — it is logged and swallowed so the
+    outcome still returns and the webhook still acks, exactly as each channel did
+    before the migration (never a 5xx that would provoke a provider retry-storm on a
+    permanently-blank/unrouted message)."""
+    try:
+        await tai42_app.conversations.accept(
+            channel=bridge.channel_id,
+            our_identity=bridge.our_identity,
+            client_address=bridge.client_address,
+            cap_key=bridge.cap_key,
+            text=bridge.bridge_text,
+            provider_message_id=bridge.provider_message_id,
+        )
+    except BlankInboundTextError:
+        logger.warning(
+            "inbound: blank bridge text for %s on channel %r; acked, no turn",
+            bridge.client_address,
+            bridge.channel_id,
+        )
+    except LookupError:
+        logger.warning(
+            "inbound: no conversation route for %s on channel %r; acked, no turn",
+            bridge.client_address,
+            bridge.channel_id,
+        )
 
 
 async def _notify_guest(bridge: InboundBridge, message: str) -> None:
@@ -227,6 +269,35 @@ async def _emit_answer_rejected(
         )
 
 
+async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str, reason: str) -> None:
+    """Emit the ``interactions.callback_discarded`` platform event ONCE when the handler
+    fail-closes on a stored callback instead of forwarding the answer to it.
+
+    ``reason`` is one of ``"host_mismatch"`` / ``"public_base_unset"`` / ``"malformed_url"``.
+    The payload deliberately carries NO ``callback_url`` (it embeds the bearer ticket) —
+    only the channel, interaction, guest address and reason. Best-effort: a hooks-manager
+    failure is logged and swallowed so it never fails the inbound webhook.
+    """
+    from tai42_skeleton.hooks.cache import get_hooks_manager
+
+    payload = {
+        "channel": bridge.channel_id,
+        "interaction_id": interaction_id,
+        "client_address": bridge.client_address,
+        "reason": reason,
+    }
+    try:
+        await get_hooks_manager().on_event(topic=CALLBACK_DISCARDED_EVENT_TOPIC, payload=payload)
+    except Exception:
+        logger.warning(
+            "inbound: failed to emit %r for the discarded callback on channel %r interaction %s",
+            CALLBACK_DISCARDED_EVENT_TOPIC,
+            bridge.channel_id,
+            interaction_id,
+            exc_info=True,
+        )
+
+
 async def handle_inbound_answer(
     *,
     channel_id: str,
@@ -274,12 +345,16 @@ async def handle_inbound_answer(
         # the reply as a normal turn. The handler touches nothing.
         return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
-    if not _callback_host_pinned(entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id):
-        # The stored callback host is not this platform's configured public base:
-        # never POST the guest's answer to it. Release the poisoned/stale reservation
-        # and treat the reply as uncorrelated so the caller bridges it as a normal turn
-        # (never lost) — the loud log is emitted by the pin check.
+    pin_failure = _callback_pin_failure(
+        entry.callback_url, channel_id=channel_id, interaction_id=entry.interaction_id
+    )
+    if pin_failure is not None:
+        # The stored callback cannot be trusted (wrong host / unset base / malformed):
+        # never POST the guest's answer to it. Release the poisoned/stale reservation,
+        # emit the operator event, and treat the reply as uncorrelated so the caller
+        # bridges it as a normal turn (never lost) — the loud log is in the pin check.
         await store.release_correlation(correlation_key)
+        await _emit_callback_discarded(bridge, interaction_id=entry.interaction_id, reason=pin_failure)
         return InboundAnswerResult(outcome=InboundAnswerOutcome.NO_CORRELATION)
 
     try:

@@ -26,6 +26,7 @@ Events-API dedupe claim:
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -35,6 +36,8 @@ from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_slack.settings import SlackRedisSettings, slack_redis_settings
+
+logger = logging.getLogger(__name__)
 
 _CORR_KEY = "channel:slack:corr:{key}"
 _DEDUPE_KEY = "channel:slack:event:{event_id}"
@@ -83,12 +86,23 @@ class SlackThreadCorrelationStore:
             raw = cast("str | None", await redis.get(_CORR_KEY.format(key=key)))
         if raw is None:
             return None
-        data = json.loads(raw)
-        return Correlation(
-            callback_url=data["callback_url"],
-            interaction_id=data.get("interaction_id", ""),
-            ttl_deadline=datetime.fromisoformat(data["timeout_at"]),
-        )
+        try:
+            data = json.loads(raw)
+            return Correlation(
+                callback_url=data["callback_url"],
+                interaction_id=data.get("interaction_id", ""),
+                ttl_deadline=datetime.fromisoformat(data["timeout_at"]),
+            )
+        except (ValueError, KeyError, TypeError):
+            # A record written by the pre-migration code (a bare callback URL string, not
+            # a JSON record) does not parse. Tolerate it as a graceful miss so the reply
+            # bridges, never a 500; never log the value (it is a callback URL).
+            logger.warning(
+                "slack: corr record for key %r is not the current JSON shape "
+                "(pre-migration bare-URL record?); treating as no correlation",
+                key,
+            )
+            return None
 
     async def release_correlation(self, key: str) -> None:
         """Drop any reservation under ``key``, idempotently (a no-op when free)."""
@@ -153,12 +167,6 @@ async def store_correlation(ts: str, callback_url: str, interaction_id: str, tim
         raise ChannelDeliveryError(f"question budget already expired (timeout_at={timeout_at.isoformat()})")
     entry = Correlation(callback_url=callback_url, interaction_id=interaction_id, ttl_deadline=timeout_at)
     await slack_thread_correlation_store.set_correlation(ts, entry, ttl_seconds=ttl)
-
-
-async def delete_correlation(thread_ts: str) -> None:
-    """Drop the ``ts`` mapping (the callback door's single-use claim is the real
-    idempotency guard; this just stops later thread chatter re-forwarding)."""
-    await slack_thread_correlation_store.release_correlation(thread_ts)
 
 
 async def store_form_record(

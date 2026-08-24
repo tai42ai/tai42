@@ -12,7 +12,6 @@ from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_channel_slack.correlation import (
     DEDUPE_TTL_SECONDS,
     claim_dedupe,
-    delete_correlation,
     delete_form_record,
     get_form_record,
     release_dedupe,
@@ -96,9 +95,11 @@ async def test_store_correlation_expired_budget_raises_and_writes_nothing(fake_r
     assert fake_redis.store == {}
 
 
-async def test_delete_correlation_removes_mapping(fake_redis):
-    await store_correlation("11.22", _CALLBACK, "int-9", datetime.now(UTC) + timedelta(seconds=60))
-    await delete_correlation("11.22")
+async def test_thread_get_tolerates_legacy_bare_url_record(fake_redis):
+    # A record written by the PRE-migration code is a bare callback URL string, not the
+    # current JSON. get_correlation must read it as a graceful miss (-> the reply
+    # bridges), never raise a JSONDecodeError.
+    fake_redis.store["channel:slack:corr:11.22"] = "http://gateway/api/interactions/callback/legacy"
     assert await slack_thread_correlation_store.get_correlation("11.22") is None
 
 
@@ -196,7 +197,6 @@ async def test_missing_redis_url_raises_on_every_store_function(monkeypatch: pyt
         slack_form_correlation_store.get_correlation("int-9"),
         slack_form_correlation_store.release_correlation("int-9"),
         store_correlation("11.22", _CALLBACK, "int-9", _deadline()),
-        delete_correlation("11.22"),
         store_form_record("int-9", _CALLBACK, _SCHEMA, "q", _deadline()),
         get_form_record("int-9"),
         delete_form_record("int-9"),

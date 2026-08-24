@@ -696,14 +696,14 @@ async def _cached_form_flow_id(schema: dict[str, Any]) -> str:
 
 
 def _rejection_body(question: str, error_line: str) -> str:
-    """The re-sent Flow's body: the question, then a generic rejection line.
+    """The re-sent Flow's body: the question, then the door's rejection line.
 
     When the composed body would exceed ``_FLOW_BODY_MAX_CHARS`` the question is
     dropped WHOLE — the fresh Flow re-presents the fields, so a mid-string ellipsis
     (forbidden by the no-silent-truncation posture) is never needed. ``error_line`` is
-    the short generic ``_CALLBACK_REJECTION_OPAQUE`` line (the door's specific reason
-    rides the operator event instead, since the shared ladder abstracts the door
-    response away), which always fits the cap."""
+    the door's OWN reason (which names the failing field), bounded by
+    :func:`_door_error_line` to ``_DOOR_REJECTION_MAX_CHARS`` — or the fixed opaque line
+    when the door gave none — so the lead + tail always fits the cap."""
     tail = f"{_FORM_REJECTION_LEAD} {error_line}"
     full = f"{question}\n\n{tail}"
     return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail

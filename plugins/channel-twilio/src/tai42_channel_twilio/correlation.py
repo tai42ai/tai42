@@ -22,6 +22,7 @@ a redelivered webhook from re-forwarding a peeked-but-not-released reply.
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import UTC, datetime
 from typing import cast
@@ -31,6 +32,8 @@ from tai42_contract.channels import ChannelDeliveryError, Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_twilio.settings import TwilioRedisSettings, twilio_redis_settings, twilio_settings
+
+logger = logging.getLogger(__name__)
 
 
 class PendingQuestionExistsError(ChannelDeliveryError):
@@ -88,7 +91,18 @@ class TwilioCorrelationStore:
             raw = cast("str | bytes | None", await redis.get(_pending_key(key)))
         if raw is None:
             return None
-        return Correlation.model_validate_json(raw)
+        try:
+            return Correlation.model_validate_json(raw)
+        except ValueError:
+            # A record written by the pre-migration code (legacy JSON with no
+            # interaction_id) does not validate as a Correlation. Tolerate it as a
+            # graceful miss so the reply bridges, never a 500; never log the value.
+            logger.warning(
+                "twilio: pending record for key %r is not the current Correlation shape "
+                "(pre-migration record?); treating as no correlation",
+                key,
+            )
+            return None
 
     async def release_correlation(self, key: str) -> None:
         """Drop any reservation under ``key``, idempotently (a no-op when free)."""

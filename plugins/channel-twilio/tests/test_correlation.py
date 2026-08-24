@@ -8,6 +8,7 @@ door and the ``MessageSid`` dedupe set.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -59,6 +60,14 @@ async def test_set_get_round_trip(fake_redis: FakeRedis):
 
 
 async def test_get_unknown_returns_none(fake_redis: FakeRedis):
+    assert await twilio_correlation_store.get_correlation(_KEY) is None
+
+
+async def test_get_tolerates_legacy_record(fake_redis: FakeRedis):
+    # A record written by the PRE-migration code is legacy JSON (callback_url + timeout_at,
+    # no interaction_id/ttl_deadline) that does not validate as a Correlation. get_correlation
+    # must read it as a graceful miss (-> the reply bridges), never raise a ValidationError.
+    fake_redis.store[_REDIS_KEY] = json.dumps({"callback_url": _CALLBACK, "timeout_at": _deadline().isoformat()})
     assert await twilio_correlation_store.get_correlation(_KEY) is None
 
 

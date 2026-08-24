@@ -47,6 +47,14 @@ async def test_get_unknown_returns_none(fake_redis):
     assert await store.get_correlation("99") is None
 
 
+async def test_get_tolerates_legacy_bare_url_record(fake_redis):
+    # A record written by the PRE-migration code is a bare callback URL string, not a JSON
+    # Correlation. get_correlation must read it as a graceful miss (-> the reply bridges),
+    # never raise a JSON/validation error.
+    fake_redis.data["channel:telegram:corr:42"] = "https://example.test/api/interactions/callback/legacy"
+    assert await store.get_correlation("42") is None
+
+
 async def test_release_removes_key_and_is_idempotent(fake_redis):
     await store.set_correlation("42", _entry(), ttl_seconds=600)
     await store.release_correlation("42")

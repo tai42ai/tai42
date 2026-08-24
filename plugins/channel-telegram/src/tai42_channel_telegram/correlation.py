@@ -21,6 +21,7 @@ makes the one-pending guarantee explicit at the port).
 
 from __future__ import annotations
 
+import logging
 from typing import cast
 
 from tai42_contract.app import tai42_app
@@ -28,6 +29,8 @@ from tai42_contract.channels import Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegram_correlation_settings
+
+logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "channel:telegram:corr:"
 
@@ -77,7 +80,18 @@ class TelegramCorrelationStore:
             raw = cast("str | None", await r.get(_key(key)))
         if raw is None:
             return None
-        return Correlation.model_validate_json(raw)
+        try:
+            return Correlation.model_validate_json(raw)
+        except ValueError:
+            # A record written by the pre-migration code (a bare callback URL string, not
+            # a JSON Correlation) does not parse. Tolerate it as a graceful miss so the
+            # reply bridges, never a 500; never log the value (it is a callback URL).
+            logger.warning(
+                "telegram: correlation for key %r is not the current Correlation shape "
+                "(pre-migration bare-URL record?); treating as no correlation",
+                key,
+            )
+            return None
 
     async def release_correlation(self, key: str) -> None:
         """Drop any reservation under ``key``, idempotently (a no-op when free)."""
