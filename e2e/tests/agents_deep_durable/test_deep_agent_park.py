@@ -28,6 +28,7 @@ import json
 from collections.abc import Callable
 
 from tai42_contract.interactions import SuspendedInteraction
+
 from tai42_e2e import wait_for_async
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
