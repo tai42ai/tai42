@@ -26,6 +26,7 @@ dependencies = [
     # The pure interface contract the plugin registers through — the Sandbox ABC,
     # the session/stream models, SandboxPolicy, the error family, PluginItemKind.SANDBOX,
     # and the tai42_app.sandboxes facet.
+    # Republished for the tai42-contract 5.x major (unified park protocol).
     "tai42-contract>=5.0,<6",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
