@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
     AnswerFormat,
@@ -48,6 +49,9 @@ class ChannelDeliveryError(Exception):
     ``retryable`` is True.
     """
 
+    # A question handed to a channel could not be delivered to the human.
+    __tai_error_kind__ = ErrorKind.DELIVERY_FAILED
+
     def __init__(self, message: str, *, retryable: bool = False, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -64,6 +68,10 @@ class ChannelInputError(Exception):
     operation door maps it to the client-error (400) class, never the retryable
     503 a transient delivery failure earns.
     """
+
+    # The input's shape/content is contract-valid but unrenderable by nature — a
+    # permanent client-side refusal.
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 
 with warnings.catch_warnings():

@@ -7,9 +7,14 @@ Each carries the profile ``name`` it concerns.
 
 from __future__ import annotations
 
+from tai42_contract.errors import ErrorKind
+
 
 class SettingsProfileError(Exception):
     """Base for settings-profile view failures, carrying the profile ``name``."""
+
+    # A bare view failure is an unclassified store fault (subclasses stamp their own).
+    __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, name: str, message: str):
         super().__init__(message)
@@ -19,6 +24,9 @@ class SettingsProfileError(Exception):
 class SettingsProfileNotFoundError(SettingsProfileError):
     """No settings profile (or no active profile) named ``name``."""
 
+    # The addressed profile does not exist.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
+
     def __init__(self, name: str):
         super().__init__(name, f"settings profile {name!r} not found")
 
@@ -26,12 +34,18 @@ class SettingsProfileNotFoundError(SettingsProfileError):
 class SettingsProfileExistsError(SettingsProfileError):
     """A settings profile named ``name`` already exists."""
 
+    # A create colliding with an existing profile.
+    __tai_error_kind__ = ErrorKind.CONFLICT
+
     def __init__(self, name: str):
         super().__init__(name, f"settings profile {name!r} already exists")
 
 
 class SettingsProfileVersionNotFoundError(SettingsProfileError):
     """No version ``version`` exists for settings profile ``name``."""
+
+    # A requested profile version does not exist.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, name: str, version: int | None = None):
         self.version = version
