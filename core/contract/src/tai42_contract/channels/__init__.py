@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import warnings
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -460,7 +461,53 @@ class CorrelationStore(Protocol):
         ...
 
 
+class AnswerForwardError(Exception):
+    """The interactions answer door did not accept a forwarded answer on a status the
+    shared inbound-answer ladder cannot resolve (401/413/5xx or a transport fault).
+
+    Raised by :meth:`AppChannels.handle_inbound_answer` WITHOUT releasing the
+    correlation, so the channel's transport-level retry (the provider's webhook
+    redelivery) re-runs the ladder and the answer is never silently lost. A channel
+    lets it propagate out of its inbound webhook so the provider redelivers — the
+    same loud-failure contract each channel kept when it hand-rolled the ladder.
+    """
+
+
+class InboundAnswerOutcome(StrEnum):
+    """What the shared inbound-answer ladder decided for one inbound reply on a
+    correlation key. A channel maps this to its own transport ack."""
+
+    NO_CORRELATION = "no_correlation"  # no pending ask on this key — the CALLER bridges it as a normal turn
+    FORWARDED = "forwarded"  # the door accepted the answer; the correlation was released
+    RETRY_KEPT = "retry_kept"  # the door rejected a re-answerable ask; correlation KEPT, guest told what's expected
+    BRIDGED = "bridged"  # the ask is gone or the mismatch is hard; correlation released and the reply bridged
+
+
+class InboundBridge(BaseModel):
+    """The context a bridged turn needs when a reply is not (or no longer) an answer.
+
+    A channel hands one of these to :meth:`AppChannels.handle_inbound_answer` alongside
+    the correlation key and answer value. ``channel_id`` is the registered channel
+    name; ``our_identity`` and ``client_address`` are the conversation's two addresses
+    (the operator identity the turn answers from, and the guest's attested address /
+    thread); ``cap_key`` is the party the per-address turn cap holds accountable;
+    ``provider_message_id`` dedupes a provider redelivery at the conversation seam;
+    ``bridge_text`` is the channel's faithful rendering of the guest's message for a
+    bridged turn.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    channel_id: str
+    our_identity: str
+    client_address: str
+    cap_key: str
+    provider_message_id: str
+    bridge_text: str
+
+
 __all__ = [
+    "AnswerForwardError",
     "Channel",
     "ChannelDelivery",
     "ChannelDeliveryError",
@@ -469,4 +516,6 @@ __all__ = [
     "ChannelTemplate",
     "Correlation",
     "CorrelationStore",
+    "InboundAnswerOutcome",
+    "InboundBridge",
 ]

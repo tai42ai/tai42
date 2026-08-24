@@ -97,6 +97,7 @@ class TwilioChannel:
             twilio_number=from_number,
             human_number=target,
             callback_url=delivery.callback_url,
+            interaction_id=delivery.interaction_id,
             timeout_at=delivery.timeout_at,
         )
         try:

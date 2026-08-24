@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import SecretStr
+from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import reset_all_settings
 
@@ -68,18 +69,28 @@ def test_route_metadata(stub_app):
     assert route.summary == "Telegram channel inbound webhook"
 
 
-async def test_valid_reply_forwards_answer_and_clears_mapping(http_recorder, fake_redis):
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
+async def test_valid_reply_invokes_shared_ladder_and_acks_forwarded(http_recorder, fake_redis, channels):
+    # The reply is handed to the ONE shared ladder with the anchor id as the
+    # correlation key, the reply text as the answer, and the bridge context; a
+    # FORWARDED outcome acks "forwarded".
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
 
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    forwards = _forward_requests(http_recorder)
-    assert len(forwards) == 1
-    forward = forwards[0]
-    assert str(forward.url) == _CALLBACK
-    assert json.loads(forward.content) == {"answer": "the blue one"}
-    assert fake_redis.data == {}
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.channel_id == "telegram"
+    assert call.correlation_key == "42"  # the replied-to anchor message id
+    assert call.answer == "the blue one"
+    assert call.bridge.channel_id == "telegram"
+    assert call.bridge.our_identity == "123456"  # the bot's numeric id
+    assert call.bridge.client_address == "777"
+    assert call.bridge.cap_key == "777"
+    assert call.bridge.provider_message_id == "5"  # the update id
+    assert call.bridge.bridge_text == "the blue one"
+    # The plugin no longer forwards itself; the ladder owns that.
+    assert _forward_requests(http_recorder) == []
 
 
 async def test_missing_wrong_and_wrong_length_secret_all_deny_identically(http_recorder, fake_redis):
@@ -155,31 +166,30 @@ async def test_bridge_only_deployment_no_recipients_does_not_misconfigure(
     assert conversations.accept_calls[0].client_address == "555"
 
 
-async def test_reply_from_allowlisted_chat_forwards(http_recorder, fake_redis):
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
+async def test_reply_from_allowlisted_chat_reaches_the_ladder(http_recorder, fake_redis, channels):
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     response = await inbound(make_inbound_request(_reply_update(chat_id=888), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(_forward_requests(http_recorder)) == 1
+    assert len(channels.inbound_calls) == 1
 
 
-async def test_reply_from_chat_allowlisted_only_by_username_forwards(
-    http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch
+async def test_reply_from_chat_allowlisted_only_by_username_reaches_the_ladder(
+    http_recorder, fake_redis, channels, monkeypatch: pytest.MonkeyPatch
 ):
     # The allowlist names the chat by @username alone; the update's numeric
     # chat id appears nowhere in the configuration, yet the reply matches on
-    # "@" + chat.username and is forwarded.
+    # "@" + chat.username and reaches the ladder.
     monkeypatch.setenv("CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS", "@ops_bot")
     reset_all_settings()
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     update = _reply_update(chat_id=424242, username="ops_bot")
     response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    forwards = _forward_requests(http_recorder)
-    assert len(forwards) == 1
-    assert json.loads(forwards[0].content) == {"answer": "the blue one"}
-    assert fake_redis.data == {}
+    assert len(channels.inbound_calls) == 1
+    assert channels.inbound_calls[0].answer == "the blue one"
+    assert channels.inbound_calls[0].bridge.client_address == "424242"
 
 
 async def test_oversized_body_413_bounded_while_streaming(http_recorder, fake_redis):
@@ -294,23 +304,26 @@ async def test_uncorrelated_blank_message_is_acked_no_turn(http_recorder, fake_r
     assert any("blank" in record.message for record in caplog.records)
 
 
-async def test_pending_question_reply_resolves_ask_not_bridge(http_recorder, fake_redis, conversations):
-    # a ForceReply reply matching a pending question resolves the ask
-    # and never reaches the bridge.
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
+async def test_pending_question_reply_resolves_ask_not_bridge(http_recorder, fake_redis, conversations, channels):
+    # a ForceReply reply matching a pending question resolves the ask via the ladder
+    # and never reaches the caller's fresh-turn bridge.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "forwarded"}}
-    assert len(_forward_requests(http_recorder)) == 1
-    assert conversations.accept_calls == []
+    assert len(channels.inbound_calls) == 1
+    assert conversations.accept_calls == []  # the caller never bridges a resolved answer
 
 
-async def test_expired_force_reply_falls_through_to_bridge(http_recorder, fake_redis, conversations):
+async def test_expired_force_reply_falls_through_to_bridge(http_recorder, fake_redis, conversations, channels):
     # A ForceReply reply from a recipient chat whose question expired is a correlation
-    # miss -> the bridge, NOT a silent ignore.
+    # miss: the ladder returns NO_CORRELATION and the CALLER bridges it as a fresh turn
+    # (never a silent ignore).
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(channels.inbound_calls) == 1  # the ladder was consulted first
     assert _forward_requests(http_recorder) == []  # bridge makes no forward call
     assert len(conversations.accept_calls) == 1
     call = conversations.accept_calls[0]
@@ -379,60 +392,32 @@ async def test_malformed_bot_token_bridge_misconfigures(http_recorder, fake_redi
     assert conversations.accept_calls == []
 
 
-async def test_callback_404_terminal_bridges_the_reply(http_recorder, fake_redis, conversations):
-    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
-    # reply: the mapping is cleared and the reply is bridged into the conversation
-    # carrying its text, under the update id so a Telegram redelivery dedupes
-    # downstream at the conversation seam.
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
-    http_recorder.responder = lambda request: httpx.Response(404)
+async def test_ladder_bridged_outcome_acks_accepted(http_recorder, fake_redis, channels):
+    # The ladder's BRIDGED outcome (the ask is gone / a hard mismatch — it already
+    # bridged the reply internally) acks "accepted", the same wire a fresh-turn bridge
+    # returns. The plugin passes the update id as the bridge's dedupe key.
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "accepted"}}
-    assert fake_redis.data == {}  # mapping cleared — no re-forward of later chatter
-    assert len(conversations.accept_calls) == 1
-    call = conversations.accept_calls[0]
-    assert call.text == "the blue one"
-    assert call.client_address == "777"
-    assert call.provider_message_id == "5"  # the update id — dedupes a redelivery
+    assert len(channels.inbound_calls) == 1
+    assert channels.inbound_calls[0].bridge.provider_message_id == "5"  # the update id — dedupes a redelivery
 
 
-async def test_callback_500_does_not_bridge_only_terminal_404_bridges(http_recorder, fake_redis, conversations):
-    # A retryable (5xx) failure must NOT be converted into a bridge — only the
-    # terminal 404 bridges. The 5xx keeps the mapping and raises so Telegram
-    # redelivers.
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
-    http_recorder.responder = lambda request: httpx.Response(500)
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+async def test_ladder_forward_error_propagates_so_telegram_redelivers(http_recorder, fake_redis, channels):
+    # A 401/413/5xx / transport fault surfaces as AnswerForwardError from the ladder;
+    # the plugin lets it propagate (-> 500) so Telegram redelivers and re-runs the
+    # ladder — the answer is never silently lost.
+    channels.inbound_error = AnswerForwardError("interactions answer door rejected the answer: HTTP 500")
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
-    assert conversations.accept_calls == []  # never bridged
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}  # mapping kept
 
 
-async def test_callback_400_keeps_mapping_for_a_retyped_answer(http_recorder, fake_redis):
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
-    http_recorder.responder = lambda request: httpx.Response(400)
+async def test_ladder_retry_kept_outcome_acks_rejected(http_recorder, fake_redis, channels):
+    # The ladder's RETRY_KEPT outcome (the door rejected a re-answerable ask; the
+    # correlation is kept and the guest was told what's expected) acks "rejected".
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "rejected"}}
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
-
-
-async def test_callback_500_raises_so_telegram_redelivers(http_recorder, fake_redis):
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
-    http_recorder.responder = lambda request: httpx.Response(500)
-    with pytest.raises(RuntimeError, match="HTTP 500"):
-        await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
-
-
-async def test_callback_transport_error_propagates(http_recorder, fake_redis):
-    fake_redis.data["channel:telegram:corr:42"] = _CALLBACK
-
-    def responder(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("door unreachable")
-
-    http_recorder.responder = responder
-    with pytest.raises(httpx.ConnectError, match="door unreachable"):
-        await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
+    assert len(channels.inbound_calls) == 1

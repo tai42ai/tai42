@@ -35,11 +35,11 @@ from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification, Correlation
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_telegram.client import telegram_http
-from tai42_channel_telegram.correlation import store_correlation
+from tai42_channel_telegram.correlation import telegram_correlation_store
 from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
 # Tier-1 (confirm/external) is answered at the callback door via a tappable URL
@@ -190,11 +190,16 @@ class TelegramChannel:
             )
 
         # Budget measured AFTER the send so the key expires at the deadline, not
-        # deadline + send duration. A budget spent mid-send makes store_correlation
+        # deadline + send duration. A budget spent mid-send makes set_correlation
         # reject the non-positive TTL.
         ttl_seconds = math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds())
+        entry = Correlation(
+            callback_url=delivery.callback_url,
+            interaction_id=delivery.interaction_id,
+            ttl_deadline=delivery.timeout_at,
+        )
         try:
-            await store_correlation(message_id, delivery.callback_url, ttl_seconds)
+            await telegram_correlation_store.set_correlation(str(message_id), entry, ttl_seconds=ttl_seconds)
         except Exception as exc:
             raise ChannelDeliveryError(
                 f"question {delivery.interaction_id} was sent (message_id={message_id}) but its "

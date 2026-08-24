@@ -34,6 +34,7 @@ from tai42_skeleton.channels.inbound import (
     handle_inbound_answer,
 )
 from tai42_skeleton.hooks import cache as hooks_cache
+from tai42_skeleton.interactions.settings import InteractionsSettings
 
 _CALLBACK_URL = "https://host.example/api/interactions/callback/tkt"
 _INTERACTION_ID = "int-42"
@@ -365,6 +366,91 @@ async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
 
 
 # -- door-body parse: a malformed 400 body degrades to retry-in-place ------------
+
+
+def _pin_public_base(monkeypatch, base: str | None) -> None:
+    """Point the handler's host-pinning at ``base`` (the configured public base)."""
+    monkeypatch.setattr(
+        inbound_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=base)
+    )
+
+
+# -- security carry-in (a): callback_url host pinning ----------------------------
+
+
+async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wired, monkeypatch):
+    # A stored callback_url whose host is not the configured public base (a poisoned or
+    # stale store entry) must NEVER be POSTed to: the reservation is released, the reply
+    # is treated as uncorrelated (the caller bridges it), and nothing is forwarded.
+    _pin_public_base(monkeypatch, "https://host.example")
+    store = FakeStore(_entry(callback_url="https://evil.example/api/interactions/callback/tkt"))
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="hi", store=store, bridge=_bridge()
+    )
+
+    assert outcome is InboundAnswerOutcome.NO_CORRELATION
+    assert forward_calls == []  # the guest's answer was never shipped to the wrong host
+    assert store.released == ["k"]  # the poisoned reservation is dropped
+    assert wired.channel.notifications == []
+    assert wired.accept_calls == []
+    assert wired.events == []
+
+
+async def test_callback_host_match_forwards(wired, monkeypatch):
+    # The stored callback host equals the configured public base -> the normal forward.
+    _pin_public_base(monkeypatch, "https://host.example")
+    store = FakeStore(_entry())  # _CALLBACK_URL is on host.example
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
+    )
+
+    assert outcome is InboundAnswerOutcome.FORWARDED
+    assert forward_calls == [SimpleNamespace(callback_url=_CALLBACK_URL, answer="yes")]
+    assert store.released == ["k"]
+
+
+async def test_callback_host_pin_skipped_when_public_base_unset(wired, monkeypatch):
+    # No configured public base -> the check cannot run and is skipped (a correlated
+    # channel always sets one in practice); the forward still happens.
+    _pin_public_base(monkeypatch, None)
+    store = FakeStore(_entry(callback_url="https://anything.example/api/interactions/callback/tkt"))
+    forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="yes", store=store, bridge=_bridge()
+    )
+
+    assert outcome is InboundAnswerOutcome.FORWARDED
+    assert len(forward_calls) == 1
+
+
+# -- security carry-in (b): rejection-reason truncation --------------------------
+
+
+async def test_400_reason_is_truncated_in_notice_and_event(wired, monkeypatch):
+    # A pathological door reason must not blow up the guest notice or the persisted
+    # event: the reason is bounded to 300 chars before either use.
+    long_reason = "x" * 1000
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(400, json={"error": long_reason, "retry_in_place": True}))
+
+    outcome = await handle_inbound_answer(
+        channel_id="fakechan", correlation_key="k", answer="maybe", store=store, bridge=_bridge()
+    )
+
+    assert outcome is InboundAnswerOutcome.RETRY_KEPT
+    truncated = "x" * 300
+    assert len(wired.events) == 1
+    assert wired.events[0].payload["reason"] == truncated
+    assert len(wired.events[0].payload["reason"]) == 300
+    assert len(wired.channel.notifications) == 1
+    # The notice carries the truncated reason and nothing of the 1000-char original.
+    assert truncated in wired.channel.notifications[0].message
+    assert "x" * 301 not in wired.channel.notifications[0].message
 
 
 async def test_malformed_400_body_defaults_to_retry_in_place(wired, monkeypatch):
