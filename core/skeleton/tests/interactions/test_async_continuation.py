@@ -288,8 +288,9 @@ async def test_reaper_hooks_failure_does_not_break_continuation_fire(wired, capt
 async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured, monkeypatch):
     # An expiry member whose state has vanished (idle-expired) is reconciled off the
     # index without firing — never a phantom continuation, and never a phantom
-    # ``ask_expired_unanswered`` event either (the event states a successful expiry
-    # CLAIM; a vanished/lost-race member claims nothing).
+    # ``ask_expired_unanswered`` event either: the event states a successful expiry
+    # CLAIM, and a vanished member exits before ever claiming. (The lost-race exit —
+    # ``claimed is False`` — shares the same ``if claimed:`` guard by structure.)
     from tai42_skeleton.hooks import cache as hooks_cache
 
     hooks = RecordingHooks()
