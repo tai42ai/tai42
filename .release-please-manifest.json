@@ -1,6 +1,6 @@
 {
   "core/contract": "5.0.0",
-  "core/kit": "3.6.0",
+  "core/kit": "3.6.1",
   "core/cli": "4.0.0",
   "core/skeleton": "8.0.0",
   "plugins/accounts-oidc": "1.0.6",
