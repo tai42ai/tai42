@@ -413,3 +413,66 @@ async def list_interactions(page: int = 1, page_size: int = 50) -> dict:
         "next_page": _next_page(page, limit, total),
         "truncated": False,
     }
+
+
+#: The largest ``?limit=`` the parked-interactions audit door serves. A larger value is
+#: clamped to it (valid data, not an error), so one audit can never ask for an unbounded slice.
+MAX_PENDING_INTERACTIONS_LIMIT = 1000
+
+#: The parked-interactions audit door's default slice when a caller names no ``?limit=``.
+DEFAULT_PENDING_INTERACTIONS_LIMIT = 500
+
+
+class PendingInteractionsQuery(BaseModel):
+    """The ``?limit=`` window the parked-interactions audit door takes.
+
+    Spec metadata only — the door parses its query at the HTTP edge, and the operation
+    clamps the value to ``1..``:data:`MAX_PENDING_INTERACTIONS_LIMIT`."""
+
+    limit: int = Field(
+        default=DEFAULT_PENDING_INTERACTIONS_LIMIT,
+        description=(
+            f"Max parked asks to return, soonest-expiry first. Bounded to "
+            f"1..{MAX_PENDING_INTERACTIONS_LIMIT}; an out-of-range value is clamped, never refused."
+        ),
+    )
+
+
+@operation(
+    name="list_pending_interactions",
+    summary="List parked (async) interactions awaiting an answer",
+    tags=["interactions"],
+    errors=[BadRequestError],
+    request_model=PendingInteractionsQuery,
+)
+async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LIMIT) -> dict:
+    """A read-only admin audit of the parked async asks awaiting an answer — the native
+    surface a scheduled watchdog flow reads to spot parks nearing (or past) their
+    expiry.
+
+    An UNRESTRICTED operator sees the whole cross-audience set — exactly the reach the
+    operator inbox (``list_interactions``) already grants. A RESTRICTED caller sees ONLY
+    the parks addressed to its identity, the same audience filter the inbox applies —
+    never a 403: this operation is projected, and a projected route must agree with the
+    gate for every identity it is projected to (the owned-keys e2e pins that invariant).
+    Reads the ``pending:expiry`` index WITHOUT mutating it (no claim, no TTL change):
+    purely an audit. ``limit`` is clamped to ``1..``:data:`MAX_PENDING_INTERACTIONS_LIMIT`
+    (default :data:`DEFAULT_PENDING_INTERACTIONS_LIMIT`); it bounds the underlying index
+    scan, so a restricted caller's filtered slice may hold fewer items. Returns
+    ``{"items", "count"}`` — each item carries ``interaction_id``, ``group_id``,
+    ``question`` (truncated), ``channel``, ``recipient``, ``audience``, ``thread_id``
+    (when the park carries one), ``expiry_at``, ``created_at``, ``mode``."""
+    _user_id, restricted = request_identity()
+    limit = min(max(limit, 1), MAX_PENDING_INTERACTIONS_LIMIT)
+    # OFF gate: with no store configured no park can exist — the honest empty audit.
+    if not interactions_store_configured():
+        return {"items": [], "count": 0}
+    settings = interactions_settings()
+    store = InteractionStore(settings.key_prefix)
+    async with client_ctx(RedisClient, settings.redis) as r:
+        items = await store.list_pending(r, now=datetime.now(UTC), limit=limit)
+    if restricted is not None:
+        # A restricted caller sees only its own addressed parks — the inbox's audience
+        # filter, applied AFTER the bounded scan so the operator path stays one read.
+        items = [item for item in items if item.get("audience") == restricted]
+    return {"items": items, "count": len(items)}

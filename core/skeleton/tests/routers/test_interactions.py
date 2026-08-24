@@ -176,6 +176,9 @@ async def test_post_form_answer_schema_mismatch_400_carries_field(wired):
     body = _json(resp)
     assert body["error"] == "answer does not match schema at count: 'abc' is not of type 'integer'"
     assert body["field"] == "count"
+    # The door signals a correlated channel that this rejection is re-answerable in
+    # place — the live ask stands, so the guest can answer again.
+    assert body["retry_in_place"] is True
 
 
 async def test_post_form_answer_root_mismatch_400_omits_field(wired):
@@ -188,6 +191,9 @@ async def test_post_form_answer_root_mismatch_400_omits_field(wired):
     body = _json(resp)
     assert body["error"] == "answer does not match schema: 'count' is a required property"
     assert "field" not in body
+    # The retry-in-place policy signal is present even when the failing field is
+    # unlocated (no ``field`` key).
+    assert body["retry_in_place"] is True
 
 
 async def test_post_unknown_ticket_404(wired):
@@ -1825,7 +1831,9 @@ async def test_callback_typed_wrong_type_400(wired):
     await _seed_typed(wired, AnswerFormat.TEXT)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"answer": 7}'))
     assert resp.status_code == 400
-    assert _json(resp) == {"error": "answer must be a string"}
+    # A format-validation rejection is re-answerable in place: the door signals it
+    # with ``retry_in_place`` so a correlated channel keeps the ask live.
+    assert _json(resp) == {"error": "answer must be a string", "retry_in_place": True}
 
 
 async def test_callback_typed_missing_answer_key_400(wired):
@@ -1992,3 +2000,113 @@ async def test_callback_post_oversized_query_413_when_off(wired):
     _off(wired)
     resp = await router.callback(make_request("POST", path_params={"ticket": "NOPE"}, query="a=" + "z" * 100))
     assert resp.status_code == 413
+
+
+# -- parked-interactions audit door (GET /api/interactions/pending) -------------
+
+
+def _async_park(store, *, iid="p1", gid="pg", channel=None, recipient=None, audience=None) -> InteractionRequest:
+    now = datetime.now(UTC)
+    future = now + timedelta(hours=1)
+    return InteractionRequest(
+        interaction_id=iid,
+        group_id=gid,
+        question="proceed?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=store.reply_key(iid),
+        created_at=now,
+        timeout_at=future,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=future,
+        channel=channel,
+        recipient=recipient,
+        audience=audience,
+    )
+
+
+async def test_pending_operator_gets_items_and_count(wired):
+    park = _async_park(wired.store, iid="p1", channel="telegram", recipient="@ops")
+    await wired.store.add(wired.fake, park, idle_ttl=86400)
+    with _identity(user_id="op1", owner=None):
+        result = await ops.list_pending_interactions()
+    assert result["count"] == 1
+    assert result["items"][0]["interaction_id"] == "p1"
+    assert result["items"][0]["channel"] == "telegram"
+    assert result["items"][0]["recipient"] == "@ops"
+
+
+async def test_pending_restricted_caller_sees_only_its_addressed_slice(wired):
+    # A restricted caller gets the inbox's audience filter, never a 403 — this
+    # operation is PROJECTED, and a projected route must agree with the gate for
+    # every identity it is projected to (the owned-keys e2e pins that invariant).
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="mine", audience="u1"), idle_ttl=86400)
+    await wired.store.add(
+        wired.fake, _async_park(wired.store, iid="other", gid="og", audience="owner-2"), idle_ttl=86400
+    )
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="broadcast", gid="bg"), idle_ttl=86400)
+    with _identity(user_id="u1", owner="owner-1"):
+        body = await ops.list_pending_interactions()
+    assert body["count"] == 1
+    assert [item["interaction_id"] for item in body["items"]] == ["mine"]
+
+
+async def test_pending_route_returns_data_envelope(wired):
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="p1"), idle_ttl=86400)
+    resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 200
+    body = _json(resp)["data"]
+    assert body["count"] == 1
+    assert body["items"][0]["interaction_id"] == "p1"
+
+
+async def test_pending_route_restricted_gets_filtered_200(wired):
+    # Through the route a restricted caller is served (200) with only its own
+    # addressed slice — the projected-route/gate agreement, not a denial.
+    await wired.store.add(wired.fake, _async_park(wired.store, iid="mine", audience="u1"), idle_ttl=86400)
+    await wired.store.add(
+        wired.fake, _async_park(wired.store, iid="other", gid="og", audience="owner-2"), idle_ttl=86400
+    )
+    with _identity(user_id="u1", owner="owner-1"):
+        resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 200
+    body = _json(resp)["data"]
+    assert body["count"] == 1
+    assert body["items"][0]["interaction_id"] == "mine"
+
+
+async def test_pending_route_clamps_limit(wired, monkeypatch):
+    captured: dict[str, int] = {}
+    real = InteractionStore.list_pending
+
+    async def spy(self, r, *, now, limit):
+        captured["limit"] = limit
+        return await real(self, r, now=now, limit=limit)
+
+    monkeypatch.setattr(InteractionStore, "list_pending", spy)
+    # Above the cap clamps down; below 1 clamps up — never refused.
+    high = await router.list_pending_interactions(make_request("GET", query="limit=5000"))
+    assert high.status_code == 200
+    assert captured["limit"] == 1000
+    low = await router.list_pending_interactions(make_request("GET", query="limit=0"))
+    assert low.status_code == 200
+    assert captured["limit"] == 1
+
+
+async def test_pending_route_non_integer_limit_400(wired):
+    resp = await router.list_pending_interactions(make_request("GET", query="limit=abc"))
+    assert resp.status_code == 400
+
+
+async def test_pending_route_default_limit_500(wired, monkeypatch):
+    captured: dict[str, int] = {}
+
+    async def spy(self, r, *, now, limit):
+        captured["limit"] = limit
+        return []
+
+    monkeypatch.setattr(InteractionStore, "list_pending", spy)
+    resp = await router.list_pending_interactions(make_request("GET"))
+    assert resp.status_code == 200
+    assert captured["limit"] == 500

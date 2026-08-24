@@ -56,6 +56,13 @@ logger = logging.getLogger(__name__)
 
 _CALLBACK_PLACEHOLDER = "{callback_url}"
 
+# The platform-event topic emitted when a channel delivery of a question is
+# TERMINALLY abandoned (retries exhausted / non-retryable / no budget left). Core
+# states the fact; a deployment wires a hook (topic -> a tool such as notify_user, a
+# ticket) in config to decide what an operator sees. It RIDES ALONGSIDE the unchanged
+# raise that propagates the failure — it never replaces the error path.
+DELIVERY_FAILED_EVENT_TOPIC = "interactions.delivery_failed"
+
 
 class InteractionTimeoutError(Exception):
     """Raised when ``ask_user`` gets no answer within its timeout budget."""
@@ -173,6 +180,39 @@ async def _prune(
     missing/expired."""
     async with client_ctx(RedisClient, settings.redis) as conn:
         return await store.prune_pending(conn, interaction_id, group_id)
+
+
+async def _emit_delivery_failed(*, channel: str, interaction_id: str, recipient: str | None, error: str) -> None:
+    """Emit the ``interactions.delivery_failed`` platform event ONCE when a channel
+    delivery of a question has been TERMINALLY abandoned — the question pruned, nothing
+    answered — alongside the unchanged raise that propagates the failure.
+
+    Core states the fact; a deployment wires a hook on this topic (e.g. a ``notify_user``
+    tool, a ticket) in config to decide what an operator sees. Best-effort: a
+    hooks-manager failure is logged and swallowed so the event can never turn a loud
+    delivery failure into a different error — the raise path stays exactly as it was.
+    """
+    # Local import: reach the hooks-manager accessor only when emitting, mirroring the
+    # inbound ladder's pattern (keeps a module-load import edge out of this helper and
+    # avoids an import cycle across packages).
+    from tai42_skeleton.hooks.cache import get_hooks_manager
+
+    payload = {
+        "channel": channel,
+        "interaction_id": interaction_id,
+        "recipient": recipient,
+        "error": error,
+    }
+    try:
+        await get_hooks_manager().on_event(topic=DELIVERY_FAILED_EVENT_TOPIC, payload=payload)
+    except Exception:
+        logger.warning(
+            "ask_user: failed to emit %r for the abandoned delivery on channel %r interaction %s",
+            DELIVERY_FAILED_EVENT_TOPIC,
+            channel,
+            interaction_id,
+            exc_info=True,
+        )
 
 
 # The park-completion context key a tool/flow route target binds the delivery thread under
@@ -713,6 +753,20 @@ async def ask_user(
                     # recorded.
                     if isinstance(exc, asyncio.CancelledError):
                         mark_parked_question(exc, interaction_id, question, sensitive)
+                    elif result == "pruned" and isinstance(exc, Exception):
+                        # Terminal delivery abandonment: the send failed for good and the
+                        # question was pruned (nothing answered). State the fact as a
+                        # best-effort platform event that RIDES ALONGSIDE the raise below —
+                        # a deployment wires a hook on the topic to decide what an operator
+                        # sees. Never a cancellation (handled above), never the
+                        # answered/gone fall-through (an answer landed, delivery not
+                        # abandoned), and never a replacement for the error path.
+                        await _emit_delivery_failed(
+                            channel=channel,
+                            interaction_id=interaction_id,
+                            recipient=recipient,
+                            error=str(exc),
+                        )
                     raise
                 if result == "answered":
                     logger.warning(

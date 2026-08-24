@@ -191,14 +191,116 @@ async def test_answer_racing_expiry_yields_exactly_one_continuation(wired, captu
     assert len(captured) == 1
 
 
-async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured):
+class RecordingHooks:
+    """Captures every ``on_event`` the reaper emits."""
+
+    def __init__(self) -> None:
+        self.events: list[SimpleNamespace] = []
+
+    async def on_event(self, topic, payload, *, tool_kwargs_override=None) -> None:
+        self.events.append(SimpleNamespace(topic=topic, payload=payload))
+
+
+async def test_reaper_emits_ask_expired_unanswered_with_payload(wired, captured, monkeypatch):
+    # A park claimed by expiry STATES the fact as exactly one
+    # ``interactions.ask_expired_unanswered`` event carrying the interaction/group ids,
+    # the delivery channel + recipient, and an ISO8601 UTC ``expired_at`` — alongside
+    # the continuation the reaper still fires.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    req = InteractionRequest(
+        interaction_id="x1",
+        group_id="xg",
+        question="?",
+        answer_format=AnswerFormat.TEXT,
+        reply_to=wired.store.reply_key("x1"),
+        created_at=datetime.now(UTC),
+        timeout_at=past,
+        mode="async",
+        continuation_tool="resume_tool",
+        continuation_identity="svc-key",
+        expiry_at=past,
+        channel="telegram",
+        recipient="@ops",
+    )
+    await wired.store.add(wired.fake, req, idle_ttl=86400, continuation_fingerprint="fp-1")
+
+    fired = await reaper_module.reap_expired_parks_once()
+    assert fired == 1
+    await _drain()
+
+    assert len(captured) == 1  # the expiry continuation still fired
+    assert len(hooks.events) == 1
+    event = hooks.events[0]
+    assert event.topic == reaper_module.ASK_EXPIRED_UNANSWERED_EVENT_TOPIC == "interactions.ask_expired_unanswered"
+    assert event.payload["interaction_id"] == "x1"
+    assert event.payload["group_id"] == "xg"
+    assert event.payload["channel"] == "telegram"
+    assert event.payload["recipient"] == "@ops"
+    expired_at = datetime.fromisoformat(event.payload["expired_at"])
+    assert expired_at.tzinfo is not None  # an aware ISO8601 UTC timestamp
+
+
+async def test_reaper_emits_null_channel_recipient_when_unset(wired, captured, monkeypatch):
+    # A studio-inbox-only park (no channel/recipient) still emits — the two fields ride
+    # as ``None`` rather than being dropped.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await wired.store.add(
+        wired.fake, _async_req(wired.store, iid="n1", expiry_at=past), idle_ttl=86400, continuation_fingerprint="fp-1"
+    )
+
+    assert await reaper_module.reap_expired_parks_once() == 1
+    await _drain()
+
+    assert len(hooks.events) == 1
+    assert hooks.events[0].payload["channel"] is None
+    assert hooks.events[0].payload["recipient"] is None
+
+
+async def test_reaper_hooks_failure_does_not_break_continuation_fire(wired, captured, monkeypatch):
+    # A hooks-manager failure on the expiry event is swallowed: the reaper still claims
+    # the park and fires its continuation, and the pass reports the fire.
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    class BoomHooks:
+        async def on_event(self, topic, payload, *, tool_kwargs_override=None):
+            raise RuntimeError("hooks down")
+
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: BoomHooks())
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await wired.store.add(
+        wired.fake, _async_req(wired.store, iid="h1", expiry_at=past), idle_ttl=86400, continuation_fingerprint="fp-1"
+    )
+
+    fired = await reaper_module.reap_expired_parks_once()
+    assert fired == 1  # the pass did not abort on the hooks failure
+    await _drain()
+    assert len(captured) == 1  # the continuation still fired despite the hooks failure
+
+
+async def test_reaper_drops_stale_index_member_for_vanished_state(wired, captured, monkeypatch):
     # An expiry member whose state has vanished (idle-expired) is reconciled off the
-    # index without firing — never a phantom continuation.
+    # index without firing — never a phantom continuation, and never a phantom
+    # ``ask_expired_unanswered`` event either: the event states a successful expiry
+    # CLAIM, and a vanished member exits before ever claiming. (The lost-race exit —
+    # ``claimed is False`` — shares the same ``if claimed:`` guard by structure.)
+    from tai42_skeleton.hooks import cache as hooks_cache
+
+    hooks = RecordingHooks()
+    monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     await wired.fake.zadd(wired.store.pending_expiry_key, {"ghost": now_ms - 1000})
     assert await reaper_module.reap_expired_parks_once() == 0
     await _drain()
     assert captured == []
+    assert hooks.events == []
     assert await wired.store.due_expiries(wired.fake, datetime.now(UTC)) == []
 
 

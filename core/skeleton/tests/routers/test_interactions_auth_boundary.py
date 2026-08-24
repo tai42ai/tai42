@@ -65,6 +65,7 @@ def _interactions_registry() -> RouteRegistry:
     same-owner overlap on ``/api/interactions/callback/answer`` resolves to the authed route."""
     registry = RouteRegistry()
     _record(registry, "/api/interactions/stream", ["GET"], public=False, action="read")
+    _record(registry, "/api/interactions/pending", ["GET"], public=False, action="read")
     _record(registry, "/api/interactions/{interaction_id}/answer", ["POST"], public=False, action="write")
     _record(registry, "/api/interactions/media/{media_id}", ["GET"], public=True)
     _record(registry, "/api/interactions/callback/{ticket}", ["GET", "POST"], public=True)
@@ -111,6 +112,7 @@ def boundary_client(monkeypatch):
 
     routes = [
         Route("/api/interactions/stream", router.stream, methods=["GET"]),
+        Route("/api/interactions/pending", router.list_pending_interactions, methods=["GET"]),
         Route("/api/interactions/media/{media_id}", router.media, methods=["GET"]),
         Route("/api/interactions/{interaction_id}/answer", router.answer, methods=["POST"]),
         Route("/api/interactions/callback/{ticket}", router.callback, methods=["GET", "POST"]),
@@ -150,6 +152,13 @@ def test_stream_rejected_without_auth(boundary_client):
 
 def test_answer_rejected_without_auth(boundary_client):
     resp = boundary_client.post("/api/interactions/i1/answer", json={"answer": "x"})
+    assert resp.status_code in (401, 403)
+
+
+def test_pending_rejected_without_auth(boundary_client):
+    # The parked-interactions audit is an authed operator door, gated exactly like the
+    # stream/answer surfaces — an unauthenticated request never reaches the handler.
+    resp = boundary_client.get("/api/interactions/pending")
     assert resp.status_code in (401, 403)
 
 

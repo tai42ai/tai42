@@ -61,6 +61,15 @@ def _event_fields(event_type: str, interaction_id: str, group_id: str, audience:
 # ``"gone"`` found no state key at all (missing/expired, no writes).
 PruneResult = Literal["pruned", "answered", "gone"]
 
+# The read-only ``list_pending`` admin audit truncates each question to this many
+# characters so one over-long question can never bloat the audit frame; the full
+# text stays on the durable record (this preview is display-only).
+_PENDING_QUESTION_PREVIEW_CHARS = 200
+
+# The default cap on ``list_pending`` — the audit returns at most this many of the
+# soonest-to-expire parks when a caller names no explicit limit.
+_PENDING_LIST_DEFAULT_LIMIT = 500
+
 # Atomic phantom self-heal for the pending-deadline index. A waiter killed
 # mid-flight (SIGKILL/OOM) never runs cleanup, so its group lingers in
 # ``pending_key``. This script — run on every ``add`` — reads the groups whose
@@ -1005,6 +1014,67 @@ class InteractionStore:
         a member whose state already vanished/answered (so the claim was a no-op),
         keeping the index from re-listing a dead member every pass."""
         await r.zrem(self.pending_expiry_key, interaction_id)
+
+    async def list_pending(
+        self, r: Redis, *, now: datetime, limit: int = _PENDING_LIST_DEFAULT_LIMIT
+    ) -> list[dict[str, Any]]:
+        """A read-only admin audit of the currently-parked async asks — every member
+        of the per-interaction expiry index (``pending:expiry``), soonest deadline
+        first, as a flat per-item mapping a watchdog flow can inspect natively.
+
+        Reads the index by rank WITHOUT mutating it — no claim, no TTL change, no drop
+        of a stale member (reconciling a vanished member stays the reaper's job) — so
+        an audit never perturbs the park lifecycle. The lowest-scored (soonest to
+        expire) ``limit`` members are returned; ``limit`` defaults to
+        :data:`_PENDING_LIST_DEFAULT_LIMIT`. ``now`` is accepted for call-site symmetry
+        with :meth:`due_expiries` (the audit lists ALL parks, due or not, so it does
+        not filter on it). For each id the state hash is fetched; an id whose state has
+        vanished (answered/expired/pruned between the index read and the hash read) is
+        skipped, so a listed item always has live state.
+
+        Per item: ``interaction_id``, ``group_id``, ``question`` (truncated to
+        :data:`_PENDING_QUESTION_PREVIEW_CHARS`), ``channel``, ``recipient``,
+        ``audience``, ``thread_id`` (the denormalized hash field when a park carries
+        one — absent-tolerant, ``None`` for a park raised before the cascade feature),
+        ``expiry_at``, ``created_at``, ``mode``."""
+        if limit <= 0:
+            return []
+        raw_ids = await r.zrange(self.pending_expiry_key, 0, limit - 1)
+        items: list[dict[str, Any]] = []
+        for raw_id in raw_ids:
+            interaction_id = as_str(raw_id)
+            raw = await cast("Awaitable[dict[str | bytes, str | bytes]]", r.hgetall(self.state_key(interaction_id)))
+            state = self._state_from_raw(raw)
+            if state is None or state.status != "pending":
+                # Vanished, or an answered member lingering in the index before the
+                # reaper reconciles it off: the index member is left untouched (that
+                # stays the reaper's job) and the item is skipped, so a listed park is
+                # always live and still awaiting an answer.
+                continue
+            request = state.request
+            # ``thread_id`` is a denormalized hash field the cascade feature stamps; it
+            # is absent on older parks, so read it tolerantly from the raw hash rather
+            # than the parsed request (which never carried it). Normalize the key across
+            # a decode/no-decode redis client.
+            fields = {as_str(k): as_str(v) for k, v in raw.items()}
+            question = request.question
+            if len(question) > _PENDING_QUESTION_PREVIEW_CHARS:
+                question = question[:_PENDING_QUESTION_PREVIEW_CHARS]
+            items.append(
+                {
+                    "interaction_id": request.interaction_id,
+                    "group_id": state.group_id,
+                    "question": question,
+                    "channel": request.channel,
+                    "recipient": request.recipient,
+                    "audience": request.audience,
+                    "thread_id": fields.get("thread_id"),
+                    "expiry_at": request.expiry_at.isoformat() if request.expiry_at is not None else None,
+                    "created_at": request.created_at.isoformat(),
+                    "mode": request.mode,
+                }
+            )
+        return items
 
     async def continuation_fingerprint(self, r: Redis, interaction_id: str) -> str | None:
         """The async fire's captured key fingerprint stashed on the state hash

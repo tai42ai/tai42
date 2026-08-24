@@ -173,7 +173,10 @@ def test_d1_projected_surface_is_the_expected_op_count():
             # — the sandbox identity + resolved-policy read, tier-0 default-projected like its
             # ``backend_info`` sibling — and ``list_interactions`` — the paged pending-inbox
             # read door, a tier-0 read like ``list_notifications`` (neither authority_changing).
-            assert total == 180, total
+            # The +1 to 181 is ``list_pending_interactions`` — the read-only parked-asks audit
+            # door, a tier-0 read like its ``list_interactions`` sibling (neither
+            # authority_changing; the operator-only gate lives in the op, not the projection).
+            assert total == 181, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -233,27 +236,27 @@ def test_d1_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 135 (the +2 are ``sandbox_info`` and
-            # ``list_interactions``), measured two ways.
+            # The default-projected surface = 136 (the +2 are ``sandbox_info`` and
+            # ``list_interactions``; the +1 is ``list_pending_interactions``), measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 135, len(projected)
-            assert total - len(tier2) - len(tier1) == 135
+            assert len(projected) == 136, len(projected)
+            assert total - len(tier2) - len(tier1) == 136
 
-            # The LIVE booted tool surface is the 135 projected ops PLUS the two
+            # The LIVE booted tool surface is the 136 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 135) — they are mandatory bridges registered independently of
+            # (``projected`` stays 136) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 137.
+            # live count is 138.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 137
+            assert len(live) == 138
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -414,13 +417,13 @@ def test_d1_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 135 projected ops plus the two
+            # api_tools projected the surface: the 136 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 137 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 138 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 137
+            assert len(live) == 138
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process
