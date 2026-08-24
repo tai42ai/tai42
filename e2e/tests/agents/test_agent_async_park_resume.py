@@ -36,6 +36,7 @@ from collections.abc import Callable
 
 import pytest
 
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_e2e import wait_for_async
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.settings import HarnessSettings
@@ -85,10 +86,15 @@ async def _park_agent_run(stack: TaiStack, thread_id: str, question: str, expiry
             retry_on_reloading=True,
         )
     receipt = result.data
-    assert receipt["status"] == "suspended", f"the agent run did not park: {receipt}"
-    interaction_ids = receipt["interaction_ids"]
-    assert len(interaction_ids) == 1, f"expected one parked interaction, got {interaction_ids}"
-    interaction_id = interaction_ids[0]
+    # A park crossing the agent TOOL-face is now the generic ``SuspendedInteraction`` sentinel
+    # (model-dumped over the wire as ``{"interaction_id": ..., "expiry_at": ...}``, no top-level
+    # ``"status"`` and a single ``interaction_id``, not an ``interaction_ids`` list) — never the
+    # agent's INTERNAL suspended-receipt dict. Validate the wire dict back to that sentinel to
+    # PROVE the run parked: a completed run returns free-form text or an answer dict, neither of
+    # which carries the required ``interaction_id`` and so fails this validation loudly.
+    assert isinstance(receipt, dict), f"the agent run did not return a park sentinel: {receipt}"
+    suspended = SuspendedInteraction.model_validate(receipt)
+    interaction_id = suspended.interaction_id
     # The parked tool's ask ran exactly once at park time.
     ask_records = stack.records(f"agent_async_ask:{interaction_id}")
     assert len(ask_records) == 1, f"e2e_agent_async_ask did not run exactly once: {ask_records}"

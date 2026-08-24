@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+from tai42_contract.interactions import SuspendedInteraction
 from tai42_e2e import wait_for_async
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
@@ -135,11 +136,14 @@ async def test_park_answer_resumes_across_workers(
 
     parked = await _park(stack, thread_id, question, expiry_seconds=3600)
     receipt = parked.get("receipt")
-    assert isinstance(receipt, dict), f"the deep agent run did not return a receipt: {parked}"
-    assert receipt.get("status") == "suspended", f"the deep agent run did not park: {parked}"
-    interaction_ids = receipt["interaction_ids"]
-    assert len(interaction_ids) == 1, f"expected one parked interaction, got {interaction_ids}"
-    interaction_id = interaction_ids[0]
+    # A park crossing the agent TOOL-face is now the generic ``SuspendedInteraction`` sentinel
+    # (model-dumped over the wire as ``{"interaction_id": ..., "expiry_at": ...}``, no top-level
+    # ``"status"`` and a single ``interaction_id``, not an ``interaction_ids`` list) — never the
+    # agent's INTERNAL suspended-receipt dict. Validate the wire dict back to that sentinel to
+    # PROVE the run parked: a completed run returns free-form text or an answer dict, neither of
+    # which carries the required ``interaction_id`` and so fails this validation loudly.
+    assert isinstance(receipt, dict), f"the deep agent run did not return a park sentinel: {parked}"
+    interaction_id = SuspendedInteraction.model_validate(receipt).interaction_id
 
     # Answer through replica B's door: fires agent_resume on B — a different worker than the one
     # that parked on A — rebuilding the graph from the shared redis checkpoint.
