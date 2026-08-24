@@ -243,9 +243,7 @@ def _wire(monkeypatch, fake_client_ctx) -> InteractionsSettings:
     return settings
 
 
-async def test_ask_user_captures_thread_from_tool_park_completion_context(
-    monkeypatch, fake_redis, fake_client_ctx
-):
+async def test_ask_user_captures_thread_from_tool_park_completion_context(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
@@ -265,9 +263,7 @@ async def test_ask_user_captures_thread_from_tool_park_completion_context(
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {result.interaction_id}
 
 
-async def test_ask_user_captures_thread_from_agent_bridge_turn_context(
-    monkeypatch, fake_redis, fake_client_ctx
-):
+async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_client_ctx)
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
