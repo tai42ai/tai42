@@ -967,7 +967,7 @@ class InteractionStore:
             )
             if group_id is None:
                 # The park's state already vanished (answered/expired/pruned): nothing to
-                # prune, and the trailing delete reconciles the orphan member off.
+                # prune, and the trailing snapshot SREM reconciles the orphan member off.
                 continue
             await self.prune_pending(r, interaction_id, group_id)
         # Remove ONLY the members we snapshotted (SREM, not a blind DELETE of the key): a park
