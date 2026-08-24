@@ -175,7 +175,7 @@ def test_unset_max_concurrent_never_exceeds_default(bind_fake_app, monkeypatch):
     bind_fake_app(FakeTools(run_tool=run_tool))
     params = [{"n": i} for i in range(6)]
 
-    async def main() -> list[Any]:
+    async def main() -> list[Any] | SuspendedInteraction:
         return await asyncio.wait_for(execute_batch("tool", params, execution_mode="parallel"), timeout=5)
 
     results = asyncio.run(main())
@@ -205,7 +205,7 @@ def test_explicit_max_concurrent_wins_over_default(bind_fake_app, monkeypatch):
     bind_fake_app(FakeTools(run_tool=run_tool))
     params = [{"n": i} for i in range(3)]
 
-    async def main() -> list[Any]:
+    async def main() -> list[Any] | SuspendedInteraction:
         return await asyncio.wait_for(
             execute_batch("tool", params, execution_mode="parallel", max_concurrent=3), timeout=5
         )
