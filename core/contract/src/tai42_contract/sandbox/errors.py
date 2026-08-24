@@ -7,9 +7,14 @@ values (a timeout carries partial-output LENGTHS, never content).
 
 from __future__ import annotations
 
+from tai42_contract.errors import ErrorKind
+
 
 class SandboxError(Exception):
     """Base for every sandbox failure."""
+
+    # A bare sandbox failure is an upstream (provider-side) fault.
+    __tai_error_kind__ = ErrorKind.UPSTREAM_ERROR
 
 
 class SandboxUnavailableError(SandboxError):
@@ -19,9 +24,15 @@ class SandboxUnavailableError(SandboxError):
     consumer catches this ONE type when no provider backs the seam.
     """
 
+    # No provider backs the seam — a dependency-unavailable fault.
+    __tai_error_kind__ = ErrorKind.UNAVAILABLE
+
 
 class SandboxSessionNotFoundError(SandboxError):
     """No live session has the requested id."""
+
+    # The addressed session id does not exist.
+    __tai_error_kind__ = ErrorKind.NOT_FOUND
 
     def __init__(self, session_id: str):
         super().__init__(f"sandbox session {session_id!r} not found")
@@ -35,6 +46,9 @@ class SandboxExecTimeoutError(SandboxError):
     secrets read from ``env``) so a caller can log the shape of what was produced
     before the kill.
     """
+
+    # An exec exceeded its timeout budget.
+    __tai_error_kind__ = ErrorKind.TIMED_OUT
 
     def __init__(self, *, timeout_seconds: float, stdout_len: int, stderr_len: int):
         super().__init__(
@@ -56,3 +70,6 @@ class SandboxSpecRejectedError(SandboxError):
     an ``isolation`` below the floor, ``persistent`` while durable is off). The
     message names which; the family never silently downgrades a rejected spec.
     """
+
+    # The submitted session spec cannot be honored — a rejected input.
+    __tai_error_kind__ = ErrorKind.BAD_INPUT

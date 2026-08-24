@@ -38,6 +38,7 @@ from tai42_contract.agent.events import (
     StructuredFinal,
     SuspendedFinal,
 )
+from tai42_contract.errors import ErrorKind
 
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
@@ -48,6 +49,9 @@ class AgentInterruptedError(Exception):
     paused on an interrupt. A non-streaming caller cannot act on an interrupt, so
     it surfaces loudly rather than returning a partial. ``interrupts`` is the list
     of :class:`InterruptFinal` events the run emitted."""
+
+    # A drained run that paused on an interrupt did not complete — cancelled.
+    __tai_error_kind__ = ErrorKind.CANCELLED
 
     def __init__(self, interrupts: list[InterruptFinal]):
         self.interrupts = interrupts

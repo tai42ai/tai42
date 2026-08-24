@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from tai42_contract.errors import ErrorKind
+
 
 class OperationError(Exception):
     """Base class for every declared operation failure.
@@ -20,9 +22,16 @@ class OperationError(Exception):
     the projection reports; subclasses set it. The base itself carries ``500`` so
     an operation raising the base (rather than a specific subclass) still maps to
     a defined status rather than an unhandled crash.
+
+    ``__tai_error_kind__`` is the transport-neutral twin of ``status``: the same
+    failure named for a non-HTTP edge (an agent, the CLI, a projected tool).
+    Subclasses set it beside their ``status``; the base's ``500`` maps to an
+    upstream/internal fault.
     """
 
     status: ClassVar[int] = 500
+    # A bare operation failure (base 500) is an upstream/internal fault.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
     def __init__(self, message: str, *, extra: dict[str, object] | None = None) -> None:
         super().__init__(message)
@@ -37,18 +46,24 @@ class ValidationRejected(OperationError):
     """The request was well-formed but failed the operation's own validation."""
 
     status: ClassVar[int] = 422
+    # A rejected body/input.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.BAD_INPUT
 
 
 class BadRequestError(OperationError):
     """The request was malformed and could not be processed."""
 
     status: ClassVar[int] = 400
+    # A malformed request.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.BAD_INPUT
 
 
 class NotFoundError(OperationError):
     """The addressed resource does not exist."""
 
     status: ClassVar[int] = 404
+    # The addressed resource does not exist.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.NOT_FOUND
 
 
 class PayloadTooLargeError(OperationError):
@@ -59,6 +74,8 @@ class PayloadTooLargeError(OperationError):
     """
 
     status: ClassVar[int] = 413
+    # An over-cap payload is a rejected input.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.BAD_INPUT
 
 
 class PermissionDenied(OperationError):
@@ -71,6 +88,8 @@ class PermissionDenied(OperationError):
     """
 
     status: ClassVar[int] = 403
+    # An authorization denial.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAUTHORIZED
 
 
 class ForbiddenError(OperationError):
@@ -86,12 +105,16 @@ class ForbiddenError(OperationError):
     """
 
     status: ClassVar[int] = 403
+    # An authorization denial.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAUTHORIZED
 
 
 class ConflictError(OperationError):
     """The operation conflicts with the current state of the resource."""
 
     status: ClassVar[int] = 409
+    # A state conflict.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.CONFLICT
 
 
 class NotSupportedError(OperationError):
@@ -104,6 +127,9 @@ class NotSupportedError(OperationError):
     """
 
     status: ClassVar[int] = 501
+    # Judgment call: a missing capability has no dedicated kind; UNAVAILABLE (like a
+    # 503) is the closest transport-neutral fit — the capability is not here to serve.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAVAILABLE
 
 
 class UpstreamError(OperationError):
@@ -115,18 +141,24 @@ class UpstreamError(OperationError):
     """
 
     status: ClassVar[int] = 502
+    # A delegated-to dependency failed.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
 
 class UnavailableError(OperationError):
     """A dependency the operation needs is temporarily unavailable."""
 
     status: ClassVar[int] = 503
+    # A temporarily unavailable dependency.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UNAVAILABLE
 
 
 class OperationFailed(OperationError):
     """The operation was reached but failed while executing."""
 
     status: ClassVar[int] = 500
+    # An internal execution failure (500) — an upstream/internal fault.
+    __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
 
 __all__ = [
