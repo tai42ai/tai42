@@ -307,8 +307,9 @@ async def _authorize_pinned_route(
     if is_execution_fire:
         bound_fingerprint = caller_identity.execution_key_fingerprint
         if bound_fingerprint is None:
-            # An invariant breach: a gate-on execution identity always carries one. Refuse
-            # loudly rather than leave the fire's dispatches unbound to a key identity.
+            # An invariant breach: a gate-on execution identity always carries one — ""
+            # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
+            # None never. Refuse loudly rather than dispatch with no anchor at all.
             raise PermissionDenied("access denied: bound execution identity carries no key fingerprint")
         # Imported at call time: the execution module imports this one.
         from tai42_skeleton.authz.execution import assert_policy_matches_fingerprint
