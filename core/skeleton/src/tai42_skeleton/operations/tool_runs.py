@@ -719,7 +719,8 @@ async def _rebuild_crash_resume_identity(execution_key: str) -> CallerIdentity |
     with no live policy / disabled / grantless yields ``None`` so the re-drive fail-closes
     loudly rather than substituting a different principal. Delegates to the shared
     :func:`~tai42_skeleton.authz.execution.rebuild_execution_identity` (function-local
-    import: a module-level edge into ``authz`` closes an import cycle)."""
+    import keeps the operations→authz edge lazy, matching the guarded authz-edge
+    idiom)."""
     from tai42_skeleton.authz.execution import rebuild_execution_identity
 
     return await rebuild_execution_identity(execution_key)

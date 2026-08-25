@@ -223,7 +223,13 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
     the rebuild. A key with no live policy / disabled / grantless yields ``None``
     so the caller fail-closes loudly rather than substituting a different
     principal. Shared by the crash-resume re-drive and the tool doors' own-key
-    bind — every consumer rebuilds the SAME way, at the same trust level."""
+    bind — every consumer rebuilds the SAME way, at the same trust level.
+
+    KEY principals only: with the gate on, the rebuild requires the per-mint key
+    fingerprint, which a SESSION-authenticated human's policy does not carry — a
+    session principal therefore yields ``None`` (no bind, fail-closed), and an
+    async-parking tool keeps refusing loudly for that caller. Extending the
+    continuation machinery to fingerprint-less principals is a separate design."""
     settings = access_control_settings()
     if not settings.enable:
         # Gate off: every principal is the synthetic admin; the identity carries the key

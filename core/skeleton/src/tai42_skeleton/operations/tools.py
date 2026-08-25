@@ -158,6 +158,13 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
 
     Reaching this route is full-execution privilege — the Studio key runs any
     registered tool. Per-tool scoped keys are not supported.
+
+    With the caller's own execution identity bound below, the dispatch ALSO takes
+    the per-call execution decision the fire seam runs (an AND-gate over this
+    route's own authz — it can only deny more, never less), and a connector-backed
+    tool resolves its managed credential exactly as a fire would. Both are
+    fire-parity, not new privilege; when the bind degrades to unbound the dispatch
+    behaves exactly as before this seam existed.
     """
     # Resolve the name first: an unknown tool is a loud 404 (matching the schema route),
     # told apart from a tool that raises DURING execution. Only the unknown-tool error is
@@ -178,8 +185,8 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     # live-grants rebuild the crash-resume re-drive and the background submit use; a
     # caller whose key carries no authority binds nothing and behaves exactly as
     # before. An already-bound identity (an inline fire reaching this op) is never
-    # clobbered. Function-local import: a module-level edge into ``authz`` closes an
-    # import cycle.
+    # clobbered. Function-local imports keep the operations→authz edge lazy,
+    # matching the repo's guarded authz-edge idiom.
     from tai42_skeleton.access_control.user import request_identity
     from tai42_skeleton.authz.execution_identity import (
         get_execution_identity,

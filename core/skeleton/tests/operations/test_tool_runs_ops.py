@@ -382,20 +382,24 @@ async def test_submit_binds_the_callers_own_key_into_the_detached_run(wired):
 
 async def test_submit_from_a_fire_keeps_the_fires_binding(wired):
     # A hook/schedule fire submits WITH its identity already bound; the door must
-    # inherit it untouched, never clobber it with a rebuild.
+    # inherit it untouched, never clobber it with a rebuild. The submit ALSO sees
+    # a request identity and the rebuild WOULD return a different identity — only
+    # the no-clobber guard keeps the fire's binding, so removing the guard flips
+    # the detached run to the caller identity and fails this test.
     from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
     from tai42_skeleton.authz.identity import CallerIdentity
 
     tools = _IdentityReadingTools()
     wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
     fire_identity = CallerIdentity(user_id="svc-fire", execution_key_fingerprint="fp-fire")
 
-    async def _rebuild_must_not_run(key: str):
-        raise AssertionError("a fire's submit must never rebuild an identity")
+    async def _rebuild(key: str):
+        return CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live")
 
     from tai42_skeleton.authz import execution as authz_execution
 
-    wired.monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild_must_not_run)
+    wired.monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild)
 
     token = set_execution_identity(fire_identity)
     try:
@@ -405,6 +409,29 @@ async def test_submit_from_a_fire_keeps_the_fires_binding(wired):
         reset_execution_identity(token)
 
     assert tools.seen_identities == [fire_identity]
+
+
+async def test_submit_degrades_to_unbound_when_the_rebuild_cannot_answer(wired):
+    # A rebuild the infrastructure cannot answer degrades to the pre-bind behavior:
+    # the submit succeeds, the detached run stays unbound, nothing propagates.
+    from tai42_skeleton.authz import execution as authz_execution
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+    tools = _IdentityReadingTools()
+    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
+
+    async def _rebuild_raises(key: str):
+        raise RuntimeError("policy store unreachable")
+
+    wired.monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild_raises)
+
+    out = await ops.submit_run("alpha", {"x": 1})
+    await _drain()
+
+    assert isinstance(out["run_id"], str)
+    assert tools.seen_identities == [None]
+    assert get_execution_identity() is None
 
 
 async def test_submit_unauthenticated_binds_nothing(wired):
