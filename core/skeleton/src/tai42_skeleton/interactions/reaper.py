@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 # has just claimed it by the EXPIRY sentinel. Core states the fact; a deployment wires a
 # hook on this topic in config to decide what an operator sees. It RIDES ALONGSIDE the
 # expiry continuation the reaper fires — it never perturbs the claim/continuation flow.
-ASK_EXPIRED_UNANSWERED_EVENT_TOPIC = "interactions.ask_expired_unanswered"
+ASK_EXPIRED_UNANSWERED_EVENT_TOPIC = "interactions_ask_expired_unanswered"
 
 
 async def _emit_ask_expired_unanswered(request: InteractionRequest, group_id: str, expired_at: datetime) -> None:
-    """Emit the ``interactions.ask_expired_unanswered`` platform event ONCE for a park
+    """Emit the ``interactions_ask_expired_unanswered`` platform event ONCE for a park
     the reaper has just claimed by expiry.
 
     Core states the fact; a deployment wires a hook on this topic to decide what an

@@ -203,7 +203,7 @@ class RecordingHooks:
 
 async def test_reaper_emits_ask_expired_unanswered_with_payload(wired, captured, monkeypatch):
     # A park claimed by expiry STATES the fact as exactly one
-    # ``interactions.ask_expired_unanswered`` event carrying the interaction/group ids,
+    # ``interactions_ask_expired_unanswered`` event carrying the interaction/group ids,
     # the delivery channel + recipient, and an ISO8601 UTC ``expired_at`` — alongside
     # the continuation the reaper still fires.
     from tai42_skeleton.hooks import cache as hooks_cache
@@ -235,7 +235,7 @@ async def test_reaper_emits_ask_expired_unanswered_with_payload(wired, captured,
     assert len(captured) == 1  # the expiry continuation still fired
     assert len(hooks.events) == 1
     event = hooks.events[0]
-    assert event.topic == reaper_module.ASK_EXPIRED_UNANSWERED_EVENT_TOPIC == "interactions.ask_expired_unanswered"
+    assert event.topic == reaper_module.ASK_EXPIRED_UNANSWERED_EVENT_TOPIC == "interactions_ask_expired_unanswered"
     assert event.payload["interaction_id"] == "x1"
     assert event.payload["group_id"] == "xg"
     assert event.payload["channel"] == "telegram"

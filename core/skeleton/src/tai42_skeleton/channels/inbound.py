@@ -19,11 +19,11 @@ and the handler honors it. A future hard-mismatch 400 sets it False, and the
 non-retryable seam already releases + bridges without a code change here.
 
 The operator is told of a rejected answer through a PLATFORM EVENT, not a wired
-call: core states the fact by emitting the ``interactions.answer_rejected`` topic
+call: core states the fact by emitting the ``interactions_answer_rejected`` topic
 on the hooks manager, and a deployment decides what to do with it (a hook that
 runs ``notify_user``, opens a ticket, ...) in config. Emission is best-effort —
 a hooks-manager failure never fails the inbound webhook. NOTE: a hostile guest can
-fire these topics (``interactions.answer_rejected``, ``interactions.callback_discarded``)
+fire these topics (``interactions_answer_rejected``, ``interactions_callback_discarded``)
 once per inbound message, so a hook wired on either topic should be rate-limit-aware.
 """
 
@@ -86,7 +86,7 @@ ANSWER_REJECTED_FINAL_NOTICE = "Sorry, that answer wasn't accepted and this ques
 # Core states the fact; a deployment wires a hook (topic -> a tool such as
 # notify_user) in config to decide what an operator sees. Both the retryable and the
 # hard-mismatch 400 variants emit it — the ``retry_in_place`` payload key distinguishes.
-ANSWER_REJECTED_EVENT_TOPIC = "interactions.answer_rejected"
+ANSWER_REJECTED_EVENT_TOPIC = "interactions_answer_rejected"
 
 # The platform-event topic emitted when the handler DISCARDS a stored callback instead
 # of forwarding the guest's answer to it — because the callback's host is not the
@@ -94,7 +94,7 @@ ANSWER_REJECTED_EVENT_TOPIC = "interactions.answer_rejected"
 # (fail-closed: the guest's answer is never shipped to a non-configured host). Best-effort
 # like the rejected-answer event; the payload carries the ``reason`` and NEVER the URL or
 # its ticket. A hook here should be rate-limit-aware (see the module docstring).
-CALLBACK_DISCARDED_EVENT_TOPIC = "interactions.callback_discarded"
+CALLBACK_DISCARDED_EVENT_TOPIC = "interactions_callback_discarded"
 
 # Upper bound on the door's human-readable rejection reason as it rides into the
 # guest notice and the operator event payload. The door names the failing field in a
@@ -230,7 +230,7 @@ async def _emit_answer_rejected(
     retry_in_place: bool,
     notice_owner: str,
 ) -> None:
-    """Emit the ``interactions.answer_rejected`` platform event ONCE for a
+    """Emit the ``interactions_answer_rejected`` platform event ONCE for a
     door-rejected answer.
 
     Core states the fact; a deployment wires a hook on this topic (e.g. a
@@ -270,7 +270,7 @@ async def _emit_answer_rejected(
 
 
 async def _emit_callback_discarded(bridge: InboundBridge, *, interaction_id: str, reason: str) -> None:
-    """Emit the ``interactions.callback_discarded`` platform event ONCE when the handler
+    """Emit the ``interactions_callback_discarded`` platform event ONCE when the handler
     fail-closes on a stored callback instead of forwarding the answer to it.
 
     ``reason`` is one of ``"host_mismatch"`` / ``"public_base_unset"`` / ``"malformed_url"``.
