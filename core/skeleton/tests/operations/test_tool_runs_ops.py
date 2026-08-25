@@ -329,3 +329,92 @@ async def test_list_tool_runs_off_when_store_unconfigured_returns_empty(monkeypa
     monkeypatch.delenv("TAI_TOOL_RUNS_REDIS_URL", raising=False)
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     assert await ops.list_tool_runs("alpha") == []
+
+
+# -- submit binds the caller's own execution identity ------------------------
+
+
+class _IdentityReadingTools(_FakeTools):
+    """A tools double whose run_tool records the execution identity it runs under —
+    the detached supervisor copies the submitting context, so what this sees is what
+    an async-parking tool would rebind its continuation as."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_identities: list[object] = []
+
+    async def run_tool(self, key, arguments, *, offload_sync=False):
+        from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+        self.seen_identities.append(get_execution_identity())
+        return await super().run_tool(key, arguments, offload_sync=offload_sync)
+
+
+async def test_submit_binds_the_callers_own_key_into_the_detached_run(wired):
+    # An HTTP submit carries no execution identity; the door rebuilds the CALLER'S OWN
+    # key (live grants) and the spawned supervisor inherits it — the seam an
+    # async-parking tool needs to rebind its continuation.
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    tools = _IdentityReadingTools()
+    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    wired.monkeypatch.setattr(ops, "request_identity", lambda: ("usr-caller", False))
+
+    rebuilt = CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live")
+
+    async def _rebuild(key: str):
+        assert key == "usr-caller"
+        return rebuilt
+
+    from tai42_skeleton.authz import execution as authz_execution
+
+    wired.monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild)
+
+    await ops.submit_run("alpha", {"x": 1})
+    await _drain()
+
+    assert tools.seen_identities == [rebuilt]
+    # The submit request itself is released — the binding lives only in the copy.
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+    assert get_execution_identity() is None
+
+
+async def test_submit_from_a_fire_keeps_the_fires_binding(wired):
+    # A hook/schedule fire submits WITH its identity already bound; the door must
+    # inherit it untouched, never clobber it with a rebuild.
+    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    tools = _IdentityReadingTools()
+    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    fire_identity = CallerIdentity(user_id="svc-fire", execution_key_fingerprint="fp-fire")
+
+    async def _rebuild_must_not_run(key: str):
+        raise AssertionError("a fire's submit must never rebuild an identity")
+
+    from tai42_skeleton.authz import execution as authz_execution
+
+    wired.monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild_must_not_run)
+
+    token = set_execution_identity(fire_identity)
+    try:
+        await ops.submit_run("alpha", {"x": 1})
+        await _drain()
+    finally:
+        reset_execution_identity(token)
+
+    assert tools.seen_identities == [fire_identity]
+
+
+async def test_submit_unauthenticated_binds_nothing(wired):
+    # No caller id (gate off / anonymous): the run stays identity-less, exactly as
+    # before — the async-ask seam then fail-closes loudly inside the tool.
+    tools = _IdentityReadingTools()
+    wired.monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=tools))
+    wired.monkeypatch.setattr(ops, "request_identity", lambda: (None, False))
+
+    await ops.submit_run("alpha", {"x": 1})
+    await _drain()
+
+    assert tools.seen_identities == [None]

@@ -717,29 +717,12 @@ async def _rebuild_crash_resume_identity(execution_key: str) -> CallerIdentity |
     reconstruction reads the key's live fingerprint and builds the identity from the
     current grants — a mid-life de-scope/revocation therefore lands on the re-drive. A key
     with no live policy / disabled / grantless yields ``None`` so the re-drive fail-closes
-    loudly rather than substituting a different principal."""
-    from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+    loudly rather than substituting a different principal. Delegates to the shared
+    :func:`~tai42_skeleton.authz.execution.rebuild_execution_identity` (function-local
+    import: a module-level edge into ``authz`` closes an import cycle)."""
+    from tai42_skeleton.authz.execution import rebuild_execution_identity
 
-    from tai42_skeleton.access_control.policy import PolicyEnforcer
-    from tai42_skeleton.access_control.settings import access_control_settings
-    from tai42_skeleton.authz.execution import build_execution_identity
-    from tai42_skeleton.operations.errors import PermissionDenied
-
-    settings = access_control_settings()
-    if not settings.enable:
-        # Gate off: every principal is the synthetic admin; the identity carries the key
-        # alone (no fingerprint needed, matching ``build_execution_identity``'s gate-off).
-        return await build_execution_identity(execution_key, bound_fingerprint="")
-    enforcer = PolicyEnforcer(settings)
-    version = await enforcer.current_policy_version()
-    policy = await enforcer.get_policy_at(execution_key, version)
-    fingerprint = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
-    if not isinstance(fingerprint, str) or not fingerprint:
-        return None
-    try:
-        return await build_execution_identity(execution_key, bound_fingerprint=fingerprint)
-    except PermissionDenied:
-        return None
+    return await rebuild_execution_identity(execution_key)
 
 
 async def _reconcile_lost(r: Any, store: ToolRunStore, run_id: str, record: dict[str, str], ttl: int) -> dict[str, str]:
@@ -843,6 +826,34 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
     user_id, _restricted = request_identity()
     owning_identity = user_id
 
+    # An HTTP submit carries no execution identity, so an async-parking tool in the
+    # detached run could never rebind its continuation (a fire's submit inherits the
+    # fire's binding and is left untouched). Bind the caller's OWN key — the same
+    # rebuild the crash-resume re-drive uses, live grants and all — around the spawn
+    # so the copied context carries it; a key whose grants carry no authority binds
+    # nothing and the run behaves exactly as before.
+    from tai42_skeleton.authz.execution_identity import (
+        get_execution_identity,
+        reset_execution_identity,
+        set_execution_identity,
+    )
+
+    bind_token = None
+    if get_execution_identity() is None and owning_identity is not None:
+        from tai42_skeleton.authz.execution import rebuild_execution_identity
+
+        try:
+            caller_identity = await rebuild_execution_identity(owning_identity)
+        except Exception:
+            # The bind is opportunistic — it ENABLES an async-parking tool, it is not
+            # this door's authz gate (the route decision already ran). A rebuild the
+            # infrastructure cannot answer degrades to the pre-bind behavior (unbound,
+            # the parking seam fail-closes loudly) instead of failing the submit.
+            logger.warning("tool-run submit: could not rebuild the caller's execution identity", exc_info=True)
+            caller_identity = None
+        if caller_identity is not None:
+            bind_token = set_execution_identity(caller_identity)
+
     run_id = secrets.token_urlsafe(16)
     started = _now()
     try:
@@ -856,6 +867,11 @@ async def submit_run(tool_name: str, arguments: dict[str, object]) -> dict:
         # return the reserved slot here and re-raise loudly.
         _ACTIVE_RUNS -= 1
         raise
+    finally:
+        # Release the submit-scope binding: the spawned supervisor already copied it
+        # into its own context, and this request must not stay bound past the submit.
+        if bind_token is not None:
+            reset_execution_identity(bind_token)
     return {"run_id": run_id}
 
 

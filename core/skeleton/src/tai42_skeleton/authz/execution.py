@@ -213,6 +213,34 @@ async def bind_execution_identity(execution_key: str, *, bound_fingerprint: str)
         reset_execution_identity(token)
 
 
+async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | None:
+    """Rebuild the synthetic execution identity for ``execution_key`` from its
+    CURRENT live grants, or ``None`` when they no longer carry authority.
+
+    The caller holds only the ``user_id`` string (never the mint fingerprint), so
+    the reconstruction reads the key's live fingerprint and builds the identity
+    from the current grants — a mid-life de-scope/revocation therefore lands on
+    the rebuild. A key with no live policy / disabled / grantless yields ``None``
+    so the caller fail-closes loudly rather than substituting a different
+    principal. Shared by the crash-resume re-drive and the tool doors' own-key
+    bind — every consumer rebuilds the SAME way, at the same trust level."""
+    settings = access_control_settings()
+    if not settings.enable:
+        # Gate off: every principal is the synthetic admin; the identity carries the key
+        # alone (no fingerprint needed, matching ``build_execution_identity``'s gate-off).
+        return await build_execution_identity(execution_key, bound_fingerprint="")
+    enforcer = PolicyEnforcer(settings)
+    version = await enforcer.current_policy_version()
+    policy = await enforcer.get_policy_at(execution_key, version)
+    fingerprint = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return None
+    try:
+        return await build_execution_identity(execution_key, bound_fingerprint=fingerprint)
+    except PermissionDenied:
+        return None
+
+
 class ExecutionConditionError(TokenFreeConditionError):
     """A NAMED principal's stored policy condition cannot be evaluated by a tokenless
     background execution — the one refusal type :func:`assert_execution_key_evaluable`

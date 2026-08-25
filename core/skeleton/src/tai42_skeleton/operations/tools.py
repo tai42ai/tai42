@@ -171,6 +171,39 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
     except UnknownToolError as exc:
         # A lookup raises for exactly the name it was asked, so no name check is needed.
         raise NotFoundError(f"unknown tool: {tool_name}") from exc
+
+    # A synchronous door call carries no execution identity, so an async-parking tool
+    # (a flow/agent whose ask_user parks) could never rebind its continuation and
+    # 500'd instead of parking. Bind the caller's OWN key for the dispatch — the same
+    # live-grants rebuild the crash-resume re-drive and the background submit use; a
+    # caller whose key carries no authority binds nothing and behaves exactly as
+    # before. An already-bound identity (an inline fire reaching this op) is never
+    # clobbered. Function-local import: a module-level edge into ``authz`` closes an
+    # import cycle.
+    from tai42_skeleton.access_control.user import request_identity
+    from tai42_skeleton.authz.execution_identity import (
+        get_execution_identity,
+        reset_execution_identity,
+        set_execution_identity,
+    )
+
+    bind_token = None
+    if get_execution_identity() is None:
+        caller_key, _restricted = request_identity()
+        if caller_key is not None:
+            from tai42_skeleton.authz.execution import rebuild_execution_identity
+
+            try:
+                caller_identity = await rebuild_execution_identity(caller_key)
+            except Exception:
+                # Opportunistic bind, not this door's authz gate (the route decision
+                # already ran): a rebuild the infrastructure cannot answer degrades to
+                # the pre-bind behavior (unbound; the parking seam fail-closes loudly)
+                # instead of failing every tool call.
+                logger.warning("run-tool: could not rebuild the caller's execution identity", exc_info=True)
+                caller_identity = None
+            if caller_identity is not None:
+                bind_token = set_execution_identity(caller_identity)
     try:
         # This envelope serves ONLY the live synchronous caller (a background submit
         # runs through ``submit_run``/``_supervise``, never this line), so a wrapped
@@ -196,6 +229,11 @@ async def run_tool(tool_name: str, arguments: dict[str, object]) -> Any:
         # A bare raise stringifies to ""; the class-name fallback keeps the envelope
         # from emitting {"error": ""}.
         raise OperationFailed(str(exc) or type(exc).__name__) from exc
+    finally:
+        # The binding must not outlive this dispatch — a later op on the same request
+        # context must see the request-scope world, not a lingering execution identity.
+        if bind_token is not None:
+            reset_execution_identity(bind_token)
 
 
 @operation(
