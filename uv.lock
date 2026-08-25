@@ -5241,7 +5241,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "2.0.0"
+version = "2.0.1"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -6101,7 +6101,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "8.3.0"
+version = "8.4.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
