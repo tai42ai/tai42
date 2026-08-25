@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError
     # and the tai42_app handle the plugin registers through.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.2,<6",
+    "tai42-contract>=5.3,<6",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
     "tai42-kit[redis]>=3.6,<4",

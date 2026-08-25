@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract the backend registers through — the Backend ABC,
     # CallbackSchema fields, the Manifest model, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.2,<6",
+    "tai42-contract>=5.3,<6",
     # TaiBaseSettings + settings cache, pooled Redis clients, schedule
     # normalization, and the signature helpers; [jq] compiles the callback
     # condition/expression filters. The floor names the first release carrying
