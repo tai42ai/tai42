@@ -98,6 +98,16 @@ restarts.
 [`examples/manifest.yml`](examples/manifest.yml) is the commented manifest
 reference.
 
+## Platform event topics (9.0)
+
+Since 9.0 the interaction failure events fire on hook-subscribable,
+single-segment topics: `interactions_answer_rejected`,
+`interactions_delivery_failed`, `interactions_ask_expired_unanswered`,
+`interactions_callback_discarded`. The 8.x dotted spellings were
+unregisterable by the hook door's topic charset, so no subscriber can
+exist to break — but the constants' VALUES changed, which is a breaking
+surface change and ships as this major.
+
 ## The worker bus
 
 When a deployment runs more than one process — several `tai serve` workers, a
