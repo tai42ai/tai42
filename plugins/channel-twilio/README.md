@@ -154,3 +154,11 @@ present in the environment; it skips cleanly otherwise.
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE`.
+
+## Correlation surface (2.0)
+
+Since 2.0 inbound answers resolve through the platform's shared inbound-answer
+ladder: the plugin exposes its correlation store over the contract's
+`CorrelationStore` port (reserve / peek / release) plus a transport ack, and the
+skeleton owns the forward / retry-in-place / bridge ladder. The plugin-local
+`pop`/`restore` correlation helpers from 1.x are gone.
