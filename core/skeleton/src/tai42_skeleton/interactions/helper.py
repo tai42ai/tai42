@@ -62,7 +62,7 @@ _CALLBACK_PLACEHOLDER = "{callback_url}"
 # states the fact; a deployment wires a hook (topic -> a tool such as notify_user, a
 # ticket) in config to decide what an operator sees. It RIDES ALONGSIDE the unchanged
 # raise that propagates the failure — it never replaces the error path.
-DELIVERY_FAILED_EVENT_TOPIC = "interactions.delivery_failed"
+DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
 
 
 class InteractionTimeoutError(Exception):
@@ -191,7 +191,7 @@ async def _prune(
 
 
 async def _emit_delivery_failed(*, channel: str, interaction_id: str, recipient: str | None, error: str) -> None:
-    """Emit the ``interactions.delivery_failed`` platform event ONCE when a channel
+    """Emit the ``interactions_delivery_failed`` platform event ONCE when a channel
     delivery of a question has been TERMINALLY abandoned — the question pruned, nothing
     answered — alongside the unchanged raise that propagates the failure.
 

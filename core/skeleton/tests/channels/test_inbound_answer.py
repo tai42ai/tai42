@@ -274,7 +274,7 @@ async def test_400_retryable_keeps_correlation_notifies_and_alerts_once(wired, m
     # fact payload (channel, interaction, reason, field, retry_in_place=True).
     assert len(wired.events) == 1
     event = wired.events[0]
-    assert event.topic == ANSWER_REJECTED_EVENT_TOPIC == "interactions.answer_rejected"
+    assert event.topic == ANSWER_REJECTED_EVENT_TOPIC == "interactions_answer_rejected"
     assert event.payload == {
         "channel": "fakechan",
         "interaction_id": _INTERACTION_ID,
@@ -474,7 +474,7 @@ async def test_callback_host_mismatch_releases_and_treats_as_no_correlation(wire
     # The callback-discarded event fired with the right payload and NO url/ticket.
     assert len(wired.events) == 1
     event = wired.events[0]
-    assert event.topic == inbound_module.CALLBACK_DISCARDED_EVENT_TOPIC == "interactions.callback_discarded"
+    assert event.topic == inbound_module.CALLBACK_DISCARDED_EVENT_TOPIC == "interactions_callback_discarded"
     assert event.payload == {
         "channel": "fakechan",
         "interaction_id": _INTERACTION_ID,
