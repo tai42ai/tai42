@@ -382,3 +382,130 @@ def test_reload_and_remove_tool_project_with_destructive_hint() -> None:
     assert set(names) == {"reload_tool", "remove_tool"}
     assert app.tools.registered["reload_tool"]["annotations"].destructiveHint is True
     assert app.tools.registered["remove_tool"]["annotations"].destructiveHint is True
+
+
+# -- the sync door binds the caller's own execution identity -----------------
+
+
+class _IdentityReadingTools(_Tools):
+    """Records the execution identity the dispatch runs under — what an
+    async-parking tool would rebind its continuation as."""
+
+    def __init__(self) -> None:
+        super().__init__({"calc"}, run_result={"ok": 1})
+        self.seen_identities: list[object] = []
+
+    async def run_tool(self, key, arguments, *, offload_sync=False):
+        from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+        self.seen_identities.append(get_execution_identity())
+        return await super().run_tool(key, arguments, offload_sync=offload_sync)
+
+
+def _wire_caller(monkeypatch: pytest.MonkeyPatch, identity_result) -> None:
+    from tai42_skeleton.access_control import user as ac_user
+    from tai42_skeleton.authz import execution as authz_execution
+
+    monkeypatch.setattr(ac_user, "request_identity", lambda: ("usr-caller", False))
+
+    async def _rebuild(key: str):
+        assert key == "usr-caller"
+        return identity_result
+
+    monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild)
+
+
+async def test_run_tool_binds_the_callers_own_execution_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The sync door rebuilds the CALLER'S OWN key (live grants) around the dispatch,
+    # so an async-parking tool can rebind its continuation instead of 500ing; the
+    # binding never outlives the dispatch.
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    tools = _IdentityReadingTools()
+    _install(monkeypatch, tools=tools)
+    rebuilt = CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live")
+    _wire_caller(monkeypatch, rebuilt)
+
+    await tools_ops.run_tool("calc", {"a": 1})
+
+    assert tools.seen_identities == [rebuilt]
+    assert get_execution_identity() is None
+
+
+async def test_run_tool_releases_the_binding_when_the_tool_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    tools = _IdentityReadingTools()
+
+    async def _boom(key, arguments, *, offload_sync=False):
+        raise RuntimeError("boom")
+
+    tools.run_tool = _boom  # type: ignore[method-assign]
+    _install(monkeypatch, tools=tools)
+    _wire_caller(monkeypatch, CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live"))
+
+    with pytest.raises(OperationFailed):
+        await tools_ops.run_tool("calc", {"a": 1})
+
+    assert get_execution_identity() is None
+
+
+async def test_run_tool_keeps_an_existing_binding_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An inline fire reaching this op is already bound; the door must never clobber
+    # the fire's authority with the request-scope caller. The caller IS
+    # authenticated here and the rebuild WOULD return a different identity — only
+    # the no-clobber guard keeps the fire's binding in place, so removing the
+    # guard flips the dispatch to the caller identity and fails this test.
+    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    tools = _IdentityReadingTools()
+    _install(monkeypatch, tools=tools)
+    _wire_caller(monkeypatch, CallerIdentity(user_id="usr-caller", execution_key_fingerprint="fp-live"))
+    fire_identity = CallerIdentity(user_id="svc-fire", execution_key_fingerprint="fp-fire")
+
+    token = set_execution_identity(fire_identity)
+    try:
+        await tools_ops.run_tool("calc", {"a": 1})
+    finally:
+        reset_execution_identity(token)
+
+    assert tools.seen_identities == [fire_identity]
+
+
+async def test_run_tool_degrades_to_unbound_when_the_rebuild_cannot_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bind is opportunistic, never this door's authz gate: a rebuild the
+    # infrastructure cannot answer (redis down, enforcer fault) degrades to the
+    # pre-bind behavior — the tool still runs, unbound — instead of failing the door.
+    from tai42_skeleton.access_control import user as ac_user
+    from tai42_skeleton.authz import execution as authz_execution
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+    tools = _IdentityReadingTools()
+    _install(monkeypatch, tools=tools)
+    monkeypatch.setattr(ac_user, "request_identity", lambda: ("usr-caller", False))
+
+    async def _rebuild_raises(key: str):
+        raise RuntimeError("policy store unreachable")
+
+    monkeypatch.setattr(authz_execution, "rebuild_execution_identity", _rebuild_raises)
+
+    result = await tools_ops.run_tool("calc", {"a": 1})
+
+    assert result == {"ok": 1}
+    assert tools.seen_identities == [None]
+    assert get_execution_identity() is None
+
+
+async def test_run_tool_unauthenticated_binds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.access_control import user as ac_user
+
+    tools = _IdentityReadingTools()
+    _install(monkeypatch, tools=tools)
+    monkeypatch.setattr(ac_user, "request_identity", lambda: (None, False))
+
+    await tools_ops.run_tool("calc", {"a": 1})
+
+    assert tools.seen_identities == [None]
