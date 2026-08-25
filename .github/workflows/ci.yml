@@ -90,6 +90,12 @@ jobs:
           # exhaustive, so neither can lean on the path filter to decide what changed:
           # treat the whole workspace as changed and force every gate on.
           FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+          # A release-please train PR changes only versions/changelogs/manifests of
+          # content the feature PRs just ran the FULL suite on verbatim. The train
+          # keeps the fast gates (check matrix, fleet, frontend dist-freshness) and
+          # skips the e2e/ui-e2e suites — ci-ok tolerates skipped, so automerge is
+          # unaffected. The weekly schedule stays exhaustive either way.
+          RELEASE_TRAIN: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--') }}
         run: |
           set -euo pipefail
           # Manual dispatch or the weekly schedule: force the full workspace + every
@@ -192,6 +198,14 @@ jobs:
           run_browsers=false
           if [ "$FORCE_FULL" = "true" ] || [ "$BROWSERS" = "true" ]; then
             run_browsers=true
+          fi
+          # Train short-circuit (see RELEASE_TRAIN above): version-only churn does
+          # not re-earn the e2e wall-clock the same tree already spent.
+          if [ "${RELEASE_TRAIN:-false}" = "true" ]; then
+            run_e2e=false
+            run_monitoring=false
+            run_browsers=false
+            backends='[]'
           fi
           echo "core=$CORE" >> "$GITHUB_OUTPUT"
           echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")" >> "$GITHUB_OUTPUT"
