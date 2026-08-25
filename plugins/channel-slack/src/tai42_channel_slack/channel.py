@@ -246,7 +246,7 @@ class SlackChannel:
         ts = body.get("ts")
         if not isinstance(ts, str) or not ts:
             raise ChannelDeliveryError("chat.postMessage ok response carried no ts")
-        await store_correlation(ts, delivery.callback_url, delivery.timeout_at)
+        await store_correlation(ts, delivery.callback_url, delivery.interaction_id, delivery.timeout_at)
 
     async def notify(self, notification: ChannelNotification) -> list[str]:
         """Post one plain fire-and-forget message via ``chat.postMessage``, returning

@@ -20,7 +20,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery
+from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -50,13 +50,33 @@ class _StubClients:
 
 
 class _StubChannels:
+    """Records registrations and stands in for the shared inbound-answer ladder the
+    real skeleton exposes on ``app.channels`` — the plugin's test venv cannot import
+    the skeleton, so the ladder is faked at this contract seam. A test sets the
+    outcome (or an error) and reads back the recorded call."""
+
     def __init__(self) -> None:
         self.registered: dict[str, Any] = {}
+        self.inbound_calls: list[Any] = []
+        self.inbound_outcome: Any = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_error: BaseException | None = None
 
     def register(self, name: str, channel: Any) -> None:
         if name in self.registered:
             raise ValueError(f"channel {name!r} already registered")
         self.registered[name] = channel
+
+    async def handle_inbound_answer(
+        self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
+    ) -> InboundAnswerResult:
+        self.inbound_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
+            )
+        )
+        if self.inbound_error is not None:
+            raise self.inbound_error
+        return InboundAnswerResult(outcome=self.inbound_outcome)
 
 
 class _StubHttp:
@@ -177,6 +197,9 @@ class FakeRedis:
             self.ttls[key] = ex
         return True
 
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
     async def getdel(self, key: str) -> str | None:
         self.ttls.pop(key, None)
         return self.store.pop(key, None)
@@ -191,10 +214,17 @@ class FakeRedis:
 
 @pytest.fixture
 def stub_app() -> Iterator[_StubApp]:
+    channels = _stub_app.channels
+    channels.inbound_calls.clear()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    channels.inbound_error = None
     yield _stub_app
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    channels.inbound_calls.clear()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    channels.inbound_error = None
 
 
 _ENV_VARS = (
@@ -253,6 +283,11 @@ def fake_redis(stub_app: _StubApp, fake_httpx: FakeHttpx) -> FakeRedis:
     fake = FakeRedis(events=fake_httpx.events)
     stub_app.clients.by_class[RedisClient] = fake
     return fake
+
+
+@pytest.fixture
+def channels(stub_app: _StubApp) -> _StubChannels:
+    return stub_app.channels
 
 
 def make_delivery(**overrides: Any) -> ChannelDelivery:

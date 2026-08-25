@@ -5,11 +5,10 @@ the test secret — the flow always crosses real verification first."""
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
-import httpx
 import pytest
+from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_slack.inbound import slack_inbound
@@ -58,7 +57,10 @@ def _reply_event(**overrides: Any) -> dict[str, Any]:
 
 
 def _seed_correlation(fake_redis) -> None:
-    fake_redis.store[_CORR_KEY] = _CALLBACK
+    # The corr record is now a JSON {callback_url, interaction_id, timeout_at}.
+    fake_redis.store[_CORR_KEY] = json.dumps(
+        {"callback_url": _CALLBACK, "interaction_id": "int-7", "timeout_at": "2999-01-01T00:00:00+00:00"}
+    )
     fake_redis.ttls[_CORR_KEY] = 300
 
 
@@ -113,34 +115,35 @@ async def test_non_event_callback_envelope_is_ignored():
     assert body_json(response) == {"status": "ignored"}
 
 
-async def test_happy_path_forwards_answer_and_drops_correlation(fake_redis, http_script):
+async def test_happy_path_forwards_answer_and_drops_correlation(fake_redis, channels):
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     response = await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert response.status_code == 200
     assert body_json(response) == {"status": "forwarded"}
-    (forward,) = http_script.requests
-    assert str(forward.url) == _CALLBACK
-    assert json.loads(forward.content) == {"answer": "yes, deploy it"}
-    assert _CORR_KEY not in fake_redis.store  # dropped after the forward
+    (call,) = channels.inbound_calls
+    assert call.correlation_key == _THREAD_TS
+    assert call.answer == "yes, deploy it"
+    assert call.bridge.owns_retry_notice is False  # a threaded reply is re-answerable in place
+    assert _CORR_KEY not in fake_redis.store  # released by the ladder (mirrored)
     assert _DEDUPE_KEY in fake_redis.store  # claim kept: retries ack as duplicates
 
 
-async def test_reply_from_allowlisted_conversation_forwards(fake_redis, http_script):
+async def test_reply_from_allowlisted_conversation_forwards(fake_redis, channels):
     # A question can be delivered to any allowlisted recipient, so a
     # correlated reply from that conversation — not only the default one — is
-    # a real answer.
+    # a real answer that reaches the ladder.
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     event = _reply_event(channel=TEST_ALLOWED_RECIPIENT)
     response = await slack_inbound(_signed(_event_body(event=event)))
 
     assert body_json(response) == {"status": "forwarded"}
-    (forward,) = http_script.requests
-    assert str(forward.url) == _CALLBACK
+    (call,) = channels.inbound_calls
+    assert call.answer == "yes, deploy it"
 
 
 async def test_bridge_only_deployment_needs_no_ask_user_recipients(fake_redis, stub_conversations, monkeypatch):
@@ -158,107 +161,102 @@ async def test_bridge_only_deployment_needs_no_ask_user_recipients(fake_redis, s
     assert _DEDUPE_KEY in fake_redis.store  # processed: retries ack as duplicate
 
 
-async def test_duplicate_event_id_acks_without_second_forward(fake_redis, http_script):
+async def test_duplicate_event_id_acks_without_second_forward(fake_redis, channels):
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     first = await slack_inbound(_signed(_event_body(event=_reply_event())))
     second = await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert body_json(first) == {"status": "forwarded"}
     assert body_json(second) == {"status": "duplicate"}
-    assert len(http_script.requests) == 1
+    assert len(channels.inbound_calls) == 1  # the ladder was consulted exactly once
 
 
-async def test_door_404_terminal_bridges_the_reply(fake_redis, http_script, stub_conversations, caplog):
-    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
-    # reply: the correlation is dropped and the reply is bridged into the conversation
-    # carrying its text, under the event id so a Slack redelivery dedupes.
+async def test_ladder_bridged_outcome_acks_and_drops_correlation(fake_redis, channels):
+    # The ladder's BRIDGED outcome (the ask is gone — it released the correlation and
+    # already bridged the reply internally, under the event id dedupe key) acks 200. The
+    # channel supplies the faithful bridge text and the event id.
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
-    with caplog.at_level(logging.WARNING):
-        response = await slack_inbound(_signed(_event_body(event=_reply_event())))
+    response = await slack_inbound(_signed(_event_body(event=_reply_event())))
 
-    assert body_json(response) == {"status": "accepted"}
-    assert _CORR_KEY not in fake_redis.store  # correlation dropped — no re-forward
+    assert body_json(response) == {"status": "bridged"}
+    assert _CORR_KEY not in fake_redis.store  # released by the ladder (mirrored)
     assert _DEDUPE_KEY in fake_redis.store  # Slack's retry acks as duplicate
-    assert any("bridging the reply" in record.message for record in caplog.records)
-    (call,) = stub_conversations.accept_calls
-    assert call.text == "yes, deploy it"
-    assert call.client_address == TEST_DEFAULT_RECIPIENT
-    assert call.provider_message_id == "Ev001"
+    (call,) = channels.inbound_calls
+    assert call.bridge.bridge_text == "yes, deploy it"
+    assert call.bridge.client_address == TEST_DEFAULT_RECIPIENT
+    assert call.bridge.provider_message_id == "Ev001"
 
 
-async def test_door_404_bridge_then_redelivery_acks_duplicate_no_second_bridge(
-    fake_redis, http_script, stub_conversations
-):
-    # After a 404-bridge, Slack redelivers the same event_id: the dedupe claim
-    # short-circuits — the retry acks as a duplicate and never bridges a second time.
+async def test_bridged_then_redelivery_acks_duplicate_no_second_ladder_call(fake_redis, channels):
+    # After a BRIDGED outcome, Slack redelivers the same event_id: the dedupe claim
+    # short-circuits — the retry acks as a duplicate and never re-runs the ladder.
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
     first = await slack_inbound(_signed(_event_body(event=_reply_event())))
-    assert body_json(first) == {"status": "accepted"}
+    assert body_json(first) == {"status": "bridged"}
 
     second = await slack_inbound(_signed(_event_body(event=_reply_event())))
     assert body_json(second) == {"status": "duplicate"}
-    assert len(stub_conversations.accept_calls) == 1  # still once
+    assert len(channels.inbound_calls) == 1  # still once
 
 
-async def test_door_500_does_not_bridge_only_terminal_404_bridges(fake_redis, http_script, stub_conversations):
-    # A retryable (5xx) failure must NOT be converted into a bridge — only the
-    # terminal 404 bridges. The 5xx keeps the correlation and raises so Slack retries.
+async def test_ladder_forward_error_does_not_bridge_and_keeps_correlation(fake_redis, channels, stub_conversations):
+    # A raised AnswerForwardError (5xx/transport) must NOT be converted into a bridge:
+    # the ladder kept the correlation and the channel re-raises for Slack's retry.
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(500))
+    channels.inbound_error = AnswerForwardError("callback forward failed: HTTP 500 from the interactions door")
 
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert stub_conversations.accept_calls == []  # never bridged
-    assert fake_redis.store[_CORR_KEY] == _CALLBACK  # correlation kept
+    assert _CORR_KEY in fake_redis.store  # correlation kept
 
 
-async def test_door_400_keeps_correlation_for_a_retyped_answer(fake_redis, http_script, caplog):
+async def test_door_retry_kept_keeps_correlation_and_acks_rejected(fake_redis, channels):
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(400))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
-    with caplog.at_level(logging.WARNING):
-        response = await slack_inbound(_signed(_event_body(event=_reply_event())))
+    response = await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert body_json(response) == {"status": "rejected"}
-    assert fake_redis.store[_CORR_KEY] == _CALLBACK  # the human can reply again
-    assert any("rejected the answer" in record.message for record in caplog.records)
+    assert _CORR_KEY in fake_redis.store  # the human can reply again
 
 
-async def test_door_500_raises_releases_claim_keeps_correlation_then_retry_recovers(fake_redis, http_script):
+async def test_ladder_forward_error_releases_claim_then_retry_recovers(fake_redis, channels):
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(500))
+    channels.inbound_error = AnswerForwardError("callback forward failed: HTTP 500 from the interactions door")
 
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert _DEDUPE_KEY not in fake_redis.store  # claim released for the retry
-    assert fake_redis.store[_CORR_KEY] == _CALLBACK
+    assert _CORR_KEY in fake_redis.store
 
     # Slack's retry ladder redelivers the same event; the door recovered.
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_error = None
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     response = await slack_inbound(_signed(_event_body(event=_reply_event())))
     assert body_json(response) == {"status": "forwarded"}
 
 
-async def test_forward_transport_error_propagates_and_releases_claim(fake_redis, http_script):
+async def test_transport_error_wrapped_by_ladder_releases_claim(fake_redis, channels):
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.ConnectError("door unreachable"))
+    channels.inbound_error = AnswerForwardError("forwarding the answer to the door failed: connect error")
 
-    with pytest.raises(httpx.ConnectError, match="door unreachable"):
+    with pytest.raises(AnswerForwardError, match="forwarding the answer"):
         await slack_inbound(_signed(_event_body(event=_reply_event())))
 
     assert _DEDUPE_KEY not in fake_redis.store
-    assert fake_redis.store[_CORR_KEY] == _CALLBACK
+    assert _CORR_KEY in fake_redis.store
 
 
-async def test_correlated_reply_without_text_raises_never_none(fake_redis, http_script):
+async def test_correlated_reply_without_text_raises_never_none(fake_redis, channels):
     _seed_correlation(fake_redis)
     event = _reply_event()
     del event["text"]
@@ -266,7 +264,7 @@ async def test_correlated_reply_without_text_raises_never_none(fake_redis, http_
     with pytest.raises(ValueError, match="carries no text"):
         await slack_inbound(_signed(_event_body(event=event)))
 
-    assert http_script.requests == []
+    assert channels.inbound_calls == []  # never reached the ladder
     assert _DEDUPE_KEY not in fake_redis.store  # released so the retry reprocesses
 
 

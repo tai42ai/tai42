@@ -27,28 +27,32 @@ import json
 import logging
 import math
 from collections.abc import Iterator
-from dataclasses import replace
 from typing import Any
 
-import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import (
+    AnswerForwardError,
+    ChannelDeliveryError,
+    InboundAnswerOutcome,
+    InboundBridge,
+)
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
-from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
 from tai42_channel_whatsapp.client import mark_read_typing, send_flow, send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
     already_seen,
+    bump_rejections,
+    correlation_key,
     get_cached_flow_id,
     mark_known_contact,
     mark_seen,
     peek_pending,
-    pop_pending,
-    restore_pending,
+    release_pending,
+    whatsapp_correlation_store,
 )
 from tai42_channel_whatsapp.flows import build_flow
 from tai42_channel_whatsapp.settings import require_delivery_setting, whatsapp_settings
@@ -100,10 +104,6 @@ class SignatureRejectedError(Exception):
 
 class PayloadTooLargeError(Exception):
     """The inbound body exceeded the unauthenticated door's byte cap (mapped to 413)."""
-
-
-class AnswerForwardError(Exception):
-    """The interactions callback door did not accept the forwarded answer."""
 
 
 async def _read_bounded_body(request: Request, cap: int) -> bytes:
@@ -160,14 +160,6 @@ def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejec
         return PlainTextResponse("signature verification failed", status_code=401)
     logger.error("whatsapp inbound: CHANNEL_WHATSAPP_APP_SECRET is unset or empty; failing closed")
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
-
-
-async def _forward_answer(callback_url: str, answer: str | dict[str, Any]) -> httpx.Response:
-    """POST ``{"answer": <value>}`` to the interaction's callback door and return
-    its response; the caller applies the status policy. ``answer`` is a string for a
-    text/select reply or a dict for a completed form (Flow) reply."""
-    async with tai42_app.clients.client_ctx(HttpxClient, timeout=whatsapp_settings().http_timeout_seconds) as (client):
-        return await client.post(callback_url, json={"answer": answer})
 
 
 def _verify_handshake(request: Request) -> Response:
@@ -340,20 +332,21 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
 
 
 async def _handle_text(message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str) -> None:
-    """A typed reply: forward it to a pending question, else route to the bridge."""
+    """A typed reply: resolve it against a pending question via the shared ladder, else
+    route to the bridge."""
     if await already_seen(wamid):
         return
     text_field = message.get("text")
     body = text_field.get("body") if isinstance(text_field, dict) else None
     text = body if isinstance(body, str) else ""
 
-    pending = await pop_pending(phone_number_id, wa_id)
+    pending = await peek_pending(phone_number_id, wa_id)
     if pending is None:
         # No pending question (unrelated text or expired) — route to the bridge.
         await _bridge_inbound(phone_number_id, wa_id, text, wamid)
         return
     # A typed reply answers with its body minus outer whitespace.
-    await _forward_to_callback(phone_number_id, wa_id, text.strip(), wamid, pending)
+    await _resolve_answer(phone_number_id, wa_id, wamid, text.strip(), pending)
 
 
 def _extract_interactive_reply(interactive: Any) -> tuple[str | None, str]:
@@ -423,28 +416,22 @@ async def _handle_interactive(message: dict[str, Any], phone_number_id: str, wa_
         return
     reply_id, title = _extract_interactive_reply(interactive)
 
-    # Decide before destructively popping: peek the pending ask and check the tap
-    # against it. A non-answer must not remove the pending — bridge and leave it.
+    # Peek the pending ask (non-destructive) and check the tap against it. A non-answer
+    # must not touch the pending — bridge the tap's title and leave the ask untouched.
     pending = await peek_pending(phone_number_id, wa_id)
-    if pending is None or _map_tap_to_answer(reply_id, pending) is None:
+    if pending is None:
         await _bridge_inbound(phone_number_id, wa_id, title, wamid)
         return
-
-    # A real answer — claim it now (atomic GETDEL). ``None`` means a concurrent
-    # reply already claimed it: bridge the title so the same ask is never answered
-    # twice.
-    popped = await pop_pending(phone_number_id, wa_id)
-    if popped is None:
-        await _bridge_inbound(phone_number_id, wa_id, title, wamid)
-        return
-    answer = _map_tap_to_answer(reply_id, popped)
+    answer = _map_tap_to_answer(reply_id, pending)
     if answer is None:
-        # A different ask reserved the pair in the tiny peek→pop gap — this tap is
-        # not an answer to it; restore that ask and bridge the tap's title.
-        await restore_pending(phone_number_id, wa_id, popped)
+        # A stale/malformed/out-of-range tap, or a text ask with no options — not an
+        # answer to this pending ask; bridge the tap's title and leave the ask intact.
         await _bridge_inbound(phone_number_id, wa_id, title, wamid)
         return
-    await _forward_to_callback(phone_number_id, wa_id, answer, wamid, popped)
+    # A real answer — resolve it via the shared ladder (which peeks + forwards + keeps
+    # or releases). One-pending is enforced on reserve, and the wamid dedupe above
+    # guards a redelivery, so the peek-then-resolve needs no destructive claim.
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
 
 
 def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None:
@@ -533,17 +520,11 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
         await _bridge_inbound(phone_number_id, wa_id, "", wamid)
         return
 
-    popped = await pop_pending(phone_number_id, wa_id)
-    if popped is None or popped.interaction_id != flow_token:
-        # A concurrent reply claimed the ask, or a different ask reserved the pair in
-        # the peek→pop gap — this form is not an answer to it; restore and bridge.
-        if popped is not None:
-            await restore_pending(phone_number_id, wa_id, popped)
-        await _bridge_inbound(phone_number_id, wa_id, "", wamid)
-        return
-
-    answer = _coerce_form_answer(response, popped.schema)
-    await _forward_to_callback(phone_number_id, wa_id, answer, wamid, popped)
+    # A matched completed form: coerce the response to the schema's types and resolve
+    # it via the shared ladder. The wamid dedupe upstream guards a redelivery, so no
+    # destructive claim is needed before the ladder's own peek.
+    answer = _coerce_form_answer(response, pending.schema)
+    await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
 
 
 def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQuestion) -> str:
@@ -578,85 +559,88 @@ def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQues
     return text
 
 
-async def _forward_to_callback(
-    phone_number_id: str, wa_id: str, answer: str | dict[str, Any], wamid: str, pending: PendingQuestion
+async def _resolve_answer(
+    phone_number_id: str, wa_id: str, wamid: str, answer: str | dict[str, Any], pending: PendingQuestion
 ) -> None:
-    """Forward a correlated reply to the callback door and apply the status policy:
-    2xx answered; 404 terminal — the interaction is gone, so the reply is bridged as
-    a conversation message (never lost); anything else restores the correlation and
-    raises so Meta's retry re-resolves — the answer is never lost. A 400 branches on
-    the ask kind: a text/select ask is kept for a re-reply in place, while a form ask
-    (a completed Flow, which has no re-reply surface) is recovered by re-sending a
-    fresh Flow carrying the door's error (bounded).
+    """Resolve a correlated reply against its pending ask via the ONE shared ladder.
 
     ``answer`` is already final: a typed reply's stripped body, the option text an
-    interactive tap resolved to, or the coerced dict of a completed form (Flow).
-    """
-    try:
-        forwarded = await _forward_answer(pending.callback_url, answer)
-    except Exception:
-        # Transport failure — restore so the webhook retry or the human's next
-        # message still resolves it.
-        await restore_pending(phone_number_id, wa_id, pending)
-        raise
+    interactive tap resolved to, or the coerced dict of a completed form (Flow). The
+    ladder forwards it, interprets the door's outcome over the plugin's
+    :class:`CorrelationStore`, and returns the outcome the channel maps:
 
-    if forwarded.status_code // 100 == 2:
-        await mark_seen(wamid)
-        return
-    if forwarded.status_code == 404:
-        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
-        # ticket can't accept the answer, but the human's reply must NEVER be lost —
-        # bridge it as an ordinary conversation message with a faithful text
-        # rendering. _bridge_inbound sets provider_message_id=wamid, so a Meta
-        # redelivery of the same inbound dedupes at the conversation seam.
-        logger.warning(
-            "callback door returned terminal HTTP 404 for %s; the interaction is gone — "
-            "bridging the reply into the conversation instead of dropping it",
-            wamid,
-        )
-        await _bridge_inbound(phone_number_id, wa_id, _render_answer_for_bridge(answer, pending), wamid)
-        return
-    if forwarded.status_code == 400:
-        if pending.schema is not None:
-            # A form ask: the completed Flow has no re-reply surface, so a kept
-            # correlation would strand the guest. Recover by re-sending a fresh Flow.
-            await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, forwarded)
-            return
-        # A text/select ask CAN be re-replied to in place; keep the correlation and
-        # ack (the same body would be rejected again).
-        logger.warning(
-            "callback door rejected the answer for %s (400); correlation kept so the human can re-reply", wamid
-        )
-        await restore_pending(phone_number_id, wa_id, pending)
-        await mark_seen(wamid)
-        return
-    # 401/413/5xx ambient failure — keep the correlation and fail loudly; Meta's
-    # retry re-pops the restored question and forwards again.
-    await restore_pending(phone_number_id, wa_id, pending)
-    raise AnswerForwardError(
-        f"interactions callback rejected the answer: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
+    * ``NO_CORRELATION`` — the ask expired between the channel's decode-peek and the
+      ladder's own peek: bridge the reply as a fresh turn (never lost).
+    * ``RETRY_KEPT`` on a FORM ask — the channel owns the correction surface
+      (``owns_retry_notice=True``, so the ladder sent NO guest notice): re-send a fresh
+      Flow carrying the door's own reason so the guest can answer again in place.
+    * ``FORWARDED`` / ``BRIDGED`` / ``RETRY_KEPT`` on a text/select ask (the ladder sent
+      the generic notice) — mark the wamid seen so a redelivery is not re-processed.
+
+    An :class:`AnswerForwardError` (401/413/5xx / transport fault) propagates so Meta
+    redelivers and re-runs the ladder; the wamid is NOT marked seen on that raise.
+    """
+    is_form = pending.schema is not None
+    bridge_text = _render_answer_for_bridge(answer, pending)
+    result = await tai42_app.channels.handle_inbound_answer(
+        channel_id="whatsapp",
+        correlation_key=correlation_key(phone_number_id, wa_id),
+        answer=answer,
+        store=whatsapp_correlation_store,
+        bridge=InboundBridge(
+            channel_id="whatsapp",
+            our_identity=phone_number_id,
+            client_address=wa_id,
+            # The provider attests the wa_id, so it is both the conversation identity
+            # and the party the turn cap holds accountable.
+            cap_key=wa_id,
+            provider_message_id=wamid,
+            bridge_text=bridge_text,
+            # A form ask's correction surface is a re-opened Flow the channel renders
+            # off RETRY_KEPT; a text/select ask is re-answered in place, so core owns
+            # its notice. Setting this per ask-shape keeps the guest messaged exactly
+            # once either way.
+            owns_retry_notice=is_form,
+        ),
     )
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
+        await _bridge_inbound(phone_number_id, wa_id, bridge_text, wamid)
+        return
+    if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
+        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason)
+        return
+    await mark_seen(wamid)
+
+
+def _door_error_line(retry_reason: str | None) -> str:
+    """The guest-facing error line for the re-sent Flow: the door's OWN reason (already
+    length-bounded by the ladder, re-capped here defensively at ``_DOOR_REJECTION_MAX_CHARS``
+    which names the failing field), or the fixed opaque line when the door gave none —
+    restoring the pre-migration ``_door_rejection_line`` fidelity."""
+    return retry_reason[:_DOOR_REJECTION_MAX_CHARS] if retry_reason else _CALLBACK_REJECTION_OPAQUE
 
 
 async def _recover_form_rejection(
-    phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, forwarded: httpx.Response
+    phone_number_id: str, wa_id: str, wamid: str, pending: PendingQuestion, retry_reason: str | None
 ) -> None:
-    """Recover a form answer the callback door rejected (400) by re-sending a fresh
-    Flow for the SAME interaction, bounded by ``_MAX_FORM_REJECTIONS``.
+    """Recover a door-rejected form answer by re-sending a fresh Flow for the SAME
+    interaction, bounded by ``_MAX_FORM_REJECTIONS``.
 
-    The pending record is already popped by the caller. Ordering is load-bearing for
-    Meta's redelivery:
+    The shared ladder returned RETRY_KEPT: it KEPT the reservation and — because this
+    channel owns the retry notice — sent NO guest message, so the fresh Flow is the
+    guest's single correction message (no double-messaging). ``retry_reason`` is the
+    door's own (already-truncated) message, which names the failing field and rides the
+    re-sent Flow's body — restoring the pre-migration behavior; a missing reason falls
+    back to a fixed opaque line. Ordering is load-bearing for Meta's redelivery:
 
     * Under the cap — re-send a fresh Flow (same ``flow_token`` = ``interaction_id``,
-      same cached flow id, body = the question plus the door's error line), then keep
-      the pending alive with the rejection counted and mark the wamid seen. A re-send
-      that itself fails restores the pending UNCHANGED and does NOT mark the wamid
-      seen, then raises — so Meta's redelivery re-pops the same ask, re-hits the 400,
-      and re-enters this path (the counter is spent only by a re-send that reached the
-      guest).
-    * At the cap — leave the pending popped (a later text then bridges normally), tell
-      the guest once the form could not be processed, and let the ask time out on its
-      side.
+      same cached flow id), then count the rejection on the STILL-HELD record and mark
+      the wamid seen. A re-send that itself fails does NOT mark the wamid seen and
+      leaves the counter unchanged, then raises — so Meta's redelivery re-runs the
+      ladder, re-hits the 400, and re-enters this path (the counter is spent only by a
+      re-send that reached the guest).
+    * At the cap — tell the guest once the form could not be processed and mark the
+      wamid seen; the ask times out on its side.
     """
     if pending.interaction_id is None or pending.schema is None or pending.question is None:
         raise AnswerForwardError(
@@ -671,11 +655,14 @@ async def _recover_form_rejection(
             pending.rejections,
             _MAX_FORM_REJECTIONS,
         )
+        # Release the reservation the ladder kept: no re-Flow surface remains, so a
+        # later inbound must bridge (not re-answer) while the ask times out server-side.
+        await release_pending(phone_number_id, wa_id)
         await send_message(phone_number_id=phone_number_id, to=wa_id, body=_FORM_UNPROCESSABLE)
         await mark_seen(wamid)
         return
 
-    body_text = _rejection_body(pending.question, _door_rejection_line(forwarded))
+    body_text = _rejection_body(pending.question, _door_error_line(retry_reason))
     try:
         flow_id = await _cached_form_flow_id(pending.schema)
         await send_flow(
@@ -686,11 +673,11 @@ async def _recover_form_rejection(
             flow_token=pending.interaction_id,
         )
     except Exception:
-        # A re-send that fails must NOT mark the wamid seen: restore the pending
-        # unchanged so Meta's redelivery re-pops it and re-enters this 400 path.
-        await restore_pending(phone_number_id, wa_id, pending)
+        # A re-send that fails must NOT mark the wamid seen and must NOT count the
+        # rejection: the record is still held (the ladder kept it), so raising is
+        # enough — Meta's redelivery re-runs the ladder and re-enters this path.
         raise
-    await restore_pending(phone_number_id, wa_id, replace(pending, rejections=pending.rejections + 1))
+    await bump_rejections(phone_number_id, wa_id, pending)
     await mark_seen(wamid)
 
 
@@ -713,31 +700,13 @@ def _rejection_body(question: str, error_line: str) -> str:
 
     When the composed body would exceed ``_FLOW_BODY_MAX_CHARS`` the question is
     dropped WHOLE — the fresh Flow re-presents the fields, so a mid-string ellipsis
-    (forbidden by the no-silent-truncation posture) is never needed. The lead+error
-    tail is bounded (``_door_rejection_line`` caps the error at
-    ``_DOOR_REJECTION_MAX_CHARS``) so it always fits the cap."""
+    (forbidden by the no-silent-truncation posture) is never needed. ``error_line`` is
+    the door's OWN reason (which names the failing field), bounded by
+    :func:`_door_error_line` to ``_DOOR_REJECTION_MAX_CHARS`` — or the fixed opaque line
+    when the door gave none — so the lead + tail always fits the cap."""
     tail = f"{_FORM_REJECTION_LEAD} {error_line}"
     full = f"{question}\n\n{tail}"
     return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail
-
-
-def _door_rejection_line(forwarded: httpx.Response) -> str:
-    """The guest-facing error line for the re-sent Flow: the callback door's OWN 400
-    message (which names the failing field), bounded to ``_DOOR_REJECTION_MAX_CHARS``.
-    A body that is not this platform's error envelope (a proxy/WAF page) is replaced
-    and logged — the guest is never shown an intermediary's content."""
-    try:
-        payload = forwarded.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
-        return payload["error"][:_DOOR_REJECTION_MAX_CHARS]
-    logger.warning(
-        "callback door rejected a form answer with a 400 body that is not this platform's error envelope; "
-        "the guest is told nothing of it: %s",
-        forwarded.text[:500],
-    )
-    return _CALLBACK_REJECTION_OPAQUE
 
 
 async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: str) -> None:

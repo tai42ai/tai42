@@ -46,17 +46,16 @@ from urllib.parse import parse_qs
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
 
 from tai42_channel_slack.channel import open_modal_view
-from tai42_channel_slack.client import slack_http
 from tai42_channel_slack.correlation import (
     claim_dedupe,
-    delete_correlation,
-    delete_form_record,
-    get_callback_url,
     get_form_record,
     release_dedupe,
+    slack_form_correlation_store,
+    slack_thread_correlation_store,
 )
 from tai42_channel_slack.forms import (
     FORM_OPEN_ACTION_ID,
@@ -67,6 +66,21 @@ from tai42_channel_slack.forms import (
     is_declared_field,
 )
 from tai42_channel_slack.settings import slack_settings
+
+# The shared ladder's outcome -> the Events door's JSON ack status. Every non-miss
+# outcome is a 2xx Slack accepts; the string is informational (Slack only needs the
+# 2xx). A NO_CORRELATION miss is handled by the caller (it bridges).
+_EVENTS_ACK = {
+    InboundAnswerOutcome.FORWARDED: "forwarded",
+    InboundAnswerOutcome.RETRY_KEPT: "rejected",
+    InboundAnswerOutcome.BRIDGED: "bridged",
+}
+
+# The generic guest-facing line rendered inline in the modal on a retryable rejection
+# (RETRY_KEPT). The channel OWNS this correction surface (owns_retry_notice=True, so the
+# ladder sent no separate notice — no double-messaging); the door's specific field
+# reason rides the interactions.answer_rejected operator event the ladder emitted.
+_MODAL_RETRY_TEXT = "That answer wasn't accepted. Please check your entries and submit again."
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +263,8 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     channel = event.get("channel")
     thread_ts = event.get("thread_ts")
 
-    if isinstance(thread_ts, str) and thread_ts and channel in recipients:
-        callback_url = await get_callback_url(thread_ts)
-        if callback_url is not None:
-            return await _forward_answer(callback_url, thread_ts, text, settings.bot_user_id, channel, event_id)
+    if isinstance(thread_ts, str) and thread_ts and isinstance(channel, str) and channel in recipients:
+        return await _resolve_answer(thread_ts, text, settings.bot_user_id, channel, event_id)
 
     return await _bridge(settings.bot_user_id, channel, text, event_id)
 
@@ -289,47 +301,53 @@ async def _bridge(our_identity: str | None, channel: object, text: object, event
     return JSONResponse({"status": "accepted"})
 
 
-async def _forward_answer(
-    callback_url: str, thread_ts: str, text: object, our_identity: str | None, channel: object, event_id: str
+async def _resolve_answer(
+    thread_ts: str, text: object, our_identity: str | None, channel: str, event_id: str
 ) -> Response:
-    """Forward a correlated pending-question reply to its callback door.
+    """Resolve a correlated threaded reply against its pending ask via the ONE shared
+    ladder, or bridge it on a correlation miss.
 
-    ``our_identity``/``channel``/``event_id`` are the bridge context so a terminal
-    404 (the interaction is gone) bridges the reply into the conversation rather than
-    dropping it — ``_bridge`` sets ``provider_message_id`` = the event id, so a Slack
-    redelivery of the same inbound dedupes at the conversation seam."""
+    The ask is peeked first (channel-side) so a correlated reply that carries no text is
+    the loud error it has always been (raise -> 500, Slack retries then logs) rather than
+    an ask resolved with ``None`` — while an uncorrelated thread reply bridges. A live
+    ask hands the text to the ladder (a threaded reply is re-answerable in place, so the
+    ladder owns the retry notice, ``owns_retry_notice=False``). ``event_id`` is the
+    bridge's dedupe key at the conversation seam. An ``AnswerForwardError`` (401/5xx /
+    transport fault) propagates so the outer guard frees the dedupe claim and Slack's
+    retry re-runs the ladder.
+    """
+    entry = await slack_thread_correlation_store.get_correlation(thread_ts)
+    if entry is None:
+        # No pending ask on this thread (expired / never ours) — bridge like any message.
+        return await _bridge(our_identity, channel, text, event_id)
     if not isinstance(text, str) or not text:
-        # A CORRELATED reply with no text is an error, not chatter: raise (-> 500,
-        # Slack retries then logs) rather than resolve the ask with None.
         raise ValueError(f"correlated slack reply in thread {thread_ts} carries no text")
 
-    async with slack_http() as client:
-        response = await client.post(callback_url, json={"answer": text})
-    if response.status_code == 200:
-        await delete_correlation(thread_ts)
-        return JSONResponse({"status": "forwarded"})
-    if response.status_code == 404:
-        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
-        # ticket can't accept the answer, but the human's reply must NEVER be lost —
-        # drop the correlation and bridge the reply into the conversation instead.
-        logger.warning(
-            "slack inbound: callback door returned terminal HTTP 404 for thread_ts=%s; the interaction "
-            "is gone — bridging the reply into the conversation instead of dropping it",
-            thread_ts,
-        )
-        await delete_correlation(thread_ts)
+    # The forward path needs no bot user id — it rides only into the bridge context the
+    # ladder uses ONLY on a terminal 404 (BRIDGED). An unset id there degrades that rare
+    # bridge, never the common forward; the NO_CORRELATION bridge path still requires it.
+    # A threaded reply is re-answered in place, so the ladder owns the retry notice and
+    # the door reason it carries back is ignored here.
+    result = await tai42_app.channels.handle_inbound_answer(
+        channel_id="slack",
+        correlation_key=thread_ts,
+        answer=text,
+        store=slack_thread_correlation_store,
+        bridge=InboundBridge(
+            channel_id="slack",
+            our_identity=our_identity or "",
+            client_address=channel,
+            # The provider attests the channel id, so it is both the conversation
+            # identity and the party the turn cap holds accountable.
+            cap_key=channel,
+            provider_message_id=event_id,
+            bridge_text=text,
+            owns_retry_notice=False,
+        ),
+    )
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         return await _bridge(our_identity, channel, text, event_id)
-    if response.status_code == 400:
-        # The door rejected THIS answer; keep the correlation so the human can
-        # reply again, and ack 200 (redelivering the same text is pointless).
-        logger.warning(
-            "slack inbound: callback door rejected the answer for thread_ts=%s (400); correlation kept",
-            thread_ts,
-        )
-        return JSONResponse({"status": "rejected"})
-    # 401/5xx transient/misconfig — raise (keep the correlation; the guard frees
-    # the dedupe claim so Slack's retry re-attempts the forward).
-    raise RuntimeError(f"callback forward failed: HTTP {response.status_code} from the interactions door")
+    return JSONResponse({"status": _EVENTS_ACK[result.outcome]})
 
 
 # Shown in the modal when the question's form record is gone (TTL lapsed between
@@ -372,33 +390,33 @@ def _state_values(view: dict[str, Any]) -> dict[str, Any]:
     return values if isinstance(values, dict) else {}
 
 
-def _door_error_text(response: Any) -> str:
-    """The callback door's 400 message (its JSON ``error`` field), or a generic
-    fallback when the body is not the expected shape."""
-    try:
-        body = response.json()
-    except ValueError:
-        return "The form could not be submitted."
-    if isinstance(body, dict):
-        error = body.get("error")
-        if isinstance(error, str) and error:
-            return error
-    return "The form could not be submitted."
+def _field_has_block(schema: dict[str, Any], field: str | None) -> bool:
+    """Whether the door-named ``field`` is a declared schema property, so its name is a
+    valid modal block_id to pin the inline error under (else the caller falls back to the
+    first field). A None/absent/nested field has no matching block."""
+    return isinstance(field, str) and is_declared_field(schema, field)
 
 
-def _door_error_block(response: Any, schema: dict[str, Any], fallback: str) -> str:
-    """The block_id to pin the door's 400 error under: the door-named ``field`` when
-    it is a declared schema property (block_id == field name), else ``fallback`` (the
-    first field) for an absent/unknown/nested field."""
-    try:
-        body = response.json()
-    except ValueError:
-        return fallback
-    if isinstance(body, dict):
-        field = body.get("field")
-        if isinstance(field, str) and is_declared_field(schema, field):
-            return field
-    return fallback
+def _render_form_answer_for_bridge(answer: dict[str, Any], schema: dict[str, Any]) -> str:
+    """A faithful, ALWAYS non-empty text rendering of a submitted form for the
+    conversation bridge when the interaction is terminally gone (a BRIDGED outcome).
+
+    Rendered as readable ``label: value`` lines — the schema property's ``title`` when
+    it has one, else the raw field key. A scalar renders as itself; a non-scalar as
+    compact JSON, never a Python ``repr``. An empty form falls back to a compact JSON
+    dump so the bridge is handed a non-blank string (``conversations.accept`` rejects
+    blank text)."""
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    props = properties if isinstance(properties, dict) else {}
+    lines = []
+    for key, value in answer.items():
+        prop = props.get(key)
+        title = prop.get("title") if isinstance(prop, dict) else None
+        label = title if isinstance(title, str) and title else key
+        rendered = value if isinstance(value, str | int | float | bool) else json.dumps(value, ensure_ascii=False)
+        lines.append(f"{label}: {rendered}")
+    text = "\n".join(lines)
+    return text if text else json.dumps(answer, ensure_ascii=False)
 
 
 @tai42_app.http.custom_route(
@@ -475,13 +493,20 @@ async def _handle_block_actions(payload: dict[str, Any]) -> Response:
 
 
 async def _handle_view_submission(payload: dict[str, Any]) -> Response:
-    """Forward one ``tai42_form_submit`` submission to its callback door.
+    """Resolve one ``tai42_form_submit`` submission against its pending ask via the ONE
+    shared ladder, rendering the modal's own ack.
 
-    The interaction id rides in ``private_metadata``. A gone form record shows the
-    expired notice. Otherwise the state is coerced per the stored schema and posted
-    as ``{"answer": <dict>}``: door 2xx closes the modal and drops the record; 400
-    keeps the record and shows the door's message; 404 shows the expired notice and
-    drops the record; anything else raises (loud 500, record kept).
+    The interaction id rides in ``private_metadata`` and IS the correlation key. A gone
+    form record shows the expired notice. Otherwise the state is coerced per the stored
+    schema and handed to the ladder as ``{"answer": <dict>}`` with
+    ``owns_retry_notice=True`` — a completed modal has no re-reply surface, so the
+    channel OWNS the guest correction (the ladder sends no separate notice, avoiding a
+    double message) and renders it as the modal's inline Block-Kit error on RETRY_KEPT
+    (the modal stays open). Outcome -> modal ack: FORWARDED closes the modal (the ladder
+    released the record); RETRY_KEPT shows the inline error under the first field (record
+    kept); NO_CORRELATION / BRIDGED (the ask is gone — the ladder released it and, on a
+    404, bridged the submission so it is never lost) show the expired notice; an
+    AnswerForwardError (5xx) propagates (loud 500, record kept).
     """
     view = payload.get("view")
     if not isinstance(view, dict) or view.get("callback_id") != FORM_SUBMIT_CALLBACK_ID:
@@ -496,22 +521,45 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
 
     schema = record["schema"]
     answer = extract_answer(schema, state_values)
-    async with slack_http() as client:
-        response = await client.post(record["callback_url"], json={"answer": answer})
-    status = response.status_code
     first_block = first_field_name(schema)
-    if status == 200:
-        await delete_form_record(interaction_id)
+
+    user = payload.get("user")
+    user_id = user.get("id") if isinstance(user, dict) and isinstance(user.get("id"), str) else None
+    our_identity = slack_settings().bot_user_id
+    raw_view_id = view.get("id")
+    view_id = raw_view_id if isinstance(raw_view_id, str) and raw_view_id else interaction_id
+    result = await tai42_app.channels.handle_inbound_answer(
+        channel_id="slack",
+        correlation_key=interaction_id,
+        answer=answer,
+        store=slack_form_correlation_store,
+        bridge=InboundBridge(
+            channel_id="slack",
+            # The submitting user is the guest; the bot is the operator identity a
+            # bridged (gone-ask) submission answers from. Both are addresses only.
+            our_identity=our_identity or "",
+            client_address=user_id or interaction_id,
+            cap_key=user_id or interaction_id,
+            provider_message_id=view_id,
+            bridge_text=_render_form_answer_for_bridge(answer, schema),
+            owns_retry_notice=True,
+        ),
+    )
+    if result.outcome is InboundAnswerOutcome.FORWARDED:
         # An empty body closes the modal.
         return JSONResponse({})
-    if status == 400:
-        # The door rejected THIS answer; keep the record so the human can correct it.
-        # Pin the error under the failing field's block when the door named one, else
+    if result.outcome is InboundAnswerOutcome.RETRY_KEPT:
+        # The channel owns the correction: the modal stays open with an inline error
+        # carrying the door's OWN reason, pinned under the door-named field's block when
+        # it is a declared schema property (restoring the pre-migration fidelity), else
         # the first field.
-        logger.warning("slack interactive: door rejected form %s (400); record kept", interaction_id)
-        return _errors_response(_door_error_block(response, schema, first_block), _door_error_text(response))
-    if status == 404:
-        logger.warning("slack interactive: door reports form %s ticket terminally gone (404)", interaction_id)
-        await delete_form_record(interaction_id)
-        return _errors_response(first_block, _FORM_EXPIRED_TEXT)
-    raise RuntimeError(f"callback forward failed: HTTP {status} from the interactions door")
+        logger.warning("slack interactive: door rejected form %s (retry-in-place); record kept", interaction_id)
+        error_text = result.retry_reason or _MODAL_RETRY_TEXT
+        block = result.retry_field if _field_has_block(schema, result.retry_field) else first_block
+        return _errors_response(block, error_text)
+    # NO_CORRELATION / BRIDGED: the ask is gone. The ladder released the record (and, on
+    # a 404, bridged the submission); tell the guest the question is closed.
+    logger.warning(
+        "slack interactive: form %s ask is gone (%s); showing the expired notice", interaction_id, result.outcome
+    )
+    return _errors_response(first_block, _FORM_EXPIRED_TEXT)

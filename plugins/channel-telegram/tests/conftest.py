@@ -16,6 +16,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -46,8 +47,16 @@ class _StubClients:
 
 
 class _StubChannels:
+    """Records channel registrations and stands in for the shared inbound-answer
+    ladder (``handle_inbound_answer``) the real skeleton exposes on ``app.channels`` —
+    the plugin's test venv cannot import the skeleton, so the ladder is faked at this
+    contract seam. A test sets the outcome (or an error) and reads back the call."""
+
     def __init__(self) -> None:
         self.registered: dict[str, Any] = {}
+        self.inbound_calls: list[SimpleNamespace] = []
+        self.inbound_outcome: InboundAnswerOutcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_error: BaseException | None = None
 
     def register(self, name: str, channel: Any) -> None:
         if name in self.registered:
@@ -59,6 +68,18 @@ class _StubChannels:
 
     def names(self) -> list[str]:
         return sorted(self.registered)
+
+    async def handle_inbound_answer(
+        self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
+    ) -> InboundAnswerResult:
+        self.inbound_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
+            )
+        )
+        if self.inbound_error is not None:
+            raise self.inbound_error
+        return InboundAnswerResult(outcome=self.inbound_outcome)
 
 
 class _StubHttp:
@@ -157,16 +178,22 @@ tai42_app.bind(_stub_app)
 
 
 class FakeRedis:
-    """In-memory stand-in for the async Redis commands the correlation store uses."""
+    """In-memory stand-in for the async Redis commands the correlation store uses.
+
+    ``set`` honours ``nx`` (the store reserves NX for one-pending-per-anchor): a
+    reserve on a held key returns ``None`` (redis-py's miss signal), else ``True``."""
 
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False) -> bool | None:
+        if nx and key in self.data:
+            return None
         self.data[key] = value
         if ex is not None:
             self.ttls[key] = ex
+        return True
 
     async def get(self, key: str) -> str | None:
         return self.data.get(key)
@@ -183,21 +210,33 @@ def stub_app() -> _StubApp:
 
 @pytest.fixture(autouse=True)
 def _reset_conversations() -> Any:
-    """Clear recorded bridge-facet calls so the singleton stub never leaks state."""
+    """Clear recorded bridge-facet and inbound-ladder calls so the singleton stub
+    never leaks state across tests."""
     conv = _stub_app.conversations
     conv.accept_calls.clear()
     conv.status_calls.clear()
     conv.accept_result = "msg-0001"
     conv.accept_error = None
+    channels = _stub_app.channels
+    channels.inbound_calls.clear()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    channels.inbound_error = None
     yield
     conv.accept_calls.clear()
     conv.status_calls.clear()
     conv.accept_error = None
+    channels.inbound_calls.clear()
+    channels.inbound_error = None
 
 
 @pytest.fixture
 def conversations() -> _StubConversations:
     return _stub_app.conversations
+
+
+@pytest.fixture
+def channels() -> _StubChannels:
+    return _stub_app.channels
 
 
 @pytest.fixture

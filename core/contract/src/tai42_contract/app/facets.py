@@ -28,7 +28,12 @@ from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.agent import Agent
 from tai42_contract.backend import Backend
 from tai42_contract.backup import BackupSectionInfo
-from tai42_contract.channels import Channel
+from tai42_contract.channels import (
+    Channel,
+    CorrelationStore,
+    InboundAnswerResult,
+    InboundBridge,
+)
 from tai42_contract.clients import BaseClient
 from tai42_contract.config import ConfigManager
 from tai42_contract.connectors.models import ResolvedConnectionAuth
@@ -272,6 +277,51 @@ class AppChannels(Protocol):
 
     def names(self) -> list[str]:
         """Every registered channel name, for the channels catalog route."""
+        ...
+
+    async def handle_inbound_answer(
+        self,
+        *,
+        channel_id: str,
+        correlation_key: str,
+        answer: Any,
+        store: CorrelationStore,
+        bridge: InboundBridge,
+    ) -> InboundAnswerResult:
+        """Resolve one inbound guest reply against its pending ask — the ONE shared
+        inbound-answer ladder every correlated channel calls instead of hand-rolling
+        its own "forward → interpret 2xx/404/400 → release/bridge/keep" sequence.
+
+        Returns an :class:`InboundAnswerResult`: the ``outcome`` the channel maps to its
+        transport ack, plus the door's ``retry_reason``/``retry_field`` when it rejected
+        the answer's content, so a channel that owns its correction surface can render the
+        door's specific message.
+
+        A channel computes its own opaque ``correlation_key`` for the guest's address,
+        provides the ``answer`` value to forward to the door as ``{"answer": answer}``,
+        its :class:`~tai42_contract.channels.CorrelationStore`, and an
+        :class:`InboundBridge` of the fields a bridged turn needs. The ladder:
+
+        * No pending ask on the key -> :attr:`InboundAnswerOutcome.NO_CORRELATION`
+          with NO side effect: the CALLER bridges the reply as a normal turn (the
+          ladder never bridges on a miss, exactly as each channel did by hand).
+        * The door accepts (2xx) -> release the correlation, return
+          :attr:`InboundAnswerOutcome.FORWARDED`.
+        * The door returns 404 (the ask was withdrawn/expired/cancelled) -> release,
+          bridge the reply as a fresh turn, return :attr:`InboundAnswerOutcome.BRIDGED`.
+        * The door returns 400 on a LIVE ask -> read the door's ``retry_in_place``
+          (default True): True keeps the correlation, notifies the guest what's
+          expected, fires ONE operator event, returns :attr:`InboundAnswerOutcome.RETRY_KEPT`;
+          False (a hard mismatch) releases, notifies the guest the question is closed,
+          fires the event, bridges the reply, returns :attr:`InboundAnswerOutcome.BRIDGED`.
+        * Anything else (401/413/5xx, or a transport fault) -> do NOT release; raise
+          :class:`AnswerForwardError` so the channel's webhook redelivery re-runs the
+          ladder. The answer is never silently lost.
+
+        The callback host is pinned to the platform's configured public base before the
+        forward; a stored callback whose host does not match is released and treated as
+        :attr:`InboundAnswerOutcome.NO_CORRELATION`.
+        """
         ...
 
 

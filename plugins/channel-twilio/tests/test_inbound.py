@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 
-import httpx
 import pytest
 from starlette.responses import Response
+from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 
 import tai42_channel_twilio.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_twilio.correlation import reserve_pending
-from tai42_channel_twilio.inbound import AnswerForwardError
 
 from .conftest import (
     FakeHttpx,
@@ -54,7 +53,7 @@ def handler(stub_app) -> Callable[..., Awaitable[Response]]:
 
 async def _seed_pending(callback_url: str = _CALLBACK) -> None:
     delivery = make_delivery(callback_url=callback_url)
-    await reserve_pending(_TWILIO, _HUMAN, delivery.callback_url, delivery.timeout_at)
+    await reserve_pending(_TWILIO, _HUMAN, delivery.callback_url, delivery.interaction_id, delivery.timeout_at)
 
 
 async def _pending_intact(fake_redis: FakeRedis) -> bool:
@@ -64,27 +63,36 @@ async def _pending_intact(fake_redis: FakeRedis) -> bool:
 # --- Happy path ---------------------------------------------------------------
 
 
-async def test_valid_signature_resolves_pending(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    await _seed_pending()
-    fake_httpx.responses.append(response(200))
+async def test_valid_signature_hands_reply_to_shared_ladder(handler, channels, fake_redis: FakeRedis):
+    # The signed reply is handed to the ONE shared ladder with the number-pair key,
+    # the Body as the answer, and the bridge context; a FORWARDED outcome acks 204
+    # and marks the sid seen. The plugin no longer forwards itself — the ladder does.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(_pairs()))
 
     assert result.status_code == 204
-    assert len(fake_httpx.calls) == 1
-    assert fake_httpx.calls[0]["url"] == _CALLBACK
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
-    assert not await _pending_intact(fake_redis)  # consumed
-    assert _SEEN_KEY in fake_redis.store  # sid marked seen
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.channel_id == "twilio"
+    assert call.correlation_key == f"{_TWILIO}:{_HUMAN}"
+    assert call.answer == "yes please"
+    assert call.bridge.channel_id == "twilio"
+    assert call.bridge.our_identity == _TWILIO
+    assert call.bridge.client_address == _HUMAN
+    assert call.bridge.cap_key == _HUMAN
+    assert call.bridge.provider_message_id == "SM777"
+    assert call.bridge.bridge_text == "yes please"
+    assert _SEEN_KEY in fake_redis.store  # sid marked seen on a resolved outcome
 
 
-async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    await _seed_pending()
-    fake_httpx.responses.append(response(200))
-
+async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, channels, fake_redis: FakeRedis):
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
     await handler(signed_request(_pairs(Body=" yes please \n")))
-
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
+    # The answer forwarded to the ladder is the Body minus outer whitespace...
+    assert channels.inbound_calls[0].answer == "yes please"
+    # ...while the bridge text a gone-ask fallback would use is the Body verbatim.
+    assert channels.inbound_calls[0].bridge.bridge_text == " yes please \n"
 
 
 async def test_public_url_reconstructed_from_forwarded_headers(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -116,8 +124,8 @@ async def test_query_string_is_part_of_the_signed_url(handler, fake_redis: FakeR
     result = await handler(signed_request(_pairs(), query="x=1"))
     assert result.status_code == 204
 
-    # The same request signed WITHOUT the query must be rejected.
-    await _seed_pending()
+    # The same request signed WITHOUT the query must be rejected (a signature failure
+    # short-circuits before the store, so no fresh reservation is needed here).
     rejected = await handler(signed_request(_pairs(), query="x=1", sign_url=f"https://public.example{_PATH}"))
     assert rejected.status_code == 401
 
@@ -255,16 +263,17 @@ async def test_missing_message_sid_is_400(handler, fake_redis: FakeRedis, fake_h
     await _assert_rejected(handler, signed_request(pairs), fake_redis, fake_httpx, status=400)
 
 
-async def test_message_sid_dedupe_skips_second_delivery(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    await _seed_pending()
-    fake_httpx.responses.append(response(200))
+async def test_message_sid_dedupe_skips_second_delivery(handler, channels, fake_redis: FakeRedis):
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     first = await handler(signed_request(_pairs()))
     second = await handler(signed_request(_pairs()))
 
     assert first.status_code == 204
     assert second.status_code == 204
-    assert len(fake_httpx.calls) == 1  # no second forward
+    # The second delivery is deduped on its MessageSid BEFORE the ladder — the shared
+    # handler is consulted exactly once.
+    assert len(channels.inbound_calls) == 1
 
 
 async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
@@ -328,16 +337,16 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_pending_question_resolves_before_bridge(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # a correlated pending question resolves the ask and never reaches the bridge.
-    await _seed_pending()
-    fake_httpx.responses.append(response(200))
+async def test_pending_question_resolves_before_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
+    # a correlated pending question resolves the ask via the ladder and never reaches
+    # the caller's fresh-turn bridge.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(_pairs()))
 
     assert result.status_code == 204
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}  # forwarded to the door
-    assert stub_app.conversations.accept_calls == []  # the bridge was NOT reached
+    assert len(channels.inbound_calls) == 1
+    assert stub_app.conversations.accept_calls == []  # the caller's bridge was NOT reached
 
 
 async def test_signature_failure_short_circuits_before_bridge(
@@ -351,13 +360,14 @@ async def test_signature_failure_short_circuits_before_bridge(
     assert _SEEN_KEY not in fake_redis.store
 
 
-async def test_dedupe_hit_short_circuits_before_bridge(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # Regression: an already-seen MessageSid short-circuits before the bridge.
+async def test_dedupe_hit_short_circuits_before_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
+    # Regression: an already-seen MessageSid short-circuits before the ladder and bridge.
     fake_redis.store[_SEEN_KEY] = "1"
 
     result = await handler(signed_request(_pairs()))
 
     assert result.status_code == 204
+    assert channels.inbound_calls == []  # the ladder was never consulted
     assert stub_app.conversations.accept_calls == []
 
 
@@ -374,107 +384,50 @@ async def test_bridge_overflow_propagates_and_does_not_dedupe(
     assert _SEEN_KEY not in fake_redis.store
 
 
-async def test_door_5xx_restores_pending_and_raises_so_twilio_retries(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    await _seed_pending()
-    fake_httpx.responses.append(response(500, text="oops"))
+async def test_ladder_forward_error_raises_and_does_not_dedupe(handler, channels, fake_redis: FakeRedis):
+    # A door 5xx / 401 / transport fault surfaces as AnswerForwardError from the ladder
+    # (which keeps the correlation for the retry); the plugin lets it propagate and does
+    # NOT mark the sid seen, so Twilio's redelivery re-runs the ladder.
+    channels.inbound_error = AnswerForwardError("interactions callback rejected the answer: HTTP 500: oops")
 
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(_pairs()))
 
-    assert await _pending_intact(fake_redis)  # restored
     assert _SEEN_KEY not in fake_redis.store  # NOT marked seen — the retry must not dedupe away
 
-    # Twilio's webhook retry (same request) pops the restored question and lands it.
-    fake_httpx.responses.append(response(200))
-    retry = await handler(signed_request(_pairs()))
-    assert retry.status_code == 204
-    assert len(fake_httpx.calls) == 2
-    assert not await _pending_intact(fake_redis)
 
+async def test_ladder_bridged_outcome_acks_and_marks_seen(handler, channels, fake_redis: FakeRedis):
+    # A BRIDGED outcome (the ask is gone / a hard mismatch — the ladder already bridged
+    # the reply internally, carrying the Body verbatim under the MessageSid dedupe key)
+    # acks 204 and marks the sid seen so a redelivery is not re-processed.
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
-async def test_door_404_terminal_bridges_the_sms_reply(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
-    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
-    # SMS: it is bridged into the conversation carrying the Body verbatim, under the
-    # same MessageSid so a Twilio redelivery dedupes rather than double-dispatching.
-    await _seed_pending()
-    fake_httpx.responses.append(response(404))
-
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(_pairs(Body="ship it")))
+    result = await handler(signed_request(_pairs(Body="ship it")))
 
     assert result.status_code == 204
-    assert not await _pending_intact(fake_redis)  # correlation consumed
+    assert len(channels.inbound_calls) == 1
+    assert channels.inbound_calls[0].bridge.bridge_text == "ship it"
+    assert channels.inbound_calls[0].bridge.provider_message_id == "SM777"
     assert _SEEN_KEY in fake_redis.store
-    assert any("bridging the reply" in record.message for record in caplog.records)
-    assert stub_app.conversations.accept_calls == [
-        {
-            "channel": "twilio",
-            "our_identity": _TWILIO,
-            "client_address": _HUMAN,
-            "cap_key": _HUMAN,
-            "text": "ship it",
-            "provider_message_id": "SM777",
-        }
-    ]
 
-    # Twilio redelivers the same MessageSid: dedupe short-circuits — no second bridge,
-    # no second forward to the dead ticket.
+    # Twilio redelivers the same MessageSid: dedupe short-circuits — the ladder is not
+    # consulted a second time.
     redelivery = await handler(signed_request(_pairs(Body="ship it")))
     assert redelivery.status_code == 204
-    assert len(stub_app.conversations.accept_calls) == 1  # still once
-    assert len(fake_httpx.calls) == 1
+    assert len(channels.inbound_calls) == 1  # still once
 
 
-async def test_door_5xx_does_not_bridge_only_terminal_404_bridges(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # A retryable (5xx) failure must NOT be converted into a bridge — only the
-    # terminal 404 bridges. The 5xx restores the correlation and raises.
-    await _seed_pending()
-    fake_httpx.responses.append(response(500, text="oops"))
+async def test_ladder_retry_kept_outcome_acks_and_marks_seen(handler, channels, fake_redis: FakeRedis):
+    # A RETRY_KEPT outcome (the door rejected a re-answerable ask; the ladder kept the
+    # correlation and told the guest what's expected) acks 204 and marks the sid seen —
+    # redelivering the same body would be rejected again.
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
-    with pytest.raises(AnswerForwardError, match="HTTP 500"):
-        await handler(signed_request(_pairs()))
-
-    assert stub_app.conversations.accept_calls == []  # never bridged
-    assert await _pending_intact(fake_redis)  # restored for the retry
-
-
-async def test_door_400_keeps_correlation_for_a_re_reply(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
-    await _seed_pending()
-    fake_httpx.responses.append(response(400))
-
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(_pairs()))
+    result = await handler(signed_request(_pairs()))
 
     assert result.status_code == 204
-    assert await _pending_intact(fake_redis)  # restored — the human can reply again
+    assert len(channels.inbound_calls) == 1
     assert _SEEN_KEY in fake_redis.store
-    assert any("rejected the answer" in record.message for record in caplog.records)
-
-    # A NEW reply from the pair (new sid) pops it and forwards.
-    fake_httpx.responses.append(response(200))
-    retry = await handler(signed_request(_pairs(MessageSid="SM778", Body="option two")))
-    assert retry.status_code == 204
-    assert fake_httpx.calls[-1]["json"] == {"answer": "option two"}
-    assert not await _pending_intact(fake_redis)
-
-
-async def test_forward_transport_failure_restores_and_propagates(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    await _seed_pending()
-    fake_httpx.responses.append(httpx.ConnectError("door unreachable"))
-
-    with pytest.raises(httpx.ConnectError):
-        await handler(signed_request(_pairs()))
-
-    assert await _pending_intact(fake_redis)  # restored
-    assert _SEEN_KEY not in fake_redis.store  # not marked seen
 
 
 # --- Signed delivery-status route ---------------------------------------------

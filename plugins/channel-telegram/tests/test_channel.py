@@ -8,13 +8,19 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification, Correlation
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_telegram.channel import TelegramChannel
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
 _TOKEN = "123456:test-token"
+
+
+def _stored_correlation(fake_redis, key: str = "channel:telegram:corr:42") -> Correlation:
+    """The :class:`Correlation` the store persisted under ``key`` (a JSON record now,
+    carrying callback_url + interaction_id + ttl_deadline)."""
+    return Correlation.model_validate_json(fake_redis.data[key])
 
 
 def _delivery(
@@ -52,7 +58,12 @@ async def test_text_ask_sends_force_reply_and_stores_correlation(http_recorder, 
     assert "(Answer before " in body["text"]
     assert body["reply_markup"] == {"force_reply": True, "input_field_placeholder": "Reply to answer"}
 
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
+    # The store now persists a Correlation record (callback_url + interaction_id +
+    # ttl_deadline), keyed by the anchor message id, TTL = the remaining budget.
+    assert list(fake_redis.data) == ["channel:telegram:corr:42"]
+    entry = _stored_correlation(fake_redis)
+    assert entry.callback_url == _CALLBACK
+    assert entry.interaction_id == "int-1"
     assert 599 <= fake_redis.ttls["channel:telegram:corr:42"] <= 601
 
 
@@ -64,7 +75,8 @@ async def test_select_renders_options_as_guided_text(http_recorder, fake_redis):
     assert "- blue" in body["text"]
     assert "Reply with one of the options above." in body["text"]
     assert body["reply_markup"] == {"force_reply": True, "input_field_placeholder": "Reply to answer"}
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
+    assert list(fake_redis.data) == ["channel:telegram:corr:42"]
+    assert _stored_correlation(fake_redis).callback_url == _CALLBACK
 
 
 @pytest.mark.parametrize("answer_format", ["confirm", "external"])
@@ -207,7 +219,8 @@ async def test_caller_recipient_on_allowlist_sends_to_it(http_recorder, fake_red
     assert len(http_recorder.requests) == 1
     body = json.loads(http_recorder.requests[0].content)
     assert body["chat_id"] == "888"
-    assert fake_redis.data == {"channel:telegram:corr:42": _CALLBACK}
+    assert list(fake_redis.data) == ["channel:telegram:corr:42"]
+    assert _stored_correlation(fake_redis).callback_url == _CALLBACK
 
 
 async def test_caller_recipient_not_on_allowlist_refuses_without_sending(http_recorder, fake_redis):
