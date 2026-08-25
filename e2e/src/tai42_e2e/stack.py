@@ -743,8 +743,13 @@ class TaiStack:
         # returns, so a test firing a gated request the instant the stack is ready never
         # races the gate.
         workers = self._serve_workers_on_port()
+        # The budget must model the stack: N workers each import the whole platform
+        # and hold their own ~2s self-resync gate, and on a contended CI runner the
+        # flat boot budget can elapse before even ONE of a wide pool answers (the
+        # observed "only saw [] of 4 workers" flake). Scale the drain per worker;
+        # a healthy narrow stack still clears in a fraction of it.
         for port in app_ports:
-            await self.wait_workers(workers, port=port, deadline=deadline)
+            await self.wait_workers(workers, port=port, deadline=deadline * max(1, workers))
 
     def _early_exit_detail(self) -> str | None:
         for handle in self._procs.values():

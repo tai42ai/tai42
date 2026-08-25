@@ -31,6 +31,8 @@ import pytest
 from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
 from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, permissive_policy
 
+from tai42_e2e.waiting import WaitTimeout, wait_for_async
+
 
 class _StubSandboxes:
     """Captures the provider's import-time ``register_sandbox`` so the real
@@ -176,9 +178,24 @@ async def http_over_tcp(session: ManagedSandboxSession, host: str, port: int, pa
 
 
 async def resolves_dns(session: ManagedSandboxSession, name: str) -> bool:
-    """Whether the session can resolve ``name`` — DNS egress works."""
-    result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=25)
-    return result.exit_code == 0
+    """Whether the session can resolve ``name`` — DNS egress works.
+
+    "Egress open" is a STEADY-STATE property; a single UDP resolution can be lost
+    to transient runner noise without falsifying it. Wait on the condition over a
+    bounded window (soft bound: the deadline is checked BETWEEN attempts, so one
+    hung lookup can run to its own 25s exec timeout): a firewall that blocks DNS
+    fails every attempt deterministically, so the negative stays trustworthy
+    while one dropped packet stops failing the suite."""
+
+    async def resolved() -> bool:
+        result = await session.exec(["nslookup", name], stdin=b"", timeout_seconds=25)
+        return result.exit_code == 0
+
+    try:
+        await wait_for_async(resolved, deadline=15.0, interval=2.0, message=f"{name} never resolved")
+    except WaitTimeout:
+        return False
+    return True
 
 
 async def default_gateway(session: ManagedSandboxSession) -> str:
