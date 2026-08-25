@@ -26,20 +26,18 @@ import hmac
 import logging
 from urllib.parse import parse_qsl
 
-import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
+from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
-from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import require_secret
 
 from tai42_channel_twilio.correlation import (
-    PendingQuestion,
     already_seen,
+    correlation_key,
     mark_seen,
-    pop_pending,
-    restore_pending,
+    twilio_correlation_store,
 )
 from tai42_channel_twilio.settings import twilio_settings
 
@@ -65,10 +63,6 @@ class SignatureRejectedError(Exception):
 
 class PayloadTooLargeError(Exception):
     """The inbound body exceeded the unauthenticated door's byte cap (mapped to 413)."""
-
-
-class AnswerForwardError(Exception):
-    """The interactions callback door did not accept the forwarded answer."""
 
 
 async def _read_bounded_body(request: Request, cap: int) -> bytes:
@@ -157,13 +151,6 @@ def _auth_error_response(exc: ValueError | PayloadTooLargeError | SignatureRejec
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
 
 
-async def _forward_answer(callback_url: str, answer: str) -> httpx.Response:
-    """POST ``{"answer": <value>}`` to the interaction's callback door and return
-    its response; the caller applies the status policy."""
-    async with tai42_app.clients.client_ctx(HttpxClient, timeout=twilio_settings().http_timeout_seconds) as client:
-        return await client.post(callback_url, json={"answer": answer})
-
-
 @tai42_app.http.custom_route(
     "/inbound",
     methods=["POST"],
@@ -176,12 +163,13 @@ async def twilio_inbound(request: Request) -> Response:
     or route it into the conversation bridge.
 
     Order is load-bearing: bounded body read (413) → signature (nothing trusted
-    before it) → MessageSid dedupe → atomic pending claim → forward. A correlated
-    reply forwards to the callback door; a correlation MISS goes to the bridge.
-    Forward status policy: 2xx answered; 404 terminal — the interaction is gone, so
-    the reply is bridged as a conversation message (never lost); 400 rejected
-    (restore so the human can re-reply); anything else restores and raises so
-    Twilio's retry re-resolves — the answer is never silently lost.
+    before it) → MessageSid dedupe → the shared inbound-answer ladder. A correlated
+    reply is resolved by the ladder (forward / retry-in-place / bridge over the
+    plugin's :class:`CorrelationStore`); a correlation MISS (``NO_CORRELATION``)
+    goes to this channel's bridge, exactly as before. Every resolved/kept/bridged
+    outcome acks 204 and marks the ``MessageSid`` seen; an ``AnswerForwardError``
+    (401/413/5xx / transport fault) propagates so Twilio's retry re-runs the ladder —
+    the answer is never silently lost, and the sid is NOT marked seen on that raise.
     """
     try:
         form_pairs = await _authenticated_form_pairs(request)
@@ -198,55 +186,33 @@ async def twilio_inbound(request: Request) -> Response:
         return Response(status_code=204)
 
     # Inbound direction: To = the deployment's Twilio number, From = the human.
-    pending = await pop_pending(twilio_number=form.get("To", ""), human_number=form.get("From", ""))
-    if pending is None:
+    twilio_number = form.get("To", "")
+    human_number = form.get("From", "")
+    result = await tai42_app.channels.handle_inbound_answer(
+        channel_id="twilio",
+        correlation_key=correlation_key(twilio_number, human_number),
+        # A typed SMS answers with its Body minus outer whitespace.
+        answer=form.get("Body", "").strip(),
+        store=twilio_correlation_store,
+        bridge=InboundBridge(
+            channel_id="twilio",
+            our_identity=twilio_number,
+            client_address=human_number,
+            # The provider attests the From number, so it is both the conversation
+            # identity and the party the turn cap holds accountable.
+            cap_key=human_number,
+            provider_message_id=message_sid,
+            # A bridged (gone-ask / hard-mismatch) reply carries the Body verbatim.
+            bridge_text=form.get("Body", ""),
+        ),
+    )
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         # No pending question (unrelated text or expired) — route to the bridge.
         return await _bridge_inbound(form, message_sid)
-
-    answer = form.get("Body", "").strip()
-    try:
-        forwarded = await _forward_answer(pending.callback_url, answer)
-    except Exception:
-        # Transport failure — restore so the webhook retry or the human's next
-        # message still resolves it.
-        await _restore(form, pending)
-        raise
-
-    if forwarded.status_code // 100 == 2:
-        await mark_seen(message_sid)
-        return Response(status_code=204)
-    if forwarded.status_code == 404:
-        # Terminal: the interaction is gone (pruned/timed-out/cancelled). The dead
-        # ticket can't accept the answer, but the human's SMS must NEVER be lost —
-        # bridge it as an ordinary conversation message (its Body verbatim).
-        # _bridge_inbound sets provider_message_id=message_sid, so a Twilio
-        # redelivery of the same inbound dedupes at the conversation seam.
-        logger.warning(
-            "callback door returned terminal HTTP 404 for %s; the interaction is gone — "
-            "bridging the reply into the conversation instead of dropping it",
-            message_sid,
-        )
-        return await _bridge_inbound(form, message_sid)
-    if forwarded.status_code == 400:
-        # The door rejected THIS answer; keep the correlation so the human can
-        # re-reply, and ack (the same body would be rejected again).
-        logger.warning(
-            "callback door rejected the answer for %s (400); correlation kept so the human can re-reply",
-            message_sid,
-        )
-        await _restore(form, pending)
-        await mark_seen(message_sid)
-        return Response(status_code=204)
-    # 401/413/5xx ambient failure — keep the correlation and fail loudly; Twilio's
-    # retry re-pops the restored question and forwards again.
-    await _restore(form, pending)
-    raise AnswerForwardError(
-        f"interactions callback rejected the answer: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
-    )
-
-
-async def _restore(form: dict[str, str], pending: PendingQuestion) -> None:
-    await restore_pending(twilio_number=form.get("To", ""), human_number=form.get("From", ""), question=pending)
+    # FORWARDED / RETRY_KEPT / BRIDGED: the ladder resolved (or already bridged) the
+    # reply; ack 204 and mark the sid seen so a redelivery is not re-processed.
+    await mark_seen(message_sid)
+    return Response(status_code=204)
 
 
 async def _bridge_inbound(form: dict[str, str], message_sid: str) -> Response:

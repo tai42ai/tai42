@@ -27,12 +27,12 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import require_secret
 
-from tai42_channel_telegram.client import send_chat_action, telegram_http
-from tai42_channel_telegram.correlation import clear_correlation, lookup_callback_url
+from tai42_channel_telegram.client import send_chat_action
+from tai42_channel_telegram.correlation import telegram_correlation_store
 from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, telegram_settings
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
 _MAX_BODY_BYTES = 1 * 1024 * 1024
+
+# The shared ladder's outcome -> this webhook's ``{"data": {"status": ...}}`` ack. The
+# statuses match the wire the hand-rolled ladder answered: a resolved answer forwards,
+# a kept re-answerable ask reads "rejected", a bridged (gone/hard-mismatch) reply reads
+# "accepted" — the same string a fresh-turn bridge returns. NO_CORRELATION is absent:
+# the caller bridges that miss and returns the bridge's own ack.
+_ACK_STATUS = {
+    InboundAnswerOutcome.FORWARDED: "forwarded",
+    InboundAnswerOutcome.RETRY_KEPT: "rejected",
+    InboundAnswerOutcome.BRIDGED: "accepted",
+}
 
 
 class _PayloadTooLarge(Exception):
@@ -84,48 +95,57 @@ def _is_recipient_chat(chat: dict[str, object], settings: TelegramSettings) -> b
     return str(chat.get("id")) in recipient_chats or (isinstance(username, str) and f"@{username}" in recipient_chats)
 
 
-async def _forward_answer(
-    message_id: int,
-    callback_url: str,
+async def _resolve_answer(
     settings: TelegramSettings,
+    replied_id: int,
     chat_id: int,
     text: str,
     update: dict[str, object],
-) -> Response:
-    """Forward a correlated ForceReply answer to its callback door and map the
-    door's status to this webhook's ack. Transport errors propagate (-> 500).
+) -> Response | None:
+    """Resolve a ForceReply answer against its pending ask via the ONE shared ladder.
 
-    ``settings``/``chat_id``/``text``/``update`` are the bridge context so a terminal
-    404 (the interaction is gone) bridges the reply into the conversation rather than
-    dropping it — ``_bridge`` sets ``provider_message_id`` = the update id, so a
-    Telegram redelivery of the same inbound dedupes at the conversation seam."""
-    async with telegram_http() as client:
-        forwarded = await client.post(callback_url, json={"answer": text})
+    The correlation key is the anchor message's id; the answer is the reply text
+    verbatim. The ladder forwards to the door and interprets the outcome (release /
+    keep-and-notify / bridge) over the plugin's :class:`CorrelationStore` — the plugin
+    keeps only its transport ack. Returns the webhook ack for a resolved/kept/bridged
+    outcome, or ``None`` on a correlation miss so the caller bridges the reply as a
+    fresh turn (the ladder never bridges on a miss — the caller does, exactly as
+    before). An :class:`AnswerForwardError` (401/413/5xx / transport fault) propagates
+    to a 500 so Telegram redelivers and re-runs the ladder.
 
-    if forwarded.status_code == 200:
-        await clear_correlation(message_id)
-        return JSONResponse({"data": {"status": "forwarded"}}, status_code=200)
-    # 404 is the ONE terminal callback status: the ticket is gone and retrying the
-    # same answer can never succeed. (A duplicate forward resolves idempotently to 200.)
-    if forwarded.status_code == 404:
-        logger.warning(
-            "telegram inbound: callback door returned terminal HTTP 404 for message_id=%s; the interaction "
-            "is gone — bridging the reply into the conversation instead of dropping it",
-            message_id,
+    ``update_id`` is the bridge's idempotency key and ``our_identity`` the bot's
+    numeric id (a malformed token is a loud 500), both resolved up front so the
+    :class:`InboundBridge` a 404/hard-mismatch bridge needs is ready before the call.
+    """
+    update_id = update.get("update_id")
+    if not isinstance(update_id, int):
+        return JSONResponse({"error": "update carries no integer update_id"}, status_code=400)
+    try:
+        our_identity = bot_numeric_id(
+            require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
         )
-        await clear_correlation(message_id)
-        return await _bridge(settings, chat_id, text, update)
-    if forwarded.status_code == 400:
-        logger.warning(
-            "telegram inbound: callback door rejected the answer for message_id=%s (400); "
-            "correlation kept so the human can reply again",
-            message_id,
-        )
-        return JSONResponse({"data": {"status": "rejected"}}, status_code=200)
-    raise RuntimeError(
-        f"interaction callback returned HTTP {forwarded.status_code} for message_id={message_id}; "
-        f"failing the webhook delivery so Telegram redelivers"
+    except ValueError:
+        return _misconfigured("CHANNEL_TELEGRAM_BOT_TOKEN")
+
+    result = await tai42_app.channels.handle_inbound_answer(
+        channel_id="telegram",
+        correlation_key=str(replied_id),
+        answer=text,
+        store=telegram_correlation_store,
+        bridge=InboundBridge(
+            channel_id="telegram",
+            our_identity=our_identity,
+            client_address=str(chat_id),
+            # The provider attests the chat id, so it is both the conversation identity
+            # and the party the turn cap holds accountable.
+            cap_key=str(chat_id),
+            provider_message_id=str(update_id),
+            bridge_text=text,
+        ),
     )
+    if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
+        return None
+    return JSONResponse({"data": {"status": _ACK_STATUS[result.outcome]}}, status_code=200)
 
 
 async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: dict[str, object]) -> Response:
@@ -233,12 +253,13 @@ async def inbound(request: Request) -> Response:
         logger.warning("telegram inbound: typing action for chat_id=%s failed: %s", chat_id, exc)
 
     # ask_user wins when a ForceReply reply from a recipient chat matches a
-    # still-pending question; an expired match falls through to the bridge.
+    # still-pending question; a correlation miss (expired/never-ours) falls through to
+    # the bridge — the shared ladder returns NO_CORRELATION and the caller bridges.
     reply_to = message.get("reply_to_message")
     replied_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
     if isinstance(replied_id, int) and _is_recipient_chat(chat, settings):
-        callback_url = await lookup_callback_url(replied_id)
-        if callback_url is not None:
-            return await _forward_answer(replied_id, callback_url, settings, chat_id, text, update)
+        resolved = await _resolve_answer(settings, replied_id, chat_id, text, update)
+        if resolved is not None:
+            return resolved
 
     return await _bridge(settings, chat_id, text, update)

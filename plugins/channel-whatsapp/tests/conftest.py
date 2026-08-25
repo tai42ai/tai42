@@ -19,7 +19,7 @@ import httpx
 import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
-from tai42_contract.channels import ChannelDelivery
+from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -49,13 +49,45 @@ class _StubClients:
 
 
 class _StubChannels:
+    """Records registrations and stands in for the shared inbound-answer ladder the
+    real skeleton exposes on ``app.channels`` — the plugin's test venv cannot import
+    the skeleton, so the ladder is faked at this contract seam. A test sets the outcome
+    (or an error) and reads back the recorded call (including ``bridge.owns_retry_notice``)."""
+
     def __init__(self) -> None:
         self.registered: dict[str, Any] = {}
+        self.inbound_calls: list[SimpleNamespace] = []
+        self.inbound_outcome: InboundAnswerOutcome = InboundAnswerOutcome.NO_CORRELATION
+        self.inbound_retry_reason: str | None = None
+        self.inbound_retry_field: str | None = None
+        self.inbound_error: BaseException | None = None
 
     def register(self, name: str, channel: Any) -> None:
         if name in self.registered:
             raise ValueError(f"channel {name!r} already registered")
         self.registered[name] = channel
+
+    async def handle_inbound_answer(
+        self, *, channel_id: str, correlation_key: str, answer: Any, store: Any, bridge: Any
+    ) -> InboundAnswerResult:
+        self.inbound_calls.append(
+            SimpleNamespace(
+                channel_id=channel_id, correlation_key=correlation_key, answer=answer, store=store, bridge=bridge
+            )
+        )
+        if self.inbound_error is not None:
+            raise self.inbound_error
+        # Mirror the real ladder's ONE store side-effect so store-state assertions
+        # (pending consumed vs kept) hold in the plugin suite: a terminal outcome
+        # releases the reservation via the port, a kept/miss one leaves it untouched.
+        # The forward/notice/bridge policy itself is the core ladder's own test.
+        if self.inbound_outcome in (InboundAnswerOutcome.FORWARDED, InboundAnswerOutcome.BRIDGED):
+            await store.release_correlation(correlation_key)
+        return InboundAnswerResult(
+            outcome=self.inbound_outcome,
+            retry_reason=self.inbound_retry_reason,
+            retry_field=self.inbound_retry_field,
+        )
 
 
 class _StubHttp:
@@ -220,10 +252,26 @@ class FakeRedis:
 
 @pytest.fixture
 def stub_app() -> Iterator[_StubApp]:
+    channels = _stub_app.channels
+    _reset_channels(channels)
     yield _stub_app
     _stub_app.clients.by_class.clear()
     _stub_app.clients.ctx_kwargs.clear()
     _stub_app.conversations = _StubConversations()
+    _reset_channels(channels)
+
+
+def _reset_channels(channels: _StubChannels) -> None:
+    channels.inbound_calls.clear()
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    channels.inbound_retry_reason = None
+    channels.inbound_retry_field = None
+    channels.inbound_error = None
+
+
+@pytest.fixture
+def channels(stub_app: _StubApp) -> _StubChannels:
+    return stub_app.channels
 
 
 _ENV_VARS = (

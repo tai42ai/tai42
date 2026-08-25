@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from starlette.responses import Response
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, InboundAnswerOutcome
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.settings import reset_all_settings
 
@@ -23,7 +23,6 @@ from tai42_channel_whatsapp.inbound import (
     _FORM_REJECTION_LEAD,
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
-    AnswerForwardError,
     _render_answer_for_bridge,
 )
 
@@ -282,27 +281,32 @@ async def test_wamid_dedupe_short_circuits_before_bridge(
     assert not fake_httpx.calls
 
 
-async def test_pending_question_resolves_before_bridge(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_pending_question_resolves_before_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
     await _seed_pending()
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["url"] == _CALLBACK
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
-    assert stub_app.conversations.accept_calls == []  # the bridge was NOT reached
-    assert not await _pending_intact(fake_redis)  # consumed
+    # The reply is handed to the shared ladder with the pair key + the reply text; a
+    # text ask does not own its retry notice (core would send it).
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.correlation_key == f"{PHONE_NUMBER_ID}:{WA_ID}"
+    assert call.answer == "yes please"
+    assert call.bridge.owns_retry_notice is False
+    assert stub_app.conversations.accept_calls == []  # the caller's bridge was NOT reached
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_answer_is_body_verbatim_minus_outer_whitespace(handler, channels, fake_redis: FakeRedis):
     await _seed_pending()
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     await handler(signed_request(message_payload(text="  yes please \n")))
 
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
+    assert channels.inbound_calls[0].answer == "yes please"
 
 
 async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
@@ -479,7 +483,7 @@ async def test_batched_message_lookuperror_continues_to_next(
 
 
 async def test_batched_failing_reply_does_not_starve_independent_bridge(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # m1 is a correlated reply whose callback door persistently 5xx's; m2 is an
     # independent bridge message for a different wa_id. m1's propagating failure
@@ -490,23 +494,24 @@ async def test_batched_failing_reply_does_not_starve_independent_bridge(
     payload = message_payload(wamid="wamid.M1", text="the answer")
     value = payload["entry"][0]["changes"][0]["value"]
     value["messages"].append({"id": "wamid.M2", "from": "15559990002", "type": "text", "text": {"body": "independent"}})
-    fake_httpx.responses.append(response(500, text="down"))
+    # m1 correlates (a pending exists) so it reaches the ladder, which raises; m2 has no
+    # pending so it never reaches the ladder — it bridges independently.
+    channels.inbound_error = AnswerForwardError("interactions callback rejected the answer: HTTP 500: down")
 
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(payload))
 
     assert [c["provider_message_id"] for c in stub_app.conversations.accept_calls] == ["wamid.M2"]  # m2 committed
-    assert await _pending_intact(fake_redis)  # m1 restored — it retries on redelivery
+    assert await _pending_intact(fake_redis)  # m1's ask kept — it retries on redelivery
     assert "channel:whatsapp:seen:wamid.M1" not in fake_redis.store  # m1 un-acked
     assert "channel:whatsapp:seen:wamid.M2" in fake_redis.store  # m2 acked
 
-    # Redelivery: m1 fails again (still 5xx), m2 is dedupe-skipped (no re-bridge).
-    fake_httpx.responses.append(response(500, text="down"))
+    # Redelivery: m1 fails again (ladder still raises), m2 is dedupe-skipped (no re-bridge).
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(payload))
 
     assert [c["provider_message_id"] for c in stub_app.conversations.accept_calls] == ["wamid.M2"]  # still once
-    assert len(fake_httpx.calls) == 2  # m1 forwarded twice; m2 never forwarded
+    assert len(channels.inbound_calls) == 2  # m1 reached the ladder twice; m2 never (no pending)
 
 
 async def test_status_infra_failure_reraises_but_later_message_commits(
@@ -585,95 +590,73 @@ async def test_dict_payload_with_non_list_entry_is_acked(handler, stub_app):
 # --- Forward status policy (correlated reply) ---------------------------------
 
 
-async def test_door_5xx_restores_pending_and_raises_so_meta_retries(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
+async def test_ladder_forward_error_raises_and_does_not_dedupe(handler, channels, fake_redis: FakeRedis):
+    # A door 5xx / 401 / transport fault surfaces as AnswerForwardError from the ladder
+    # (which keeps the correlation for the retry); the plugin lets it propagate and does
+    # NOT mark the wamid seen, so Meta's redelivery re-runs the ladder.
     await _seed_pending()
-    fake_httpx.responses.append(response(500, text="oops"))
+    channels.inbound_error = AnswerForwardError("interactions callback rejected the answer: HTTP 500: oops")
 
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(message_payload()))
 
-    assert await _pending_intact(fake_redis)  # restored
+    assert await _pending_intact(fake_redis)  # the ladder kept it (stub left it intact)
     assert _SEEN_KEY not in fake_redis.store  # NOT marked seen — the retry must not dedupe away
 
-    fake_httpx.responses.append(response(200))
-    retry = await handler(signed_request(message_payload()))
-    assert retry.status_code == 200
-    assert len(fake_httpx.calls) == 2
-    assert not await _pending_intact(fake_redis)
 
-
-async def test_door_404_terminal_bridges_the_text_reply(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
-    # A terminal 404 (the interaction is gone) must NOT silently drop the human's
-    # reply: it is bridged into the conversation carrying the reply's text, under the
-    # same wamid so a Meta redelivery dedupes rather than double-dispatching.
+async def test_ladder_bridged_text_reply_acks_and_renders_bridge_text(handler, channels, fake_redis: FakeRedis):
+    # A BRIDGED outcome (the ask is gone / a hard mismatch — the ladder already bridged
+    # the reply internally, carrying the text under the wamid dedupe key) acks 200 and
+    # marks the wamid seen. The channel supplies the faithful bridge text.
     await _seed_pending()
-    fake_httpx.responses.append(response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(message_payload(text="yes please")))
+    result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
-    assert not await _pending_intact(fake_redis)  # correlation consumed
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
     assert _SEEN_KEY in fake_redis.store
-    assert any("bridging the reply" in record.message for record in caplog.records)
-    assert stub_app.conversations.accept_calls == [
-        {
-            "channel": "whatsapp",
-            "our_identity": PHONE_NUMBER_ID,
-            "client_address": WA_ID,
-            "cap_key": WA_ID,
-            "text": "yes please",
-            "provider_message_id": _WAMID,
-        }
-    ]
+    assert channels.inbound_calls[0].bridge.bridge_text == "yes please"
+    assert channels.inbound_calls[0].bridge.provider_message_id == _WAMID
 
-    # Meta redelivers the same wamid: dedupe short-circuits — no second bridge, no
-    # second forward to the dead ticket.
+    # Meta redelivers the same wamid: dedupe short-circuits — the ladder is not consulted again.
     redelivery = await handler(signed_request(message_payload(text="yes please")))
     assert redelivery.status_code == 200
-    assert len(stub_app.conversations.accept_calls) == 1  # still once
-    assert len(fake_httpx.calls) == 1
+    assert len(channels.inbound_calls) == 1  # still once
 
 
-async def test_door_404_terminal_bridges_the_select_tap_label(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # A select tap whose interaction is terminally gone bridges the option's
-    # human-readable label (the tap IS the person's answer), never a silent drop.
+async def test_bridged_select_tap_renders_the_option_label(handler, channels, fake_redis: FakeRedis):
+    # A select tap resolves to its option label in the channel, which is what the
+    # ladder's bridge would carry when the interaction is terminally gone.
     await _seed_pending_select(options=["staging", "production"])
-    fake_httpx.responses.append(response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
     result = await handler(signed_request(interactive_payload(reply_id="int-1:1", title="production")))
 
     assert result.status_code == 200
-    assert not await _pending_intact(fake_redis)  # consumed
-    assert stub_app.conversations.accept_calls[0]["text"] == "production"
-    assert stub_app.conversations.accept_calls[0]["provider_message_id"] == _WAMID
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
+    assert channels.inbound_calls[0].answer == "production"  # the tap resolved to options[1]
+    assert channels.inbound_calls[0].bridge.bridge_text == "production"
+    assert channels.inbound_calls[0].bridge.provider_message_id == _WAMID
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_door_404_terminal_bridges_form_as_readable_fields(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # A completed Flow form whose interaction is terminally gone bridges a readable
-    # rendering of the submitted field/value pairs (never a raw JSON dump, never a
-    # silent drop).
+async def test_bridged_form_renders_readable_fields(handler, channels, fake_redis: FakeRedis):
+    # A completed Flow form's bridge text renders the submitted field/value pairs
+    # readably (never a raw JSON dump), which the ladder would carry on a gone ask.
     await _seed_pending_form()
-    fake_httpx.responses.append(response(404))
+    channels.inbound_outcome = InboundAnswerOutcome.BRIDGED
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "ship it", "qty": "7"})))
 
     assert result.status_code == 200
-    assert not await _pending_intact(fake_redis)  # consumed
-    bridged = stub_app.conversations.accept_calls[0]["text"]
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
+    assert channels.inbound_calls[0].answer == {"note": "ship it", "qty": 7}  # coerced dict forwarded
+    bridged = channels.inbound_calls[0].bridge.bridge_text
     assert "note: ship it" in bridged
     assert "qty: 7" in bridged  # coerced to int, rendered as a labelled field line
     assert "{" not in bridged  # not a raw JSON dump
-    assert stub_app.conversations.accept_calls[0]["provider_message_id"] == _WAMID
+    assert channels.inbound_calls[0].bridge.provider_message_id == _WAMID
 
 
 def test_render_empty_form_answer_bridges_a_non_empty_string():
@@ -700,52 +683,32 @@ def test_render_form_answer_with_a_nested_value_uses_json_not_repr():
     assert "Note: ship it" in rendered  # scalar rendering unchanged
 
 
-async def test_door_5xx_does_not_bridge_only_terminal_404_bridges(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # A retryable (5xx) failure must NOT be converted into a bridge — only the
-    # terminal 404 bridges. The 5xx restores the correlation and raises.
+async def test_ladder_forward_error_does_not_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
+    # A raised AnswerForwardError (5xx/transport) must NOT be converted into a bridge:
+    # the ladder kept the correlation and the plugin re-raises for Meta's retry.
     await _seed_pending()
-    fake_httpx.responses.append(response(500, text="oops"))
+    channels.inbound_error = AnswerForwardError("interactions callback rejected the answer: HTTP 500: oops")
 
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(message_payload()))
 
     assert stub_app.conversations.accept_calls == []  # never bridged
-    assert await _pending_intact(fake_redis)  # restored for the retry
+    assert await _pending_intact(fake_redis)  # kept for the retry
 
 
-async def test_door_400_keeps_correlation_for_a_re_reply(
-    handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
+async def test_text_ask_retry_kept_acks_and_keeps_correlation(handler, channels, fake_redis: FakeRedis):
+    # RETRY_KEPT on a text ask (owns_retry_notice=False, so the CORE sent the guest
+    # notice): the correlation is kept and the wamid is marked seen — redelivering the
+    # same body would be rejected again.
     await _seed_pending()
-    fake_httpx.responses.append(response(400))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(message_payload()))
+    result = await handler(signed_request(message_payload()))
 
     assert result.status_code == 200
-    assert await _pending_intact(fake_redis)  # restored — the human can reply again
+    assert channels.inbound_calls[0].bridge.owns_retry_notice is False  # core owns the text-ask notice
+    assert await _pending_intact(fake_redis)  # kept — the human can reply again
     assert _SEEN_KEY in fake_redis.store
-    assert any("rejected the answer" in record.message for record in caplog.records)
-
-    # A NEW reply from the pair (new wamid) pops it and forwards.
-    fake_httpx.responses.append(response(200))
-    retry = await handler(signed_request(message_payload(wamid="wamid.SECOND", text="option two")))
-    assert retry.status_code == 200
-    assert fake_httpx.calls[-1]["json"] == {"answer": "option two"}
-    assert not await _pending_intact(fake_redis)
-
-
-async def test_forward_transport_failure_restores_and_propagates(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    await _seed_pending()
-    fake_httpx.responses.append(httpx.ConnectError("door unreachable"))
-
-    with pytest.raises(httpx.ConnectError):
-        await handler(signed_request(message_payload()))
-
-    assert await _pending_intact(fake_redis)  # restored
-    assert _SEEN_KEY not in fake_redis.store  # not marked seen
 
 
 # --- Delivery-status webhooks -------------------------------------------------
@@ -923,19 +886,14 @@ def form_reply_payload(response: dict, *, wamid: str = _WAMID, wa_id: str = WA_I
     }
 
 
-def _door_400() -> httpx.Response:
-    """A callback-door 400 in the platform envelope, naming the failing field."""
-    return response(400, json={"error": "note: bad", "field": "note"})
-
-
 def _flow_accepted(wamid: str = "wamid.RESEND") -> httpx.Response:
     """A Cloud-API accept for a re-sent Flow message."""
     return response(200, json={"messages": [{"id": wamid}]})
 
 
-async def test_form_reply_forwards_coerced_answer_dict(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_form_reply_forwards_coerced_answer_dict(handler, channels, fake_redis: FakeRedis):
     await _seed_pending_form()
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(
         signed_request(
@@ -944,57 +902,61 @@ async def test_form_reply_forwards_coerced_answer_dict(handler, fake_redis: Fake
     )
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["url"] == _CALLBACK
     # flow_token stripped; qty string→int; amount string→float; agree bool passthrough; note string.
-    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "ship it", "qty": 7, "amount": 3.5, "agree": True}}
-    assert not await _pending_intact(fake_redis)  # consumed
+    assert channels.inbound_calls[0].answer == {"note": "ship it", "qty": 7, "amount": 3.5, "agree": True}
+    # A form ask owns its retry notice — its correction surface is a re-opened Flow.
+    assert channels.inbound_calls[0].bridge.owns_retry_notice is True
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_form_reply_coerces_string_boolean(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_form_reply_coerces_string_boolean(handler, channels, fake_redis: FakeRedis):
     await _seed_pending_form()
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "agree": "true"})))
 
-    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "agree": True}}
+    assert channels.inbound_calls[0].answer == {"note": "x", "agree": True}
 
 
-async def test_form_reply_bad_coercion_re_sends_flow_naming_field(
-    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+async def test_form_reply_bad_coercion_forwards_raw_then_re_sends_flow(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A decimal in an integer field is forwarded raw (int("3.5") fails); the door
-    # rejects it (400 naming the field) and the reply is recovered by re-sending a
-    # fresh Flow whose body repeats the question and names the failing field.
+    # A decimal in an integer field is forwarded raw (int("3.5") fails); the ladder's
+    # RETRY_KEPT on this form ask recovers by re-sending a fresh Flow (the channel owns
+    # the guest correction here — the ladder sent no notice).
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, json={"error": "answer at qty: 3.5 is not an integer", "field": "qty"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    # The ladder returns the door's own field-naming reason on RETRY_KEPT.
+    channels.inbound_retry_reason = "answer at qty: 3.5 is not an integer"
+    channels.inbound_retry_field = "qty"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "qty": "3.5"})))
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "qty": "3.5"}}  # raw, uncoerced
-    resend = fake_httpx.calls[1]["json"]  # recovered by a fresh Flow
+    assert channels.inbound_calls[0].answer == {"note": "x", "qty": "3.5"}  # raw, uncoerced, handed to the ladder
+    resend = fake_httpx.calls[0]["json"]  # the ONLY send now — the answer forward is the ladder's
     assert resend["interactive"]["type"] == "flow"
     assert resend["interactive"]["action"]["parameters"]["flow_token"] == "int-1"
     assert resend["interactive"]["action"]["parameters"]["flow_id"] == "flow-cached"
     body = resend["interactive"]["body"]["text"]
     assert _FORM_QUESTION in body  # the question is repeated
-    assert "qty" in body  # the door's field-naming error rides the body
+    assert "qty" in body  # the door's field-naming reason rides the re-sent Flow body (parity restored)
     assert await _pending_intact(fake_redis)  # kept for the re-submission
     assert _stored_rejections(fake_redis) == 1
 
 
 @pytest.mark.parametrize("raw_number", ["1e999", "nan", "inf"])
 async def test_form_reply_non_finite_number_forwarded_raw(
-    raw_number: str, waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    raw_number: str, waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A value parsing to inf/nan passes jsonschema yet serializes to null
-    # downstream; it is forwarded raw so the door 400s and the reply is recovered.
+    # A value parsing to inf/nan passes jsonschema yet serializes to null downstream;
+    # it is forwarded raw so the door 400s and the reply is recovered by a fresh Flow.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, json={"error": "amount: not finite", "field": "amount"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(
@@ -1002,32 +964,35 @@ async def test_form_reply_non_finite_number_forwarded_raw(
     )
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": {"note": "x", "amount": raw_number}}  # raw, uncoerced
-    assert fake_httpx.calls[1]["json"]["interactive"]["type"] == "flow"  # recovered by a fresh Flow
+    assert channels.inbound_calls[0].answer == {"note": "x", "amount": raw_number}  # raw, uncoerced
+    assert fake_httpx.calls[0]["json"]["interactive"]["type"] == "flow"  # recovered by a fresh Flow
     assert await _pending_intact(fake_redis)
     assert _stored_rejections(fake_redis) == 1
 
 
-async def test_form_reply_door_400_re_sends_fresh_flow(waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # A door-rejected form answer is recovered by re-sending a fresh Flow for the
-    # SAME interaction: same flow_token, the cached flow id, the door's error in the
-    # body, the correlation kept alive with the rejection counted.
+async def test_form_retry_kept_re_sends_fresh_flow(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # RETRY_KEPT on a form ask recovers by re-sending a fresh Flow for the SAME
+    # interaction: same flow_token, the cached flow id, a generic error line, the
+    # correlation kept alive with the rejection counted, and a single guest message.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, json={"error": "note: must not be blank", "field": "note"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
     assert result.status_code == 200
-    assert len(fake_httpx.calls) == 2
-    assert fake_httpx.calls[0]["url"] == _CALLBACK  # the answer forward
-    assert fake_httpx.calls[1]["url"].endswith(f"/{PHONE_NUMBER_ID}/messages")  # the fresh Flow send
-    resend = fake_httpx.calls[1]["json"]
+    assert len(fake_httpx.calls) == 1  # the fresh Flow send only — the answer forward is the ladder's
+    assert fake_httpx.calls[0]["url"].endswith(f"/{PHONE_NUMBER_ID}/messages")  # the fresh Flow send
+    resend = fake_httpx.calls[0]["json"]
     assert resend["interactive"]["type"] == "flow"
     params = resend["interactive"]["action"]["parameters"]
     assert params["flow_token"] == "int-1"  # same interaction — reply matching unchanged
     assert params["flow_id"] == "flow-cached"  # reuses the cached flow id
+    # The door's OWN reason rides the body (restored parity), not a generic line.
     assert resend["interactive"]["body"]["text"] == (
         f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} note: must not be blank"
     )
@@ -1036,8 +1001,26 @@ async def test_form_reply_door_400_re_sends_fresh_flow(waba_env, handler, fake_r
     assert _SEEN_KEY in fake_redis.store
 
 
+async def test_form_retry_kept_without_reason_uses_opaque_line(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # When the door gave no usable reason (retry_reason None), the re-sent Flow falls
+    # back to the fixed opaque line — the guest is never shown an intermediary's content.
+    await _seed_pending_form()
+    _seed_flow_cache(fake_redis)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = None
+    fake_httpx.responses.append(_flow_accepted())
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
+    assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
+
+
 async def test_form_rejection_long_question_drops_question_keeps_error(
-    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # A question long enough to overflow Meta's 1024-char interactive.body.text cap is
     # dropped WHOLE from the re-sent Flow body (never a mid-string ellipsis): the fresh
@@ -1046,13 +1029,14 @@ async def test_form_rejection_long_question_drops_question_keeps_error(
     long_question = "Q" * (_FLOW_BODY_MAX_CHARS + 100)
     await _seed_pending_form(question=long_question)
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, json={"error": "note: must not be blank", "field": "note"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
     assert result.status_code == 200
-    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
     assert body == f"{_FORM_REJECTION_LEAD} note: must not be blank"  # tail only — the question is gone
     assert long_question not in body  # no question
     assert not body.startswith("Q")  # not even a chopped prefix of it
@@ -1065,7 +1049,7 @@ async def test_form_rejection_long_question_drops_question_keeps_error(
 
 
 async def test_form_rejection_body_at_cap_boundary_keeps_question(
-    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # The cap is inclusive: a body whose length is EXACTLY the cap keeps the question,
     # and one char more would drop it. Pins the <= boundary against the constant.
@@ -1074,13 +1058,14 @@ async def test_form_rejection_body_at_cap_boundary_keeps_question(
     question = "Q" * (_FLOW_BODY_MAX_CHARS - len(tail) - len("\n\n"))
     await _seed_pending_form(question=question)
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, json={"error": error, "field": "note"}))
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = error
     fake_httpx.responses.append(_flow_accepted())
 
     result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
     assert result.status_code == 200
-    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
+    body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
     assert body == f"{question}\n\n{tail}"  # question kept at exactly the cap
     assert len(body) == _FLOW_BODY_MAX_CHARS
     assert _stored_rejections(fake_redis) == 1
@@ -1088,29 +1073,36 @@ async def test_form_rejection_body_at_cap_boundary_keeps_question(
 
 
 async def test_form_rejection_cap_stops_re_send_and_bridges(
-    waba_env, stub_app, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+    waba_env,
+    stub_app,
+    handler,
+    channels,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    caplog: pytest.LogCaptureFixture,
 ):
-    # Two rejections under the cap each re-send; the one that reaches the cap does
-    # NOT re-send — the guest gets one plain final message, the pending is popped, and
-    # a later text bridges normally.
+    # Two RETRY_KEPT rejections under the cap each re-send; the one that reaches the cap
+    # does NOT re-send — the guest gets one plain final message, the reservation is
+    # released, and a later text bridges normally.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
     _set_stored_rejections(fake_redis, _MAX_FORM_REJECTIONS - 2)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
     # First rejection: under the cap → re-send, counter +1.
-    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.RS1")])
+    fake_httpx.responses.append(_flow_accepted("wamid.RS1"))
     await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R1")))
     assert fake_httpx.calls[-1]["json"]["interactive"]["type"] == "flow"
     assert _stored_rejections(fake_redis) == _MAX_FORM_REJECTIONS - 1
 
     # Second rejection: still under the cap → second re-send, now at the cap.
-    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.RS2")])
+    fake_httpx.responses.append(_flow_accepted("wamid.RS2"))
     await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R2")))
     assert fake_httpx.calls[-1]["json"]["interactive"]["type"] == "flow"
     assert _stored_rejections(fake_redis) == _MAX_FORM_REJECTIONS
 
-    # Third rejection: at the cap → NO flow send, one plain final message, popped.
-    fake_httpx.responses.extend([_door_400(), _flow_accepted("wamid.FINAL")])
+    # Third rejection: at the cap → NO flow send, one plain final message, released.
+    fake_httpx.responses.append(_flow_accepted("wamid.FINAL"))
     with caplog.at_level("ERROR"):
         result = await handler(
             signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"}, wamid="wamid.R3"))
@@ -1120,39 +1112,42 @@ async def test_form_rejection_cap_stops_re_send_and_bridges(
     final = fake_httpx.calls[-1]["json"]
     assert final["type"] == "text"  # a plain message, never another flow
     assert final["text"]["body"] == _FORM_UNPROCESSABLE
-    assert not await _pending_intact(fake_redis)  # popped, not restored
+    assert not await _pending_intact(fake_redis)  # released, not re-sent
     assert any(f"cap {_MAX_FORM_REJECTIONS}" in record.message for record in caplog.records)
 
     # A later inbound text now bridges normally — the pending is gone.
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
     await handler(signed_request(message_payload(wamid="wamid.TXT", text="hello")))
     assert len(stub_app.conversations.accept_calls) == 1
 
 
 async def test_form_rejection_re_send_failure_raises_and_keeps_pending(
-    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # A re-send that itself fails (5xx) propagates out of the webhook so Meta
-    # redelivers; the pending is restored UNCHANGED and the wamid is NOT marked seen,
-    # so the redelivery re-pops the same ask and re-enters the 400 path.
+    # redelivers; the pending is kept UNCHANGED (the ladder held it, no bump) and the
+    # wamid is NOT marked seen, so the redelivery re-runs the ladder and re-enters.
     await _seed_pending_form()
     _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(_door_400())  # the answer forward is rejected
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
     fake_httpx.responses.append(response(500, text="graph down"))  # the re-send itself fails
 
     with pytest.raises(ChannelDeliveryError, match="HTTP 500"):
         await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
-    assert await _pending_intact(fake_redis)  # restored for the redelivery
+    assert await _pending_intact(fake_redis)  # kept for the redelivery
     assert _stored_rejections(fake_redis) == 0  # a failed re-send does not spend the cap
     assert _SEEN_KEY not in fake_redis.store  # not marked seen — redelivery re-enters
 
 
-async def test_form_rejection_cache_miss_raises_loudly(waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_form_rejection_cache_miss_raises_loudly(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
     # The published-flow cache has no TTL, so a miss at re-send time means the store
-    # was lost — a loud failure that re-sends nothing, restoring the pending unchanged
-    # for Meta's redelivery, never a silent skip.
+    # was lost — a loud failure that re-sends nothing, keeping the pending unchanged for
+    # Meta's redelivery, never a silent skip.
     await _seed_pending_form()  # no flow-cache entry seeded
-    fake_httpx.responses.append(_door_400())
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
 
     with pytest.raises(AnswerForwardError, match="no published flow cached"):
         await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
@@ -1160,27 +1155,6 @@ async def test_form_rejection_cache_miss_raises_loudly(waba_env, handler, fake_r
     assert await _pending_intact(fake_redis)
     assert _stored_rejections(fake_redis) == 0
     assert _SEEN_KEY not in fake_redis.store
-
-
-async def test_form_rejection_non_envelope_400_shows_opaque_line(
-    waba_env, handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
-    # A 400 body that is not this platform's error envelope (a proxy/WAF page) is not
-    # shown to the guest: the re-sent Flow carries a fixed opaque line instead, and the
-    # raw body is logged.
-    await _seed_pending_form()
-    _seed_flow_cache(fake_redis)
-    fake_httpx.responses.append(response(400, text="<html>blocked by WAF</html>"))
-    fake_httpx.responses.append(_flow_accepted())
-
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
-
-    assert result.status_code == 200
-    body = fake_httpx.calls[1]["json"]["interactive"]["body"]["text"]
-    assert body == f"{_FORM_QUESTION}\n\n{_FORM_REJECTION_LEAD} {_CALLBACK_REJECTION_OPAQUE}"
-    assert "blocked by WAF" not in body  # the intermediary's content never reaches the guest
-    assert any("not this platform's error envelope" in record.message for record in caplog.records)
 
 
 async def test_form_reply_flow_token_mismatch_bridges_and_keeps_pending(
@@ -1244,14 +1218,14 @@ async def test_form_reply_missing_response_json_bridges(
     assert len(stub_app.conversations.accept_calls) == 1
 
 
-async def test_form_reply_door_5xx_restores_and_raises(handler, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_form_reply_door_5xx_raises_and_keeps_pending(handler, channels, fake_redis: FakeRedis):
     await _seed_pending_form()
-    fake_httpx.responses.append(response(500, text="oops"))
+    channels.inbound_error = AnswerForwardError("interactions callback rejected the answer: HTTP 500: oops")
 
     with pytest.raises(AnswerForwardError, match="HTTP 500"):
         await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
 
-    assert await _pending_intact(fake_redis)  # restored — Meta's retry re-resolves
+    assert await _pending_intact(fake_redis)  # kept — Meta's retry re-resolves
     assert _SEEN_KEY not in fake_redis.store
 
 
@@ -1287,24 +1261,24 @@ async def test_non_object_json_payload_is_acked(handler, stub_app):
 # --- Interactive inbound (button/list taps) -----------------------------------
 
 
-async def test_button_tap_answers_pending_select(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_button_tap_answers_pending_select(handler, stub_app, channels, fake_redis: FakeRedis):
     await _seed_pending_select(options=["staging", "production"])
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(interactive_payload(reply_id="int-1:1", title="production")))
 
     assert result.status_code == 200
-    # The tap resolves to options[1] under the bound ask, forwarded verbatim.
-    assert fake_httpx.calls[0]["url"] == _CALLBACK
-    assert fake_httpx.calls[0]["json"] == {"answer": "production"}
+    # The tap resolves to options[1] under the bound ask, handed to the ladder verbatim.
+    assert channels.inbound_calls[0].answer == "production"
+    assert channels.inbound_calls[0].bridge.owns_retry_notice is False  # a select ask, not a form
     assert stub_app.conversations.accept_calls == []  # not bridged
-    assert not await _pending_intact(fake_redis)  # consumed
+    assert not await _pending_intact(fake_redis)  # released by the ladder (mirrored)
     assert _SEEN_KEY in fake_redis.store
 
 
-async def test_list_reply_tap_answers_pending_select(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_list_reply_tap_answers_pending_select(handler, stub_app, channels, fake_redis: FakeRedis):
     await _seed_pending_select(options=["staging", "production"])
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(
         signed_request(
@@ -1315,20 +1289,20 @@ async def test_list_reply_tap_answers_pending_select(handler, stub_app, fake_red
     )
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": "staging"}
+    assert channels.inbound_calls[0].answer == "staging"
     assert not await _pending_intact(fake_redis)
 
 
-async def test_typed_reply_to_select_ask_still_works(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+async def test_typed_reply_to_select_ask_still_works(handler, stub_app, channels, fake_redis: FakeRedis):
     # The human may always type instead of tapping; a text reply to a select ask
-    # forwards its body verbatim (minus outer whitespace).
+    # hands its body verbatim (minus outer whitespace) to the ladder.
     await _seed_pending_select(options=["staging", "production"])
-    fake_httpx.responses.append(response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(message_payload(text="production")))
 
     assert result.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": "production"}
+    assert channels.inbound_calls[0].answer == "production"
     assert not await _pending_intact(fake_redis)
 
 
@@ -1419,25 +1393,26 @@ async def test_unicode_or_overlong_digit_index_is_non_answer_no_5xx(
 
 
 async def test_stale_tap_does_not_pop_pending_so_a_later_genuine_reply_answers(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    handler, stub_app, channels, fake_redis: FakeRedis
 ):
-    # A stale/non-answer tap must PEEK, not POP: the live ask survives so a
+    # A stale/non-answer tap must PEEK, not claim: the live ask survives so a
     # concurrent genuine reply from the same pair still answers (no lost answer,
     # no double-answer).
     await _seed_pending_select(options=["staging", "production"], interaction_id="int-1")
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
-    # A stale tap for an earlier ask — a non-answer that must NOT claim the pending.
+    # A stale tap for an earlier ask — a non-answer that never reaches the ladder.
     stale = await handler(signed_request(interactive_payload(wamid="wamid.STALE", reply_id="int-0:0", title="stale")))
     assert stale.status_code == 200
-    assert await _pending_intact(fake_redis)  # not popped
+    assert channels.inbound_calls == []  # the stale tap bridged, never consulted the ladder
+    assert await _pending_intact(fake_redis)  # not claimed
 
     # The genuine reply now arrives and still resolves the still-live ask.
-    fake_httpx.responses.append(response(200))
     genuine = await handler(
         signed_request(interactive_payload(wamid="wamid.REAL", reply_id="int-1:1", title="production"))
     )
     assert genuine.status_code == 200
-    assert fake_httpx.calls[0]["json"] == {"answer": "production"}  # answered once
+    assert channels.inbound_calls[0].answer == "production"  # answered once
     assert not await _pending_intact(fake_redis)  # now consumed
 
 
@@ -1569,19 +1544,18 @@ async def test_inbound_fires_read_typing_signal_before_branches(
 
 
 async def test_correlated_question_reply_fires_typing_signal(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # Firing at _handle_message (before the type branches) also covers a reply that
     # correlates to a pending question — the path that never reaches the bridge.
     await _seed_pending()
-    fake_httpx.responses.append(response(200))  # the answer forward
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     result = await handler(signed_request(message_payload(text="yes please")))
 
     assert result.status_code == 200
     assert [c["json"] for c in fake_httpx.typing_calls] == [_TYPING_BODY]  # typing fired
-    assert fake_httpx.calls[0]["url"] == _CALLBACK  # the answer was still forwarded
-    assert fake_httpx.calls[0]["json"] == {"answer": "yes please"}
+    assert channels.inbound_calls[0].answer == "yes please"  # the answer reached the ladder
     assert stub_app.conversations.accept_calls == []  # correlation hit, not the bridge
 
 

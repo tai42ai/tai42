@@ -64,9 +64,11 @@ EXPECTED_FACADE = {
     # webhook_verifiers (2)
     "register",
     "get",
-    # channels (3) — ``register`` and ``get`` share their leaf names with
-    # webhook_verifiers above; ``names`` is the one new distinct name
+    # channels (4) — ``register`` and ``get`` share their leaf names with
+    # webhook_verifiers above; ``names`` and ``handle_inbound_answer`` (the shared
+    # inbound-answer ladder channel plugins reach through the contract) are distinct
     "names",
+    "handle_inbound_answer",
     # conversations (2)
     "accept",
     "record_delivery_status",
@@ -224,11 +226,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 73 (sub-protocol, member) pairs over 70 distinct names — ``store`` is
+    # 74 (sub-protocol, member) pairs over 71 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 70, f"union={len(union)}"
-    assert total == 73 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 71, f"union={len(union)}"
+    assert total == 74 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_two_namespaces():

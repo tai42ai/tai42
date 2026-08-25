@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
 import pytest
+from tai42_contract.channels import InboundAnswerOutcome
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import reset_all_settings
 
@@ -57,7 +57,9 @@ def _message(**overrides: Any) -> dict[str, Any]:
 
 
 def _seed_correlation(fake_redis) -> None:
-    fake_redis.store[_CORR_KEY] = _CALLBACK
+    fake_redis.store[_CORR_KEY] = json.dumps(
+        {"callback_url": _CALLBACK, "interaction_id": "int-7", "timeout_at": "2999-01-01T00:00:00+00:00"}
+    )
     fake_redis.ttls[_CORR_KEY] = 300
 
 
@@ -124,19 +126,18 @@ async def test_bridge_infrastructure_failure_propagates_and_releases_claim(fake_
     assert _DEDUPE_KEY not in fake_redis.store
 
 
-async def test_pending_question_reply_resolves_ask_and_never_bridges(fake_redis, http_script, stub_conversations):
-    # Correlation precedence: a thread reply matching a pending question forwards
-    # to the callback door; the bridge is never reached.
+async def test_pending_question_reply_resolves_ask_and_never_bridges(fake_redis, channels, stub_conversations):
+    # Correlation precedence: a thread reply matching a pending question resolves via
+    # the ladder; the caller's bridge is never reached.
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     event = _message(thread_ts=_THREAD_TS, text="yes, do it")
     response = await slack_inbound(_signed(_event_body(event)))
 
     assert body_json(response) == {"status": "forwarded"}
     assert stub_conversations.accept_calls == []
-    (forward,) = http_script.requests
-    assert str(forward.url) == _CALLBACK
+    assert channels.inbound_calls[0].answer == "yes, do it"
 
 
 async def test_expired_thread_reply_bridges_not_ignored(fake_redis, http_script, stub_conversations):
@@ -212,16 +213,18 @@ async def test_bot_user_id_unset_on_bridge_route_is_loud_misconfig(fake_redis, s
     assert _DEDUPE_KEY not in fake_redis.store
 
 
-async def test_bot_user_id_unset_does_not_block_ask_user_path(fake_redis, http_script, stub_conversations, monkeypatch):
-    # The ask_user path needs no bot user id: a correlated reply still forwards
-    # when CHANNEL_SLACK_BOT_USER_ID is unset.
+async def test_bot_user_id_unset_does_not_block_ask_user_path(fake_redis, channels, stub_conversations, monkeypatch):
+    # The forward path needs no bot user id: a correlated reply still resolves via the
+    # ladder when CHANNEL_SLACK_BOT_USER_ID is unset (the id rides only into the bridge
+    # context the ladder uses on a terminal 404, not the forward).
     monkeypatch.delenv("CHANNEL_SLACK_BOT_USER_ID")
     reset_all_settings()
     _seed_correlation(fake_redis)
-    http_script.results.append(httpx.Response(200))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
 
     event = _message(thread_ts=_THREAD_TS, text="yes")
     response = await slack_inbound(_signed(_event_body(event)))
 
     assert body_json(response) == {"status": "forwarded"}
     assert stub_conversations.accept_calls == []
+    assert channels.inbound_calls[0].bridge.our_identity == ""  # unset id degrades to empty

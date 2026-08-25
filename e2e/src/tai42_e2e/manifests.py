@@ -639,7 +639,9 @@ def _telegram_channel_env(res: StackResources, *, real: bool) -> dict[str, str]:
             "CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS": chat,
         }
     return {
-        "CHANNEL_TELEGRAM_BOT_TOKEN": "e2e-telegram-bot-token",
+        # Real bot tokens are ``<numeric bot id>:<secret>``; the plugin parses the
+        # numeric prefix as its own identity, so the fake token mirrors the shape.
+        "CHANNEL_TELEGRAM_BOT_TOKEN": "9900000000:e2e-telegram-bot-token",
         "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
         "CHANNEL_TELEGRAM_API_BASE_URL": _require_stub(res.telegram_api_base_url, "telegram"),
         "CHANNEL_TELEGRAM_REDIS_URL": res.redis_url,
