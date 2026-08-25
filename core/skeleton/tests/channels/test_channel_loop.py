@@ -608,7 +608,7 @@ async def test_delivery_bug_prunes_and_raises(wired):
 
 async def test_terminal_delivery_failure_emits_delivery_failed_once(wired, monkeypatch):
     # A send that fails for good (question pruned, nothing answered) STATES the fact as
-    # exactly one ``interactions.delivery_failed`` event carrying the channel, the
+    # exactly one ``interactions_delivery_failed`` event carrying the channel, the
     # interaction id, the recipient, and the error text — and the original delivery
     # error still propagates unchanged (the event rides alongside, never replaces it).
     from tai42_skeleton.hooks import cache as hooks_cache
@@ -632,7 +632,7 @@ async def test_terminal_delivery_failure_emits_delivery_failed_once(wired, monke
 
     assert len(hooks.events) == 1
     event = hooks.events[0]
-    assert event.topic == helper_module.DELIVERY_FAILED_EVENT_TOPIC == "interactions.delivery_failed"
+    assert event.topic == helper_module.DELIVERY_FAILED_EVENT_TOPIC == "interactions_delivery_failed"
     assert event.payload == {
         "channel": "boom",
         "interaction_id": captured["iid"],

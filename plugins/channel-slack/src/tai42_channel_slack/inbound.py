@@ -79,7 +79,7 @@ _EVENTS_ACK = {
 # The generic guest-facing line rendered inline in the modal on a retryable rejection
 # (RETRY_KEPT). The channel OWNS this correction surface (owns_retry_notice=True, so the
 # ladder sent no separate notice — no double-messaging); the door's specific field
-# reason rides the interactions.answer_rejected operator event the ladder emitted.
+# reason rides the interactions_answer_rejected operator event the ladder emitted.
 _MODAL_RETRY_TEXT = "That answer wasn't accepted. Please check your entries and submit again."
 
 logger = logging.getLogger(__name__)
