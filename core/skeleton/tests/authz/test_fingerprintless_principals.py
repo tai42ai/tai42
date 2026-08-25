@@ -99,3 +99,25 @@ async def test_rebuild_still_anchors_a_minted_key_to_its_fingerprint(gate_on):
     identity = await rebuild_execution_identity("svc-key")
     assert identity is not None
     assert identity.execution_key_fingerprint == "fp-live"
+
+
+# -- the documented corruption posture ---------------------------------------
+
+
+async def test_rebuild_posture_for_a_minted_key_with_a_stripped_fingerprint(gate_on):
+    """DOCUMENTED POSTURE (not an endorsement): a minted key whose stored
+    fingerprint was stripped (corruption / admin-only policy edit) reads as
+    fingerprint-less and binds on the EPHEMERAL rebuild seam — durable fire
+    records captured a real fingerprint at write time and still refuse it.
+    Pinned so the posture changes only on purpose."""
+    gate_on(AccessPolicy(scopes=["*"], policy_data={}))
+    identity = await rebuild_execution_identity("svc-key-stripped")
+    assert identity is not None
+    assert identity.execution_key_fingerprint == ""
+
+
+async def test_a_durable_record_still_refuses_a_stripped_key(gate_on):
+    # The durable side of the posture: a record that captured the real per-mint
+    # fingerprint never matches a policy that has since lost it.
+    with pytest.raises(ExecutionKeyAuthorityError):
+        assert_policy_matches_fingerprint(_policy(), "svc-key-stripped", bound_fingerprint="fp-captured-at-write")

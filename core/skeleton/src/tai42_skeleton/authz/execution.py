@@ -119,7 +119,14 @@ def assert_policy_matches_fingerprint(policy: AccessPolicy, execution_key: str, 
     refusal surface. Every other combination stays fail-closed: a MINTED key's
     stored fingerprint never matches ``""`` (a gate-off-era record cannot bind a
     minted key once the gate is on), and a bound fingerprint never matches a policy
-    that has since lost or changed its own.
+    that has since lost or changed its own. Account ids are never re-minted
+    (``usr-<random>`` per create), so a fingerprint-less park cannot be replayed
+    onto a recreated principal — the deleted id's policy stays gone.
+
+    KNOWN POSTURE: a minted key whose stored ``policy_data`` fingerprint was
+    stripped or emptied (store corruption, or an admin-only policy edit) reads as
+    fingerprint-less here and binds on the EPHEMERAL rebuild seam; durable
+    fire records captured a real fingerprint at write time and still refuse it.
     """
     stored = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
     if bound_fingerprint == "" and stored is None:
@@ -433,8 +440,9 @@ async def authorize_execution_tool_call(
         if identity.user_id is None:
             raise PermissionDenied("access denied: no caller identity for an external tool dispatch")
         if identity.execution_key_fingerprint is None:
-            # An invariant breach: a gate-on execution identity always carries one. Refuse
-            # rather than re-read with no anchor, which fails open on a key carrying none.
+            # An invariant breach: a gate-on execution identity always carries one — ""
+            # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
+            # None never. Refuse rather than re-read with no anchor at all.
             raise PermissionDenied("access denied: bound execution identity carries no key fingerprint")
         await assert_key_carries_authority(
             PolicyEnforcer(settings), identity.user_id, bound_fingerprint=identity.execution_key_fingerprint
