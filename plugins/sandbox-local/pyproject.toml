@@ -27,7 +27,7 @@ dependencies = [
     # the session/stream models, SandboxPolicy, the error family, PluginItemKind.SANDBOX,
     # and the tai42_app.sandboxes facet.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.2,<6",
+    "tai42-contract>=5.3,<6",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
     # importable conformance suite. The floor names the first release carrying
