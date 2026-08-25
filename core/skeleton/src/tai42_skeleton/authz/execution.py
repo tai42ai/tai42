@@ -109,11 +109,29 @@ def assert_policy_matches_fingerprint(policy: AccessPolicy, execution_key: str, 
     otherwise.
 
     A ``user_id`` is reusable across a revoke+remint; the fingerprint is not, so the
-    reminted key never inherits the old record's authority. An absent live fingerprint
-    fails the same equality (``bound_fingerprint`` is always non-empty) and is refused.
-    The ONE spelling of this equality — both seam branches route through it.
+    reminted key never inherits the old record's authority. The ONE spelling of this
+    equality — every seam branch routes through it.
+
+    A FINGERPRINT-LESS principal (an account user — never minted, so no per-mint
+    identity exists) binds with ``bound_fingerprint == ""`` and matches a live policy
+    that carries NO fingerprint: there is no mint identity to anchor, and the
+    authority checks around this equality (policy exists, not disabled) remain the
+    refusal surface. Every other combination stays fail-closed: a MINTED key's
+    stored fingerprint never matches ``""`` (a gate-off-era record cannot bind a
+    minted key once the gate is on), and a bound fingerprint never matches a policy
+    that has since lost or changed its own. Account ids are never re-minted
+    (``usr-<random>`` per create), so a fingerprint-less park cannot be replayed
+    onto a recreated principal — the deleted id's policy stays gone.
+
+    KNOWN POSTURE: a minted key whose stored ``policy_data`` fingerprint was
+    stripped or emptied (store corruption, or an admin-only policy edit) reads as
+    fingerprint-less here and binds on the EPHEMERAL rebuild seam; durable
+    fire records captured a real fingerprint at write time and still refuse it.
     """
-    if policy.policy_data.get(KEY_FINGERPRINT_CLAIM) != bound_fingerprint:
+    stored = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
+    if bound_fingerprint == "" and stored is None:
+        return
+    if stored != bound_fingerprint:
         raise _authority_refusal(execution_key, execution_key, "no longer matches the bound key identity")
 
 
@@ -225,11 +243,13 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
     principal. Shared by the crash-resume re-drive and the tool doors' own-key
     bind — every consumer rebuilds the SAME way, at the same trust level.
 
-    KEY principals only: with the gate on, the rebuild requires the per-mint key
-    fingerprint, which a SESSION-authenticated human's policy does not carry — a
-    session principal therefore yields ``None`` (no bind, fail-closed), and an
-    async-parking tool keeps refusing loudly for that caller. Extending the
-    continuation machinery to fingerprint-less principals is a separate design."""
+    A MINTED key rebuilds anchored to its live per-mint fingerprint. A
+    FINGERPRINT-LESS principal (an account user — a session-authenticated human,
+    never minted) rebuilds with the empty fingerprint the whole seam treats as
+    "no mint identity to anchor": the bind, the mid-turn re-assert, and the
+    continuation rebind all match it against a policy that carries none, while
+    the surrounding authority checks (policy exists, not disabled) keep refusing
+    a deleted or disabled principal."""
     settings = access_control_settings()
     if not settings.enable:
         # Gate off: every principal is the synthetic admin; the identity carries the key
@@ -239,8 +259,10 @@ async def rebuild_execution_identity(execution_key: str) -> CallerIdentity | Non
     version = await enforcer.current_policy_version()
     policy = await enforcer.get_policy_at(execution_key, version)
     fingerprint = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
-    if not isinstance(fingerprint, str) or not fingerprint:
-        return None
+    if not isinstance(fingerprint, str):
+        # No mint identity on the live policy: an account principal. The empty
+        # fingerprint is the seam-wide "fingerprint-less" spelling.
+        fingerprint = ""
     try:
         return await build_execution_identity(execution_key, bound_fingerprint=fingerprint)
     except PermissionDenied:
@@ -418,8 +440,9 @@ async def authorize_execution_tool_call(
         if identity.user_id is None:
             raise PermissionDenied("access denied: no caller identity for an external tool dispatch")
         if identity.execution_key_fingerprint is None:
-            # An invariant breach: a gate-on execution identity always carries one. Refuse
-            # rather than re-read with no anchor, which fails open on a key carrying none.
+            # An invariant breach: a gate-on execution identity always carries one — ""
+            # for a fingerprint-less ACCOUNT principal (resolved by the ONE equality),
+            # None never. Refuse rather than re-read with no anchor at all.
             raise PermissionDenied("access denied: bound execution identity carries no key fingerprint")
         await assert_key_carries_authority(
             PolicyEnforcer(settings), identity.user_id, bound_fingerprint=identity.execution_key_fingerprint
