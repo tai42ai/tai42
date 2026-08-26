@@ -236,6 +236,47 @@ async def test_route_create_seam_binds_extractor_to_the_operation(wired):
     assert stored.turns_per_hour_override == 6000
 
 
+async def test_route_create_seam_persists_error_reply_text(wired):
+    """The same extractor -> operation -> store seam carries ``error_reply_text``: a body that
+    sets it lands the custom guest-facing reply on the stored row, and a body that omits it
+    stores ``None`` (the built-in default applies at turn time)."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.decorator import operation_metadata_of
+
+    with tai42_app.bound(instance.build_app()):
+        from tai42_skeleton.routers.conversations import _extract_route_create
+
+    op = operation_metadata_of(ops.create_conversation_route)
+    base = {
+        "door": "api",
+        "target_kind": "agent",
+        "target_name": "relay",
+        "execution_key": "svc",
+        "callback_url": "https://example.com/cb",
+    }
+
+    # Default path: body omits the reply; the stored row carries ``None``.
+    kwargs = await _extract_route_create(cast(Any, _FakeRouteRequest(dict(base), "chat")))
+    result = await op.func(**kwargs)
+    assert isinstance(result, dict)
+    assert result["created"] is True
+    assert wired.rows["chat"].error_reply_text is None
+
+    # Custom path: a non-blank reply rides the body through the seam and persists verbatim.
+    text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    kwargs_custom = await _extract_route_create(
+        cast(Any, _FakeRouteRequest({**base, "error_reply_text": text}, "spanish"))
+    )
+    result_custom = await op.func(**kwargs_custom)
+    assert isinstance(result_custom, dict)
+    assert result_custom["created"] is True
+    stored = await wired.get_route("spanish")
+    assert stored is not None
+    assert stored.error_reply_text == text
+
+
 async def test_create_defaults_initial_mode_to_agent_and_surfaces_it(wired):
     result = await ops.create_conversation_route(
         route_name="chat",

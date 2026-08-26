@@ -324,6 +324,27 @@ def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():
             ConversationRouteCreate(**_route_kwargs(turns_per_hour_override=bad))
 
 
+def test_error_reply_text_defaults_to_none_and_must_be_non_blank_and_bounded():
+    from tai42_contract.conversations import ConversationRouteCreate
+
+    # Absent by default: a failed turn falls back to the built-in default reply.
+    assert ConversationRouteCreate(**_route_kwargs()).error_reply_text is None
+    # A non-blank custom reply is accepted and preserved verbatim.
+    text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    assert ConversationRouteCreate(**_route_kwargs(error_reply_text=text)).error_reply_text == text
+    # An empty reply is refused by the min-length bound.
+    with pytest.raises(ValidationError):
+        ConversationRouteCreate(**_route_kwargs(error_reply_text=""))
+    # A whitespace-only reply is refused as blank by the non-blank validator.
+    with pytest.raises(ValidationError, match="non-blank"):
+        ConversationRouteCreate(**_route_kwargs(error_reply_text="   "))
+    # The reply is length-bounded so a single guest-facing message cannot be unbounded.
+    # Exactly at the 2000-char bound is accepted; one past it is refused.
+    assert ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2000)).error_reply_text == "x" * 2000
+    with pytest.raises(ValidationError):
+        ConversationRouteCreate(**_route_kwargs(error_reply_text="x" * 2001))
+
+
 def test_blank_inbound_text_error_is_a_value_error():
     from tai42_contract.conversations import BlankInboundTextError
 

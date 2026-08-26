@@ -90,6 +90,7 @@ def _channel_route(
     our_identity: str = "+15550001111",
     *,
     turns_per_hour_override: int | None = None,
+    error_reply_text: str | None = None,
 ) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
@@ -101,10 +102,16 @@ def _channel_route(
         our_identity=our_identity,
         execution_key_fingerprint="fp-1",
         turns_per_hour_override=turns_per_hour_override,
+        error_reply_text=error_reply_text,
     )
 
 
-def _api_route(route_name: str = "chat", *, turns_per_hour_override: int | None = None) -> ConversationRoute:
+def _api_route(
+    route_name: str = "chat",
+    *,
+    turns_per_hour_override: int | None = None,
+    error_reply_text: str | None = None,
+) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
         door="api",
@@ -115,6 +122,7 @@ def _api_route(route_name: str = "chat", *, turns_per_hour_override: int | None 
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
         turns_per_hour_override=turns_per_hour_override,
+        error_reply_text=error_reply_text,
     )
 
 
@@ -125,6 +133,7 @@ def _tool_channel_route(
     target_name: str = "echo-tool",
     payload_expr: str | None = None,
     reply_expr: str | None = None,
+    error_reply_text: str | None = None,
 ) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
@@ -137,6 +146,7 @@ def _tool_channel_route(
         channel="twilio",
         our_identity=our_identity,
         execution_key_fingerprint="fp-1",
+        error_reply_text=error_reply_text,
     )
 
 
@@ -146,6 +156,7 @@ def _tool_api_route(
     target_name: str = "echo-tool",
     payload_expr: str | None = None,
     reply_expr: str | None = None,
+    error_reply_text: str | None = None,
 ) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
@@ -158,6 +169,7 @@ def _tool_api_route(
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
+        error_reply_text=error_reply_text,
     )
 
 
@@ -484,30 +496,41 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
 async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch):
     # A non-success terminal (the route carries no error mapping) delivers the uniform
-    # client-safe notice — never the raw internal detail, never a silent drop.
+    # client-safe notice — the DELIVERY route's ``error_reply_text`` when set, never the raw
+    # internal detail, never a silent drop. The guest-facing notice resolves through the
+    # delivery route (where the record is filed and the guest is conversing), NOT the pinned
+    # originating route — so an originating route carrying a DIFFERENT error_reply_text does
+    # not win here (pinning the deliberate choice at turn.py:1608).
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    other = "This originating-route text must NOT win."
     channel = FakeChannel()
-    route = _tool_channel_route(reply_expr=".result.reply // null")
-    _wire(monkeypatch, FakeManager(route), channel)
+    route = _tool_channel_route(reply_expr=".result.reply // null", error_reply_text=spanish)
+    origin = _tool_channel_route(route_name="tool-origin", reply_expr=".x", error_reply_text=other)
+    _wire(monkeypatch, FakeManager(route, origin), channel)
 
     out = await turn_module.deliver_tool_completion(
         delivery_thread_id="bridge:tool-line:+15550002222",
         completion_id="e1",
         result={"detail": "internal"},
         status=PARK_COMPLETION_FAILED,
+        route_name="tool-origin",
     )
     await _settle()
     assert out == {"message_id": "e1"}
     rec = await _store().get_record("e1")
     assert rec is not None
-    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
-    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+    # The delivery route's custom text wins over the originating route's.
+    assert rec.answer == spanish
+    assert [n.message for n in channel.sends] == [spanish]
 
 
 async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(env, monkeypatch):
     # A success terminal the route's reply_expr cannot map is delivered as the client-safe
     # notice rather than crashing the resumer or dropping the outcome.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
     channel = FakeChannel()
-    route = _tool_channel_route(reply_expr=".result.reply")  # a non-string/non-null emit raises
+    # a non-string/non-null emit raises; the delivery route carries the custom notice.
+    route = _tool_channel_route(reply_expr=".result.reply", error_reply_text=spanish)
     _wire(monkeypatch, FakeManager(route), channel)
 
     out = await turn_module.deliver_tool_completion(
@@ -520,7 +543,8 @@ async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(
     assert out == {"message_id": "u1"}
     rec = await _store().get_record("u1")
     assert rec is not None
-    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+    # The delivery route's custom notice, not the built-in default.
+    assert rec.answer == spanish
 
 
 async def test_deliver_tool_completion_silent_reply_delivers_nothing(env, monkeypatch):
@@ -656,6 +680,52 @@ async def test_tool_target_that_raises_is_an_error(env, monkeypatch):
     assert record.answer_status == "error"
     assert record.error is not None
     assert "tool blew up" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_a_channel_tool_error_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+    # A route carrying ``error_reply_text`` sends THAT guest-facing reply on a failed turn,
+    # while the record's internal ``error`` detail keeps the diagnosable wording unchanged.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(error_reply_text=spanish)), channel)
+
+    def _boom(kw):
+        raise RuntimeError("tool blew up")
+
+    _wire_tool(monkeypatch, _boom)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    # The guest sees the route's custom reply, not the built-in default.
+    assert record.answer == spanish
+    assert [n.message for n in channel.sends] == [spanish]
+    # The internal detail is untouched — only the guest-facing answer resolves through the route.
+    assert record.error is not None
+    assert "tool blew up" in record.error
+
+
+async def test_a_channel_tool_error_falls_back_to_the_default_when_unset(env, monkeypatch):
+    # With no ``error_reply_text`` the same failure delivers the built-in default reply.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+
+    def _boom(kw):
+        raise RuntimeError("tool blew up")
+
+    _wire_tool(monkeypatch, _boom)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
     assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
 
 
@@ -1016,6 +1086,35 @@ async def test_api_wait_fast_returns_answer_and_suppresses_callback(env, monkeyp
     assert record.delivery_status is DeliveryStatus.DELIVERED
     # The sync-wait delivered it, so NO callback was POSTed (no double-fire).
     assert posted == []
+
+
+async def test_an_api_error_outcome_carries_the_route_error_reply_text(env, monkeypatch):
+    # An api-door error surfaces the route's ``error_reply_text`` in the sync-wait
+    # ConversationAnswer: the caller sees the custom reply, not the built-in default.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    _wire(monkeypatch, FakeManager(_tool_api_route(error_reply_text=spanish)))
+
+    def _boom(kw):
+        raise RuntimeError("tool blew up")
+
+    _wire_tool(monkeypatch, _boom)
+
+    async def _post(url, body, signature, timeout_seconds):
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    await _settle()
+
+    assert result.answer is not None
+    assert result.answer.status == "error"
+    assert result.answer.answer == spanish
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "tool blew up" in record.error
 
 
 async def test_api_no_wait_returns_202_then_posts_signed_callback(env, monkeypatch):
@@ -2038,6 +2137,59 @@ async def test_redrive_of_a_record_stranded_mid_turn_fails_it_and_never_reruns_t
     assert record.answer_status == "error"
     assert record.error is not None
     assert record.delivery_status is DeliveryStatus.DELIVERED
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+    assert agent.calls == []
+
+
+async def test_a_stranded_turn_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+    # The stranded-turn repair resolves the record's route best-effort, so the guest sees the
+    # route's own ``error_reply_text`` — the same custom reply a live failed turn would send.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route(error_reply_text=spanish)), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+    await _create_stranded_intake(store, env, "stranded")
+    assert await store.claim_inbound("twilio", "PID1", "stranded") == "stranded"
+
+    await turn_module.redrive_accepted()
+    await _settle()
+
+    record = await store.get_record("stranded")
+    assert record is not None
+    assert record.answer_status == "error"
+    # The guest sees the route's custom reply; the internal detail keeps the built-in wording.
+    assert record.answer == spanish
+    assert record.error is not None
+    assert [n.message for n in channel.sends] == [spanish]
+    assert agent.calls == []
+
+
+async def test_a_stranded_turn_falls_back_to_the_default_when_the_route_lookup_fails(env, monkeypatch):
+    # A route lookup that fails (manager unavailable, route gone, exception) must never make
+    # this repair path less robust: it falls back to the built-in default reply.
+    agent = EchoAgent()
+    channel = FakeChannel()
+    manager = FakeManager(_channel_route())
+    _wire(monkeypatch, manager, channel)
+
+    async def _boom(name: str):
+        raise RuntimeError("route store unavailable")
+
+    monkeypatch.setattr(manager, "get_route", _boom)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+    await _create_stranded_intake(store, env, "stranded")
+    assert await store.claim_inbound("twilio", "PID1", "stranded") == "stranded"
+
+    await turn_module.redrive_accepted()
+    await _settle()
+
+    record = await store.get_record("stranded")
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
     assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
     assert agent.calls == []
 
