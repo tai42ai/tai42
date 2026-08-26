@@ -435,3 +435,101 @@ def test_reconfigure_re_rates_a_live_bucket(monkeypatch):
     for _ in range(5):
         assert caps.admit_address("abuser") is AddressAdmission.ADMIT
     assert caps.admit_address("abuser") is AddressAdmission.SHED_WITH_REPLY
+
+
+def test_a_per_hour_override_runs_a_bucket_at_its_own_rate(monkeypatch, small_settings):
+    # An overridden key runs at its own per-hour rate while a key with no override stays on
+    # the global cap (2 here), so the two never share one budget.
+    clock = _Clock()
+    monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
+    caps = TurnCaps(small_settings)
+
+    # The overridden key gets 4 turns; its bucket is created at the override rate.
+    for _ in range(4):
+        assert caps.admit_address("vip", per_hour=4) is AddressAdmission.ADMIT
+    assert caps.admit_address("vip", per_hour=4) is AddressAdmission.SHED_WITH_REPLY
+
+    # A key with no override is still bound by the global cap of 2.
+    assert caps.admit_address("plain") is AddressAdmission.ADMIT
+    assert caps.admit_address("plain") is AddressAdmission.ADMIT
+    assert caps.admit_address("plain") is AddressAdmission.SHED_WITH_REPLY
+
+
+def test_none_per_hour_runs_at_the_global_rate(monkeypatch, small_settings):
+    # An explicit ``per_hour=None`` is byte-identical to omitting it: the global cap applies.
+    clock = _Clock()
+    monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
+    caps = TurnCaps(small_settings)
+
+    assert caps.admit_address("+1", per_hour=None) is AddressAdmission.ADMIT
+    assert caps.admit_address("+1", per_hour=None) is AddressAdmission.ADMIT
+    assert caps.admit_address("+1", per_hour=None) is AddressAdmission.SHED_WITH_REPLY
+    assert caps._buckets["+1"].capacity == float(small_settings.per_address_turns_per_hour)
+
+
+def test_a_reload_does_not_clobber_an_override(monkeypatch):
+    # A settings reload re-rates live buckets to the global value, but an overridden key is
+    # restored to its override rate on its next message (lazy re-rate), so the reload never
+    # silently drops it onto the global cap.
+    clock = _Clock()
+    monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "2")
+    caps = TurnCaps(ConversationsSettings())
+    assert caps.admit_address("vip", per_hour=10) is AddressAdmission.ADMIT
+
+    # Reload the GLOBAL cap; reconfigure transiently re-rates every live bucket to it.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "3")
+    caps.reconfigure(ConversationsSettings())
+    assert caps._buckets["vip"].capacity == 3.0
+
+    # The overridden key's next message restores its own rate in place: capacity and refill
+    # are the override again, not the reloaded global 3 (tokens stay clamped down — a reload
+    # only ever clamps, never hands back).
+    assert caps.admit_address("vip", per_hour=10) is AddressAdmission.ADMIT
+    assert caps._buckets["vip"].capacity == 10.0
+    assert caps._buckets["vip"].refill_per_second == 10 / 3600.0
+
+    # After a full refill window the bucket runs at 10/hour, not the global 3: ten admits.
+    clock.now += 3600.0
+    for _ in range(10):
+        assert caps.admit_address("vip", per_hour=10) is AddressAdmission.ADMIT
+    assert caps.admit_address("vip", per_hour=10) is AddressAdmission.SHED_WITH_REPLY
+
+
+def test_a_changed_override_re_rates_the_bucket_in_place(monkeypatch, small_settings):
+    # A message arriving with a different override than the bucket currently carries adopts
+    # the new rate in place, clamping tokens down (never handing any back), just as a reload.
+    clock = _Clock()
+    monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
+    caps = TurnCaps(small_settings)
+
+    assert caps.admit_address("vip", per_hour=100) is AddressAdmission.ADMIT
+    assert caps._buckets["vip"].capacity == 100.0
+    # Lower the override: tokens are clamped down to the new capacity, none handed back.
+    assert caps.admit_address("vip", per_hour=3) is AddressAdmission.ADMIT
+    bucket = caps._buckets["vip"]
+    assert bucket.capacity == 3.0
+    assert bucket.refill_per_second == 3 / 3600.0
+    assert bucket.tokens <= 3.0
+
+
+def test_a_re_rate_never_refunds_a_drained_bucket(monkeypatch, small_settings):
+    # The never-refund invariant across a rate change: a bucket drained to zero at one rate
+    # stays shed when the same key next arrives with a DIFFERENT (even HIGHER) override. A
+    # re-rate only ever clamps tokens down, so a raised ceiling does not resurrect a spent
+    # budget — the clamp a mutation that refunds on re-rate would break.
+    clock = _Clock()
+    monkeypatch.setattr(caps_module.time, "monotonic", clock.monotonic)
+    caps = TurnCaps(small_settings)
+
+    # Drain the key to zero at a rate of 2: two admits, then the third hit sheds (empty).
+    assert caps.admit_address("vip", per_hour=2) is AddressAdmission.ADMIT
+    assert caps.admit_address("vip", per_hour=2) is AddressAdmission.ADMIT
+    assert caps.admit_address("vip", per_hour=2) is AddressAdmission.SHED_WITH_REPLY
+    assert caps._buckets["vip"].tokens < 1
+
+    # Re-rate to a HIGHER override on the very next message, same instant (no refill): the
+    # ceiling rises but the drained balance is NOT handed back — still shed, tokens < 1.
+    result = caps.admit_address("vip", per_hour=50)
+    assert result is not AddressAdmission.ADMIT
+    assert caps._buckets["vip"].tokens < 1

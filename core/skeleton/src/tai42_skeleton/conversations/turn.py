@@ -1122,7 +1122,9 @@ async def accept(
         return owner
 
     message_id = str(uuid4())
-    admission = get_turn_caps().admit_address(_channel_bucket_key(route.route_name, cap_bucket))
+    admission = get_turn_caps().admit_address(
+        _channel_bucket_key(route.route_name, cap_bucket), route.turns_per_hour_override
+    )
     if admission is AddressAdmission.SHED_WITH_REPLY:
         return await _shed_with_reply(
             store,
@@ -1271,11 +1273,12 @@ async def submit_api_message(
     message_id = str(uuid4())
 
     caps = get_turn_caps()
-    admission = caps.admit_address(_api_bucket_key(route.route_name, caller_principal))
+    admission = caps.admit_address(_api_bucket_key(route.route_name, caller_principal), route.turns_per_hour_override)
     if admission is not AddressAdmission.ADMIT:
+        effective_rate = route.turns_per_hour_override or caps.settings.per_address_turns_per_hour
         raise AddressRateLimitedError(
             f"caller {caller_principal!r} is over its rate cap of "
-            f"{caps.settings.per_address_turns_per_hour}/hour on route {route.route_name!r}; "
+            f"{effective_rate}/hour on route {route.route_name!r}; "
             "retry after a short wait"
         )
 

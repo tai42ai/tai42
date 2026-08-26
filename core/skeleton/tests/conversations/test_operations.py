@@ -4,6 +4,7 @@ compile + callback-secret mint), get/list (secret withheld), delete, and the slu
 from __future__ import annotations
 
 import time
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -116,6 +117,19 @@ class _FakeApp:
         self.tools = _FakeTools(tools)
 
 
+class _FakeRouteRequest:
+    """The minimal request surface ``_extract_route_create`` reads: an async JSON body and
+    the ``route_name`` path param — enough to drive the real HTTP-door extractor without a
+    live server."""
+
+    def __init__(self, body: dict, route_name: str) -> None:
+        self._body = body
+        self.path_params = {"route_name": route_name}
+
+    async def json(self) -> dict:
+        return self._body
+
+
 @pytest.fixture
 def record_redis(monkeypatch) -> FakeRecordRedis:
     """The answer/record store's redis, behind the ops that reach the thread indexes."""
@@ -171,6 +185,55 @@ async def test_create_api_route_mints_and_shows_the_secret_once(wired):
     assert wired.rows["chat"].callback_secret == result["callback_secret"]
     # The route view withholds the secret.
     assert "callback_secret" not in result["route"]
+
+
+async def test_route_create_seam_binds_extractor_to_the_operation(wired):
+    """The real HTTP-door binding: ``_extract_route_create`` -> ``op.func(**kwargs)`` exactly
+    as ``adapter.py`` dispatches it. This is the seam the un-wired ``turns_per_hour_override``
+    param broke: the extractor's ``model_dump()`` always emits the key, so an operation
+    signature missing it TypeErrors -> 500 on EVERY route create.
+
+    Once WITHOUT the key in the body (the default path that used to 500) and once WITH a
+    positive override (proving it now persists to the stored row)."""
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.decorator import operation_metadata_of
+
+    # The conversations router registers its routes against the ``tai42_app`` handle at
+    # import time (as the runtime and the routers test conftest do), so bind a built app for
+    # that one-shot import; the extractor and the operation themselves need no bound app to
+    # run, and the operation still resolves its agents/manager through the ``wired`` fakes.
+    with tai42_app.bound(instance.build_app()):
+        from tai42_skeleton.routers.conversations import _extract_route_create
+
+    op = operation_metadata_of(ops.create_conversation_route)
+    base = {
+        "door": "api",
+        "target_kind": "agent",
+        "target_name": "relay",
+        "execution_key": "svc",
+        "callback_url": "https://example.com/cb",
+    }
+
+    # Default path: body omits the override entirely; the extractor still emits the key and
+    # the operation accepts it, storing ``None``.
+    kwargs = await _extract_route_create(cast(Any, _FakeRouteRequest(dict(base), "chat")))
+    result = await op.func(**kwargs)
+    assert isinstance(result, dict)
+    assert result["created"] is True
+    assert wired.rows["chat"].turns_per_hour_override is None
+
+    # Override path: a positive override rides the body through the seam and persists.
+    kwargs_over = await _extract_route_create(
+        cast(Any, _FakeRouteRequest({**base, "turns_per_hour_override": 6000}, "fast"))
+    )
+    result_over = await op.func(**kwargs_over)
+    assert isinstance(result_over, dict)
+    assert result_over["created"] is True
+    stored = await wired.get_route("fast")
+    assert stored is not None
+    assert stored.turns_per_hour_override == 6000
 
 
 async def test_create_defaults_initial_mode_to_agent_and_surfaces_it(wired):

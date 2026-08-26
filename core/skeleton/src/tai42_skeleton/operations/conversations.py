@@ -199,6 +199,7 @@ async def create_conversation_route(
     channel: str | None = None,
     our_identity: str | None = None,
     callback_url: str | None = None,
+    turns_per_hour_override: int | None = None,
 ) -> dict[str, Any]:
     """Create a conversation route from its flat parameters — an UPSERT, so this is the
     create path AND the edit path for a route of that name.
@@ -216,7 +217,9 @@ async def create_conversation_route(
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
     cannot be re-keyed under the new door.
-    An ``api`` row's ``callback_secret`` is minted here and returned ONCE.
+    An ``api`` row's ``callback_secret`` is minted here and returned ONCE. A positive
+    ``turns_per_hour_override`` runs this route's per-address buckets at that rate instead
+    of the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.
     Returns ``{"created", "route_name", "route", "callback_secret"}``.
     """
     # Validate the whole body shape at the operation, not the edge: the MCP tool and a
@@ -234,6 +237,7 @@ async def create_conversation_route(
             channel=channel,
             our_identity=our_identity,
             callback_url=callback_url,
+            turns_per_hour_override=turns_per_hour_override,
         )
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation route: {exc}") from exc

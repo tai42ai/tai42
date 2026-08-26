@@ -91,6 +91,13 @@ def create_route(
     callback_url: Annotated[
         str | None, typer.Option("--callback-url", help="door=api: the https answer-delivery URL.")
     ] = None,
+    turns_per_hour_override: Annotated[
+        int | None,
+        typer.Option(
+            "--turns-per-hour-override",
+            help="Per-route override (positive) of the global per-address turns/hour cap; unset uses the global rate.",
+        ),
+    ] = None,
 ) -> None:
     """Create or replace a conversation route.
 
@@ -123,6 +130,8 @@ def create_route(
         body["our_identity"] = our_identity
     if callback_url is not None:
         body["callback_url"] = callback_url
+    if turns_per_hour_override is not None:
+        body["turns_per_hour_override"] = turns_per_hour_override
     with ctx_obj.client() as client:
         data = client.post(f"/api/conversations/{route_name}", json=body)
     emit_result(ctx_obj, data)
