@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract the plugin registers through — the Monitoring
     # protocols, the neutral data models, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.4,<6",
+    "tai42-contract>=5.5,<6",
     # TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.6,<4",
     # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private
