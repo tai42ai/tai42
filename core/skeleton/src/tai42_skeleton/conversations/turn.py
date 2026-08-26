@@ -407,7 +407,7 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
     resumed run's final answer fires it to post the reply back into this thread."""
     agent = _agent_registry().get(route.target_name)
     if agent is None:
-        return _tool_error(f"agent {route.target_name!r} is not registered")
+        return _tool_error(f"agent {route.target_name!r} is not registered", route)
     turn_context = BridgeTurnContext(
         thread_id=thread_id,
         route_name=route.route_name,
@@ -429,15 +429,15 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
                 finally:
                     reset_park_completion(completion_token)
     except PermissionDenied as exc:
-        return _tool_error(f"turn denied: {exc}")
+        return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:
         # A failed turn becomes a logged error OUTCOME, not a swallowed error.
         logger.error("conversations: turn for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"turn error: {exc}")
+        return _tool_error(f"turn error: {exc}", route)
     if isinstance(answer, _AgentParked):
         return _SilentOutcome()
     if not answer.strip():
-        return _tool_error("agent produced an empty answer")
+        return _tool_error("agent produced an empty answer", route)
     return _ResolvedOutcome(answer_status="answered", answer=answer, error=None)
 
 
@@ -482,8 +482,16 @@ _ToolOutcome = _SilentOutcome | _ResolvedOutcome
 _MintedCode = tuple[str, datetime]
 
 
-def _tool_error(detail: str) -> _ResolvedOutcome:
-    return _ResolvedOutcome(answer_status="error", answer=_ERROR_ANSWER_TEXT, error=detail)
+def _error_answer_text(route: ConversationRoute | None) -> str:
+    """The guest-facing text for a failed turn: the route's configured ``error_reply_text``
+    when it carries one, else the built-in English default. A ``None`` route (no route in
+    scope) falls back to the default. Only the guest-facing ``answer`` resolves through the
+    route — the record's ``error`` detail and the logs keep the built-in wording."""
+    return (route.error_reply_text if route is not None else None) or _ERROR_ANSWER_TEXT
+
+
+def _tool_error(detail: str, route: ConversationRoute | None = None) -> _ResolvedOutcome:
+    return _ResolvedOutcome(answer_status="error", answer=_error_answer_text(route), error=detail)
 
 
 async def _run_tool_turn(
@@ -540,7 +548,7 @@ async def _run_tool_turn(
             route.route_name,
             type(exc).__name__,
         )
-        return _tool_error(f"payload_expr error ({type(exc).__name__})")
+        return _tool_error(f"payload_expr error ({type(exc).__name__})", route)
     try:
         async with bind_execution_identity(route.execution_key, bound_fingerprint=route.execution_key_fingerprint):
             # Bind the generic tool-route completion for the dispatch: a parking tool captures
@@ -561,10 +569,10 @@ async def _run_tool_turn(
             finally:
                 reset_park_completion(completion_token)
     except PermissionDenied as exc:
-        return _tool_error(f"turn denied: {exc}")
+        return _tool_error(f"turn denied: {exc}", route)
     except Exception as exc:
         logger.error("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"turn error: {exc}")
+        return _tool_error(f"turn error: {exc}", route)
     if isinstance(result, SuspendedInteraction):
         # The tool parked the caller on an async ask (a generic contract sentinel —
         # the turn learns nothing of the driver's resume state): produce no reply and
@@ -575,7 +583,7 @@ async def _run_tool_turn(
         reply = await _tool_reply(route, result)
     except Exception as exc:
         logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"reply_expr error: {exc}")
+        return _tool_error(f"reply_expr error: {exc}", route)
     if reply is None or not reply.strip():
         return _SilentOutcome()
     return _ResolvedOutcome(answer_status="answered", answer=reply, error=None)
@@ -777,7 +785,7 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
                 logger.error(
                     "conversations: manual-mode inbound append for route %r failed", route.route_name, exc_info=exc
                 )
-                return _tool_error(f"manual-mode append error: {exc}")
+                return _tool_error(f"manual-mode append error: {exc}", route)
     return _SilentOutcome()
 
 
@@ -818,7 +826,7 @@ async def _resolve_turn_record(
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
         # leaving the greeting carrying a now-dead code (a Redeem/Unlink ignore it).
-        outcome = await _run_pairing_turn(multichannel, person, action, greeting_code)
+        outcome = await _run_pairing_turn(multichannel, person, action, greeting_code, route)
     return _outcome_record(intake, _with_greeting(outcome, greeting))
 
 
@@ -861,7 +869,11 @@ def _pairing_reply(text: str) -> _ResolvedOutcome:
 
 
 async def _run_pairing_turn(
-    multichannel: _Multichannel, person: Person, action: Link | Unlink | Redeem, greeting_code: _MintedCode | None
+    multichannel: _Multichannel,
+    person: Person,
+    action: Link | Unlink | Redeem,
+    greeting_code: _MintedCode | None,
+    route: ConversationRoute,
 ) -> _ToolOutcome:
     """Dispatch a classified pairing action against the multichannel target and return its
     resolved outcome. ``Link`` presents ``greeting_code`` when a first-contact greeting
@@ -896,7 +908,7 @@ async def _run_pairing_turn(
         return _pairing_reply(_INVALID_CODE_TEXT)
     except Exception as exc:
         logger.error("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
-        return _tool_error(f"pairing turn error: {exc}")
+        return _tool_error(f"pairing turn error: {exc}", route)
 
 
 async def _redeem_turn(multichannel: _Multichannel, person: Person, action: Redeem) -> _ToolOutcome:
@@ -1480,12 +1492,13 @@ async def deliver_agent_completion(thread_id: str, result: Any, completion_id: s
         # lease-lapse re-drive): the exactly-once point is passed, so this is a benign no-op.
         return {"message_id": completion_id}
     text = _serialize_structured(result)
-    # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
-    # replies for an empty answer, so the client sees a consistent outcome either way. It rides
-    # the operator record as an ``answered`` reply (an operator record is always answered) — the
-    # text is the reply, there is no client turn to mark ``error`` against.
-    answer = text if text.strip() else _ERROR_ANSWER_TEXT
     route, client_address = await _resolve_completion_target(thread_id)
+    # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
+    # replies for an empty answer, so the client sees a consistent outcome either way — the
+    # route's own ``error_reply_text`` when it carries one. It rides the operator record as an
+    # ``answered`` reply (an operator record is always answered) — the text is the reply, there
+    # is no client turn to mark ``error`` against.
+    answer = text if text.strip() else _error_answer_text(route)
     record = _new_record(
         route=route,
         message_id=completion_id,
@@ -1580,7 +1593,9 @@ async def deliver_tool_completion(
                 mapping_route.route_name,
                 exc_info=exc,
             )
-            reply = _ERROR_ANSWER_TEXT
+            # The guest-facing notice resolves through the DELIVERY route (where the record is
+            # filed and the guest is conversing), so its own ``error_reply_text`` applies.
+            reply = _error_answer_text(route)
         else:
             if reply is None or not reply.strip():
                 # A designed silent outcome delivers nothing; it re-maps to the same null on a
@@ -1588,8 +1603,9 @@ async def deliver_tool_completion(
                 return {"message_id": None}
     else:
         # A non-success terminal: the route carries no error mapping, so deliver the uniform
-        # client-safe notice (never the raw internal detail, never silence).
-        reply = _ERROR_ANSWER_TEXT
+        # client-safe notice (the delivery route's ``error_reply_text`` when set) — never the
+        # raw internal detail, never silence.
+        reply = _error_answer_text(route)
     record = _new_record(
         route=route,
         message_id=completion_id,
@@ -1820,8 +1836,22 @@ async def _owns_inbound_claim(store: ConversationRecordStore, record: Conversati
 async def _fail_stranded_turn(store: ConversationRecordStore, record: ConversationRecord) -> None:
     """Give an intake record the error outcome its interrupted turn never produced and
     spawn its delivery — the one resolution both the in-process watcher and the periodic
-    re-drive apply. Losing the guarded transition leaves the existing outcome standing."""
-    completed = _with_outcome(record, "error", _ERROR_ANSWER_TEXT, "turn was interrupted before it produced an answer")
+    re-drive apply. Losing the guarded transition leaves the existing outcome standing.
+
+    The intake record carries its ``route_name``, so the guest-facing text resolves the
+    route's ``error_reply_text`` best-effort: the route is looked up through the conversations
+    manager and ANY failure (manager unavailable, route gone, exception) falls back to the
+    built-in default. This is an interrupted-turn/lease-lapse repair path, so it must never be
+    less robust than a bare default — the lookup only ever upgrades the text, never blocks the
+    outcome. Only the guest-facing ``answer`` resolves through the route; the record's ``error``
+    detail and the logs keep the built-in wording."""
+    try:
+        route = await get_conversations_manager().get_route(record.route_name)
+    except Exception:
+        route = None
+    completed = _with_outcome(
+        record, "error", _error_answer_text(route), "turn was interrupted before it produced an answer"
+    )
     outcome = await store.complete_turn(completed)
     if outcome != 1:
         logger.warning(

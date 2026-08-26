@@ -164,6 +164,66 @@ def test_conversations_create_omits_turns_per_hour_override_when_unset(monkeypat
     assert result.exit_code == 0, result.output
 
 
+def test_conversations_create_sets_error_reply_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["error_reply_text"] == text
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+            "--error-reply-text",
+            text,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_omits_error_reply_text_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "error_reply_text" not in body
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_conversations_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
