@@ -9,7 +9,10 @@ each as a tool (so extensions wrap it and other presets can bake over it).
 Every mutating door validates a body CAN bind BEFORE any store write (a bad edit is
 a loud 400, never a committed version that can never bind), persists THEN registers,
 compensates a residual register failure by re-pointing the store so store + live
-never diverge, and fans the rebind/removal out on the worker bus. The concrete app
+never diverge, and fans the rebind/removal out on the worker bus — embedding that
+per-worker fleet report in the mutation response (the ``fanout`` field, the same shape
+the template writers return) so a deployer has the read-your-writes barrier signal the
+platform already computes, not merely a log line. The concrete app
 singleton (``from tai42_skeleton.app import instance``) is reached for the store view,
 the register/reload engine, the generic versioned store (the HARD delete the view
 does not expose), and ``emit_list_changed``. Success values are returned bare — the
@@ -40,7 +43,7 @@ from tai42_kit.utils.data.json_schema_util import (
 )
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_name
@@ -52,7 +55,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._authority import require_admin, resolve_caller
-from tai42_skeleton.operations._broadcast import log_non_convergence, snapshot_membership
+from tai42_skeleton.operations._broadcast import fleet_fanout, log_non_convergence, snapshot_membership
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)
@@ -636,7 +639,7 @@ async def _census_at_start(op_name: str) -> dict[str, int] | None:
     return await snapshot_membership(instance.app.bus, op_name)
 
 
-async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) -> set[str]:
+async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) -> FleetResult:
     """Broadcast a preset rebind on the worker bus so every worker re-reads the active
     body and rebinds ``name``. The op carries only ``kind`` + ``name``; each worker
     re-reads the store itself. The store write and local rebind have already landed by
@@ -649,9 +652,11 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
     logging and its op-start census (``expected_at_start``, from
     :func:`_census_at_start`) so a stranded sibling is never silent.
 
-    Returns the sibling names this broadcast actually ADDRESSED (self excluded) —
-    the report IS that set, expected verdicts and gap rows alike. A rename's second
-    fan-out needs it: see :func:`_union_census`."""
+    Returns the per-worker fleet report so the mutation door can embed it in its
+    response (:func:`~tai42_skeleton.operations._broadcast.fleet_fanout` shapes it — the
+    read-your-writes barrier a deployer needs) exactly as the template writers do. The
+    sibling names a rename's second fan-out is judged against are derived from it with
+    :func:`_addressed_siblings`; see :func:`_union_census`."""
     report = await instance.app.bus.publish(
         {"op": _RELOAD_OP, "kind": "preset", "name": name},
         None,
@@ -659,14 +664,22 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
         expected_at_start=expected_at_start,
     )
     log_non_convergence(report)
+    return report
+
+
+def _addressed_siblings(report: FleetResult) -> set[str]:
+    """The sibling names a broadcast actually ADDRESSED (self excluded) — the report IS
+    that set, expected verdicts and gap rows alike. A rename's second fan-out needs it:
+    see :func:`_union_census`."""
     self_name = instance.app.bus.identity.name
     return {result.name for result in report.results if result.name != self_name}
 
 
-async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) -> None:
+async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) -> FleetResult:
     """Broadcast a preset removal on the worker bus so every worker tears ``name``
     down. Same already-applied self entry, op-start census, and non-convergence
-    logging as :func:`_fanout_reload`."""
+    logging as :func:`_fanout_reload`, and it likewise returns the per-worker fleet
+    report so the delete door can embed it in its response."""
     report = await instance.app.bus.publish(
         {"op": _REMOVE_OP, "kind": "preset", "name": name},
         None,
@@ -674,6 +687,7 @@ async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) ->
         expected_at_start=expected_at_start,
     )
     log_non_convergence(report)
+    return report
 
 
 # A worker the reload reached but no census of ours ever saw. Real generations are
@@ -769,7 +783,8 @@ async def create_preset(
     """Create a preset, ATOMIC: ordered name pre-checks run BEFORE any store write,
     then the base rule + agent-authoring + combo/schema/bind validation, then the
     store write THEN register (rolling the row fully back on a register failure), one
-    ``list_changed``, and the bus rebind fan-out."""
+    ``list_changed``, and the bus rebind fan-out. The response embeds the per-worker
+    fleet report under ``fanout``."""
     # A preset name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe (a slash-bearing name would never match the routes; an
     # over-long one collides after client-tool truncation).
@@ -901,13 +916,13 @@ async def create_preset(
             raise ConflictError(f"preset name {name!r} collides with an existing tool") from register_exc
         raise register_exc
     await instance.app.emit_list_changed("tool")
-    await _fanout_reload(name, census)
+    report = await _fanout_reload(name, census)
     # Cross-references from the post-write population — the new body may already
     # compose other presets (``uses``), and a sibling authored against this name is
     # picked up too (``used_by``); one source of truth with the list / get rows.
     bodies = await instance.app.presets.list_active_bodies()
     uses_map, used_by_map = _reference_maps(bodies)
-    return _new_record_view(
+    view = _new_record_view(
         name,
         base_tool,
         description,
@@ -917,6 +932,11 @@ async def create_preset(
         uses=uses_map.get(name, []),
         used_by=used_by_map.get(name, []),
     )
+    # Embed the per-worker rebind fan-out report (mirrors the template writers): a
+    # deployer reads it as the read-your-writes barrier signal — proof the new binding
+    # propagated to every serving worker, not only the one that served this call.
+    view["fanout"] = fleet_fanout(report)
+    return view
 
 
 # -- get one -----------------------------------------------------------------
@@ -990,7 +1010,8 @@ async def save_version(
     """Save a new version (carry-forward sentinels on omitted fields) then reload and
     fan out; 409 if the record is conflicted, 404 for an absent name. The
     ``list_changed`` emit is GUARDED on a real change to the serialized wire tool OR
-    its extension combos."""
+    its extension combos. The response embeds the per-worker fleet report under
+    ``fanout``."""
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -1093,8 +1114,10 @@ async def save_version(
         await instance.app.emit_list_changed("tool")
     # The rebind fans out regardless of the emit guard: siblings must re-read the
     # active body even when the wire tool is byte-identical (a baked VALUE changed).
-    await _fanout_reload(name, census)
-    return row.model_dump()
+    report = await _fanout_reload(name, census)
+    # Embed the per-worker rebind fan-out report (mirrors the template writers): the
+    # read-your-writes barrier proving the new version reached every serving worker.
+    return {**row.model_dump(), "fanout": fleet_fanout(report)}
 
 
 # -- rollback ----------------------------------------------------------------
@@ -1111,7 +1134,8 @@ async def save_version(
 async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     """Re-point the active version then reload and fan out; 409 if the record is
     conflicted, 404 for an absent name or version, 400 if the target version cannot
-    bind against the current live registry."""
+    bind against the current live registry. The response embeds the per-worker fleet
+    report under ``fanout``."""
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -1173,8 +1197,10 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         await instance.app.emit_list_changed("tool")
     # The rebind fans out regardless of the emit guard: siblings must re-read the
     # active body even when the wire tool is byte-identical (a baked VALUE changed).
-    await _fanout_reload(name, census)
-    return {"name": name, "active_version": record.active_version}
+    report = await _fanout_reload(name, census)
+    # Embed the per-worker rebind fan-out report (mirrors the template writers): the
+    # read-your-writes barrier proving the rolled-back version reached every worker.
+    return {"name": name, "active_version": record.active_version, "fanout": fleet_fanout(report)}
 
 
 # -- rename ------------------------------------------------------------------
@@ -1193,7 +1219,8 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee
     if another preset composes the current name, binds the new tool BEFORE tearing
     the old one down, fires one ``list_changed``, and fans the rebind out NEW-first
-    then the old removal."""
+    then the old removal. The response embeds the primary rebind (new-name) fan-out
+    report under ``fanout``; the old-name removal stays log-only."""
     # The new name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe — the same rule create enforces.
     if not is_valid_preset_name(new_name):
@@ -1305,13 +1332,23 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # Fan out NEW FIRST — reload ``new_name`` on every worker BEFORE removing ``old``
     # (both briefly alive beats neither): the two are sequentially awaited confirmed
     # broadcasts, so every worker applies the reload before any is asked to remove.
-    addressed = await _fanout_reload(new_name, census)
+    reload_report = await _fanout_reload(new_name, census)
+    addressed = _addressed_siblings(reload_report)
     # Every worker the reload actually reached is now bound to ``new_name`` and must
     # also be told to drop the old one — including a worker that joined after the
     # snapshot (it rehydrated the OLD name before the commit and announced itself
     # after, so it holds a binding the store no longer knows).
     await _fanout_remove(name, _union_census(census, addressed, await _census_at_start(_REMOVE_OP)))
-    return {"name": new_name, "renamed_from": name, "active_version": record.active_version}
+    # Embed the primary rebind fan-out report — the propagation of the NEW binding, the
+    # read-your-writes barrier a deployer checks. The old-name removal is teardown and
+    # stays log-only (a single ``fanout`` field mirrors the template writers exactly; a
+    # rename does not invent a two-report shape).
+    return {
+        "name": new_name,
+        "renamed_from": name,
+        "active_version": record.active_version,
+        "fanout": fleet_fanout(reload_report),
+    }
 
 
 # -- delete ------------------------------------------------------------------
@@ -1327,7 +1364,8 @@ async def delete_preset(name: str) -> dict[str, Any]:
     """Delete a preset. A non-conflicted record is soft-deleted and its base + branch
     tools torn down (one ``list_changed``); a conflicted record is removed store-side
     ONLY (HARD delete + drop the quarantine entry), touching no registration and
-    firing no emit. Both branches fan the removal out on the bus."""
+    firing no emit. Both branches fan the removal out on the bus and embed the
+    per-worker fleet report under ``fanout``."""
     mgr = instance.app.preset_manager
 
     if mgr.is_quarantined(name):
@@ -1352,8 +1390,10 @@ async def delete_preset(name: str) -> dict[str, Any]:
         if component_store_configured(SKELETON_COMPONENT):
             await instance.app.tool_meta.store.delete_meta(name)
         mgr.drop_quarantine(name)
-        await _fanout_remove(name, census)
-        return {"name": name, "deleted": True}
+        report = await _fanout_remove(name, census)
+        # Embed the per-worker removal fan-out report (mirrors the template writers): a
+        # deployer reads it as proof the teardown reached every serving worker.
+        return {"name": name, "deleted": True, "fanout": fleet_fanout(report)}
 
     # A store-less deploy (no versioned store configured) can hold no preset, so a
     # name that is not quarantined is a genuine 404 without a Postgres read.
@@ -1372,8 +1412,10 @@ async def delete_preset(name: str) -> dict[str, Any]:
     if component_store_configured(SKELETON_COMPONENT):
         await instance.app.tool_meta.store.delete_meta(name)
     await instance.app.emit_list_changed("tool")
-    await _fanout_remove(name, census)
-    return {"name": name, "deleted": True}
+    report = await _fanout_remove(name, census)
+    # Embed the per-worker removal fan-out report (mirrors the template writers): a
+    # deployer reads it as proof the teardown reached every serving worker.
+    return {"name": name, "deleted": True, "fanout": fleet_fanout(report)}
 
 
 # -- referees ----------------------------------------------------------------

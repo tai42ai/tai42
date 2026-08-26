@@ -1356,7 +1356,15 @@ def test_rename_moves_row_rebinds_and_emits_once(pg, emit):
                 _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
             )
             assert resp.status_code == 200, _err(resp)
-            assert _data(resp) == {"name": "new", "renamed_from": "old", "active_version": 2}
+            # No worker bus is configured here, so the embedded new-name rebind fan-out
+            # collapses to the ``local-only`` report; the identity fields are unchanged.
+            body = _data(resp)
+            assert body["fanout"]["mode"] == "local-only"
+            assert {k: v for k, v in body.items() if k != "fanout"} == {
+                "name": "new",
+                "renamed_from": "old",
+                "active_version": 2,
+            }
 
             # Store row moved; the full version history is intact under the new name.
             assert [d["name"] for d in _non_role_documents(pg)] == ["new"]
@@ -1879,6 +1887,125 @@ def test_delete_non_converged_fanout_logs_loud_error(pg, emit, backend, caplog):
 
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any("did not fully converge — unconfirmed workers" in r.getMessage() for r in errors)
+
+
+# -- fan-out report embedded in the mutation response ------------------------
+
+# The preset write doors run a CONFIRMED fleet fan-out; its per-worker report is now
+# surfaced in the response ``fanout`` field (shaped by ``fleet_fanout`` exactly as the
+# template writers return it) so a deployer reading the response has the read-your-writes
+# barrier — proof the rebind/removal reached every serving worker, not merely a log line.
+# A ``reload_reaches`` sibling makes the report a multi-worker ``"fleet"`` mode carrying
+# that sibling's ``applied`` confirmation; dropping the field (or reporting only the write
+# store) leaves the propagation proof unasserted — the exact deploy blind spot this closes.
+
+
+def test_create_response_embeds_reload_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            backend.reload_reaches = {"serve-w2"}
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("wv", fixed_kwargs={"units": "v"}))
+            )
+            assert resp.status_code == 200, _err(resp)
+            fanout = _data(resp)["fanout"]
+            assert fanout["mode"] == "fleet"
+            assert {r["name"]: r["outcome"] for r in fanout["results"]} == {
+                "serve-1": "applied",
+                "serve-w2": "applied",
+            }
+
+    asyncio.run(run())
+
+
+def test_save_version_response_embeds_reload_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", fixed_kwargs={"units": "v1"})
+            backend.reload_reaches = {"serve-w2"}
+            resp = await router.save_version(
+                _request("POST", "/api/presets/wv/versions", name="wv", body={"fixed_kwargs": {"units": "v2"}})
+            )
+            assert resp.status_code == 200, _err(resp)
+            fanout = _data(resp)["fanout"]
+            assert fanout["mode"] == "fleet"
+            assert {r["name"]: r["outcome"] for r in fanout["results"]} == {
+                "serve-1": "applied",
+                "serve-w2": "applied",
+            }
+
+    asyncio.run(run())
+
+
+def test_rollback_response_embeds_reload_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", fixed_kwargs={"units": "v1"})
+            await instance.app.presets.store.save_version("wv", fixed_kwargs={"units": "v2"})
+            await instance.app.preset_manager.reload("wv")
+            backend.reload_reaches = {"serve-w2"}
+            resp = await router.rollback_preset(
+                _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
+            )
+            assert resp.status_code == 200, _err(resp)
+            fanout = _data(resp)["fanout"]
+            assert fanout["mode"] == "fleet"
+            assert {r["name"]: r["outcome"] for r in fanout["results"]} == {
+                "serve-1": "applied",
+                "serve-w2": "applied",
+            }
+
+    asyncio.run(run())
+
+
+def test_rename_response_embeds_reload_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("old", fixed_kwargs={"units": "v"})
+            backend.reload_reaches = {"serve-w2"}
+            resp = await router.rename_preset(
+                _request("POST", "/api/presets/old/rename", name="old", body={"new_name": "new"})
+            )
+            assert resp.status_code == 200, _err(resp)
+            # ``reload_reaches`` populates ONLY the reload op, so a ``"fleet"`` report
+            # carrying serve-w2 proves the embedded field is the NEW-name rebind fan-out
+            # (the primary propagation), not the old-name removal teardown.
+            fanout = _data(resp)["fanout"]
+            assert fanout["mode"] == "fleet"
+            assert {r["name"]: r["outcome"] for r in fanout["results"]} == {
+                "serve-1": "applied",
+                "serve-w2": "applied",
+            }
+
+    asyncio.run(run())
+
+
+def test_delete_response_embeds_remove_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", fixed_kwargs={"units": "v"})
+            resp = await router.delete_preset(_request("DELETE", "/api/presets/wv", name="wv"))
+            assert resp.status_code == 200, _err(resp)
+            # The remove fan-out reaches no recorded sibling here, so the report collapses
+            # to ``local-only`` — but the field IS present and ``fleet_fanout``-shaped, the
+            # same read-your-writes signal the reload doors carry.
+            assert _data(resp)["fanout"]["mode"] == "local-only"
+
+    asyncio.run(run())
+
+
+def test_delete_conflicted_response_embeds_remove_fanout_report(pg, emit, backend):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            body = PresetBody(base_tool="echo", description="d", fixed_kwargs={}, extensions=[])
+            await instance.app.versioning.store.create("preset", "weather", body.model_dump())
+            await instance.app.preset_manager.rehydrate()
+            assert instance.app.preset_manager.is_quarantined("weather")
+            resp = await router.delete_preset(_request("DELETE", "/api/presets/weather", name="weather"))
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["fanout"]["mode"] == "local-only"
+
+    asyncio.run(run())
 
 
 # -- preset tool-reloader (backend-bus dispatch target) ----------------------
