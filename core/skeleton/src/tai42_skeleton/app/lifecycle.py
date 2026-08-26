@@ -67,11 +67,13 @@ if TYPE_CHECKING:
         PresetRegistrationTierRegistry,
     )
     from tai42_skeleton.presets.manager import PresetManager
+    from tai42_skeleton.presets.seeds import PresetSeedRegistry
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.sandbox import SandboxHolder
     from tai42_skeleton.template import ResourceManager
     from tai42_skeleton.tools import ToolRefsRegistry
     from tai42_skeleton.tools.binding import ToolBinding
+    from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
 logger = logging.getLogger(__name__)
@@ -317,6 +319,14 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _tool_refs_registry(self) -> "ToolRefsRegistry":
         return self._serving_core._tool_refs_registry
+
+    @property
+    def _rename_referee_registry(self) -> "ToolRenameRefereeRegistry":
+        return self._serving_core._rename_referee_registry
+
+    @property
+    def _seed_registry(self) -> "PresetSeedRegistry":
+        return self._serving_core._seed_registry
 
     @property
     def _backup_registry(self) -> "BackupRegistry":
@@ -847,6 +857,14 @@ class TaiMCPLifecycleMixin(ABC):
         # update()/reload — the manifest's tool modules re-run their
         # @app.tools.tool(tool_refs=...) decorator each start(). Mirrors the reset above.
         self._tool_refs_registry.reset()
+
+        # Reset the rename-referee collection and the declared-preset-seed registry
+        # alongside the registries above: a reload re-imports the plugin modules (which
+        # re-run their register_rename_referee/register_seed calls) and the
+        # platform-internal referees re-arm through their startup/reload handler, so a
+        # stale referee or a dropped seed never lingers across update()/reload.
+        self._rename_referee_registry.reset()
+        self._seed_registry.reset()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep

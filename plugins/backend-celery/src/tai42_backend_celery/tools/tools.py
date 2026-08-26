@@ -404,29 +404,48 @@ async def backend_update_schedule(
 async def backend_export_schedules() -> list[dict[str, Any]]:
     """Export every RedBeat schedule as a portable list of ScheduleRecord dicts.
 
-    Iterates the schedule zset, reads each entry's full 'definition', and captures
+    Unions the schedule zset members with every entry hash found by the
+    ``redbeat:*`` key pattern, reads each entry's full 'definition', and captures
     its name, args, kwargs (tool name verbatim), the normalized schedule dict, and
-    enabled flag. Runtime-only next-run scores and meta are left out so the result
-    round-trips back through ``backend_import_schedules`` unchanged. Each entry's
-    ``definition`` and zset membership are read atomically: a member observed
-    with no backing ``definition`` raises loudly, while a member gone again at
-    that same instant means the entry was deleted after the snapshot and is
-    omitted as the correct current state.
+    enabled flag. The zset holds only ENABLED entries, so a schedule disabled with
+    the default ``remove_from_queue=True`` keeps its ``redbeat:{name}`` hash but
+    leaves the zset; the pattern scan re-includes it (it is re-enable-able, a live
+    schedule) where a zset-only walk would silently drop it. Runtime-only next-run
+    scores and meta are left out so the result round-trips back through
+    ``backend_import_schedules`` unchanged. Each entry's ``definition`` and zset
+    membership are read atomically: a member observed with no backing
+    ``definition`` raises loudly, while a member gone again at that same instant
+    means the entry was deleted after the snapshot and is omitted as the correct
+    current state.
     """
     settings = celery_settings()
     async with _redbeat_redis() as r:
         members = await r.zrange(settings.redbeat_schedule_key, 0, -1)
-        records: list[dict[str, Any]] = []
+        # RedBeat's own keys live under the double-colon ``redbeat::`` namespace (the
+        # schedule zset, lock, statics) — skip them so only entry hashes are read.
+        internal_prefix = f"{settings.redbeat_key_prefix}:"
+        entry_keys: list[str] = []
+        seen: set[str] = set()
         for member in members:
-            member_name = _text(member)
-            key = settings.redbeat_task_key(member_name)
+            key = _text(member)
+            if key not in seen:
+                seen.add(key)
+                entry_keys.append(key)
+        async for scanned in r.scan_iter(match=f"{settings.redbeat_key_prefix}*"):
+            key = _text(scanned)
+            if key.startswith(internal_prefix) or key in seen:
+                continue
+            seen.add(key)
+            entry_keys.append(key)
 
+        records: list[dict[str, Any]] = []
+        for key in entry_keys:
             definition, member_score = await _read_definition_and_membership(r, settings.redbeat_schedule_key, key)
             if not definition:
                 if member_score is None:
-                    # Member and hash both gone: deleted after the zrange snapshot.
+                    # Hash and zset member both gone: deleted after the snapshot.
                     continue
-                raise KeyError(f"Schedule zset lists {member_name!r} but hash {key!r} has no 'definition'")
+                raise KeyError(f"Schedule zset lists {key!r} but hash {key!r} has no 'definition'")
 
             def_obj = json.loads(_text(definition))
 

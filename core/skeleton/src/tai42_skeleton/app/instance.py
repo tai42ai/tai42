@@ -238,6 +238,24 @@ def build_app() -> TaiMCP:
         # is unconfigured, and an unreachable Postgres fails the boot/op loudly.
         app.lifecycle.on_startup(rehydrate_versioned_presets_if_store_in_use)
         app.lifecycle.on_reload(rehydrate_versioned_presets_if_store_in_use)
+        # Platform-internal rename referees (schedules/hooks/routes/extensions/parks) are
+        # re-armed every epoch: the referee collection is reset on each start(), and these
+        # in-house holders re-register here (the public register_rename_referee seam is for
+        # plugins). Consulted only at rename time, so ordering among the handlers is free.
+        from tai42_skeleton.tools.platform_referees import register_platform_rename_referees
+
+        app.lifecycle.on_startup(register_platform_rename_referees)
+        app.lifecycle.on_reload(register_platform_rename_referees)
+        # Declared preset seeds are applied AFTER the preset-rehydrate handler (handler
+        # dicts run in insertion order): a seed CREATES through the operations-layer
+        # internal path, which registers the tool, so ordering it here makes a seeded
+        # preset LIVE in the same epoch — resolvable in the tool registry on the very first
+        # boot, and before the sub-MCP rehydrate below that may compose one. Local import:
+        # operations.presets imports this module, so a top-level import would cycle.
+        from tai42_skeleton.operations.presets import apply_preset_seeds
+
+        app.lifecycle.on_startup(apply_preset_seeds)
+        app.lifecycle.on_reload(apply_preset_seeds)
         # Durable sub-MCP registrations rehydrate into this worker's router at boot
         # AND on every in-place reload (``reset()`` wipes the per-worker route cache),
         # so a registration survives a restart/reload and a sibling's registration

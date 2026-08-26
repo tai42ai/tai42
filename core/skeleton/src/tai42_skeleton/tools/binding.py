@@ -30,7 +30,12 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, unwrap_secrets
-from tai42_contract.tools import ToolRefsExtractor
+from tai42_contract.tools import (
+    ToolInvocation,
+    ToolRefsExtractor,
+    reset_current_tool_invocation,
+    set_current_tool_invocation,
+)
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_skeleton.agent.binding import _UNSET
@@ -596,12 +601,21 @@ class ToolBinding:
         # own defaults apply instead of a sentinel failing validation. No external
         # caller can produce _UNSET, so this is a no-op for ordinary arguments.
         arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
-        # Attribution WRAPS the drive together with the turn-budget arming (the same
-        # door set), so the tool work and its spans run INSIDE the run's attribution
-        # scope; it no-ops when no ambient attribution is deposited.
-        with stamp_run_attribution():
-            async with turn_budget():
-                return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        # Ambient invoked-tool seam: deposit this door's tool for the span of its
+        # execution and restore in ``finally`` (token discipline) — a nested
+        # re-dispatch re-sets for the inner tool and restores the outer name on exit.
+        # The reset lives in ``finally``, so a raising tool still propagates its error
+        # while the deposit is unwound.
+        invocation_token = set_current_tool_invocation(ToolInvocation(tool_name=key))
+        try:
+            # Attribution WRAPS the drive together with the turn-budget arming (the same
+            # door set), so the tool work and its spans run INSIDE the run's attribution
+            # scope; it no-ops when no ambient attribution is deposited.
+            with stamp_run_attribution():
+                async with turn_budget():
+                    return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        finally:
+            reset_current_tool_invocation(invocation_token)
 
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity, arguments

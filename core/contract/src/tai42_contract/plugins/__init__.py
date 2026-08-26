@@ -574,6 +574,12 @@ class PluginSpec(BaseModel):
     a migrations plugin (most plugins); it requires a ``package``. The contract
     validates only the path's SHAPE; the directory's existence in the installed
     package is enforced at runner-discovery time, not here.
+
+    ``migrations_component`` optionally names the database component the chain
+    migrates, for a plugin whose feature store is a SEPARATE, off-unless-declared
+    component rather than the distribution itself — absent (the default) runs the
+    chain under the distribution name, byte-identical to prior behavior. Setting
+    it REQUIRES ``migrations`` (a component with no chain migrates nothing).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -596,6 +602,7 @@ class PluginSpec(BaseModel):
     permissions: PluginPermissions = Field(default_factory=PluginPermissions)
     provides: list[PluginItem]
     migrations: str | None = None
+    migrations_component: str | None = None
 
     @property
     def ref(self) -> str:
@@ -775,6 +782,15 @@ class PluginSpec(BaseModel):
             raise ValueError("a plugin with code items must name its package")
         if self.migrations is not None and self.package is None:
             raise ValueError("migrations require a package")
+        return self
+
+    @model_validator(mode="after")
+    def _migrations_component_requires_migrations(self) -> PluginSpec:
+        # A migration component names WHERE a chain runs; naming it with no chain
+        # to run is a meaningless declaration, rejected loudly rather than silently
+        # ignored.
+        if self.migrations_component is not None and self.migrations is None:
+            raise ValueError("migrations_component requires migrations")
         return self
 
     @model_validator(mode="after")
