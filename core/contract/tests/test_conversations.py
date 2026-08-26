@@ -311,6 +311,19 @@ def test_agent_target_forbids_exprs(field: str):
         ConversationRouteCreate(**_route_kwargs(**{field: ".x"}))
 
 
+def test_turns_per_hour_override_defaults_to_none_and_must_be_positive():
+    from tai42_contract.conversations import ConversationRouteCreate
+
+    # Absent by default: the route runs at the global per-address cap.
+    assert ConversationRouteCreate(**_route_kwargs()).turns_per_hour_override is None
+    # A positive per-hour override is accepted and preserved.
+    assert ConversationRouteCreate(**_route_kwargs(turns_per_hour_override=250)).turns_per_hour_override == 250
+    # Non-positive rates are refused.
+    for bad in (0, -5):
+        with pytest.raises(ValidationError):
+            ConversationRouteCreate(**_route_kwargs(turns_per_hour_override=bad))
+
+
 def test_blank_inbound_text_error_is_a_value_error():
     from tai42_contract.conversations import BlankInboundTextError
 

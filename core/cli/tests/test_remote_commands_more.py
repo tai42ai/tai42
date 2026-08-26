@@ -106,6 +106,64 @@ def test_conversations_create_with_tool_target_maps_exprs(monkeypatch: pytest.Mo
     assert result.exit_code == 0, result.output
 
 
+def test_conversations_create_sets_turns_per_hour_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["turns_per_hour_override"] == 6000
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+            "--turns-per-hour-override",
+            "6000",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_conversations_create_omits_turns_per_hour_override_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "turns_per_hour_override" not in body
+        return data_response({"created": True})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "channel",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "svc",
+            "--channel",
+            "twilio",
+            "--identity",
+            "+15550001111",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_conversations_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"

@@ -104,6 +104,14 @@ class _TokenBucket:
             self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_second)
             self.updated = now
 
+    def _rerate(self, per_hour: int) -> None:
+        """Re-rate this bucket to ``per_hour`` IN PLACE. Never hand back tokens (they are
+        only ever clamped down) and keep the refill clock, so no in-flight refill is
+        corrupted. ``capacity`` doubles as the bucket's current rate."""
+        self.capacity = float(per_hour)
+        self.refill_per_second = per_hour / 3600.0
+        self.tokens = min(self.tokens, float(per_hour))
+
 
 class _ConcurrencyGate:
     """The global in-flight-turn ceiling, admitting waiters in arrival order. The limit is
@@ -188,23 +196,32 @@ class TurnCaps:
             # down), and keep the refill clock so no in-flight refill is corrupted.
             new_rate = settings.per_address_turns_per_hour
             for bucket in self._buckets.values():
-                bucket.capacity = float(new_rate)
-                bucket.refill_per_second = new_rate / 3600.0
-                bucket.tokens = min(bucket.tokens, float(new_rate))
+                bucket._rerate(new_rate)
         self.settings = settings
         self._gate.set_limit(settings.max_concurrent_turns)
         self._lease.reconfigure(settings)
 
     # -- the per-key token bucket --------------------------------------------
 
-    def admit_address(self, bucket_key: str) -> AddressAdmission:
+    def admit_address(self, bucket_key: str, per_hour: int | None = None) -> AddressAdmission:
         """Consume one token for ``bucket_key`` and answer whether its turn is admitted,
         and if not whether this hit still owes a paid slow-down reply. The key is opaque
-        here: each door composes one naming the party its cap holds accountable."""
+        here: each door composes one naming the party its cap holds accountable.
+
+        ``per_hour`` is the effective per-hour rate this key runs at: ``None`` uses the
+        global ``per_address_turns_per_hour``, a value is a per-route override of it. The
+        rate is (re-)applied lazily on each call, so a bucket a settings reload re-rated to
+        the global value has its RATE restored to its override on its next message — its
+        clamped token BALANCE is not refunded (the never-refund invariant: tokens are only
+        ever clamped down) — and one whose override changed adopts the new rate in place
+        using the same clamp a reload does."""
+        rate = self.settings.per_address_turns_per_hour if per_hour is None else per_hour
         now = _now()
         bucket = self._buckets.get(bucket_key)
         if bucket is None:
-            bucket = _TokenBucket(self.settings.per_address_turns_per_hour, now)
+            bucket = _TokenBucket(rate, now)
+        elif bucket.capacity != float(rate):
+            bucket._rerate(rate)
         bucket._refill(now)
         # Written back on EVERY hit, not just a miss: the write restarts the idle window,
         # so a key that keeps sending keeps its spent bucket.

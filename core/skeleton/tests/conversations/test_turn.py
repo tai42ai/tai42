@@ -85,7 +85,12 @@ class _FakeApp:
         self.channels = _FakeChannels(channel)
 
 
-def _channel_route(route_name: str = "line", our_identity: str = "+15550001111") -> ConversationRoute:
+def _channel_route(
+    route_name: str = "line",
+    our_identity: str = "+15550001111",
+    *,
+    turns_per_hour_override: int | None = None,
+) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
         door="channel",
@@ -95,10 +100,11 @@ def _channel_route(route_name: str = "line", our_identity: str = "+15550001111")
         channel="twilio",
         our_identity=our_identity,
         execution_key_fingerprint="fp-1",
+        turns_per_hour_override=turns_per_hour_override,
     )
 
 
-def _api_route(route_name: str = "chat") -> ConversationRoute:
+def _api_route(route_name: str = "chat", *, turns_per_hour_override: int | None = None) -> ConversationRoute:
     return ConversationRoute(
         route_name=route_name,
         door="api",
@@ -108,6 +114,7 @@ def _api_route(route_name: str = "chat") -> ConversationRoute:
         callback_url="https://cb.example/x",
         callback_secret="sec-1",
         execution_key_fingerprint="fp-1",
+        turns_per_hour_override=turns_per_hour_override,
     )
 
 
@@ -1263,6 +1270,56 @@ async def test_two_api_routes_give_a_caller_independent_buckets(env, monkeypatch
     await _settle()
     assert result.answer is not None
     assert result.answer.answer == "echo: hi"
+
+
+async def test_an_api_route_override_raises_the_cap_and_the_503_quotes_it(env, monkeypatch):
+    # A route carrying ``turns_per_hour_override`` runs its callers at that rate, above the
+    # global cap of 1, and the refusal names the EFFECTIVE (override) rate, not the global.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    _wire(monkeypatch, FakeManager(_api_route("chat", turns_per_hour_override=3)))
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": EchoAgent()})
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    # The override grants three turns where the global cap would have allowed one.
+    for index in range(3):
+        await turn_module.submit_api_message("chat", f"u-{index}", "hi", "alice", 0)
+    await _settle()
+
+    # The fourth is refused, and the 503 quotes the override rate of 3/hour, not the global 1.
+    with pytest.raises(caps_module.AddressRateLimitedError, match="3/hour"):
+        await turn_module.submit_api_message("chat", "u-3", "hi", "alice", 0)
+
+
+async def test_a_channel_route_override_raises_the_cap_through_the_accept_path(env, monkeypatch):
+    # The channel door honours ``turns_per_hour_override`` the same way the api door does: an
+    # address on an overridden channel route is admitted beyond the global budget, and the
+    # paid slow-down reply fires only once the OVERRIDE budget (not the global one) is spent.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route(turns_per_hour_override=3)), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+    store = _store()
+
+    # The override grants three turns where the global cap of 1 would have shed the second.
+    for index in range(3):
+        admitted = await turn_module.accept(
+            "twilio", "+15550001111", "+15550002222", "+15550002222", f"msg-{index}", f"PID{index}"
+        )
+        await _settle()
+        record = await store.get_record(admitted)
+        assert record is not None
+        assert record.answer == f"echo: msg-{index}"
+
+    # Only the fourth message — past the override budget, not the global one — buys the
+    # slow-down reply.
+    shed = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "over", "PID9")
+    await _settle()
+    shed_record = await store.get_record(shed)
+    assert shed_record is not None
+    assert shed_record.answer == turn_module._SLOW_DOWN_TEXT
 
 
 @pytest.mark.parametrize("principal", [None, "", "   "])
