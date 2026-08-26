@@ -98,6 +98,13 @@ def create_route(
             help="Per-route override (positive) of the global per-address turns/hour cap; unset uses the global rate.",
         ),
     ] = None,
+    error_reply_text: Annotated[
+        str | None,
+        typer.Option(
+            "--error-reply-text",
+            help="Guest-facing reply sent when a turn on this route fails; unset uses the built-in default.",
+        ),
+    ] = None,
 ) -> None:
     """Create or replace a conversation route.
 
@@ -132,6 +139,8 @@ def create_route(
         body["callback_url"] = callback_url
     if turns_per_hour_override is not None:
         body["turns_per_hour_override"] = turns_per_hour_override
+    if error_reply_text is not None:
+        body["error_reply_text"] = error_reply_text
     with ctx_obj.client() as client:
         data = client.post(f"/api/conversations/{route_name}", json=body)
     emit_result(ctx_obj, data)

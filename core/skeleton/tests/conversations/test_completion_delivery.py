@@ -173,6 +173,25 @@ async def test_completion_empty_result_delivers_error_reply(env, monkeypatch):
     assert channel.sends[0].message == "Sorry, something went wrong handling your message. Please try again."
 
 
+async def test_completion_empty_result_uses_the_route_error_reply_text_when_set(env, monkeypatch):
+    # A blank resumed answer delivers the route's own ``error_reply_text`` when it carries one,
+    # not the built-in default (turn.py:1501) — the SAME custom reply a fresh empty turn sends.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    channel = FakeChannel()
+    route = _channel_route().model_copy(update={"error_reply_text": spanish})
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    out = await deliver_agent_completion("bridge:line:+15550002222", "   ", "cmpl-empty-es")
+    await _settle()
+
+    assert out == {"message_id": "cmpl-empty-es"}
+    record = await _store().get_record("cmpl-empty-es")
+    assert record is not None
+    assert record.answer_status == "answered"
+    assert record.answer == spanish
+    assert channel.sends[0].message == spanish
+
+
 async def test_completion_dedupes_on_repeated_completion_id(env, monkeypatch):
     channel = FakeChannel()
     route = _channel_route()

@@ -223,12 +223,26 @@ class ConversationRouteCreate(BaseModel):
     # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
     # global rate.
     turns_per_hour_override: int | None = Field(default=None, gt=0)
+    # The guest-facing reply sent when a conversational turn on this route fails; ``None`` uses
+    # the built-in English default. LITERAL text — no placeholders/templating. Non-blank when
+    # set. (No other text field in this file carries a max_length; 2000 is a defensible bound
+    # for a single guest-facing reply.)
+    error_reply_text: str | None = Field(default=None, min_length=1, max_length=2000)
 
     @field_validator("route_name")
     @classmethod
     def _check_route_name(cls, value: str) -> str:
         if not ROUTE_NAME_RE.fullmatch(value):
             raise ValueError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {value!r}")
+        return value
+
+    @field_validator("error_reply_text")
+    @classmethod
+    def _check_error_reply_text(cls, value: str | None) -> str | None:
+        # A set override must be non-blank: a whitespace-only reply would deliver an empty
+        # guest-facing message where the built-in default was intended.
+        if value is not None and not value.strip():
+            raise ValueError("error_reply_text must be non-blank when set")
         return value
 
     @model_validator(mode="after")
