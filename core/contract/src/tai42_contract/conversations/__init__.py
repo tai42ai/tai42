@@ -219,6 +219,10 @@ class ConversationRouteCreate(BaseModel):
     channel: str | None = None  # door=channel: the registry name, ``:``-free
     our_identity: str | None = None  # door=channel: the medium address we are texted at
     callback_url: str | None = None  # door=api: the https answer sink
+    # A per-route override of the global ``per_address_turns_per_hour`` cap: the positive
+    # per-hour turn rate this route's per-address buckets run at, or ``None`` to run at the
+    # global rate.
+    turns_per_hour_override: int | None = Field(default=None, gt=0)
 
     @field_validator("route_name")
     @classmethod
