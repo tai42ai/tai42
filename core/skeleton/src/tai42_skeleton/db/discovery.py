@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.resources
+import logging
 import re
+from dataclasses import dataclass
 from importlib.resources.abc import Traversable
 
 from tai42_contract.plugins import PluginSpec
-from tai42_kit.db import MigrationDiscoveryError, MigrationEntry, component_migrator_settings
+from tai42_kit.db import (
+    MigrationDiscoveryError,
+    MigrationEntry,
+    component_binding_declared,
+    component_migrator_settings,
+)
+
+logger = logging.getLogger(__name__)
 
 # The skeleton's chain is component ``skeleton`` — the identity in the history
 # table, fixed once and forever.
@@ -80,13 +89,42 @@ def _import_package_for_distribution(distribution: str) -> str:
     return packages[0]
 
 
-def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
-    """A plugin's chain as a runner entry, or ``None`` when it declares none.
+@dataclass(frozen=True)
+class _ChainSkip:
+    """A declared chain whose ``migrations_component`` override binding is unset: a
+    DISTINCT surfaced skip, never the silent ``None`` no-migrations outcome.
 
-    The component is the plugin's distribution name (``spec.package``); its
-    connection is that component's bound migrator identity. The ``migrations`` path
-    is resolved against the plugin's import root; the runner then enforces that the
-    directory actually exists and holds a well-formed chain.
+    ``component`` is the override identity whose ``TAI_DB_BINDING_*`` the operator
+    must declare before its store migrates anywhere — carried so the visible skip
+    line names the chain that did not run."""
+
+    component: str
+
+
+def _log_chain_skip(skip: _ChainSkip) -> None:
+    """Surface a skipped override chain as a visible line — WHICH chain did not run
+    and WHY — so an optional feature's store never silently migrates into the default
+    database by fallback."""
+    logger.warning(
+        "db migrate: skipping the %r migration chain — its migrations-component database "
+        "binding (TAI_DB_BINDING_*) is not declared; set it so this component's store migrates "
+        "to the intended database.",
+        skip.component,
+    )
+
+
+def _plugin_chain(spec: PluginSpec) -> MigrationEntry | _ChainSkip | None:
+    """Resolve a plugin's declared chain to one of THREE distinct outcomes: an entry
+    to run, a :class:`_ChainSkip` (an override whose component binding is unset —
+    surfaced, never a silent ``None``), or ``None`` when the plugin declares no chain.
+
+    ``migrations_component`` (when set) names the database component the chain
+    migrates instead of the distribution; it flows into BOTH the entry's ``component``
+    history identity AND its ``settings`` connection — one without the other migrates
+    the right identity into the wrong database. An override runs ONLY while its
+    binding is EXPLICITLY declared; unset, the chain is skipped rather than run under
+    the default-database fallback. With no override the component is the distribution
+    name, byte-identical to prior behavior.
     """
     if spec.migrations is None:
         return None
@@ -95,13 +133,37 @@ def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
     # here guarantees a non-None ``package``.
     if spec.package is None:
         raise MigrationDiscoveryError("migrations require a package")
+    # The component identity the chain migrates under: the declared override, else the
+    # distribution name. Resolved BEFORE the package/directory read so a skipped
+    # override chain never needs the feature package's SQL resolved.
+    component = spec.migrations_component or spec.package
+    if spec.migrations_component is not None and component_binding_declared(component) is None:
+        return _ChainSkip(component=component)
     package = _import_package_for_distribution(spec.package)
     migrations_dir = importlib.resources.files(package).joinpath(*spec.migrations.split("/"))
     return MigrationEntry(
-        component=spec.package,
+        component=component,
         migrations_dir=migrations_dir,
-        settings=component_migrator_settings(spec.package),
+        settings=component_migrator_settings(component),
     )
+
+
+def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
+    """A plugin's chain as a runner entry, or ``None`` when it declares none OR its
+    ``migrations_component`` override binding is unset (a skip surfaced by a visible
+    line — an undeclared binding never migrates into the default database).
+
+    The component is the declared ``migrations_component`` when set, else the plugin's
+    distribution name (``spec.package``); its connection is that component's bound
+    migrator identity. The ``migrations`` path is resolved against the plugin's import
+    root; the runner then enforces that the directory actually exists and holds a
+    well-formed chain.
+    """
+    outcome = _plugin_chain(spec)
+    if isinstance(outcome, _ChainSkip):
+        _log_chain_skip(outcome)
+        return None
+    return outcome
 
 
 async def installed_plugin_entries() -> list[MigrationEntry]:
@@ -122,9 +184,15 @@ async def installed_plugin_entries() -> list[MigrationEntry]:
     entries: list[MigrationEntry] = []
     for record in await MarketplaceInstallStore().list_installed():
         spec = PluginSpec.model_validate(record.spec)
-        entry = plugin_migration_entry(spec)
-        if entry is not None:
-            entries.append(entry)
+        outcome = _plugin_chain(spec)
+        if isinstance(outcome, _ChainSkip):
+            # DISTINCT from the ``None`` no-migrations outcome: surface the skip and
+            # omit the chain, so ``tai db migrate`` reports WHICH declared chain did
+            # not run rather than silently dropping it.
+            _log_chain_skip(outcome)
+            continue
+        if outcome is not None:
+            entries.append(outcome)
     return entries
 
 

@@ -21,6 +21,7 @@ route adapter wraps them in ``{"data": ...}`` at the HTTP edge.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from typing import Annotated, Any
@@ -28,7 +29,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.manifest import ExtensionElement
-from tai42_contract.presets import CARRY_FORWARD, PresetBody
+from tai42_contract.presets import CARRY_FORWARD, CarryForward, PresetBody, PresetSeed
 from tai42_contract.presets.errors import (
     PresetExistsError,
     PresetNameConflictError,
@@ -360,12 +361,26 @@ def _reference_maps(bodies: dict[str, PresetBody]) -> tuple[dict[str, list[str]]
 
 def _referencing_presets(old_name: str, bodies: dict[str, PresetBody]) -> list[str]:
     """Every OTHER preset whose ACTIVE body composes ``old_name`` as a tool (the
-    combined collector :func:`_preset_references`, so a DECLARED reference counts too)
-    — the referees a rename would strand, sorted for a stable, fully-listed 409. Only
-    active bodies are walked: a non-active historical version may still name the old
-    tool, loud at authoring / run time if ever rolled back (delete's existing
-    posture)."""
+    combined collector :func:`_preset_references`, so a DECLARED reference counts too),
+    sorted for a stable, fully-listed answer. This is the PRESET-BODY leg of the rename
+    referee union — :func:`_rename_referees` unions it with every registered referee
+    (platform wiring + plugin providers). Only active bodies are walked: a non-active
+    historical version may still name the old tool, loud at authoring / run time if ever
+    rolled back (delete's existing posture)."""
     return sorted(name for name, body in bodies.items() if name != old_name and old_name in _preset_references(body))
+
+
+async def _rename_referees(name: str) -> list[str]:
+    """Every live reference a rename of ``name`` would strand — the full union the rename
+    gate blocks on and the referees preview door reports: the OTHER presets whose active
+    body composes ``name`` (:func:`_referencing_presets`) plus every registered rename
+    referee's descriptions (the platform-internal wiring referees + any plugin provider).
+    Each referee is consulted for the OLD name; a referee RAISING propagates loudly — a
+    rename never proceeds past an unreadable holder store (no silent bypass)."""
+    holders = _referencing_presets(name, await instance.app.presets.list_active_bodies())
+    for referee in instance.app.tools.rename_referees():
+        holders.extend(await referee(name))
+    return holders
 
 
 async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -> str | None:
@@ -529,6 +544,49 @@ async def _enforce_registration_tier(base_tool: str) -> None:
         require_admin(await resolve_caller())
 
 
+async def _validate_authoring(name: str, body: PresetBody) -> None:
+    """Run the create/save authoring validators over a FULL body about to persist,
+    raising the same loud :class:`BadRequestError` those doors raise: non-empty
+    description, agent-authoring, combo registry, output-schema, dry-run bind,
+    input-schema support, and the base tool's write validator. The seed re-point path
+    (which writes straight to the versioned store, bypassing the create/save cores)
+    calls this BEFORE its write so a re-point onto a base that rejects the carried
+    body is refused loudly, never persisted and served unvalidated."""
+    if not body.description.strip():
+        raise BadRequestError("a preset description must not be empty")
+    # A preset's base must be a registered NON-preset tool (a preset cannot be another
+    # preset's base — chaining makes rehydration order-dependent). The dry-run bind
+    # binds via ``get_tool`` and a preset IS a registered tool, so it would pass a
+    # preset base; mirror create's guard here so the re-point path rejects it too.
+    if body.base_tool in instance.app.preset_manager.registered_names():
+        raise BadRequestError(f"base tool {body.base_tool!r} is itself a preset")
+    authoring_error = await _agent_authoring_error(body.base_tool, body.fixed_kwargs)
+    if authoring_error is not None:
+        raise BadRequestError(authoring_error)
+    combo_error = _combo_registry_error(body.extensions)
+    if combo_error is not None:
+        raise BadRequestError(combo_error)
+    schema_error = await _output_schema_error(body.base_tool, body.output_schema, body.extensions)
+    if schema_error is not None:
+        raise BadRequestError(schema_error)
+    bind_error = await _dry_run_bind_error(
+        body.base_tool,
+        body.fixed_kwargs,
+        name=name,
+        description=body.description,
+        output_schema=body.output_schema,
+        input_schema=body.input_schema,
+    )
+    if bind_error is not None:
+        raise BadRequestError(bind_error)
+    input_schema_error = _input_schema_authoring_error(body)
+    if input_schema_error is not None:
+        raise BadRequestError(input_schema_error)
+    write_validator_error = await _write_validator_error(body)
+    if write_validator_error is not None:
+        raise BadRequestError(write_validator_error)
+
+
 def _input_schema_authoring_error(body: PresetBody) -> str | None:
     """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no
     registered input-schema support, else ``None``. Loud, never a silently-ignored
@@ -625,6 +683,23 @@ _RELOAD_OP = "reload_tool"
 _REMOVE_OP = "remove_tool"
 
 
+def _fleet_fanout_ready() -> bool:
+    """Whether this worker can fan a preset op out to the fleet: its bus is built AND
+    its slot identity is minted.
+
+    ``False`` only during the boot startup handlers — the declared-preset-seed applier
+    runs as an ``on_startup`` handler, BEFORE the bus subscription claims this worker's
+    slot (the bus is built and its identity minted only after the handlers). Every worker
+    runs that applier on its OWN boot, so a boot-time seed create/upgrade needs no fan-out
+    — each worker applies it locally. A reload re-runs the applier with the bus already
+    subscribed, so it fans out normally, as does every API-door mutation."""
+    try:
+        _ = instance.app.bus.identity
+    except RuntimeError:
+        return False
+    return True
+
+
 async def _census_at_start(op_name: str) -> dict[str, int] | None:
     """Pin the expected-confirmation membership BEFORE this worker's store write and
     local rebind — the untargeted-publisher discipline
@@ -635,7 +710,11 @@ async def _census_at_start(op_name: str) -> dict[str, int] | None:
     faded across it would simply be absent from the expected set, and the op would
     report converged without it. The caller reads this at its true pre-apply point,
     which is why it is a parameter of the fan-out rather than taken inside it.
-    """
+
+    ``None`` when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe):
+    :func:`_fanout_reload` / :func:`_fanout_remove` collapse to a local-only report."""
+    if not _fleet_fanout_ready():
+        return None
     return await snapshot_membership(instance.app.bus, op_name)
 
 
@@ -656,7 +735,13 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
     response (:func:`~tai42_skeleton.operations._broadcast.fleet_fanout` shapes it — the
     read-your-writes barrier a deployer needs) exactly as the template writers do. The
     sibling names a rename's second fan-out is judged against are derived from it with
-    :func:`_addressed_siblings`; see :func:`_union_census`."""
+    :func:`_addressed_siblings`; see :func:`_union_census`.
+
+    Collapses to a ``local_only`` report when the bus cannot yet fan out (the boot-time
+    seed applier, before this worker's slot is claimed) — the local rebind has already
+    landed and every sibling seeds itself on its own boot, so there is no fleet to reach."""
+    if not _fleet_fanout_ready():
+        return FleetResult(op=_RELOAD_OP, local_only=True)
     report = await instance.app.bus.publish(
         {"op": _RELOAD_OP, "kind": "preset", "name": name},
         None,
@@ -679,7 +764,10 @@ async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) ->
     """Broadcast a preset removal on the worker bus so every worker tears ``name``
     down. Same already-applied self entry, op-start census, and non-convergence
     logging as :func:`_fanout_reload`, and it likewise returns the per-worker fleet
-    report so the delete door can embed it in its response."""
+    report so the delete door can embed it in its response. Collapses to a ``local_only``
+    report when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe)."""
+    if not _fleet_fanout_ready():
+        return FleetResult(op=_REMOVE_OP, local_only=True)
     report = await instance.app.bus.publish(
         {"op": _REMOVE_OP, "kind": "preset", "name": name},
         None,
@@ -763,15 +851,7 @@ async def list_presets() -> list[dict[str, Any]]:
 # -- create ------------------------------------------------------------------
 
 
-@operation(
-    summary="Create a preset",
-    tags=["presets"],
-    destructive=True,
-    reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotSupportedError],
-    request_model=PresetCreate,
-)
-async def create_preset(
+async def _create_preset_core(
     name: str,
     base_tool: str,
     description: str,
@@ -779,12 +859,21 @@ async def create_preset(
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
     input_schema: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Create a preset, ATOMIC: ordered name pre-checks run BEFORE any store write,
-    then the base rule + agent-authoring + combo/schema/bind validation, then the
-    store write THEN register (rolling the row fully back on a register failure), one
-    ``list_changed``, and the bus rebind fan-out. The response embeds the per-worker
-    fleet report under ``fanout``."""
+    *,
+    tags: list[str] | None = None,
+    enforce_tier: bool = True,
+) -> tuple[Any, FleetResult]:
+    """The reusable create path shared by the create door and the seed applier: ordered
+    name pre-checks → base rule → agent-authoring → combo/schema/bind + input-schema +
+    write-validator validation → (optional) registration-tier fence → store write THEN
+    register (rolling the row fully back on a register failure) → one ``list_changed`` →
+    the bus rebind fan-out. Returns the store record + the per-worker fleet report.
+
+    ``enforce_tier`` runs the caller-authorization fence (create's door behavior); the
+    seed applier passes ``False`` — a platform seed has no caller to fence and runs the
+    identical content path otherwise (no logic duplicated between the two). ``tags`` labels
+    version 1 in the SAME store commit (``None`` is the door's untagged create); the seed
+    applier passes the shipped-default tag so the create-then-tag has no untagged window."""
     # A preset name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe (a slash-bearing name would never match the routes; an
     # over-long one collides after client-tool truncation).
@@ -863,8 +952,10 @@ async def create_preset(
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
     # Registration-tier fence (ruling 14): a base tool declaring ``fenced``/``secret``
-    # requires the caller clears the admin fence to author a preset over it.
-    await _enforce_registration_tier(base_tool)
+    # requires the caller clears the admin fence to author a preset over it. Skipped for
+    # a platform seed (``enforce_tier=False``) — no caller to fence.
+    if enforce_tier:
+        await _enforce_registration_tier(base_tool)
 
     # A preset needs the durable store; on a store-less deploy (the skeleton
     # database unconfigured) refuse cleanly here — the same predicate the
@@ -893,7 +984,7 @@ async def create_preset(
     spec = PresetSpec(name=name, description=description, base_tool=base_tool, fixed_kwargs=fixed_kwargs)
     try:
         record = await instance.app.presets.store.create_preset(
-            spec, extensions=extensions, output_schema=output_schema, input_schema=input_schema
+            spec, extensions=extensions, output_schema=output_schema, input_schema=input_schema, tags=tags
         )
     except PresetNameConflictError as exc:
         raise ConflictError(f"preset name {name!r} collides with an existing tool") from exc
@@ -917,6 +1008,36 @@ async def create_preset(
         raise register_exc
     await instance.app.emit_list_changed("tool")
     report = await _fanout_reload(name, census)
+    return record, report
+
+
+@operation(
+    summary="Create a preset",
+    tags=["presets"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, ConflictError, NotSupportedError],
+    request_model=PresetCreate,
+)
+async def create_preset(
+    name: str,
+    base_tool: str,
+    description: str,
+    fixed_kwargs: dict[str, Any],
+    extensions: list[list[ExtensionElement]],
+    output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a preset, ATOMIC: the shared :func:`_create_preset_core` runs the ordered
+    name pre-checks, validation, store write THEN register (rolling the row fully back on
+    a register failure), one ``list_changed``, and the bus rebind fan-out. The response
+    embeds the per-worker fleet report under ``fanout``.
+
+    A preset's NAME is its identity everywhere — it IS the live tool binding, and every
+    reference keys on it deliberately; there are no surrogate ids."""
+    record, report = await _create_preset_core(
+        name, base_tool, description, fixed_kwargs, extensions, output_schema, input_schema
+    )
     # Cross-references from the post-write population — the new body may already
     # compose other presets (``uses``), and a sibling authored against this name is
     # picked up too (``used_by``); one source of truth with the list / get rows.
@@ -991,27 +1112,31 @@ async def get_version(name: str, version: str) -> dict[str, Any]:
     return row.model_dump()
 
 
-@operation(
-    summary="Save a new preset version",
-    tags=["presets"],
-    destructive=True,
-    reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError],
-    request_model=PresetVersionSave,
-)
-async def save_version(
+async def _save_version_core(
     name: str,
+    *,
     fixed_kwargs: dict[str, Any] | None,
     extensions: list[list[ExtensionElement]] | None,
     output_schema: dict[str, Any] | None,
     output_schema_provided: bool,
     description: str | None,
-) -> dict[str, Any]:
-    """Save a new version (carry-forward sentinels on omitted fields) then reload and
-    fan out; 409 if the record is conflicted, 404 for an absent name. The
-    ``list_changed`` emit is GUARDED on a real change to the serialized wire tool OR
-    its extension combos. The response embeds the per-worker fleet report under
-    ``fanout``."""
+    input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+    tags: list[str] | None = None,
+    enforce_tier: bool = True,
+) -> tuple[Any, FleetResult]:
+    """The reusable save-a-new-version path shared by the save door and the seed applier:
+    read the active body, resolve the carry-forward sentinels, run create's validation
+    over the effective new body, (optionally) fence on the base tool's authoring tier,
+    save THEN reload (re-pointing the active version back on a residual register failure),
+    guard the ``list_changed`` emit on a real wire/extension change, and fan the rebind
+    out. Returns the new version row + the per-worker fleet report.
+
+    ``input_schema`` carries forward by default (the save door's behavior); the seed
+    applier passes an explicit schema so an upgraded shipped default sets it. ``tags`` labels
+    the new version in the SAME save commit (``None`` is the door's untagged save); the seed
+    applier passes the shipped-default tag so the save-then-tag has no untagged window.
+    ``enforce_tier`` runs the caller-authorization fence; the seed applier passes ``False`` —
+    no caller."""
     store = instance.app.presets.store
     if instance.app.preset_manager.is_quarantined(name):
         raise ConflictError(f"preset {name!r} is conflicted and is delete-only")
@@ -1032,6 +1157,10 @@ async def save_version(
     new_fixed_kwargs = active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs
     new_extensions = active.extensions if extensions is None else extensions
     new_output_schema = active.output_schema if not output_schema_provided else output_schema
+    # ``input_schema`` carries forward in the STORE (sentinel passed straight through); it
+    # enters validation only when EXPLICITLY provided (the seed path), so the save door's
+    # carry-forward validation yields ``None``.
+    validation_input_schema = None if isinstance(input_schema, CarryForward) else input_schema
     # ``description`` is editable per version under the None-carry sentinel. The
     # resulting value is validated non-empty in the store view (explicit "" or a
     # carry-from-empty both raise); mirror the resolution here to feed the dry-run.
@@ -1056,23 +1185,33 @@ async def save_version(
         name=name,
         description=new_description,
         output_schema=new_output_schema,
+        input_schema=validation_input_schema,
     )
     if bind_error is not None:
         raise BadRequestError(bind_error)
-    write_validator_error = await _write_validator_error(
-        PresetBody(
-            base_tool=base_tool,
-            description=new_description,
-            fixed_kwargs=new_fixed_kwargs,
-            extensions=new_extensions,
-            output_schema=new_output_schema,
-        )
+    new_body = PresetBody(
+        base_tool=base_tool,
+        description=new_description,
+        fixed_kwargs=new_fixed_kwargs,
+        extensions=new_extensions,
+        output_schema=new_output_schema,
+        input_schema=validation_input_schema,
     )
+    # An EXPLICITLY provided input_schema over a base tool with no support is a loud
+    # error that persists nothing (never a silently-ignored schema); a carried-forward
+    # schema was already vetted at its own authoring.
+    if not isinstance(input_schema, CarryForward):
+        input_schema_error = _input_schema_authoring_error(new_body)
+        if input_schema_error is not None:
+            raise BadRequestError(input_schema_error)
+    write_validator_error = await _write_validator_error(new_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
     # Registration-tier fence (ruling 14): the tier is the CURRENT preset's base tool,
-    # so editing a fenced base tool's preset is admin-fenced too.
-    await _enforce_registration_tier(base_tool)
+    # so editing a fenced base tool's preset is admin-fenced too. Skipped for a platform
+    # seed (``enforce_tier=False``) — no caller to fence.
+    if enforce_tier:
+        await _enforce_registration_tier(base_tool)
 
     # Snapshot the OLD wire tool + its extension combos BEFORE the store write —
     # reload tears the old tool down, and after the write the active body already
@@ -1091,6 +1230,8 @@ async def save_version(
             extensions=extensions,
             output_schema=output_schema if output_schema_provided else CARRY_FORWARD,
             description=description,
+            input_schema=input_schema,
+            tags=tags,
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -1115,6 +1256,38 @@ async def save_version(
     # The rebind fans out regardless of the emit guard: siblings must re-read the
     # active body even when the wire tool is byte-identical (a baked VALUE changed).
     report = await _fanout_reload(name, census)
+    return row, report
+
+
+@operation(
+    summary="Save a new preset version",
+    tags=["presets"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, ConflictError, NotFoundError],
+    request_model=PresetVersionSave,
+)
+async def save_version(
+    name: str,
+    fixed_kwargs: dict[str, Any] | None,
+    extensions: list[list[ExtensionElement]] | None,
+    output_schema: dict[str, Any] | None,
+    output_schema_provided: bool,
+    description: str | None,
+) -> dict[str, Any]:
+    """Save a new version (carry-forward sentinels on omitted fields) then reload and
+    fan out; 409 if the record is conflicted, 404 for an absent name. The
+    ``list_changed`` emit is GUARDED on a real change to the serialized wire tool OR
+    its extension combos. The response embeds the per-worker fleet report under
+    ``fanout``."""
+    row, report = await _save_version_core(
+        name,
+        fixed_kwargs=fixed_kwargs,
+        extensions=extensions,
+        output_schema=output_schema,
+        output_schema_provided=output_schema_provided,
+        description=description,
+    )
     # Embed the per-worker rebind fan-out report (mirrors the template writers): the
     # read-your-writes barrier proving the new version reached every serving worker.
     return {**row.model_dump(), "fanout": fleet_fanout(report)}
@@ -1217,10 +1390,14 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
 async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     """Rename a preset, ATOMIC (a preset's name IS its live tool name). Runs create's
     ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee
-    if another preset composes the current name, binds the new tool BEFORE tearing
+    if any live reference composes the current name, binds the new tool BEFORE tearing
     the old one down, fires one ``list_changed``, and fans the rebind out NEW-first
     then the old removal. The response embeds the primary rebind (new-name) fan-out
-    report under ``fanout``; the old-name removal stays log-only."""
+    report under ``fanout``; the old-name removal stays log-only.
+
+    A preset's NAME is its identity everywhere — it IS the live tool binding, and every
+    reference (preset bodies, platform wiring, plugin holders) keys on it deliberately;
+    rename integrity is enforced at THIS gate, and there are no surrogate ids."""
     # The new name is a live tool name + a ``{name}`` route segment, so it must be
     # tool-name-safe — the same rule create enforces.
     if not is_valid_preset_name(new_name):
@@ -1262,13 +1439,15 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     if mgr.is_registered(new_name):
         raise ConflictError(f"preset {new_name!r} already exists")
 
-    # Referential integrity: BLOCK (never silently cascade-rewrite) a rename that
-    # would strand another preset's authored-agent composition, listing every referee
-    # so the author updates them first. One batched active-body read, no N+1.
-    referees = _referencing_presets(name, await instance.app.presets.list_active_bodies())
+    # Referential integrity: BLOCK (never silently cascade-rewrite) a rename that would
+    # strand any live reference — the FULL union of preset-body referees + every
+    # registered referee (platform wiring: schedules/hooks/routes/extensions/parks, and
+    # plugin holders), listing every holder so the operator updates them first. A referee
+    # raising fails the rename loudly (no silent bypass).
+    referees = await _rename_referees(name)
     if referees:
         raise ConflictError(
-            f"preset {name!r} cannot be renamed: it is referenced by preset(s) {referees}; update those presets first"
+            f"preset {name!r} cannot be renamed — it is still referenced by: {referees}; update those references first"
         )
 
     # Move the store key. The pre-checks make the typed conflicts race-window catches,
@@ -1421,12 +1600,14 @@ async def delete_preset(name: str) -> dict[str, Any]:
 # -- referees ----------------------------------------------------------------
 
 
-@operation(summary="List presets that reference this preset", tags=["presets"], errors=[NotFoundError])
+@operation(summary="List live references to this preset", tags=["presets"], errors=[NotFoundError])
 async def preset_referees(name: str) -> dict[str, Any]:
-    """Every OTHER preset whose active authored-agent composition names this one as
-    a tool — the referees a rename would strand, exposed so the UI can preflight a
-    rename. 404 for an unknown preset, the same existence check the rename door runs
-    first."""
+    """Every live reference a rename of this preset would strand — the SAME full union
+    the rename door blocks on: the OTHER presets whose active body composes it, plus every
+    registered referee (platform wiring — schedules/hooks/routes/extensions/parks — and
+    plugin holders). Exposed so the UI can preflight a rename. 404 for an unknown preset,
+    the same existence check the rename door runs first; a referee raising propagates
+    loudly, exactly as at the rename gate."""
     # A store-less deploy holds no preset, so an unknown name is a genuine 404
     # without a Postgres open (the rename/delete doors' reasoning).
     if not component_store_configured(SKELETON_COMPONENT):
@@ -1435,7 +1616,7 @@ async def preset_referees(name: str) -> dict[str, Any]:
         await instance.app.presets.store.get_preset(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
-    referees = _referencing_presets(name, await instance.app.presets.list_active_bodies())
+    referees = await _rename_referees(name)
     return {"name": name, "referees": referees}
 
 
@@ -1648,3 +1829,228 @@ async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> d
     except DocumentVersionNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} has no version {version_num}") from exc
     return {"name": name, "version": version_num, "tags": tags}
+
+
+# -- declared preset seeds ---------------------------------------------------
+
+# The version tag a shipped default carries. A seed OWNS a version only while it wears
+# this tag; the moment an operator saves an untagged version the preset is user-edited
+# and the applier never touches it again.
+_SHIPPED_DEFAULT_TAG = "shipped-default"
+
+
+def _canonical(value: Any) -> str:
+    """A stable JSON rendering for the normalized seed-vs-body content compare — key order
+    and container identity never register as a difference."""
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _seed_matches(seed: PresetSeed, body: PresetBody) -> bool:
+    """Whether the live active body already equals the seed's declared content — the
+    normalized compare of base_tool + description + fixed_kwargs + input/output schemas.
+    ``base_tool`` is core content: a shipped default that re-points its binding across
+    releases must register as drift so the new binding ships. Extensions are not part of a
+    seed, so they are not compared."""
+    return (
+        seed.base_tool == body.base_tool
+        and seed.description == body.description
+        and _canonical(seed.fixed_kwargs) == _canonical(body.fixed_kwargs)
+        and _canonical(seed.input_schema) == _canonical(body.input_schema)
+        and _canonical(seed.output_schema) == _canonical(body.output_schema)
+    )
+
+
+async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
+    """Apply the seed's tool_meta display fields ONLY where the preset's tool_meta leaves
+    them absent — a seed never overwrites an operator-set display value. ``folder_path`` is
+    resolved to a leaf ``folder_id`` (creating missing folders), never a raw path string. A
+    no-op when the seed declares no tool_meta."""
+    meta = seed.tool_meta
+    if meta is None:
+        return
+    from tai42_skeleton.operations.tool_meta import _clean_label, resolve_folder_path
+
+    store = instance.app.tool_meta.store
+    current = await store.get_meta(seed.name)
+    patch: dict[str, Any] = {}
+    if meta.display_name is not None and (current is None or current.display_name is None):
+        # Route through the operation-door guard: a blank/whitespace display_name is refused
+        # LOUDLY (not persisted as an empty label), and an accepted value is stored stripped —
+        # the same invariant ``upsert_tool_meta`` enforces so ``display_name ?? name`` never
+        # renders empty.
+        patch["display_name"] = _clean_label(meta.display_name, "display_name")
+    if meta.tags is not None and (current is None or not current.tags):
+        patch["tags"] = list(meta.tags)
+    if meta.folder_path is not None and (current is None or current.folder_id is None):
+        folder_id = await resolve_folder_path(meta.folder_path)
+        if folder_id is not None:
+            patch["folder_id"] = folder_id
+    if patch:
+        await store.merge_meta(seed.name, patch=patch)
+
+
+async def _seed_create(seed: PresetSeed) -> None:
+    """Create an absent seed through the shared create core (no caller fence), tagging
+    version 1 ``shipped-default`` in the SAME commit, then apply its tool_meta where
+    absent. The atomic tag leaves no untagged window, so an interrupted create can never
+    strand an untagged version the applier must later repair."""
+    await _create_preset_core(
+        seed.name,
+        seed.base_tool,
+        seed.description,
+        seed.fixed_kwargs,
+        [],
+        seed.output_schema,
+        seed.input_schema,
+        tags=[_SHIPPED_DEFAULT_TAG],
+        enforce_tier=False,
+    )
+    await _apply_seed_tool_meta(seed)
+
+
+async def _seed_upgrade(seed: PresetSeed, active_body: PresetBody) -> None:
+    """Re-ship a shipped default whose content drifted from its live active version, tagging
+    the result ``shipped-default``. tool_meta is left untouched — an upgrade re-ships content,
+    not display.
+
+    Content drift that leaves ``base_tool`` unchanged saves a new version through the shared
+    save core (no caller fence). A drift that RE-POINTS ``base_tool`` cannot go through the
+    save core — it carries ``base_tool`` forward from the active version, so a version save
+    can never change the binding — so the full new body is written straight to the versioned
+    store (the tag applied in the SAME commit), then the live tool is reloaded onto the new
+    base and the rebind fans out. History and the tool_meta overlay are preserved (no
+    recreate); a reload that cannot bind the new base rolls the store pointer back and raises
+    loudly.
+
+    Concurrent-boot dedup (symmetric with the create branch): a sibling worker running the
+    same on_startup hook may have re-shipped this drift between the applier's drift check and
+    here. Re-read the active body first and no-op if it now matches the seed, so a concurrent
+    fleet boot yields ONE upgraded version, not a duplicate per worker — for both branches."""
+    if _seed_matches(seed, await instance.app.presets.store.get_active_body(seed.name)):
+        return
+    if seed.base_tool == active_body.base_tool:
+        # Tag the new version in the SAME save commit — no untagged window an
+        # interrupt could strand as an "operator-edited" active version the applier
+        # then freezes against future upgrades.
+        await _save_version_core(
+            seed.name,
+            fixed_kwargs=seed.fixed_kwargs,
+            extensions=[],
+            output_schema=seed.output_schema,
+            output_schema_provided=True,
+            description=seed.description,
+            input_schema=seed.input_schema,
+            tags=[_SHIPPED_DEFAULT_TAG],
+            enforce_tier=False,
+        )
+        return
+
+    new_body = PresetBody(
+        base_tool=seed.base_tool,
+        description=seed.description,
+        fixed_kwargs=seed.fixed_kwargs,
+        extensions=[],
+        output_schema=seed.output_schema,
+        input_schema=seed.input_schema,
+    )
+    # The direct store write bypasses the create/save cores, so run their authoring
+    # validators FIRST: a re-point onto a base that rejects the carried body (an unbindable
+    # base, an unsupported input_schema, a rejecting write validator, an empty description)
+    # raises loudly and persists nothing — never served unvalidated.
+    await _validate_authoring(seed.name, new_body)
+    generic = instance.app.versioning.store
+    prior_active = (await generic.get("preset", seed.name)).active_version
+    census = await _census_at_start(_RELOAD_OP)
+    await generic.save_version("preset", seed.name, new_body.model_dump(), tags=[_SHIPPED_DEFAULT_TAG])
+    try:
+        await instance.app.preset_manager.reload(seed.name)
+    except Exception:
+        await generic.rollback("preset", seed.name, prior_active)
+        raise
+    await instance.app.emit_list_changed("tool")
+    await _fanout_reload(seed.name, census)
+
+
+async def _apply_one_seed(seed: PresetSeed) -> None:
+    """The per-seed policy, idempotent across boot/reload/epoch-swap:
+
+    * absent → create + tag + tool_meta;
+    * present, active version tagged ``shipped-default``, content matches → no-op;
+    * present, active tagged ``shipped-default``, content matches → no-op;
+    * present, active tagged ``shipped-default``, content drifted → re-ship a new tagged
+      version (a base_tool re-point re-binds the live tool, other drift saves a version);
+    * present, active version UNTAGGED → operator-edited, never touched, a VISIBLE skip line
+      names the seed and why. The create tags version 1 atomically (no untagged window can
+      exist), so an untagged active version is unambiguously operator-authored;
+    * any real failure raises loudly at the lifecycle hook.
+
+    Every non-raising branch ends through the local-load guard below, so this worker leaves
+    first boot with the seed's ACTIVE stored version bound in its own registry."""
+    store = instance.app.presets.store
+    try:
+        await store.get_preset(seed.name)
+    except PresetNotFoundError:
+        # A sibling worker booting in parallel may create the same seed between this check
+        # and the create. On a conflict, re-read the STORE (not the local registry, which
+        # lags the sibling's fan-out): a preset row now present is that sibling's create —
+        # benign, idempotent. A name colliding with something that is NOT a preset row is a
+        # genuine foreign-name collision and re-raises loudly.
+        try:
+            await _seed_create(seed)
+        except ConflictError:
+            present = True
+            try:
+                await store.get_preset(seed.name)
+            except PresetNotFoundError:
+                present = False
+            if not present:
+                raise
+            logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
+    else:
+        versions = await store.list_versions(seed.name)
+        active = next(version for version in versions if version.is_current)
+        active_body = PresetBody.model_validate(active.body)
+        if _SHIPPED_DEFAULT_TAG not in active.tags:
+            # The create tags version 1 in the SAME commit, so no untagged window can exist:
+            # an untagged active version is unambiguously operator-authored (a save-door edit
+            # tags nothing) — never re-shipped, a VISIBLE skip names the seed and why.
+            logger.info(
+                "preset seeds: leaving %r untouched — its active version %d is operator-edited (not %s-tagged)",
+                seed.name,
+                active.version,
+                _SHIPPED_DEFAULT_TAG,
+            )
+        elif not _seed_matches(seed, active_body):
+            await _seed_upgrade(seed, active_body)
+
+    # Local-load guard on every non-raising branch. A sibling's boot create/upgrade lands
+    # store-side only — it does not fan out to this worker at boot — so a seed present in
+    # the store may be absent from THIS worker's registry (the sibling-dedup and up-to-date
+    # / operator-edited branches both leave it so). Bind the ACTIVE stored version here so
+    # every declared seed is callable on first boot, before any reload — never a per-worker
+    # subset. A create/upgrade already registered locally, so the guard no-ops; reload only
+    # loads the ACTIVE version (never writes one), so an operator edit is preserved and a
+    # reboot stays a no-op; it tears down first, so a name it reaches binds exactly once. A
+    # quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
+    mgr = instance.app.preset_manager
+    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
+        await mgr.reload(seed.name)
+
+
+async def apply_preset_seeds() -> None:
+    """Startup/reload/epoch-swap handler: apply every declared preset seed.
+
+    Registered AFTER the preset-rehydrate handler so a just-created seed is LIVE in the
+    same epoch (resolvable in the tool registry) — it creates through the operations-layer
+    internal path, which registers the tool. Feature-OFF is legal: with the versioned store
+    unconfigured every seed logs a VISIBLE skip and nothing is created. Any real failure
+    raises loudly. Idempotent across re-runs."""
+    seeds = instance.app.presets.seeds()
+    if not seeds:
+        return
+    if not component_store_configured(SKELETON_COMPONENT):
+        for seed in seeds:
+            logger.info("preset seeds: skipping seed %r — the versioned-document store is not configured", seed.name)
+        return
+    for seed in seeds:
+        await _apply_one_seed(seed)

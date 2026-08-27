@@ -63,6 +63,7 @@ from tai42_e2e.manifests import (
     build_sandbox_local_stack,
     build_sandbox_stack,
     build_schedule_stack,
+    build_seams_stack,
     build_shipped_connectors_stack,
 )
 from tai42_e2e.netfixtures import (
@@ -402,6 +403,17 @@ def schedule_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> It
     reload-heavy shared ``replicas`` profile (see ``build_schedule_stack`` for the
     celery prefork-restart limitation that motivates the split)."""
     yield from _boot(infra, tmp_path_factory.mktemp("schedule"), build_schedule_stack)
+
+
+@pytest.fixture(scope="session")
+def seams_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """MULTIWORKER(1) + backend stack carrying the seams fixture (preset seed + rename
+    referee + invocation probe) plus the ``schedule_task`` probe branch — the home of the
+    rename-integrity referee legs and the invocation-seam legs. Session-scoped so the two
+    read-only referee/invocation suites share ONE boot (each creates uniquely-named
+    resources); the seed-lifecycle legs boot their own store-backed / store-off stacks
+    through ``fresh_stack``."""
+    yield from _boot(infra, tmp_path_factory.mktemp("seams"), build_seams_stack)
 
 
 @pytest.fixture(scope="module")

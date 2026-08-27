@@ -81,6 +81,8 @@ class PresetStoreView(PresetStore):
         extensions: Sequence[Sequence[ExtensionElement]],
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
+        *,
+        tags: list[str] | None = None,
     ) -> DocumentRecord:
         _validate_extensions(extensions)
         if self._name_conflicts is not None and await self._name_conflicts(spec.name):
@@ -93,8 +95,11 @@ class PresetStoreView(PresetStore):
             output_schema=output_schema,
             input_schema=input_schema,
         )
+        # ``tags`` labels version 1 in the SAME commit — a caller that must tag the
+        # first version (the seed applier) leaves no untagged window; ``None`` is the
+        # door's untagged create.
         try:
-            return await self._store.create(_KIND, spec.name, body.model_dump())
+            return await self._store.create(_KIND, spec.name, body.model_dump(), tags=tags)
         except DocumentExistsError as exc:
             raise PresetExistsError(spec.name) from exc
 
@@ -107,6 +112,7 @@ class PresetStoreView(PresetStore):
         description: str | None = None,
         *,
         input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        tags: list[str] | None = None,
     ) -> DocumentVersion:
         active = await self._active_body(name)
         new_extensions = active.extensions if extensions is None else extensions
@@ -128,8 +134,11 @@ class PresetStoreView(PresetStore):
             output_schema=new_output_schema,
             input_schema=new_input_schema,
         )
+        # ``tags`` labels the new version in the SAME save commit — a caller that must
+        # tag it (the seed applier) leaves no untagged window; ``None`` is the door's
+        # untagged save (the generic store maps it to no labels).
         try:
-            return await self._store.save_version(_KIND, name, new_body.model_dump())
+            return await self._store.save_version(_KIND, name, new_body.model_dump(), tags=tags)
         except DocumentNotFoundError as exc:
             raise PresetNotFoundError(name) from exc
 

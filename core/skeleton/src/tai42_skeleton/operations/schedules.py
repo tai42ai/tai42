@@ -76,6 +76,7 @@ logger = logging.getLogger(__name__)
 # that scheduling is available.
 _LIST_TOOL = "backend_list_schedules"
 _DELETE_TOOL = "backend_delete_schedule"
+_EXPORT_TOOL = "backend_export_schedules"
 _MARKER_TOOLS = (_LIST_TOOL, _DELETE_TOOL)
 _NO_BACKEND_MESSAGE = "no installed backend exposes scheduling tools"
 _TIME_TOOL = "current_time_info"
@@ -212,6 +213,36 @@ async def list_schedules() -> Any:
     except Exception as exc:
         logger.exception("list-schedules %r raised during execution", _LIST_TOOL)
         raise OperationFailed(f"schedule listing failed ({type(exc).__name__})") from exc
+
+
+async def export_schedules_raw() -> Any:
+    """Dispatch ``backend_export_schedules`` and return its raw ``ScheduleRecord`` rows.
+
+    An in-process helper for the tool-rename SCHEDULE referee — deliberately NOT an
+    ``@operation`` HTTP door: exported kwargs can carry sensitive tool arguments (the
+    schedules backup section is secret), so the raw records surface only to the
+    in-process referee, which reads schedule NAMES from them. Feature-off (no installed
+    scheduling backend) raises :class:`NotSupportedError`. An absent ``backend_export_schedules``
+    while the marker tools ARE present propagates its ``UnknownToolError`` unchanged, so
+    the referee gates the rename loudly rather than treating an unreadable target set as
+    "no holders"; every other failure wraps as the discipline in ``list_schedules``."""
+    if not await _scheduling_backend_present():
+        raise NotSupportedError(_NO_BACKEND_MESSAGE)
+    try:
+        return await tai42_app.tools.run_tool(_EXPORT_TOOL, {})
+    except UnknownToolError as exc:
+        # The export tool's own absence is NOT feature-off here: the marker tools passed
+        # the presence pre-check, so the backend is installed but cannot report its
+        # dispatch targets. Propagate loudly — the referee blocks on it.
+        if exc.tool_name == _EXPORT_TOOL:
+            raise
+        logger.exception("export-schedules %r raised unknown-tool %r during execution", _EXPORT_TOOL, exc.tool_name)
+        raise OperationFailed(f"schedule export failed (unknown tool {exc.tool_name})") from exc
+    except OperationError:
+        raise
+    except Exception as exc:
+        logger.exception("export-schedules %r raised during execution", _EXPORT_TOOL)
+        raise OperationFailed(f"schedule export failed ({type(exc).__name__})") from exc
 
 
 @operation(

@@ -7,12 +7,18 @@ registration sub-protocol. Vendor return types (fastmcp ``Tool``, langchain
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_checkable
 
 from pydantic import BaseModel
 
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.tools.invocation import (
+    ToolInvocation,
+    current_tool_invocation,
+    reset_current_tool_invocation,
+    set_current_tool_invocation,
+)
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
@@ -28,6 +34,13 @@ F = TypeVar("F", bound=Callable[..., Any])
 #: read composed tool names out of its own ``fixed_kwargs``. Every entry must be a
 #: string; a non-string / None entry is a plugin bug the reader raises on.
 ToolRefsExtractor = Callable[[dict[str, Any]], Iterable[str]]
+
+#: A rename referee: given the tool name about to be renamed, returns
+#: human-readable descriptions of every live reference that would be stranded by
+#: the rename (empty = no objection). A referee raising is a hard failure of the
+#: rename — never a silent bypass. The platform gathers every registered
+#: referee's answers and blocks the rename when any is non-empty.
+ToolRenameReferee = Callable[[str], Awaitable[list[str]]]
 
 
 class ToolInfo(BaseModel):
@@ -91,5 +104,25 @@ class AppTools(Protocol):
     # for a body's ``base_tool``.
     def tool_refs_extractor(self, name: str) -> ToolRefsExtractor | None: ...
 
+    def register_rename_referee(self, provider: ToolRenameReferee) -> None:
+        """Register a :data:`ToolRenameReferee` consulted before a tool rename.
 
-__all__ = ["AppTools", "ToolInfo", "ToolRefsExtractor"]
+        A plugin holding tool-name references calls this through the ``tai42_app``
+        handle when its module loads. Every registered referee is asked for the
+        old name on a rename; any non-empty answer blocks the rename and its
+        descriptions name the holders. Registering the same provider object twice
+        raises loudly — a double registration is a plugin bug, never a silent
+        duplicate consult."""
+        ...
+
+
+__all__ = [
+    "AppTools",
+    "ToolInfo",
+    "ToolInvocation",
+    "ToolRefsExtractor",
+    "ToolRenameReferee",
+    "current_tool_invocation",
+    "reset_current_tool_invocation",
+    "set_current_tool_invocation",
+]

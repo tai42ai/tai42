@@ -27,7 +27,7 @@ from ._helpers import protocol_members  # stdlib-only helper, no application pac
 # (webhook_verifiers + channels), so the distinct-name union (70) is three
 # fewer than the pair count (73).
 EXPECTED_FACADE = {
-    # tools (12)
+    # tools (13)
     "tool",
     "toolkit",
     "get_tool",
@@ -39,6 +39,7 @@ EXPECTED_FACADE = {
     "register_tool_info",
     "unregister_tool_info",
     "unregister_tool_base",
+    "register_rename_referee",
     "tool_refs_extractor",
     # agents (3)
     "agent",
@@ -116,9 +117,10 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (7) — `store` shared with versioning above
+    # presets (8) — `store` shared with versioning above
     "bind",
     "register_write_validator",
+    "register_seed",
     "register_input_schema_support",
     "input_schema_support",
     "register_registration_tier",
@@ -226,11 +228,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 74 (sub-protocol, member) pairs over 71 distinct names — ``store`` is
+    # 76 (sub-protocol, member) pairs over 73 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 71, f"union={len(union)}"
-    assert total == 74 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 73, f"union={len(union)}"
+    assert total == 76 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_two_namespaces():
