@@ -5545,7 +5545,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.6.0"
+version = "5.5.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5776,7 +5776,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "3.7.0"
+version = "3.6.1"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
