@@ -9,7 +9,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/config-k8s
-contract: '>=5.5,<6'
+contract: '>=5.6,<6'
 categories:
   - configuration
 tags:
