@@ -230,6 +230,15 @@ def _bind_with_input_schema(
         except JsonSchemaValidationError as exc:
             raise FastMCPValidationError(f"caller input does not match the preset's input_schema: {exc}") from exc
         result = await forward_raw(**{payload_arg: caller_object, **fixed_kwargs})
+        # A park sentinel is a SUSPEND signal, not the tool's output: a suspending
+        # call parked the caller and the dispatch's reveal gate stowed the
+        # ``SuspendedInteraction`` RAW. Output-schema validation must NOT apply to
+        # the park — recognized on the gate by TYPE, the flattened result passes
+        # through so the dispatch returns the sentinel intact; the real result is
+        # validated on resume. Non-parking results are still validated below.
+        has_park, park = stowed_park()
+        if has_park and isinstance(park, SuspendedInteraction):
+            return result
         if output_schema is not None:
             validate_against_json_schema(result.structured_content, output_schema)
         return result

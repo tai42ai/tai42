@@ -29,6 +29,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
+from tai42_skeleton.presets.store import PresetStoreView
 
 from ..versioning.conftest import FakeVersioningPg
 
@@ -569,6 +570,96 @@ def test_upgrade_dedups_when_sibling_already_applied(pg) -> None:
             # so a concurrent fleet boot yields ONE upgraded version, not a duplicate per worker.
             await preset_ops._seed_upgrade(v2, stale_active)
             assert len(await instance.app.presets.store.list_versions("weather_default")) == 2
+
+    asyncio.run(run())
+
+
+# -- concurrent-boot dedup: a sibling create loads locally (callable first boot) --
+
+
+def test_sibling_create_dedup_loads_seed_into_local_registry(pg, monkeypatch) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+            )
+            instance.app.presets.register_seed(seed)
+
+            # A sibling worker wins the create race: the row lives in the store, but its
+            # tool-registry register never fanned out to THIS worker. Model that by
+            # creating the seed, then tearing down only this worker's local registration —
+            # the store row stays, the live tool does not.
+            await preset_ops.apply_preset_seeds()
+            await instance.app.preset_manager.remove("echo_default")
+            assert not instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" not in await instance.app.tools.get_tools()
+
+            # Force the sibling-create-dedup path: this worker's opening presence check
+            # misses (the row is not in its view yet), its create then conflicts on the
+            # sibling's row, and the re-read confirms present. Patch the store-view CLASS —
+            # the app rebuilds the view per access, so an instance patch would not stick.
+            real_get_preset = PresetStoreView.get_preset
+            calls = {"n": 0}
+
+            async def flaky_get_preset(self, name):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise PresetNotFoundError(name)
+                return await real_get_preset(self, name)
+
+            monkeypatch.setattr(PresetStoreView, "get_preset", flaky_get_preset)
+
+            await preset_ops._apply_one_seed(seed)
+
+            # The unified local-load guard bound the store-active version into THIS worker's
+            # registry — the seed is callable on first boot, before any reload.
+            assert instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" in await instance.app.tools.get_tools()
+            # No re-ship: the store still holds the sibling's single tagged version.
+            versions = await instance.app.presets.store.list_versions("echo_default")
+            assert len(versions) == 1
+            active = await _active_version("echo_default")
+            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
+
+    asyncio.run(run())
+
+
+# -- concurrent-boot success window: present-in-store but locally absent → guard loads --
+
+
+def test_present_but_unregistered_seed_loaded_by_guard(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+            )
+            instance.app.presets.register_seed(seed)
+
+            # The success window: a sibling created the seed AFTER this worker's rehydrate,
+            # so the opening presence check SUCCEEDS (row present) yet the tool is not live
+            # here. Model it by creating the seed then tearing down only this worker's local
+            # registration — the store row + its shipped-default tag stay.
+            await preset_ops.apply_preset_seeds()
+            await instance.app.preset_manager.remove("echo_default")
+            assert not instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" not in await instance.app.tools.get_tools()
+
+            # get_preset succeeds → the up-to-date no-op branch ships nothing, and the
+            # unified guard binds the active stored version so the seed is callable.
+            await preset_ops._apply_one_seed(seed)
+            assert instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" in await instance.app.tools.get_tools()
+            # No re-ship: still the single tagged version.
+            versions = await instance.app.presets.store.list_versions("echo_default")
+            assert len(versions) == 1
+            active = await _active_version("echo_default")
+            assert preset_ops._SHIPPED_DEFAULT_TAG in active.tags
 
     asyncio.run(run())
 

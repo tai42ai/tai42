@@ -683,6 +683,23 @@ _RELOAD_OP = "reload_tool"
 _REMOVE_OP = "remove_tool"
 
 
+def _fleet_fanout_ready() -> bool:
+    """Whether this worker can fan a preset op out to the fleet: its bus is built AND
+    its slot identity is minted.
+
+    ``False`` only during the boot startup handlers — the declared-preset-seed applier
+    runs as an ``on_startup`` handler, BEFORE the bus subscription claims this worker's
+    slot (the bus is built and its identity minted only after the handlers). Every worker
+    runs that applier on its OWN boot, so a boot-time seed create/upgrade needs no fan-out
+    — each worker applies it locally. A reload re-runs the applier with the bus already
+    subscribed, so it fans out normally, as does every API-door mutation."""
+    try:
+        _ = instance.app.bus.identity
+    except RuntimeError:
+        return False
+    return True
+
+
 async def _census_at_start(op_name: str) -> dict[str, int] | None:
     """Pin the expected-confirmation membership BEFORE this worker's store write and
     local rebind — the untargeted-publisher discipline
@@ -693,7 +710,11 @@ async def _census_at_start(op_name: str) -> dict[str, int] | None:
     faded across it would simply be absent from the expected set, and the op would
     report converged without it. The caller reads this at its true pre-apply point,
     which is why it is a parameter of the fan-out rather than taken inside it.
-    """
+
+    ``None`` when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe):
+    :func:`_fanout_reload` / :func:`_fanout_remove` collapse to a local-only report."""
+    if not _fleet_fanout_ready():
+        return None
     return await snapshot_membership(instance.app.bus, op_name)
 
 
@@ -714,7 +735,13 @@ async def _fanout_reload(name: str, expected_at_start: dict[str, int] | None) ->
     response (:func:`~tai42_skeleton.operations._broadcast.fleet_fanout` shapes it — the
     read-your-writes barrier a deployer needs) exactly as the template writers do. The
     sibling names a rename's second fan-out is judged against are derived from it with
-    :func:`_addressed_siblings`; see :func:`_union_census`."""
+    :func:`_addressed_siblings`; see :func:`_union_census`.
+
+    Collapses to a ``local_only`` report when the bus cannot yet fan out (the boot-time
+    seed applier, before this worker's slot is claimed) — the local rebind has already
+    landed and every sibling seeds itself on its own boot, so there is no fleet to reach."""
+    if not _fleet_fanout_ready():
+        return FleetResult(op=_RELOAD_OP, local_only=True)
     report = await instance.app.bus.publish(
         {"op": _RELOAD_OP, "kind": "preset", "name": name},
         None,
@@ -737,7 +764,10 @@ async def _fanout_remove(name: str, expected_at_start: dict[str, int] | None) ->
     """Broadcast a preset removal on the worker bus so every worker tears ``name``
     down. Same already-applied self entry, op-start census, and non-convergence
     logging as :func:`_fanout_reload`, and it likewise returns the per-worker fleet
-    report so the delete door can embed it in its response."""
+    report so the delete door can embed it in its response. Collapses to a ``local_only``
+    report when the bus cannot yet fan out (the boot-time seed applier, pre-subscribe)."""
+    if not _fleet_fanout_ready():
+        return FleetResult(op=_REMOVE_OP, local_only=True)
     report = await instance.app.bus.publish(
         {"op": _REMOVE_OP, "kind": "preset", "name": name},
         None,
@@ -1129,7 +1159,7 @@ async def _save_version_core(
     new_output_schema = active.output_schema if not output_schema_provided else output_schema
     # ``input_schema`` carries forward in the STORE (sentinel passed straight through); it
     # enters validation only when EXPLICITLY provided (the seed path), so the save door's
-    # carry-forward validation is unchanged (``None``, exactly as before this seam).
+    # carry-forward validation yields ``None``.
     validation_input_schema = None if isinstance(input_schema, CarryForward) else input_schema
     # ``description`` is editable per version under the None-carry sentinel. The
     # resulting value is validated non-empty in the store view (explicit "" or a
@@ -1952,7 +1982,10 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
     * present, active version UNTAGGED → operator-edited, never touched, a VISIBLE skip line
       names the seed and why. The create tags version 1 atomically (no untagged window can
       exist), so an untagged active version is unambiguously operator-authored;
-    * any real failure raises loudly at the lifecycle hook."""
+    * any real failure raises loudly at the lifecycle hook.
+
+    Every non-raising branch ends through the local-load guard below, so this worker leaves
+    first boot with the seed's ACTIVE stored version bound in its own registry."""
     store = instance.app.presets.store
     try:
         await store.get_preset(seed.name)
@@ -1973,25 +2006,35 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
             if not present:
                 raise
             logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
-        return
+    else:
+        versions = await store.list_versions(seed.name)
+        active = next(version for version in versions if version.is_current)
+        active_body = PresetBody.model_validate(active.body)
+        if _SHIPPED_DEFAULT_TAG not in active.tags:
+            # The create tags version 1 in the SAME commit, so no untagged window can exist:
+            # an untagged active version is unambiguously operator-authored (a save-door edit
+            # tags nothing) — never re-shipped, a VISIBLE skip names the seed and why.
+            logger.info(
+                "preset seeds: leaving %r untouched — its active version %d is operator-edited (not %s-tagged)",
+                seed.name,
+                active.version,
+                _SHIPPED_DEFAULT_TAG,
+            )
+        elif not _seed_matches(seed, active_body):
+            await _seed_upgrade(seed, active_body)
 
-    versions = await store.list_versions(seed.name)
-    active = next(version for version in versions if version.is_current)
-    active_body = PresetBody.model_validate(active.body)
-    if _SHIPPED_DEFAULT_TAG not in active.tags:
-        # The create tags version 1 in the SAME commit, so no untagged window can exist: an
-        # untagged active version is unambiguously operator-authored (a save-door edit tags
-        # nothing) — never touched, a VISIBLE skip names the seed and why.
-        logger.info(
-            "preset seeds: leaving %r untouched — its active version %d is operator-edited (not %s-tagged)",
-            seed.name,
-            active.version,
-            _SHIPPED_DEFAULT_TAG,
-        )
-        return
-    if _seed_matches(seed, active_body):
-        return
-    await _seed_upgrade(seed, active_body)
+    # Local-load guard on every non-raising branch. A sibling's boot create/upgrade lands
+    # store-side only — it does not fan out to this worker at boot — so a seed present in
+    # the store may be absent from THIS worker's registry (the sibling-dedup and up-to-date
+    # / operator-edited branches both leave it so). Bind the ACTIVE stored version here so
+    # every declared seed is callable on first boot, before any reload — never a per-worker
+    # subset. A create/upgrade already registered locally, so the guard no-ops; reload only
+    # loads the ACTIVE version (never writes one), so an operator edit is preserved and a
+    # reboot stays a no-op; it tears down first, so a name it reaches binds exactly once. A
+    # quarantined seed stays conflicted — never force-loaded onto a base it cannot bind.
+    mgr = instance.app.preset_manager
+    if not mgr.is_registered(seed.name) and not mgr.is_quarantined(seed.name):
+        await mgr.reload(seed.name)
 
 
 async def apply_preset_seeds() -> None:
