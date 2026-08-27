@@ -26,9 +26,9 @@ dependencies = [
     # The pure interface contract the backend registers through — Storage,
     # ObjectStat, assert_not_root, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.5,<6",
+    "tai42-contract>=5.6,<6",
     # Pooled clients + settings primitives (PooledClient, TaiBaseSettings, cache).
-    "tai42-kit>=3.6,<4",
+    "tai42-kit>=3.7,<4",
     "httpx>=0.28",
     "pydantic>=2.12",
     "pydantic-settings>=2.11",

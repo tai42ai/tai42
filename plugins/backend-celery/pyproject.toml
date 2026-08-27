@@ -26,12 +26,12 @@ dependencies = [
     # The pure interface contract the backend registers through — the Backend ABC,
     # CallbackSchema, Manifest, ExtensionKind, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.5,<6",
+    "tai42-contract>=5.6,<6",
     # TaiBaseSettings + settings cache, pooled Redis client, schedule
     # normalization, signature helpers, and the jq compiler (callback conditions).
     # The floor names the first release carrying `tai42_kit.backend`
     # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
-    "tai42-kit[jq]>=3.6,<4",
+    "tai42-kit[jq]>=3.7,<4",
     # Celery's own broker/pool machinery and its messaging layer (kombu is
     # Celery's transport library; pinned explicitly to hold the version).
     "celery~=5.6.3",
