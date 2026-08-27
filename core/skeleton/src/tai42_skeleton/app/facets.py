@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from tai42_contract.presets import (
         PresetBody,
         PresetInputSchemaSupport,
+        PresetSeed,
         PresetStore,
         PresetWriteValidator,
     )
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
     from tai42_contract.storage import Storage
     from tai42_contract.sub_mcp import SubMcpAppRouter
     from tai42_contract.tool_meta import ToolMetaStore
-    from tai42_contract.tools import ToolRefsExtractor
+    from tai42_contract.tools import ToolRefsExtractor, ToolRenameReferee
     from tai42_contract.versioning import VersionedStore
     from tai42_contract.webhooks import WebhookVerifier
 
@@ -122,6 +123,16 @@ class ToolsFacet(_Facet):
         """A read-only snapshot of the tool names the MCP server ``title`` currently
         binds (empty for an unknown title)."""
         return self._app._tool_binding.mcp_bound_names(title)
+
+    def register_rename_referee(self, provider: ToolRenameReferee) -> None:
+        return self._app._rename_referee_registry.register(provider)
+
+    def rename_referees(self) -> list[ToolRenameReferee]:
+        """Every registered rename referee (plugin providers + platform-internal
+        wiring). Skeleton-only — the rename gate and the referees preview door consult
+        it, so it is not on the ``AppTools`` protocol (the register-only seam), the same
+        precedent :meth:`PresetsFacet.write_validator` sets."""
+        return self._app._rename_referee_registry.all()
 
 
 class AgentsFacet(_Facet):
@@ -519,6 +530,15 @@ class PresetsFacet(_Facet):
 
     def registration_tier(self, base_tool: str) -> RouteAction | None:
         return self._app._registration_tier_registry.get(base_tool)
+
+    def register_seed(self, seed: PresetSeed) -> None:
+        return self._app._seed_registry.register(seed)
+
+    def seeds(self) -> list[PresetSeed]:
+        """Every declared preset seed. Skeleton-only — the startup/reload seed applier
+        consults it, so it is not on the ``AppPresets`` protocol (the register-only
+        seam), the same precedent :meth:`write_validator` sets."""
+        return self._app._seed_registry.all()
 
     def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
         """The registered write validator for ``base_tool``, or ``None`` when none

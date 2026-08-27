@@ -2,16 +2,20 @@ import asyncio
 import logging
 import re
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.http import create_sse_app
+from fastmcp.server.middleware import Middleware as McpMiddleware
+from fastmcp.server.middleware import MiddlewareContext
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.types import ASGIApp
 from tai42_contract.sub_mcp import RouteConfig
+from tai42_contract.tools import ToolInvocation, reset_current_tool_invocation, set_current_tool_invocation
 
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
@@ -48,6 +52,26 @@ def validate_registration(slug: str, transport: str) -> None:
         raise ValueError(f"slug {slug!r} must match {_SLUG_RE.pattern} (one lowercase path segment)")
     if transport not in _VALID_TRANSPORTS:
         raise ValueError(f"transport {transport!r} must be one of {_VALID_TRANSPORTS}")
+
+
+class InvocationSeamMiddleware(McpMiddleware):
+    """Deposit the ambient invoked-tool seam at the MCP session tool-call edge.
+
+    An MCP ``tools/call`` reaches ``Tool.run`` through the FastMCP middleware chain,
+    never the ``ToolBinding.run_tool`` seam, so this door deposits the called tool's
+    name itself. Reset in ``finally`` under token discipline so a nested in-process
+    re-dispatch restores the outer name and the deposit never leaks across calls."""
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: Callable[[MiddlewareContext[Any]], Awaitable[Any]],
+    ) -> Any:
+        token = set_current_tool_invocation(ToolInvocation(tool_name=context.message.name))
+        try:
+            return await call_next(context)
+        finally:
+            reset_current_tool_invocation(token)
 
 
 class SubAppLifespan:
@@ -384,6 +408,11 @@ class SubMcpAppRouter:
         from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
 
         mcp.add_middleware(TurnBudgetMiddleware())
+        # Ambient invoked-tool seam for this sub-MCP edge, deposited in the same
+        # innermost position as the main server: a sub-MCP ``tools/call`` reaches
+        # ``Tool.run`` directly, never the ``ToolBinding.run_tool`` seam, so this door
+        # deposits the called tool's name for the span of its run.
+        mcp.add_middleware(InvocationSeamMiddleware())
 
         if config.transport == "stdio":
             return None, None

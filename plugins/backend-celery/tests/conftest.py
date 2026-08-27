@@ -10,6 +10,7 @@ relevant facets (clients, admin, monitoring, storage) at per-test fakes.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 from collections.abc import Callable, Iterator
 from typing import Any
 from unittest.mock import MagicMock
@@ -313,6 +314,15 @@ class FakeRedis:
         if withscores:
             return [(m, self.zset[m.decode() if isinstance(m, bytes) else m]) for m in members]
         return members
+
+    async def scan_iter(self, match: str | bytes | None = None) -> Any:
+        """Yield entry-hash keys (as bytes, exercising the decode path) matching a
+        glob, modelling the redbeat:* union walk. The schedule zset is a separate
+        attribute here, not a scannable key, so only entry hashes are yielded."""
+        pattern = match.decode() if isinstance(match, bytes | bytearray) else match
+        for key in list(self.hashes):
+            if pattern is None or fnmatch.fnmatch(key, pattern):
+                yield key.encode()
 
     async def exists(self, key: str) -> int:
         return 1 if key in self.hashes else 0

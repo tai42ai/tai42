@@ -80,6 +80,10 @@ def _component_slug(component: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", component.upper())
 
 
+def _binding_env(component: str) -> str:
+    return f"TAI_DB_BINDING_{_component_slug(component)}"
+
+
 @cache
 def _database_settings_cls(prefix: str) -> type[PostgresConnectionSettings]:
     # One cached settings class per database prefix; each instantiation reads env
@@ -114,6 +118,28 @@ def _binding_settings_cls(env_var: str) -> type[_ComponentBinding]:
         value: str = Field(default=_DEFAULT_BINDING, validation_alias=env_var)
 
     return _Binding
+
+
+class _DeclaredBinding(TaiBaseSettings):
+    # Abstract base for a per-component binding read that distinguishes SET from
+    # default: ``value`` has no default, so an unset env var resolves to None. A
+    # subclass fixes the env var via ``value``'s ``validation_alias``; excluded so
+    # the aliasless base is not a bogus group.
+    registry_exclude: ClassVar[bool] = True
+
+    value: str | None = None
+
+
+@cache
+def _declared_binding_settings_cls(env_var: str) -> type[_DeclaredBinding]:
+    # One cached settings class per binding env var; each instantiation reads env
+    # fresh. Unset resolves to None so set-vs-default is observable.
+    class _Declared(_DeclaredBinding):
+        registry_exclude: ClassVar[bool] = True
+
+        value: str | None = Field(default=None, validation_alias=env_var)
+
+    return _Declared
 
 
 def _database(name: str) -> PostgresConnectionSettings:
@@ -177,7 +203,17 @@ def admin_database_settings(name: str) -> PostgresConnectionSettings:
 
 def component_binding(component: str) -> str:
     """The database name a migration component binds to (default ``"default"``)."""
-    return _binding_settings_cls(f"TAI_DB_BINDING_{_component_slug(component)}")().value
+    return _binding_settings_cls(_binding_env(component))().value
+
+
+def component_binding_declared(component: str) -> str | None:
+    """The database name a migration component binds to, only when EXPLICITLY set.
+
+    The literal value of ``TAI_DB_BINDING_<SLUG>`` when set (including ``"default"``);
+    ``None`` when unset. Exposes set-vs-default, which :func:`component_binding`'s
+    ``"default"`` fallback cannot.
+    """
+    return _declared_binding_settings_cls(_binding_env(component))().value
 
 
 def component_store_settings(component: str) -> PostgresConnectionSettings:

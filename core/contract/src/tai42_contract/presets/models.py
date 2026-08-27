@@ -66,6 +66,41 @@ class PresetInputSchemaSupport(BaseModel):
     payload_arg: str
 
 
+class PresetSeedToolMeta(BaseModel):
+    """The optional display metadata a :class:`PresetSeed` seeds onto its preset's
+    tool_meta. Each field is applied only where the preset's tool_meta leaves it
+    absent — a seed never overwrites an operator-set display value.
+
+    ``display_name`` is the human tool title; ``tags`` label it in listings;
+    ``folder_path`` is a ``/``-style path the applier resolves into the tool_meta
+    folder tree (creating missing segments), never a raw stored string.
+    """
+
+    display_name: str | None = None
+    tags: list[str] | None = None
+    folder_path: str | None = None
+
+
+class PresetSeed(BaseModel):
+    """A declared default preset a plugin ships for import-time seeding.
+
+    A seed names the preset (``name``), its human ``description``, the
+    ``base_tool`` it binds, and the ``fixed_kwargs`` baked in — the same body a
+    :class:`PresetBody` carries — plus the optional author ``input_schema`` /
+    ``output_schema`` and optional ``tool_meta`` display seed. The applier creates
+    or upgrades the preset from this shape; the contract holds only the SHAPE,
+    never the applier logic.
+    """
+
+    name: str
+    description: str
+    base_tool: str
+    fixed_kwargs: dict[str, Any] = Field(default_factory=dict)
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    tool_meta: PresetSeedToolMeta | None = None
+
+
 class CarryForward:
     """Sentinel for a :meth:`~tai42_contract.presets.PresetStore.save_version`
     editable field the caller did not provide — carry the ACTIVE value forward.

@@ -396,6 +396,41 @@ async def test_list_schedules_tolerates_delete_then_recreate_around_the_read(fak
     assert [row["name"] for row in out] == ["live"]
 
 
+async def test_export_includes_disabled_entry_absent_from_zset(fake_settings, stub_app):
+    """A schedule disabled with the default ``remove_from_queue=True`` keeps its
+    ``redbeat:{name}`` hash but leaves the zset. Export must still emit it — it is
+    re-enable-able, a live schedule — so the pattern-scan union covers what a
+    zset-only walk would silently drop."""
+    enabled_def = {
+        "name": "enabled-one",
+        "args": [],
+        "kwargs": {"backend_tool_name": "echo"},
+        "schedule": {"__type__": "interval", "every": 30.0, "relative": False},
+        "enabled": True,
+    }
+    disabled_def = {
+        "name": "disabled-one",
+        "args": [],
+        "kwargs": {"backend_tool_name": "alerts"},
+        "schedule": {"__type__": "interval", "every": 60.0, "relative": False},
+        "enabled": False,
+    }
+    stub_app.clients.client = FakeRedis(
+        hashes={
+            "redbeat:enabled-one": {"definition": json.dumps(enabled_def)},
+            "redbeat:disabled-one": {"definition": json.dumps(disabled_def)},
+        },
+        # The disabled entry is NOT a zset member (removed on disable); only the
+        # enabled one is.
+        zset={"redbeat:enabled-one": 100.0},
+    )
+    exported = await tools.backend_export_schedules()
+    by_name = {rec["name"]: rec for rec in exported}
+    assert set(by_name) == {"enabled-one", "disabled-one"}
+    assert by_name["disabled-one"]["enabled"] is False
+    assert by_name["disabled-one"]["kwargs"] == {"backend_tool_name": "alerts"}
+
+
 async def test_export_schedules_tolerates_delete_then_recreate_around_the_read(fake_settings, stub_app):
     """Same delete-plus-re-create semantics for the export marker tool."""
     live_definition = {

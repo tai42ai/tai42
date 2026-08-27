@@ -244,7 +244,9 @@ def test_preset_store_save_version_editable_fields_carry_forward_by_default():
     # now an editable per-version field defaulting to None (= carry forward, explicit
     # string sets it). base_tool is never an argument — it always carries. input_schema
     # is keyword-only and placed AFTER description so description keeps its original
-    # positional slot, keeping the surface positionally back-compatible.
+    # positional slot, keeping the surface positionally back-compatible. tags is a
+    # keyword-only, default-None addition that labels the new version in the same save
+    # commit; None leaves the version untagged.
     from tai42_contract.presets import CARRY_FORWARD, PresetStore
 
     sig = inspect.signature(PresetStore.save_version)
@@ -256,6 +258,7 @@ def test_preset_store_save_version_editable_fields_carry_forward_by_default():
         "output_schema",
         "description",
         "input_schema",
+        "tags",
     ]
     for field in ("fixed_kwargs", "extensions"):
         assert sig.parameters[field].default is None, f"{field} must default to the carry-forward sentinel"
@@ -263,6 +266,8 @@ def test_preset_store_save_version_editable_fields_carry_forward_by_default():
     assert sig.parameters["input_schema"].default is CARRY_FORWARD
     assert sig.parameters["input_schema"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["description"].default is None
+    assert sig.parameters["tags"].default is None
+    assert sig.parameters["tags"].kind is inspect.Parameter.KEYWORD_ONLY
     assert "base_tool" not in sig.parameters
 
 

@@ -43,7 +43,7 @@ from tai42_contract.conversations import DeliveryReceipt
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions.asker import AskUser
 from tai42_contract.monitoring import Monitoring
-from tai42_contract.presets import PresetInputSchemaSupport, PresetStore, PresetWriteValidator
+from tai42_contract.presets import PresetInputSchemaSupport, PresetSeed, PresetStore, PresetWriteValidator
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
 from tai42_contract.sub_mcp import SubMcpAppRouter
@@ -716,6 +716,16 @@ class AppPresets(Protocol):
     def registration_tier(self, base_tool: str) -> RouteAction | None:
         """The authoring authz tier ``base_tool`` declared, or ``None`` if it declared
         none (authoring keeps the presets' default ``write`` action)."""
+        ...
+
+    def register_seed(self, seed: PresetSeed) -> None:
+        """Declare a default preset the platform seeds at import time.
+
+        A plugin calls this through the ``tai42_app`` handle when its module loads.
+        The declared seeds are applied by the startup/reload seed applier — created
+        when absent, upgraded when a shipped default drifts, never touching an
+        operator-edited preset. Declaring two seeds under the same ``name`` raises
+        loudly — a silent overwrite could drop one plugin's default under another's."""
         ...
 
     @property

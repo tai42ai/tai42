@@ -30,6 +30,8 @@ from tai42_contract.presets.models import (
     CarryForward,
     PresetBody,
     PresetInputSchemaSupport,
+    PresetSeed,
+    PresetSeedToolMeta,
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
@@ -56,13 +58,17 @@ class PresetStore(Protocol):
         extensions: Sequence[Sequence[ExtensionElement]],
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
+        *,
+        tags: list[str] | None = None,
     ) -> DocumentRecord:
         """Create a versioned preset. ``spec`` carries ``name``/``description``/
         ``base_tool``/``fixed_kwargs``; ``extensions`` (the combos list) and the
         optional ``output_schema`` / ``input_schema`` ride alongside — all of them
-        land in the persisted :class:`PresetBody`. Raise :class:`PresetExistsError`
-        on a duplicate name, :class:`PresetNameConflictError` if the name collides
-        with a base tool."""
+        land in the persisted :class:`PresetBody`. ``tags`` labels version 1 in the
+        SAME create commit (``None`` leaves it untagged); a caller that must tag the
+        first version does so atomically, never through a separate follow-up write.
+        Raise :class:`PresetExistsError` on a duplicate name,
+        :class:`PresetNameConflictError` if the name collides with a base tool."""
         ...
 
     async def save_version(
@@ -74,8 +80,13 @@ class PresetStore(Protocol):
         description: str | None = None,
         *,
         input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        tags: list[str] | None = None,
     ) -> DocumentVersion:
         """Append a new version from the editable body fields.
+
+        ``tags`` labels the new version in the SAME save commit (``None`` leaves it
+        untagged, the door's default); a caller that must tag the version does so
+        atomically, never through a separate follow-up write.
 
         A version body is the FULL :class:`PresetBody`, so the view reconstructs
         the new body by ALWAYS carrying ``base_tool`` forward from the ACTIVE
@@ -161,6 +172,8 @@ __all__ = [
     "PresetInputSchemaSupport",
     "PresetNameConflictError",
     "PresetNotFoundError",
+    "PresetSeed",
+    "PresetSeedToolMeta",
     "PresetSpec",
     "PresetStore",
     "PresetVersionNotFoundError",

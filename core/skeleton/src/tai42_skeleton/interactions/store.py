@@ -1076,6 +1076,61 @@ class InteractionStore:
             )
         return items
 
+    async def parked_continuation_tools(self, r: Redis) -> list[str]:
+        """Every currently-parked async interaction's ``continuation_tool``, read by
+        walking the FULL per-interaction expiry index (``pending:expiry``, member =
+        interaction id) — one hash read per member, uncapped.
+
+        Distinct from :meth:`list_pending` on purpose: that audit is bounded by
+        ``limit`` (default :data:`_PENDING_LIST_DEFAULT_LIMIT`) and its item view omits
+        ``continuation_tool`` entirely, so it cannot be the rename referee's source — a
+        capped scan would silently miss a park and let a stranding rename through. The
+        referee needs EVERY park's resume target, so this reads the whole index. A member
+        whose state vanished/answered between the index read and the hash read (or a sync
+        question wrongly indexed) carries no ``continuation_tool`` and is skipped."""
+        tools: list[str] = []
+        for raw_id in await r.zrange(self.pending_expiry_key, 0, -1):
+            interaction_id = as_str(raw_id)
+            tool = as_str(
+                await cast(
+                    "Awaitable[str | bytes | None]",
+                    r.hget(self.state_key(interaction_id), "continuation_tool"),
+                )
+            )
+            if tool is not None:
+                tools.append(tool)
+        return tools
+
+    async def continuation_due_tools(self, r: Redis) -> list[str]:
+        """Every answered/expired-but-not-yet-redelivered park's continuation ``tool``,
+        read by walking the FULL continuation-due index (``continuation:due``, member =
+        interaction id) — one hash read per member, uncapped.
+
+        The companion to :meth:`parked_continuation_tools` for the rename referee: an
+        OPEN park lives in ``pending:expiry`` and resolves OUT of it on answer/expiry
+        (``record_answer`` zrem), which durably enqueues the continuation-due record the
+        reaper re-fires as ``run_tool(<tool>)``. That tool is a live holder THIS index —
+        not the pending one — carries, so a rename between answer and redelivery would
+        strand it unless both indices are unioned. A member whose record hash TTL-expired
+        between the index read and the hash read is a genuinely-gone record and is
+        skipped; a PRESENT record missing its ``tool`` field is torn and raises loudly,
+        never a silent drop."""
+        tools: list[str] = []
+        for raw_id in await r.zrange(self.continuation_due_index_key, 0, -1):
+            interaction_id = as_str(raw_id)
+            raw = await cast(
+                "Awaitable[dict[str | bytes, str | bytes]]",
+                r.hgetall(self.continuation_due_key(interaction_id)),
+            )
+            if not raw:
+                continue
+            fields = {as_str(k): as_str(v) for k, v in raw.items()}
+            tool = fields.get("tool")
+            if tool is None:
+                raise RuntimeError(f"continuation-due record {interaction_id!r} present but carries no 'tool' field")
+            tools.append(tool)
+        return tools
+
     async def continuation_fingerprint(self, r: Redis, interaction_id: str) -> str | None:
         """The async fire's captured key fingerprint stashed on the state hash
         (``""`` for a gate-off fire), or ``None`` when the question carries none (a

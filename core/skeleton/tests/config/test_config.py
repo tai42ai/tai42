@@ -6,6 +6,8 @@ conformance.
 """
 
 import importlib
+import subprocess
+import sys
 from collections.abc import Iterator
 
 import pytest
@@ -50,10 +52,19 @@ def test_mode_module_map_holds_k8s_as_string_literal() -> None:
 
 
 def test_factory_does_not_statically_import_k8s_plugin() -> None:
-    """Importing the factory must not pull in the (not-installed) k8s plugin."""
-    import sys
-
-    assert "tai42_config_k8s" not in sys.modules
+    """Importing the factory must not transitively pull in the k8s plugin — proven
+    in a clean interpreter so the check is independent of ambient imports (under a
+    shared venv another package may already have imported the plugin in-process)."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, tai42_skeleton.config.factory\nassert 'tai42_config_k8s' not in sys.modules\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_unknown_mode_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,8 +77,14 @@ def test_unknown_mode_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_k8s_mode_raises_import_error_when_plugin_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Selecting ``k8s`` without the ``tai42-config-k8s`` plugin installed raises
-    ImportError loudly rather than degrading to a default provider."""
+    ImportError loudly rather than degrading to a default provider.
+
+    Absence is simulated deterministically by masking the plugin's modules in
+    ``sys.modules``, so the ImportError path is exercised whether or not the plugin
+    happens to be installed in the ambient venv."""
     monkeypatch.setattr(factory_mod, "config_mode", lambda: "k8s")
+    for name in ("tai42_config_k8s", "tai42_config_k8s.manager"):
+        monkeypatch.setitem(sys.modules, name, None)
     with pytest.raises(ImportError):
         ConfigManagerFactory.create()
 

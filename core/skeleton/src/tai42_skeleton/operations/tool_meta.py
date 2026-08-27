@@ -213,6 +213,29 @@ async def create_folder(name: str, parent_id: str | None = None) -> dict[str, An
     return folder.model_dump()
 
 
+async def resolve_folder_path(path: str) -> str | None:
+    """Resolve a ``/``-style folder ``path`` to its leaf ``folder_id`` in the id-keyed
+    tool_meta folder tree, creating every missing segment along the way. Each segment is a
+    folder ``name`` under the running parent — an existing sibling of that name is reused, a
+    missing one created through ``create_folder(name, parent_id)``. Callers store the returned
+    leaf id, never a raw path string. Every RAW segment is run through ``_clean_label``, so a
+    blank segment (``"a//b"``) or a path that names no real folder (``""`` / ``"///"``) is a
+    LOUD authoring error — never a silently dropped segment or a silent no-op."""
+    store = instance.app.tool_meta.store
+    children: dict[tuple[str | None, str], str] = {
+        (folder.parent_id, folder.name): folder.id for folder in await store.list_folders()
+    }
+    parent_id: str | None = None
+    for segment in path.split("/"):
+        clean = _clean_label(segment, "folder path segment")
+        leaf = children.get((parent_id, clean))
+        if leaf is None:
+            leaf = (await store.create_folder(clean, parent_id)).id
+            children[(parent_id, clean)] = leaf
+        parent_id = leaf
+    return parent_id
+
+
 @operation(
     summary="Rename a folder",
     tags=["tool_meta"],

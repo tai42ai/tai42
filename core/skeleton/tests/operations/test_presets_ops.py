@@ -775,7 +775,7 @@ def test_declared_referee_blocks_rename_and_lists_in_referees(pg) -> None:
             referees = (await preset_ops.preset_referees(name="leaf"))["referees"]
             assert referees == ["comp"]
             # The rename guard now sees the declared reference too.
-            with pytest.raises(ConflictError, match="referenced by preset"):
+            with pytest.raises(ConflictError, match="cannot be renamed"):
                 await preset_ops.rename_preset(name="leaf", new_name="leaf2")
 
     asyncio.run(run())

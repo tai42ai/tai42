@@ -25,7 +25,8 @@ The doors:
   tool name; new bound BEFORE the old is torn down).
 * ``DELETE /api/presets/{name}`` — soft-delete a live record (or HARD-delete a
   conflicted one) then tear down + fan out.
-* ``GET /api/presets/{name}/referees`` — the presets a rename would strand.
+* ``GET /api/presets/{name}/referees`` — the full union of live references a rename
+  would strand (referencing presets + platform wiring + plugin holders).
 * ``POST /api/presets/validate`` — dry-run a create/version draft (200 verdict).
 * ``PUT /api/presets/{name}/versions/{version}/tags`` — relabel a version.
 

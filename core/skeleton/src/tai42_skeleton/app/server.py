@@ -61,6 +61,7 @@ from tai42_skeleton.presets.base_tool_config import (
     PresetRegistrationTierRegistry,
 )
 from tai42_skeleton.presets.manager import PresetManager
+from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
 from tai42_skeleton.sandbox import SandboxHolder
 from tai42_skeleton.settings.audit_log import audit_log_settings
@@ -68,6 +69,7 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
 if TYPE_CHECKING:
@@ -205,6 +207,11 @@ class ServingCore:
         from tai42_skeleton.tools.turn_budget import TurnBudgetMiddleware
 
         self._fast_mcp.add_middleware(TurnBudgetMiddleware())
+        # Same reason the budget arms itself here: an MCP ``tools/call`` never reaches the
+        # ``ToolBinding.run_tool`` seam, so the ambient invoked-tool is armed at this edge too.
+        from tai42_skeleton.app.sub_mcp_app import InvocationSeamMiddleware
+
+        self._fast_mcp.add_middleware(InvocationSeamMiddleware())
 
         # Per-feature impl collaborators — the bodies behind the facets.
         self._tool_binding = ToolBinding(app)
@@ -242,6 +249,13 @@ class ServingCore:
         # re-imports the tool modules and re-registers cleanly. Mirrors the
         # write-validator registry above.
         self._tool_refs_registry = ToolRefsRegistry()
+
+        # Tool-rename referee registry + declared-preset-seed registry, reset each
+        # start() alongside the registries above so a reload re-imports the plugin
+        # modules (and re-arms the platform-internal referees) cleanly. The referee
+        # collection gates every rename; the seeds drive the startup/reload applier.
+        self._rename_referee_registry = ToolRenameRefereeRegistry()
+        self._seed_registry = PresetSeedRegistry()
 
         # The backup registry is the host's first consumer of its own AppBackup facet:
         # the core host sections are registered here (never on reload, which keeps this
