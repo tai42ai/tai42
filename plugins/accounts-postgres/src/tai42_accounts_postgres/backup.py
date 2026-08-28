@@ -98,11 +98,25 @@ class _BackupUserStore:
                     # rejection, the rest still restore.
                     report["errors"].append(f"user {user.get('user_id')!r}: {exc.diag.constraint_name or exc}")
                     continue
-                except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                    # KeyError/AttributeError: missing keys / non-dict rows;
-                    # ValueError: a non-ISO created_at. All contained per user —
-                    # an escape here would roll back the WHOLE restore txn.
-                    report["errors"].append(f"malformed user record {user!r}: {exc}")
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    AttributeError,
+                    # psycopg adaptation/typing deaths for JSON-representable garbage
+                    # (a dict-valued role → "cannot adapt type 'dict'"; a list → a
+                    # server-side DatatypeMismatch). Deliberately NOT OperationalError
+                    # or broad psycopg.Error: a dead connection must fail the restore
+                    # loudly, never be mislabeled "malformed row".
+                    psycopg.ProgrammingError,
+                    psycopg.DataError,
+                ) as exc:
+                    # All contained per user — an escape here rolls back the WHOLE
+                    # restore txn, losing every created sibling and the report. The
+                    # message names the user_id only, never the full record (it
+                    # carries the password hash and email).
+                    uid = user.get("user_id", "<missing user_id>") if isinstance(user, dict) else repr(user)
+                    report["errors"].append(f"malformed user record {uid!r}: {type(exc).__name__}: {exc}")
                     continue
                 report["created" if created else "skipped_existing"] += 1
         return report

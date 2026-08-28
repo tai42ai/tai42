@@ -146,6 +146,26 @@ async def test_import_refuses_bool_and_non_positive_versions():
             await import_accounts({"version": version, "users": []})
 
 
+async def test_restore_contains_psycopg_adaptation_errors_per_user(monkeypatch):
+    # A dict/list-typed field survives params-building and dies in cur.execute as a
+    # psycopg ProgrammingError ("cannot adapt type 'dict'") — before the fix that
+    # escaped the catch and rolled back the whole restore. The report names the
+    # user_id only, never the record repr (it carries the password hash).
+    import psycopg as _psycopg
+
+    class FakeAdaptError(_psycopg.ProgrammingError):
+        pass
+
+    pg = ScriptedPg(errors=[FakeAdaptError("cannot adapt type 'dict'")], fetches=[{"user_id": "usr-b"}])
+    _pg(monkeypatch, pg)
+    bad = _row("usr-a", "a@x.io") | {"role": {"x": 1}}
+    report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
+    assert report["created"] == 1
+    assert len(report["errors"]) == 1
+    assert "usr-a" in report["errors"][0]
+    assert "argon2" not in report["errors"][0]  # never the record repr
+
+
 def test_package_imports_before_bind():
     """The package __init__ must never touch the bound tai42_app handle: tests and
     tooling import it cold, and the arming import homed in __init__ crashed every
