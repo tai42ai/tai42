@@ -122,7 +122,8 @@ async def test_restore_contains_a_malformed_created_at_per_user(monkeypatch):
     bad = _row("usr-a", "a@x.io") | {"created_at": "not-a-timestamp"}
     report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
     assert report["created"] == 1
-    assert len(report["errors"]) == 1 and "usr-a" in report["errors"][0]
+    assert len(report["errors"]) == 1
+    assert "usr-a" in report["errors"][0]
 
 
 async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
@@ -134,7 +135,8 @@ async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
     report = await _BackupUserStore(_settings()).restore_users([absent])
     assert report["created"] == 1
     sent = pg.executed[-1][1][-1]  # the created_at param of the INSERT
-    assert isinstance(sent, datetime) and sent.tzinfo is not None
+    assert isinstance(sent, datetime)
+    assert sent.tzinfo is not None
 
 
 async def test_import_refuses_bool_and_non_positive_versions():
@@ -142,3 +144,20 @@ async def test_import_refuses_bool_and_non_positive_versions():
     for version in (True, False, 0, -1):
         with pytest.raises(ValueError, match="no valid version"):
             await import_accounts({"version": version, "users": []})
+
+
+def test_package_imports_before_bind():
+    """The package __init__ must never touch the bound tai42_app handle: tests and
+    tooling import it cold, and the arming import homed in __init__ crashed every
+    pre-bind importer (the PR #120 e2e collection failure). Subprocess = a truly
+    unbound handle."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import tai42_accounts_postgres"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

@@ -8,10 +8,11 @@ Importing this package registers the ``"accounts-postgres"`` provider (see
 
 from __future__ import annotations
 
-# Importing this module arms the ``on_startup`` hook that registers the plugin's
-# ``accounts`` backup section on the host's AppBackup registry (import side effect,
-# the same pattern as the provider registration below).
-from tai42_accounts_postgres import backup as _backup  # noqa: F401
+# NOTE: the backup-section arming does NOT live here. The package __init__ must
+# stay importable BEFORE ``tai42_app.bind()`` (tests and tooling import it cold),
+# and the ``on_startup`` decorator touches the bound handle at import. The arming
+# import lives in the manifest-loaded router modules, which the host only imports
+# post-bind — the same reason routes_login's own on_startup hook is safe.
 from tai42_accounts_postgres.provider import PostgresAccountsProvider
 
 __all__ = [
