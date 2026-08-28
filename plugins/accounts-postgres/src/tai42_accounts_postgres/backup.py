@@ -19,9 +19,10 @@ it — skip (the non-destructive default) is the only mode a plugin can honor co
 To REPLACE an account from a backup, delete it first, then import.
 
 ``password_hash`` is a one-way VERIFIER, not a recoverable secret, so it round-trips
-as stored column data — a restored user logs in with the SAME password (unlike an
-API key, which cannot verify a re-presented raw key and is re-minted). The section is
-``secret=True``: the payload carries password hashes and emails.
+as stored column data — a restored user logs in with the SAME password. (The
+access-control section re-mints API keys for a different reason: its export
+deliberately carries NO key material at all, so there is nothing to round-trip.)
+The section is ``secret=True``: the payload carries password hashes and emails.
 
 Registration runs in an ``on_startup`` hook (the facet is wired only on a booted app)
 and is idempotent, so a plugin reload cannot trip the registry's duplicate-name guard
@@ -30,7 +31,7 @@ and is idempotent, so a plugin reload cannot trip the registry's duplicate-name 
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -97,7 +98,10 @@ class _BackupUserStore:
                     # rejection, the rest still restore.
                     report["errors"].append(f"user {user.get('user_id')!r}: {exc.diag.constraint_name or exc}")
                     continue
-                except (KeyError, TypeError) as exc:
+                except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                    # KeyError/AttributeError: missing keys / non-dict rows;
+                    # ValueError: a non-ISO created_at. All contained per user —
+                    # an escape here would roll back the WHOLE restore txn.
                     report["errors"].append(f"malformed user record {user!r}: {exc}")
                     continue
                 report["created" if created else "skipped_existing"] += 1
@@ -122,11 +126,14 @@ class _BackupUserStore:
         return row is not None
 
 
-def _parse_ts(value: Any) -> Any:
+def _parse_ts(value: Any) -> datetime:
     """A payload timestamp (ISO string) back to a ``datetime`` psycopg adapts to
-    ``timestamptz``; a missing value defers to the column default."""
+    ``timestamptz``. A MISSING value becomes ``now()`` — an explicit SQL ``NULL``
+    would never "defer to the column default" (Postgres raises ``NotNullViolation``
+    on a NOT NULL column); the exporter always emits a real timestamp, so this
+    branch only serves hand-edited or foreign payloads."""
     if value is None:
-        return None
+        return datetime.now(tz=UTC)
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(value)
@@ -145,7 +152,10 @@ async def import_accounts(payload: dict[str, Any]) -> dict[str, Any]:
     """The section importer: restore absent users from ``payload`` (skip-only),
     returning per-entity counts. A payload from a newer schema version is refused."""
     version = payload.get("version")
-    if not isinstance(version, int) or version > _VERSION:
+    # bool is an int subclass — refuse it explicitly (True would pass as 1).
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise ValueError(f"accounts backup payload carries no valid version (got {version!r})")
+    if version > _VERSION:
         raise ValueError(f"accounts backup payload version {version!r} is newer than this plugin supports ({_VERSION})")
     if not accounts_store_configured():
         raise RuntimeError(

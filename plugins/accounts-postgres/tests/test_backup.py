@@ -81,8 +81,10 @@ async def test_restore_email_collision_is_a_per_user_error(monkeypatch):
 async def test_import_refuses_a_newer_version():
     with pytest.raises(ValueError, match="newer than this plugin supports"):
         await import_accounts({"version": 99, "users": []})
-    with pytest.raises(ValueError, match="newer than this plugin supports"):
-        await import_accounts({"users": []})  # missing version hits the same guard
+    # A missing version is its own honest refusal — not the misleading
+    # "None is newer than" wording the old guard produced.
+    with pytest.raises(ValueError, match="no valid version"):
+        await import_accounts({"users": []})
 
 
 async def test_import_refused_when_unconfigured(monkeypatch):
@@ -109,3 +111,34 @@ def test_registration_is_idempotent_and_secret(monkeypatch):
     assert fake.registered == [("accounts", export_accounts, import_accounts, True)]
     backup.register_accounts_backup_section()  # a reload must not double-register
     assert len(fake.registered) == 1
+
+
+async def test_restore_contains_a_malformed_created_at_per_user(monkeypatch):
+    # A non-ISO created_at (hand-edited/foreign payload) must be a PER-USER error —
+    # before the fix the ValueError escaped restore_users and rolled back the whole
+    # restore transaction, losing every already-created sibling and the report.
+    pg = ScriptedPg(fetches=[{"user_id": "usr-b"}])
+    _pg(monkeypatch, pg)
+    bad = _row("usr-a", "a@x.io") | {"created_at": "not-a-timestamp"}
+    report = await _BackupUserStore(_settings()).restore_users([bad, _row("usr-b", "b@x.io")])
+    assert report["created"] == 1
+    assert len(report["errors"]) == 1 and "usr-a" in report["errors"][0]
+
+
+async def test_restore_defaults_a_missing_created_at_to_now(monkeypatch):
+    # A missing created_at must become a real datetime — an explicit SQL NULL on the
+    # NOT NULL column raises NotNullViolation; it never "defers to the default".
+    pg = ScriptedPg(fetches=[{"user_id": "usr-a"}])
+    _pg(monkeypatch, pg)
+    absent = {k: v for k, v in _row("usr-a", "a@x.io").items() if k != "created_at"}
+    report = await _BackupUserStore(_settings()).restore_users([absent])
+    assert report["created"] == 1
+    sent = pg.executed[-1][1][-1]  # the created_at param of the INSERT
+    assert isinstance(sent, datetime) and sent.tzinfo is not None
+
+
+async def test_import_refuses_bool_and_non_positive_versions():
+    # bool is an int subclass — True must not pass as version 1.
+    for version in (True, False, 0, -1):
+        with pytest.raises(ValueError, match="no valid version"):
+            await import_accounts({"version": version, "users": []})
