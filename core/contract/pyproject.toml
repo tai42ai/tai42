@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-contract"
-version = "5.6.0"
+version = "5.7.0"
 description = "Pure interface contracts (protocols, ABCs, models) for the TAI ecosystem. No logic; pydantic-only at runtime."
 readme = "README.md"
 requires-python = ">=3.13"
