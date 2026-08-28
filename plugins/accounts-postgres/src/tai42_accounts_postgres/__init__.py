@@ -8,6 +8,10 @@ Importing this package registers the ``"accounts-postgres"`` provider (see
 
 from __future__ import annotations
 
+# Importing this module arms the ``on_startup`` hook that registers the plugin's
+# ``accounts`` backup section on the host's AppBackup registry (import side effect,
+# the same pattern as the provider registration below).
+from tai42_accounts_postgres import backup as _backup  # noqa: F401
 from tai42_accounts_postgres.provider import PostgresAccountsProvider
 
 __all__ = [
