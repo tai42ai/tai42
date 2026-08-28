@@ -19,6 +19,11 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.access_control import get_current_user_id
 from tai42_contract.app import tai42_app
 
+# Arms the accounts backup-section on_startup hook. Homed HERE (a manifest-loaded
+# router module the host imports only post-bind) and NOT in the package __init__ —
+# a pre-bind package import must never touch the bound handle. Idempotent: both
+# router modules arm it; the hook's registry guard makes the second a no-op.
+from tai42_accounts_postgres import backup as _backup  # noqa: F401
 from tai42_accounts_postgres import service
 from tai42_accounts_postgres.hashing import HashCapacityError, hash_password_async, verify_password
 from tai42_accounts_postgres.service import ADMIN_ROLE, SESSION_TOKEN_PREFIX
