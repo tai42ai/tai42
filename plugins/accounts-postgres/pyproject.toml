@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-accounts-postgres"
-version = "2.1.4"
+version = "2.2.0"
 description = "Postgres-backed accounts provider for the TAI ecosystem: an installable plugin that owns user accounts, password login, sessions, and invites, registers itself as the \"accounts-postgres\" provider, and ships a Studio users-admin UI."
 readme = "README.md"
 requires-python = ">=3.13"
