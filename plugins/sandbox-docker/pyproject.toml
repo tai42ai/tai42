@@ -28,12 +28,12 @@ dependencies = [
     # and the tai42_app.sandboxes facet. The floor names the contract minor that
     # first ships the sandbox contract module.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.6,<6",
+    "tai42-contract>=5.7,<6",
     # TaiBaseSettings + settings cache and the sandbox lifecycle base. The floor
     # names the first kit minor carrying `tai42_kit.sandbox` (ManagedSandbox,
     # ManagedSandboxSession, SandboxDispatchSettings, the conformance suite), which
     # this provider builds on.
-    "tai42-kit>=3.7,<4",
+    "tai42-kit>=3.8,<4",
     # Pure-python async Docker Engine API client over aiohttp; the provider drives a
     # REMOTE engine through it and spawns no local process. Pinned to a line that
     # ships a py3-none-any wheel (the release lane is wheels-only).
