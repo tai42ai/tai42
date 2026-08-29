@@ -220,7 +220,15 @@ async def resolve_folder_path(path: str) -> str | None:
     missing one created through ``create_folder(name, parent_id)``. Callers store the returned
     leaf id, never a raw path string. Every RAW segment is run through ``_clean_label``, so a
     blank segment (``"a//b"``) or a path that names no real folder (``""`` / ``"///"``) is a
-    LOUD authoring error — never a silently dropped segment or a silent no-op."""
+    LOUD authoring error — never a silently dropped segment or a silent no-op.
+
+    Concurrency-safe: ``tool_folders`` carries ``UNIQUE NULLS NOT DISTINCT (parent_id, name)``,
+    so when a sibling worker (a parallel ``--workers N`` boot resolving the same seed path)
+    creates a segment between this resolver's ``list_folders`` read and its own create, the
+    losing create raises :class:`FolderNameConflictError`. That is not a failure here — it means
+    the sibling already made the folder this path needs — so re-read the folders and reuse the
+    winning sibling's id for that segment. Concurrent resolvers on the same fresh path converge
+    on ONE folder id, none raises."""
     store = instance.app.tool_meta.store
     children: dict[tuple[str | None, str], str] = {
         (folder.parent_id, folder.name): folder.id for folder in await store.list_folders()
@@ -230,8 +238,16 @@ async def resolve_folder_path(path: str) -> str | None:
         clean = _clean_label(segment, "folder path segment")
         leaf = children.get((parent_id, clean))
         if leaf is None:
-            leaf = (await store.create_folder(clean, parent_id)).id
-            children[(parent_id, clean)] = leaf
+            try:
+                leaf = (await store.create_folder(clean, parent_id)).id
+            except FolderNameConflictError:
+                # A sibling won the race for this segment between our read and create — reuse
+                # the folder it committed. Re-read the tree so this and later segments resolve
+                # against the sibling's now-present rows.
+                children = {(folder.parent_id, folder.name): folder.id for folder in await store.list_folders()}
+                leaf = children[(parent_id, clean)]
+            else:
+                children[(parent_id, clean)] = leaf
         parent_id = leaf
     return parent_id
 
