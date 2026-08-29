@@ -30,6 +30,7 @@ import {
 } from '@tai42/studio-sdk';
 import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 
+import { MediaItems } from '@/media-card';
 import type { ChatItem } from '@/use-chat-stream';
 
 /** The transcript item this card renders. */
@@ -160,6 +161,11 @@ export function QuestionCard({
           {expired ? <Badge variant="warning">Expired</Badge> : null}
           {!answered && !expired && locked ? <Badge variant="neutral">Session ended</Badge> : null}
         </div>
+        {/* Display media rides between the prompt and its controls — the same
+         * component a media card uses, so a question's images/links render
+         * identically. Shown in every state (answered, expired, locked): the media
+         * is context for the prompt, not an answer control. */}
+        {question.media !== null ? <MediaItems media={question.media} /> : null}
         {live ? (
           <QuestionControls
             question={question}

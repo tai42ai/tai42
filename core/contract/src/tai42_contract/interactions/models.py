@@ -167,6 +167,21 @@ def _is_served_media_url(value: str) -> bool:
     return _MEDIA_ID.fullmatch(split.path[len(MEDIA_ROUTE_PREFIX) :]) is not None
 
 
+def served_media_id(url: str) -> str | None:
+    """The stored-media id a served ``image`` url references, or ``None`` if the url
+    is not a served reference. Handles BOTH forms a request may carry: the
+    same-origin relative ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox ask stores, and the
+    absolute ``http(s)`` served reference a channel send mints from
+    ``public_base_url``. The prefix is located by parsing (the relative-form
+    ``startswith``, the absolute-form url ``path``), never by substring search — so a
+    prefix buried in a query or fragment is not mistaken for a served id."""
+    if _is_media_route_url(url):
+        return url[len(MEDIA_ROUTE_PREFIX) :]
+    if _is_served_media_url(url):
+        return urlsplit(url).path[len(MEDIA_ROUTE_PREFIX) :]
+    return None
+
+
 class MediaItem(BaseModel):
     """One media item shown WITH a question — display-only, never part of the answer.
 
@@ -303,11 +318,12 @@ class InteractionRequest(BaseModel):
     # — it is a who, not a where. None means the question is unaddressed
     # (an operator/broadcast question every unrestricted caller may see).
     audience: str | None = None
-    # Display-only media rendered WITH the question in the inbox: images and links
-    # the human sees when reading the question. It never becomes part of the answer,
-    # and it is not forwarded to channel deliveries — the inbox is where it renders.
-    # None means no media; a present list is non-empty (a present-but-empty list is
-    # a caller bug). Set per question by the tool author.
+    # Display-only media shown WITH the question: images and links the human sees when
+    # reading it. It never becomes part of the answer. It renders in the inbox AND, on a
+    # channel-delivered ask, is forwarded on ``ChannelDelivery.media`` to the channel plugin
+    # (a data:image served reference is absolute on that path so a vendor can fetch it
+    # off-origin). None means no media; a present list is non-empty (a present-but-empty list
+    # is a caller bug). Set per question by the tool author.
     media: list[MediaItem] | None = None
     # Wait discipline. ``sync`` blocks the asking caller until the answer or the
     # timeout; ``async`` PARKS the caller — the ask returns a SuspendedInteraction
@@ -383,6 +399,21 @@ class InteractionRequest(BaseModel):
             # value would leave the caller with no place to send the human.
             if not isinstance(url, str) or not url:
                 raise ValueError("external answer_format requires a non-empty string url in format_payload")
+        elif self.answer_format is AnswerFormat.TEXT:
+            # TEXT carries no payload EXCEPT an OPTIONAL ``options`` list of suggested
+            # replies: a tapped option submits its own text as the free-text answer, which
+            # stays unconstrained (unlike SELECT, where options ARE the answer set). Any
+            # other key on a text payload is a caller bug.
+            payload = self.format_payload
+            if payload is not None:
+                extra = set(payload) - {"options"}
+                if extra:
+                    raise ValueError(
+                        f"text answer_format payload carries only optional options, got extra {sorted(extra)}"
+                    )
+                options = payload.get("options")
+                if options is not None and not options:
+                    raise ValueError("text answer_format options must be a non-empty list when present")
         else:
             if self.format_payload is not None:
                 raise ValueError(f"{self.answer_format.value} answer_format carries no format_payload")

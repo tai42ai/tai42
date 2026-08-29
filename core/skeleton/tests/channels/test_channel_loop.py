@@ -13,6 +13,7 @@ seams so the blocked ``ask_user`` caller and the callback door share one store.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError
 from tai42_contract.interactions import (
+    MEDIA_ROUTE_PREFIX,
     MediaItem,
     SuspendedInteraction,
     reset_resume_continuation_tool,
@@ -213,6 +215,59 @@ async def test_fake_channel_confirm_loop(wired, fake_channel):
     assert await task is True  # the TYPED bool
 
 
+_PNG = base64.b64encode(bytes.fromhex("89504e470d0a1a0a")).decode()
+_DATA_PNG = f"data:image/png;base64,{_PNG}"
+
+
+async def test_data_media_forwarded_absolute_on_channel_delivery(wired, fake_channel):
+    # A data: image on a channel ask is stored by reference and its served ref must be
+    # ABSOLUTE on the ChannelDelivery — a vendor fetches it off-origin, and a relative
+    # ``/api/interactions/media/{id}`` would be unfetchable. https/link items pass through.
+    media: list[MediaItem | dict[str, Any]] = [
+        {"kind": "image", "url": _DATA_PNG, "caption": "shot"},
+        {"kind": "image", "url": "https://cdn.example/x.png"},
+        {"kind": "link", "url": "https://docs.example/p"},
+    ]
+    task = asyncio.create_task(ask_user("See this?", channel="fake", media=media, timeout=5))
+    iid, _gid = await await_add_event(wired.fake, wired.store)
+    delivery = await _await_delivery(fake_channel)
+
+    assert delivery.media is not None
+    # The data: image is swapped for an ABSOLUTE served url under the public base url.
+    assert delivery.media[0].url.startswith("https://cb.example" + MEDIA_ROUTE_PREFIX)
+    assert delivery.media[0].caption == "shot"
+    # https/link items ride through unchanged.
+    assert delivery.media[1].url == "https://cdn.example/x.png"
+    assert delivery.media[2].url == "https://docs.example/p"
+
+    # The persisted record carries the SAME stored list (absolute on the channel path).
+    state = await wired.store.get_state(wired.fake, iid)
+    assert state is not None
+    assert state.request.media is not None
+    assert state.request.media[0].url == delivery.media[0].url
+
+    # Close the loop so the blocked caller unwinds.
+    resp = await router.callback(
+        _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "yes"}')
+    )
+    assert resp.status_code == 200
+    assert await task == "yes"
+
+
+async def test_data_media_channel_ask_requires_public_base_url(monkeypatch, wired, fake_channel):
+    # With no public base url, a channel ask carrying a data: image must fail loudly at ask
+    # time (the setting named), never emit a relative served ref onto a channel delivery —
+    # mirroring the notify path's data:-image refusal.
+    settings = wired.settings.model_copy(update={"public_base_url": None})
+    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    media: list[MediaItem | dict[str, Any]] = [{"kind": "image", "url": _DATA_PNG}]
+    with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+        await ask_user("See this?", channel="fake", media=media, timeout=5)
+    # No delivery ever ran and nothing was persisted (the raise is before any store).
+    assert fake_channel.deliveries == []
+    assert not wired.fake._hashes
+
+
 async def test_add_frame_omits_channel_when_unset(wired):
     # No channel → the add frame has NO ``channel`` key (conditional, like
     # ``server_verified``) and the persisted request carries None.
@@ -310,10 +365,10 @@ async def test_recipient_persisted_on_record(wired, fake_channel):
     assert await task == "pong"
 
 
-async def test_channel_delivery_omits_media_inbox_keeps_it(wired, fake_channel):
-    # Display-only media is NOT forwarded to a channel: the ChannelDelivery handed
-    # to the plugin carries no media, while the persisted question keeps it and the
-    # inbox add frame renders it. A documented limit, never a silent drop.
+async def test_channel_delivery_forwards_media_and_inbox_keeps_it(wired, fake_channel):
+    # Clean break / full parity: display media is now FORWARDED to the channel — the
+    # ChannelDelivery carries the SAME stored items the inbox add frame renders. A channel
+    # that renders only text ignores ``delivery.media``; one that renders it shows it.
     media: list[MediaItem | dict[str, Any]] = [
         {"kind": "image", "url": "https://cdn.example/p.png", "caption": "A product"}
     ]
@@ -321,7 +376,10 @@ async def test_channel_delivery_omits_media_inbox_keeps_it(wired, fake_channel):
     iid, _gid = await await_add_event(wired.fake, wired.store)
     delivery = await _await_delivery(fake_channel)
 
-    assert not hasattr(delivery, "media")  # the delivery contract carries no media
+    # An https image passes through substitution unchanged, so the delivery carries it.
+    assert delivery.media is not None
+    assert delivery.media[0].url == "https://cdn.example/p.png"
+    assert delivery.media[0].caption == "A product"
 
     state = await wired.store.get_state(wired.fake, iid)
     assert state is not None
@@ -560,11 +618,29 @@ async def test_blank_recipient_with_channel_rejected(wired, fake_channel, bad_re
     assert _empty(wired.fake)
 
 
-async def test_channel_rejects_non_select_options(wired, fake_channel):
-    # Rejected up-front as a clean ValueError — never a post-persist pydantic error.
-    with pytest.raises(ValueError, match="options are only valid with answer_format 'select'"):
-        await ask_user("q", channel="fake", options=["a", "b"], timeout=5)
+async def test_channel_rejects_options_on_confirm(wired, fake_channel):
+    # Rejected up-front as a clean ValueError — confirm carries no options (only select's
+    # required answer set and text's suggested replies do).
+    with pytest.raises(ValueError, match="options are not valid with answer_format 'confirm'"):
+        await ask_user("q", answer_format="confirm", channel="fake", options=["a", "b"], timeout=5)
     assert _empty(wired.fake)
+
+
+async def test_channel_text_delivery_carries_suggested_reply_options(wired, fake_channel):
+    # TEXT suggested replies ride the channel delivery; a tapped option submits its OWN text
+    # as the free-text answer (which validates as any string).
+    task = asyncio.create_task(ask_user("How's it going?", channel="fake", options=["Good", "Bad"], timeout=5))
+    await await_add_event(wired.fake, wired.store)
+    delivery = await _await_delivery(fake_channel)
+
+    assert delivery.answer_format == "text"
+    assert delivery.options == ["Good", "Bad"]
+
+    resp = await router.callback(
+        _make_request("POST", path_params={"ticket": _ticket(delivery)}, body=b'{"answer": "Good"}')
+    )
+    assert resp.status_code == 200
+    assert await task == "Good"
 
 
 async def test_channel_requires_public_base_url(monkeypatch, fake_redis, fake_client_ctx, fake_channel):

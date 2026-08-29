@@ -97,6 +97,52 @@ describe('applyFrame', () => {
     expect(model.items[0]).toMatchObject({ answerFormat: 'form', schema, callbackUrl: null });
   });
 
+  it('carries display media on a question, in order, with its captions', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      questionFrame('text', {
+        media: [
+          { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot' },
+          { kind: 'link', url: 'https://docs.example/p', caption: 'The doc' },
+        ],
+      }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'question',
+      answerFormat: 'text',
+      media: [
+        { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot' },
+        { kind: 'link', url: 'https://docs.example/p', caption: 'The doc' },
+      ],
+    });
+  });
+
+  it('accepts a question image served from the interactions media door (absolute https)', () => {
+    // The fixed ask-media pipeline substitutes an inline data: image for an ABSOLUTE
+    // served-media URL (https://host/api/interactions/media/{id}) before the frame is
+    // sent, so that is the real shape a question image now arrives in. It is a plain
+    // absolute https URL with no userinfo, so the parser accepts it and carries it
+    // through to the card unchanged.
+    const served = 'https://app.example/api/interactions/media/med-abc123';
+    const model = fold(
+      EMPTY_MODEL,
+      questionFrame('text', { media: [{ kind: 'image', url: served, caption: 'A shot' }] }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'question',
+      answerFormat: 'text',
+      media: [{ kind: 'image', url: served, caption: 'A shot' }],
+    });
+  });
+
+  it('leaves a question with no media key carrying null media', () => {
+    const model = fold(EMPTY_MODEL, questionFrame('confirm'));
+
+    expect(model.items[0]).toMatchObject({ kind: 'question', media: null });
+  });
+
   it('folds a media card with an image and its caption', () => {
     const model = fold(
       EMPTY_MODEL,
@@ -280,6 +326,13 @@ describe('applyFrame', () => {
       questionFrame('form', { schema: { type: 'object' }, callback_url: CALLBACK }),
     ],
     ['an answered frame with no interaction id', frame('chat.answered', { id: 'a' })],
+    [
+      // A question's media is vetted exactly as a card's — one off-shape item (an
+      // http image src the inbox CSP would refuse) taints the whole question frame.
+      'a question whose display media carries a non-https image',
+      questionFrame('text', { media: [{ kind: 'image', url: 'http://example.com/a.png' }] }),
+    ],
+    ['a question whose display media is not an array', questionFrame('text', { media: 'a.png' })],
     [
       'a media card with an unknown attachment kind',
       mediaFrame({ media: [{ kind: 'video', url: 'https://example.com/a.mp4' }] }),

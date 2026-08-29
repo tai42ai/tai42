@@ -5,7 +5,11 @@ through.
 ``Tool.from_tool`` call: each ``fixed_kwargs`` key is baked as a HIDDEN, FIXED
 constant (``ArgTransform(hide=True, default=<value>)`` — removed from the exposed
 input schema, and a caller that passes it is rejected; it cannot be overridden at
-runtime), while the REMAINING arguments keep the base tool's real typed schema
+runtime — with ONE exception: when a preset has ``input_schema`` support and bakes
+the base tool's PAYLOAD ARG itself, that baked dict is not an absolute constant but a
+set of DEFAULTS the caller's validated object deep-merges over, caller-wins-per-key
+(:func:`deep_merge`); every OTHER baked kwarg stays an absolute hidden constant),
+while the REMAINING arguments keep the base tool's real typed schema
 (names, types, descriptions), NOT one opaque ``params`` blob. The preset's
 ``description`` is set on the transformed tool, so a bind re-applies it from the
 stored body every time. A preset carries NO native tags — grouping is the
@@ -29,6 +33,7 @@ forcing is possible for a non-LLM tool.
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
@@ -179,6 +184,39 @@ async def preset_bind(
     )
 
 
+def deep_merge(baked: dict[str, Any], caller: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge ``caller`` over ``baked`` with CALLER-WINS-PER-KEY semantics,
+    recursing ONLY where both sides hold a dict.
+
+    Applied per key:
+
+    - key in both, both values dicts -> recurse (nested deep merge).
+    - key in both, otherwise (scalars, lists, or mismatched types) -> the caller's
+      value REPLACES the baked one (lists REPLACE, never concatenate; scalars are not
+      coerced).
+    - key only in ``baked`` -> the baked value fills the gap.
+    - key only in ``caller`` -> the caller value passes through.
+
+    Neither input is mutated; a fresh dict is returned. The result shares NO mutable state
+    with ``baked``: a baked-only subtree (one no caller key overrides) is DEEP-COPIED into
+    the result, not aliased. ``baked`` is a bind's shared payload defaults reused across every
+    call, so aliasing it would let a consumer that mutates the forwarded merged payload poison
+    those defaults for all later calls. Caller-supplied values, by contrast, come from a fresh
+    per-call object and are taken by reference (a caller never shares state across calls).
+    """
+    # Baked-only keys are the sole aliasing seam (keys in ``caller`` are overwritten in the
+    # loop below by either a recursion result or the caller's own value): deep-copy their
+    # values so the returned object owns them and can never reach back into the shared defaults.
+    merged: dict[str, Any] = {key: (value if key in caller else copy.deepcopy(value)) for key, value in baked.items()}
+    for key, caller_value in caller.items():
+        baked_value = baked.get(key)
+        if key in baked and isinstance(baked_value, dict) and isinstance(caller_value, dict):
+            merged[key] = deep_merge(baked_value, caller_value)
+        else:
+            merged[key] = caller_value
+    return merged
+
+
 def _bind_with_input_schema(
     app: TaiApp,
     base: Tool,
@@ -207,6 +245,16 @@ def _bind_with_input_schema(
     ``fixed_kwargs`` (``forward_raw`` — the base's own arg names, bypassing the identity
     transform). An ``output_schema`` is advertised and every result validated against it,
     raising loudly on any mismatch.
+
+    ONE ``fixed_kwargs`` key is special: the ``payload_arg`` itself. Baking it lets the
+    author supply partial DEFAULTS for the payload rather than an absolute constant that
+    would discard the caller's whole validated object. Such a baked default MUST be a JSON
+    object (dict) — a non-dict is a LOUD authoring error raised HERE at bind time (so the
+    dry-run bake surfaces it as a 400 at save, not on the first call). At call time the
+    caller's object deep-merges OVER the baked defaults, caller-wins-per-key
+    (:func:`deep_merge`); the merged object — what the base tool actually sees — is what is
+    validated and forwarded. Every OTHER ``fixed_kwargs`` key stays an absolute hidden
+    constant.
     """
     support = app.presets.input_schema_support(base_tool)
     if support is None:
@@ -216,20 +264,56 @@ def _bind_with_input_schema(
         )
     payload_arg = support.payload_arg
 
+    # When the preset bakes the PAYLOAD ARG itself, the baked value is a set of partial
+    # DEFAULTS the caller deep-merges over — so it MUST be a JSON object. Reject a non-dict
+    # LOUDLY at bind time: reachable through the authoring dry-run bake, this fails at save
+    # (a 400) rather than deferring an un-mergeable constant to the first call.
+    baked_payload_present = payload_arg in fixed_kwargs
+    baked_payload_defaults: dict[str, Any] = {}
+    if baked_payload_present:
+        raw_baked_payload = fixed_kwargs[payload_arg]
+        if not isinstance(raw_baked_payload, dict):
+            raise ValueError(
+                f"preset {name!r} bakes a non-dict default for the payload argument "
+                f"{payload_arg!r} while declaring an input_schema (got "
+                f"{type(raw_baked_payload).__name__}); a baked payload default must be a "
+                "JSON object so the caller's fields can deep-merge over it"
+            )
+        baked_payload_defaults = raw_baked_payload
+
     async def _route(**kwargs: Any) -> Any:
-        # A custom transform_fn bypasses FastMCP's own argument validation, so the
-        # kernel validates the caller's object against the authored input_schema HERE,
-        # before forwarding. A mismatch (missing-required, wrong-typed, or
-        # additionalProperties-forbidden field) is a bad CALLER call: re-raise as
-        # FastMCP's ValidationError so it surfaces as a client error (logged as a
-        # warning, reaching the caller unmasked) rather than a masked 500, never
-        # routed raw into ``payload_arg``.
+        # A custom transform_fn bypasses FastMCP's own argument validation, so the kernel
+        # validates against the authored input_schema HERE before forwarding, re-raising a
+        # mismatch as FastMCP's ValidationError so it surfaces as a client error (logged as
+        # a warning, reaching the caller unmasked) rather than a masked 500.
         caller_object = dict(kwargs)
+        # Step 1: validate the caller's OWN object. A caller mistake (missing-required,
+        # wrong-typed, or additionalProperties-forbidden field) surfaces VERBATIM as a
+        # client error, never routed raw into ``payload_arg``.
         try:
             validate_against_json_schema(caller_object, input_schema)
         except JsonSchemaValidationError as exc:
             raise FastMCPValidationError(f"caller input does not match the preset's input_schema: {exc}") from exc
-        result = await forward_raw(**{payload_arg: caller_object, **fixed_kwargs})
+        if baked_payload_present:
+            # The baked payload is a set of DEFAULTS: deep-merge the caller OVER it,
+            # caller-wins-per-key. The merged object is what the base tool actually sees.
+            merged = deep_merge(baked_payload_defaults, caller_object)
+            # Step 2: validate the MERGED object. The caller already cleared step 1, so a
+            # fresh violation here is induced by the preset's baked defaults — attribute it
+            # to the preset by name (the caller's own object alone would have passed).
+            try:
+                validate_against_json_schema(merged, input_schema)
+            except JsonSchemaValidationError as exc:
+                raise FastMCPValidationError(
+                    f"preset {name!r}'s baked payload defaults produce an input that does not "
+                    f"match its input_schema: {exc}"
+                ) from exc
+            # Forward the MERGED payload under ``payload_arg``; spread ``fixed_kwargs`` first
+            # so the merged value overrides the baked payload key while EVERY other baked
+            # kwarg stays its absolute hidden constant.
+            result = await forward_raw(**{**fixed_kwargs, payload_arg: merged})
+        else:
+            result = await forward_raw(**{payload_arg: caller_object, **fixed_kwargs})
         # A park sentinel is a SUSPEND signal, not the tool's output: a suspending
         # call parked the caller and the dispatch's reveal gate stowed the
         # ``SuspendedInteraction`` RAW. Output-schema validation must NOT apply to

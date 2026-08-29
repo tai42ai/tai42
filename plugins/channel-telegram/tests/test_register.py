@@ -75,7 +75,7 @@ async def test_startup_hook_sets_webhook(stub_app, http_recorder):
     assert json.loads(request.content) == {
         "url": "https://example.test/api/channels/telegram/inbound",
         "secret_token": "s3cret_token",
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }
 
 

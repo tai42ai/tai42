@@ -52,8 +52,9 @@ async def _register_telegram_webhook() -> None:
     payload = {
         "url": f"{base.rstrip('/')}{_INBOUND_MOUNT_BASE}/inbound",
         "secret_token": secret,
-        # Only message updates matter (ForceReply answers arrive as messages).
-        "allowed_updates": ["message"],
+        # Typed replies arrive as messages; inline-keyboard option taps (select /
+        # suggested-reply asks, notify options) arrive as callback queries.
+        "allowed_updates": ["message", "callback_query"],
     }
     async with telegram_http() as client:
         response = await client.post(f"{settings.api_base_url}/bot{token}/setWebhook", json=payload)

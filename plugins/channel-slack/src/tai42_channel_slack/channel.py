@@ -32,6 +32,12 @@ from pydantic import SecretStr
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
 from tai42_kit.settings import require, require_secret
 
+from tai42_channel_slack.blocks import (
+    build_media_blocks,
+    build_option_blocks,
+    options_text_lines,
+    text_section,
+)
 from tai42_channel_slack.client import slack_http
 from tai42_channel_slack.correlation import (
     delete_form_record,
@@ -85,6 +91,31 @@ def _render_text(delivery: ChannelDelivery) -> str:
         lines.append("Options: " + ", ".join(delivery.options))
     lines.append(f"Reply in this thread. Deadline: {delivery.timeout_at.isoformat()}")
     return "\n".join(lines)
+
+
+def _display_blocks(body_text: str, media: list[Any] | None, options: list[str] | None) -> list[dict[str, Any]] | None:
+    """The Block Kit blocks for a richer (non-form) send, or ``None`` for a plain send.
+
+    A body section carries the question/message, then any display media (image / link
+    blocks), then the options as an actions block of buttons when they fit Slack's caps
+    — else a suggestion section so they stay visible (a tapped button submits its text;
+    an over-cap select still answers by a thread reply, a notify option by a typed
+    reply). ``None`` when there is neither media nor options, so a plain ask/notify
+    posts text only (unchanged). A blank ``body_text`` (a MEDIA-ONLY notify) OMITS the body
+    section entirely — Slack rejects an empty ``plain_text`` — so the blocks are the image
+    block(s) alone. A ``data:`` image raises
+    :class:`~tai42_contract.channels.ChannelInputError` here, before any send.
+    """
+    media_blocks = build_media_blocks(media)
+    option_blocks = build_option_blocks(options)
+    if options and not option_blocks:
+        # Past Slack's button caps — keep the options visible as a suggestion list
+        # rather than dropping them or truncating a label.
+        option_blocks = [text_section(options_text_lines(options))]
+    if not media_blocks and not option_blocks:
+        return None
+    body_section = [text_section(body_text)] if body_text.strip() else []
+    return [*body_section, *media_blocks, *option_blocks]
 
 
 def _resolve_recipient(settings: SlackSettings, requested: str | None) -> str:
@@ -191,7 +222,12 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
     # (:class:`FormSchemaError`, a ``ChannelInputError``), raised before any store
     # or send — never a retryable delivery failure.
     build_modal_view(delivery.interaction_id, delivery.question, schema)
-    message_blocks = build_message_blocks(delivery.question, delivery.interaction_id)
+    # Any display media rides above the form's section + open-modal button (a data:
+    # image is refused here, before the reserve or send).
+    message_blocks = [
+        *build_media_blocks(delivery.media),
+        *build_message_blocks(delivery.question, delivery.interaction_id),
+    ]
     await store_form_record(
         delivery.interaction_id, delivery.callback_url, schema, delivery.question, delivery.timeout_at
     )
@@ -207,6 +243,11 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> N
 class SlackChannel:
     """Registered under ``"slack"``; satisfies ``tai42_contract.channels.Channel``."""
 
+    # This channel renders display media (Block Kit image/section blocks) and tappable
+    # options (Block Kit buttons); the central notify_user guard reads these before
+    # handing a media or options notification over.
+    supports_media_notifications: ClassVar[bool] = True
+    supports_interactive_notifications: ClassVar[bool] = True
     supports_form_delivery: ClassVar[bool] = True
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
@@ -238,7 +279,16 @@ class SlackChannel:
         if delivery.answer_format == "form":
             await _deliver_form(token, target, delivery)
             return
-        body = await _post_message(token, target, _render_text(delivery))
+        # Display media and tappable options ride as Block Kit blocks alongside the
+        # text (the notification fallback Slack requires). A data: image is refused
+        # here, before the send. Tier-1 (confirm/external) carries no options — its
+        # answer is the plain callback link, so its block body keeps the full rendered
+        # text (link included) and only display media rides beneath it.
+        is_tier1 = delivery.answer_format in _TIER1_FORMATS
+        section_text = _render_text(delivery) if is_tier1 else delivery.question
+        block_options = None if is_tier1 else delivery.options
+        blocks = _display_blocks(section_text, delivery.media, block_options)
+        body = await _post_message(token, target, _render_text(delivery), blocks=blocks)
         if delivery.answer_format in _TIER1_FORMATS:
             # Tier-1 (confirm/external): the plain link IS the answer path — no
             # correlation entry, no threaded reply expected.
@@ -277,7 +327,17 @@ class SlackChannel:
             )
         else:
             target = _resolve_recipient(settings, notification.recipient)
-        body = await _post_message(token, target, notification.message)
+        # Display media and tappable options ride as Block Kit blocks; a tap on an
+        # option button enters the conversation as a visitor message (the interactivity
+        # door bridges it). The text fallback carries any options as suggestion lines so
+        # the notification preview still shows them. A MEDIA-ONLY notify (blank message)
+        # posts image block(s) alone with an empty text fallback — Slack accepts that when
+        # blocks carry the content. A data: image is refused before the send.
+        blocks = _display_blocks(notification.message, notification.media, notification.options)
+        text = notification.message
+        if notification.options:
+            text = f"{text}\n{options_text_lines(notification.options)}"
+        body = await _post_message(token, target, text, blocks=blocks)
         ts = body.get("ts")
         if not isinstance(ts, str) or not ts:
             raise ChannelDeliveryError("chat.postMessage ok response carried no ts")

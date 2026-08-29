@@ -484,6 +484,7 @@ async def append_question(
     timeout_at: datetime,
     callback_url: str | None = None,
     schema: dict[str, Any] | None = None,
+    media: list[dict[str, Any]] | None = None,
 ) -> str:
     """Append one ``chat.question`` entry (the UI renders the per-format widget) and
     return its id.
@@ -495,7 +496,12 @@ async def append_question(
 
     ``schema`` is the ``form`` question's JSON answer schema — display-input material
     the page's form widget renders, never a secret — carried in the frame ONLY when
-    present (non-None exactly for the ``form`` format); otherwise the key is absent."""
+    present (non-None exactly for the ``form`` format); otherwise the key is absent.
+
+    ``media`` is the question's display items — each ``{"kind", "url", "caption"?}``,
+    the SAME frame shape a ``chat.media`` card carries so the page renders them with
+    the same media-card component — carried in the frame ONLY when non-empty;
+    otherwise the key is absent. It is display-only, never part of the answer."""
     entry_id = _mint_id()
     data: dict[str, Any] = {
         "id": entry_id,
@@ -510,6 +516,8 @@ async def append_question(
         data["callback_url"] = callback_url
     if schema is not None:
         data["schema"] = schema
+    if media:
+        data["media"] = media
     await _append(identity, address, QUESTION_EVENT, data)
     return entry_id
 

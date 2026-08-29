@@ -16,7 +16,7 @@ from fastmcp.tools import Tool
 from tai42_contract.app import TaiApp
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
-from tai42_skeleton.presets.bind import preset_bind
+from tai42_skeleton.presets.bind import deep_merge, preset_bind
 
 
 def _base_tool() -> Tool:
@@ -317,3 +317,202 @@ async def test_input_schema_over_unsupported_base_is_loud():
             name="p",
             input_schema={"type": "object"},
         )
+
+
+# -- deep_merge (pure): caller-wins-per-key, recurse only into dicts on BOTH sides -----
+
+
+def test_deep_merge_fills_gaps_and_caller_wins_per_key_including_nested():
+    # Keys only in baked fill in; keys only in caller pass through; a key in both whose
+    # values are BOTH dicts recurses; caller wins per-key inside the nested dict too.
+    baked = {"a": 1, "b": {"c": 2, "keep": 0}}
+    caller = {"b": {"d": 3, "keep": 9}, "e": 4}
+    assert deep_merge(baked, caller) == {"a": 1, "b": {"c": 2, "d": 3, "keep": 9}, "e": 4}
+
+
+def test_deep_merge_lists_replace_not_concat_and_mismatched_types_replace():
+    # Lists REPLACE (never concatenate); a dict-vs-scalar mismatch replaces with the
+    # caller's value; a scalar-vs-dict mismatch likewise takes the caller's dict.
+    assert deep_merge({"xs": [1, 2]}, {"xs": [3]}) == {"xs": [3]}
+    assert deep_merge({"x": {"nested": 1}}, {"x": 5}) == {"x": 5}
+    assert deep_merge({"x": 5}, {"x": {"nested": 1}}) == {"x": {"nested": 1}}
+
+
+def test_deep_merge_does_not_mutate_inputs():
+    baked = {"b": {"c": 2}}
+    caller = {"b": {"d": 3}}
+    deep_merge(baked, caller)
+    assert baked == {"b": {"c": 2}}
+    assert caller == {"b": {"d": 3}}
+
+
+def test_deep_merge_deep_copies_baked_only_subtrees():
+    # A baked-only subtree (no caller key overriding it) must be DEEP-COPIED into the result,
+    # never aliased: ``baked`` is a bind's shared defaults reused across calls, so a consumer
+    # that mutates the merged object must not be able to poison them.
+    baked = {"a": 1, "nested": {"deep": {"k": "pristine"}}}
+    merged = deep_merge(baked, {"e": 4})
+    # A consumer scribbles on the baked-only subtree of the merged result.
+    merged["nested"]["deep"]["k"] = "poisoned"
+    merged["nested"]["added"] = True
+    # The shared defaults are untouched, and a SECOND merge still sees them pristine.
+    assert baked == {"a": 1, "nested": {"deep": {"k": "pristine"}}}
+    assert deep_merge(baked, {"e": 5})["nested"] == {"deep": {"k": "pristine"}}
+
+
+# -- input_schema with a BAKED PAYLOAD DEFAULT: deep-merge caller over defaults --------
+
+
+async def test_baked_payload_defaults_fill_gaps_and_caller_wins_per_key():
+    # Baked payload defaults {a:1, b:{c:2}}; caller {b:{d:3}, e:4} deep-merges OVER them
+    # (caller-wins-per-key, nested), and the merged object reaches the base under payload.
+    authored = {"type": "object"}
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"a": 1, "b": {"c": 2}}, "image": "pinned"},
+        name="p",
+        input_schema=authored,
+    )
+    out = await tool.run({"b": {"d": 3}, "e": 4})
+    assert out.structured_content == {
+        "payload": {"a": 1, "b": {"c": 2, "d": 3}, "e": 4},
+        "image": "pinned",
+    }
+
+
+async def test_baked_payload_caller_wins_and_lists_replace():
+    authored = {"type": "object"}
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"a": 1, "b": {"c": 2}, "xs": [1, 2]}},
+        name="p",
+        input_schema=authored,
+    )
+    # Caller wins per-key (top-level and nested); lists REPLACE, not concatenate.
+    out = await tool.run({"a": 9, "b": {"c": 8}, "xs": [3]})
+    assert out.structured_content is not None
+    assert out.structured_content["payload"] == {"a": 9, "b": {"c": 8}, "xs": [3]}
+
+
+async def test_baked_payload_only_call_equals_baked_defaults():
+    # A caller supplying {} yields exactly the baked defaults.
+    authored = {"type": "object"}
+    baked = {"a": 1, "b": {"c": 2}}
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": baked},
+        name="p",
+        input_schema=authored,
+    )
+    out = await tool.run({})
+    assert out.structured_content is not None
+    assert out.structured_content["payload"] == baked
+
+
+def _accumulating_payload_base_tool() -> Tool:
+    def runner(payload: dict, image: str = "x") -> dict:
+        """A base tool whose consumer MUTATES the payload it receives, appending to a
+        baked-only nested list. If the merge aliased the shared defaults, the list would
+        ACCUMULATE across calls."""
+        payload["nested"].setdefault("log", []).append("call")
+        return {"payload": payload, "image": image}
+
+    return Tool.from_function(runner, name="runner")
+
+
+async def test_baked_payload_defaults_survive_a_mutating_consumer():
+    # The forwarded merged payload's baked-only subtree is a deep copy, so a consumer that
+    # mutates it cannot poison the bind's shared defaults for a LATER call.
+    authored = {"type": "object"}
+    tool = await preset_bind(
+        _app(_accumulating_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"nested": {"c": 2}}},  # ``nested`` is baked-only (no caller key overrides it)
+        name="p",
+        input_schema=authored,
+    )
+    first = await tool.run({"e": 1})
+    assert first.structured_content is not None
+    assert first.structured_content["payload"]["nested"]["log"] == ["call"]
+    # The consumer mutated the FIRST call's forwarded payload; a SECOND call still starts from
+    # pristine baked defaults — the log does not accumulate, and the baked ``c`` is intact.
+    second = await tool.run({"e": 2})
+    assert second.structured_content is not None
+    assert second.structured_content["payload"]["nested"] == {"c": 2, "log": ["call"]}
+
+
+async def test_no_baked_payload_behavior_is_unchanged():
+    # When the payload arg is NOT baked, the caller's validated object is delivered
+    # verbatim (no merge step); byte-identical to the pre-defaults path.
+    authored = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "string"}},
+        "required": ["a"],
+    }
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"image": "pinned"},
+        name="p",
+        input_schema=authored,
+    )
+    out = await tool.run({"a": 1, "b": "hi"})
+    assert out.structured_content == {"payload": {"a": 1, "b": "hi"}, "image": "pinned"}
+
+
+async def test_non_dict_baked_payload_is_a_loud_authoring_error_at_bind():
+    # A non-dict baked payload under an input_schema fails LOUDLY at BIND (reachable via
+    # the authoring dry-run bake → a 400 at save), never deferred to the first call.
+    with pytest.raises(ValueError, match="non-dict default for the payload argument"):
+        await preset_bind(
+            _app(_payload_base_tool(), support=_Support("payload")),
+            "runner",
+            {"payload": "not-a-dict"},
+            name="p",
+            input_schema={"type": "object"},
+        )
+
+
+async def test_merged_object_violation_is_loud_with_preset_attribution():
+    from fastmcp.exceptions import ValidationError as FastMCPValidationError
+
+    # The caller's own object passes (``n`` is optional), but the baked default n=-1
+    # violates ``minimum: 0`` once merged — a defaults-induced violation, attributed to
+    # the preset by name (NOT reported as a caller error).
+    authored = {
+        "type": "object",
+        "properties": {"n": {"type": "integer", "minimum": 0}, "m": {"type": "integer"}},
+    }
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"n": -1}},
+        name="strict_preset",
+        input_schema=authored,
+    )
+    with pytest.raises(FastMCPValidationError, match="strict_preset"):
+        await tool.run({"m": 5})
+
+
+async def test_caller_object_violation_is_verbatim_even_with_baked_payload():
+    from fastmcp.exceptions import ValidationError as FastMCPValidationError
+
+    # With a baked payload present, a CALLER mistake still surfaces as the caller error
+    # (verbatim), never mis-attributed to the preset's baked defaults.
+    authored = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    tool = await preset_bind(
+        _app(_payload_base_tool(), support=_Support("payload")),
+        "runner",
+        {"payload": {"a": 1}},
+        name="p",
+        input_schema=authored,
+    )
+    with pytest.raises(FastMCPValidationError, match="caller input does not match"):
+        await tool.run({"zzz": 9})

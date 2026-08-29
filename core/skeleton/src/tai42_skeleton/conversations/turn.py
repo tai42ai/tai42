@@ -33,6 +33,7 @@ from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
+    AnswerPart,
     AnswerStatus,
     BlankInboundTextError,
     ConversationAnswer,
@@ -43,10 +44,12 @@ from tai42_contract.conversations import (
     PairCodeInvalidError,
     Person,
     PersonAddress,
+    joined_answer_text,
 )
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
+    MediaItem,
     SuspendedInteraction,
     reset_park_completion,
     set_park_completion,
@@ -385,6 +388,12 @@ async def _drain_answer(agent: Agent, text: str, thread_id: str) -> str | _Agent
         elif isinstance(event, MessageFinal):
             message = event
     if structured is not None:
+        # F1 (strict ruling): an agent's structured final is ALWAYS serialized to one
+        # string, even when its data is a JSON array of strings — an agent's structured
+        # output may legitimately be a string array as DATA, so there is no magic-array
+        # detection here. Ordered multi-message answers come from TOOL routes only (see
+        # ``_tool_reply``, which may emit an array of parts); an agent stays single-string
+        # until it has an explicit multi-message output contract.
         return _serialize_structured(structured.data)
     if message is not None:
         return message.text
@@ -438,7 +447,7 @@ async def _run_agent_turn(route: ConversationRoute, text: str, thread_id: str, c
         return _SilentOutcome()
     if not answer.strip():
         return _tool_error("agent produced an empty answer", route)
-    return _ResolvedOutcome(answer_status="answered", answer=answer, error=None)
+    return _ResolvedOutcome(answer_status="answered", parts=[_text_part(answer)], error=None)
 
 
 def _agent_registry() -> dict[str, Agent]:
@@ -466,13 +475,29 @@ class _SilentOutcome:
 
 @dataclass(frozen=True)
 class _ResolvedOutcome:
-    """A tool turn that produced an outcome to deliver: an ``answered`` reply or a
-    client-safe ``error``. Both carry non-blank ``answer`` text — the fields are
-    non-optional, so an outcome missing its answer cannot be represented."""
+    """A turn that produced an outcome to deliver: an ``answered`` reply or a client-safe
+    ``error``. ``parts`` is the ORDERED, non-empty list of rich :class:`AnswerPart` messages
+    the turn produced — one for a single-message answer, several for an ordered multi-message
+    one (a tool route emitting an array of strings and/or part objects). ``answer`` is the
+    part MESSAGE texts joined with a blank line — the whole-text form every legacy reader
+    keeps consuming."""
 
     answer_status: Literal["answered", "error"]
-    answer: str
+    parts: list[AnswerPart]
     error: str | None
+
+    @property
+    def answer(self) -> str:
+        """The part messages as one joined string — what intake dedup, transcripts and the
+        api door body read, and byte-identical to the old single ``answer`` for one part. A
+        media-only part contributes nothing, so an all-media outcome joins to ``""``."""
+        return joined_answer_text(self.parts)
+
+
+def _text_part(text: str) -> AnswerPart:
+    """A plain text-only :class:`AnswerPart` — the shape the platform's own replies (agent
+    answers, tool string replies, greetings, error/slow-down text, pairing replies) take."""
+    return AnswerPart(message=text)
 
 
 #: A tool turn resolves to exactly one of these two shapes — no third, coercible state.
@@ -491,7 +516,7 @@ def _error_answer_text(route: ConversationRoute | None) -> str:
 
 
 def _tool_error(detail: str, route: ConversationRoute | None = None) -> _ResolvedOutcome:
-    return _ResolvedOutcome(answer_status="error", answer=_error_answer_text(route), error=detail)
+    return _ResolvedOutcome(answer_status="error", parts=[_text_part(_error_answer_text(route))], error=detail)
 
 
 async def _run_tool_turn(
@@ -584,9 +609,10 @@ async def _run_tool_turn(
     except Exception as exc:
         logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
         return _tool_error(f"reply_expr error: {exc}", route)
-    if reply is None or not reply.strip():
+    parts = _reply_parts(reply)
+    if parts is None:
         return _SilentOutcome()
-    return _ResolvedOutcome(answer_status="answered", answer=reply, error=None)
+    return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
 
 
 async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> dict[str, object]:
@@ -605,24 +631,75 @@ async def _tool_kwargs(route: ConversationRoute, payload: dict[str, object]) -> 
     return kwargs
 
 
-async def _tool_reply(route: ConversationRoute, result: object) -> str | None:
-    """The reply text the tool result maps to, or ``None`` for a silent outcome. No
-    ``reply_expr`` → the result must itself be ``None`` or a string. Otherwise the jq
-    program over the raw result, which MUST emit exactly one value and it MUST be null or a
-    string."""
+async def _tool_reply(route: ConversationRoute, result: object) -> str | list[AnswerPart] | None:
+    """The reply a tool result maps to: ``None`` for a silent outcome, a single string, or an
+    ORDERED LIST OF RICH :class:`AnswerPart` messages the delivery machine sends as separate
+    messages in order. No ``reply_expr`` → the result must itself be ``None``, a string, or a
+    list. Otherwise the jq program over the raw result, which MUST emit exactly one value and
+    it MUST be null, a string, or an array.
+
+    A reply ARRAY is the multi-message authoring surface: each element is EITHER a plain
+    string (shorthand for a text-only part) or a part OBJECT (``{message, media?, options?,
+    template?}``) — both normalize to the one internal :class:`AnswerPart` model. An empty
+    array, a blank string element, or a malformed part object (an unknown key, a bad shape) is
+    a loud ``ValueError`` — never silently coerced (order is meaning; parts are strict from
+    birth)."""
     if route.reply_expr is None:
         if result is None or isinstance(result, str):
             return result
+        if isinstance(result, list):
+            return _checked_reply_parts(result)
         raise ValueError(
-            f"a tool target with no reply_expr must return null or a string, returned {type(result).__name__}"
+            "a tool target with no reply_expr must return null, a string, or a list of parts, "
+            f"returned {type(result).__name__}"
         )
     # Bounded at one, so an over-emitting program is capped rather than materialized whole.
     values = await run_jq_bounded(route.reply_expr, result, 1)
     if len(values) != 1:
         raise ValueError(f"reply_expr must emit exactly one value, emitted {'more than one' if values else 'none'}")
     reply = values[0]
-    if reply is not None and not isinstance(reply, str):
-        raise ValueError(f"reply_expr must emit null or a string, emitted {type(reply).__name__}")
+    if reply is None or isinstance(reply, str):
+        return reply
+    if isinstance(reply, list):
+        return _checked_reply_parts(reply)
+    raise ValueError(f"reply_expr must emit null, a string, or an array of parts, emitted {type(reply).__name__}")
+
+
+def _checked_reply_parts(value: list[object]) -> list[AnswerPart]:
+    """A tool reply array normalized to ordered :class:`AnswerPart` messages: non-empty, and
+    every element EITHER a plain string (a text-only part) or a part object. A blank string, a
+    malformed/unknown-key part object (``AnswerPart`` is ``extra="forbid"``), or an
+    unsupported element type is a loud ``ValueError`` — an empty array has no message to send,
+    and a bad element would deliver an empty or garbled part."""
+    if not value:
+        raise ValueError("a tool reply array must carry at least one message, emitted an empty array")
+    parts: list[AnswerPart] = []
+    for index, element in enumerate(value):
+        if isinstance(element, str):
+            if not element.strip():
+                raise ValueError(f"tool reply array element {index} is a blank string; a text part must be non-blank")
+            parts.append(_text_part(element))
+        elif isinstance(element, dict):
+            try:
+                parts.append(AnswerPart.model_validate(element))
+            except ValueError as exc:
+                raise ValueError(f"tool reply array element {index} is not a valid part: {exc}") from exc
+        else:
+            raise ValueError(
+                f"tool reply array element {index} must be a string or a part object, got {type(element).__name__}"
+            )
+    return parts
+
+
+def _reply_parts(reply: str | list[AnswerPart] | None) -> list[AnswerPart] | None:
+    """The ordered parts a :func:`_tool_reply` result delivers, or ``None`` for a silent
+    outcome. A ``None`` reply and a blank single string are both silent; a non-blank single
+    string is one text part; a list is already normalized and validated by
+    :func:`_tool_reply`, so it passes through as the ordered parts."""
+    if reply is None:
+        return None
+    if isinstance(reply, str):
+        return [_text_part(reply)] if reply.strip() else None
     return reply
 
 
@@ -644,6 +721,7 @@ def _new_record(
     inbound_text: str,
     answer_status: AnswerStatus | None = None,
     answer: str | None = None,
+    answer_parts: list[AnswerPart] | None = None,
     error: str | None = None,
     origin: Literal["client", "operator"] = "client",
 ) -> ConversationRecord:
@@ -682,22 +760,41 @@ def _new_record(
         delivery_status=delivery_status,
         answer_status=answer_status,
         answer=answer,
+        answer_parts=answer_parts,
         error=error,
         created_at=now,
         updated_at=now,
     )
 
 
+def _answer_fields(parts: list[AnswerPart]) -> tuple[str, list[AnswerPart] | None]:
+    """The ``(answer, answer_parts)`` a record stores for an ordered ``parts`` list: the part
+    MESSAGES joined into the whole text every legacy reader consumes, and the parts list
+    ITSELF only when it adds something over that text — more than one part, or one part
+    carrying media/options/a template. A single PLAIN-TEXT answer carries ``answer_parts=None``
+    (byte-parity with the pre-parts single answer), mirroring ``ConversationAnswer.parts``. A
+    media-only part contributes nothing to ``answer``, so an all-media answer stores ``answer=""``
+    with the parts."""
+    answer = joined_answer_text(parts)
+    if len(parts) == 1 and parts[0].is_plain_text():
+        return answer, None
+    return answer, parts
+
+
 def _with_outcome(
-    intake: ConversationRecord, answer_status: AnswerStatus, answer: str, error_detail: str | None
+    intake: ConversationRecord, answer_status: AnswerStatus, parts: list[AnswerPart], error_detail: str | None
 ) -> ConversationRecord:
     """``intake`` carrying a produced outcome and moved to ``pending_delivery`` — the shape
-    :meth:`ConversationRecordStore.complete_turn` requires."""
+    :meth:`ConversationRecordStore.complete_turn` requires. ``parts`` is the ordered
+    message list; the record stores the joined ``answer`` and, for a multi-message answer,
+    the ``answer_parts`` the delivery machine sends one message at a time."""
+    answer, answer_parts = _answer_fields(parts)
     return ConversationRecord.model_validate(
         intake.model_dump()
         | {
             "answer_status": answer_status,
             "answer": answer,
+            "answer_parts": answer_parts,
             "error": error_detail,
             "delivery_status": DeliveryStatus.PENDING_DELIVERY,
             "updated_at": time.time(),
@@ -795,7 +892,7 @@ def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> Conver
     deliverable ``silent`` marker on the api door."""
     if isinstance(outcome, _SilentOutcome):
         return _with_channel_silent(intake) if intake.door == "channel" else _with_api_silent(intake)
-    return _with_outcome(intake, outcome.answer_status, outcome.answer, outcome.error)
+    return _with_outcome(intake, outcome.answer_status, outcome.parts, outcome.error)
 
 
 async def _resolve_turn_record(
@@ -852,20 +949,23 @@ async def _greeting_and_code(multichannel: _Multichannel) -> tuple[str | None, _
 
 
 def _with_greeting(outcome: _ToolOutcome, greeting: str | None) -> _ToolOutcome:
-    """Prepend a due greeting into the turn's answer. A silent outcome due a greeting becomes
-    an answered greeting-only reply — a greeting, once due, is never silently dropped;
-    an error outcome keeps the greeting prefixed to its client-safe text."""
+    """Prepend a due greeting as its own LEADING message. A greeting is a message of its
+    own, so it becomes the first ordered part ahead of the turn's parts; a silent outcome
+    due a greeting becomes an answered greeting-only reply — a greeting, once due, is never
+    silently dropped; an error outcome keeps the greeting ahead of its client-safe text. The
+    joined answer is byte-identical to the old ``f"{greeting}\n\n{answer}"`` prefix for a
+    single-part outcome."""
     if greeting is None:
         return outcome
     if isinstance(outcome, _SilentOutcome):
-        return _ResolvedOutcome(answer_status="answered", answer=greeting, error=None)
+        return _ResolvedOutcome(answer_status="answered", parts=[_text_part(greeting)], error=None)
     return _ResolvedOutcome(
-        answer_status=outcome.answer_status, answer=f"{greeting}\n\n{outcome.answer}", error=outcome.error
+        answer_status=outcome.answer_status, parts=[_text_part(greeting), *outcome.parts], error=outcome.error
     )
 
 
 def _pairing_reply(text: str) -> _ResolvedOutcome:
-    return _ResolvedOutcome(answer_status="answered", answer=text, error=None)
+    return _ResolvedOutcome(answer_status="answered", parts=[_text_part(text)], error=None)
 
 
 async def _run_pairing_turn(
@@ -1027,7 +1127,7 @@ async def _shed_with_reply(
     if owner != message_id:
         await store.delete_record(intake)
         return owner
-    completed = _with_outcome(intake, "answered", _SLOW_DOWN_TEXT, None)
+    completed = _with_outcome(intake, "answered", [_text_part(_SLOW_DOWN_TEXT)], None)
     outcome = await store.complete_turn(completed)
     if outcome != 1:
         raise RuntimeError(
@@ -1363,12 +1463,21 @@ async def operator_send(
     client_address: str,
     text: str,
     operator_principal: str,
+    media: list[MediaItem] | None = None,
+    options: list[str] | None = None,
 ) -> str:
     """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
     record's ``message_id`` (a uuid4). No turn runs: the record is minted already
     ``answered`` carrying the operator's text and handed to the delivery machine, which sends
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
+
+    ``media`` and ``options`` are OPTIONAL richer-send forms: when either is set the reply is
+    stored as a single rich :class:`AnswerPart` (``message=text`` carrying the media/options),
+    so the delivery machine sends the operator's message with its media/options exactly as it
+    sends a produced rich part; with neither set the record stays a plain single-message
+    answer (byte-parity with the pre-rich operator send). A contract-invalid media/options
+    value (an empty list, an over-cap value) raises before any state is written.
 
     For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
     text is appended to the thread's checkpoint as an ``assistant`` message BEFORE the record
@@ -1390,6 +1499,15 @@ async def operator_send(
     worker — raises the loud, retriable :class:`ThreadBusyError` (503) rather than blocking the
     caller past the proxy timeout. A full FIFO raises the loud, retriable
     :class:`ThreadQueueOverflowError` (503) before anything is written."""
+    # A rich operator send (media/options present) stores one :class:`AnswerPart` carrying
+    # the text plus its media/options — the shape the delivery machine sends as a rich part.
+    # A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich path
+    # (and unbounded by the part message cap, which only governs a rich part's text).
+    if media is None and options is None:
+        answer: str = text
+        answer_parts: list[AnswerPart] | None = None
+    else:
+        answer, answer_parts = _answer_fields([AnswerPart(message=text, media=media, options=options)])
     message_id = str(uuid4())
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)
@@ -1416,7 +1534,8 @@ async def operator_send(
             inbound_text="",
             delivery_status=DeliveryStatus.PENDING_DELIVERY,
             answer_status="answered",
-            answer=text,
+            answer=answer,
+            answer_parts=answer_parts,
             origin="operator",
         )
         await _store().create_record(record)
@@ -1595,9 +1714,12 @@ async def deliver_tool_completion(
             )
             # The guest-facing notice resolves through the DELIVERY route (where the record is
             # filed and the guest is conversing), so its own ``error_reply_text`` applies.
-            reply = _error_answer_text(route)
+            parts: list[AnswerPart] | None = [_text_part(_error_answer_text(route))]
         else:
-            if reply is None or not reply.strip():
+            # A resumed tool reply carries the same ordered-parts shape a live tool turn does
+            # (null/blank → silent, a string → one message, an array → ordered messages).
+            parts = _reply_parts(reply)
+            if parts is None:
                 # A designed silent outcome delivers nothing; it re-maps to the same null on a
                 # redelivery, so it needs no idempotency record.
                 return {"message_id": None}
@@ -1605,7 +1727,8 @@ async def deliver_tool_completion(
         # A non-success terminal: the route carries no error mapping, so deliver the uniform
         # client-safe notice (the delivery route's ``error_reply_text`` when set) — never the
         # raw internal detail, never silence.
-        reply = _error_answer_text(route)
+        parts = [_text_part(_error_answer_text(route))]
+    answer, answer_parts = _answer_fields(parts)
     record = _new_record(
         route=route,
         message_id=completion_id,
@@ -1616,7 +1739,8 @@ async def deliver_tool_completion(
         inbound_text="",
         delivery_status=DeliveryStatus.PENDING_DELIVERY,
         answer_status="answered",
-        answer=reply,
+        answer=answer,
+        answer_parts=answer_parts,
         origin="operator",
     )
     await _store().create_record(record)
@@ -1850,7 +1974,7 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
     except Exception:
         route = None
     completed = _with_outcome(
-        record, "error", _error_answer_text(route), "turn was interrupted before it produced an answer"
+        record, "error", [_text_part(_error_answer_text(route))], "turn was interrupted before it produced an answer"
     )
     outcome = await store.complete_turn(completed)
     if outcome != 1:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import string
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, cast
@@ -20,7 +20,14 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
+from tai42_contract.channels import (
+    NOTIFICATION_MESSAGE_MAX_CHARS,
+    NOTIFICATION_OPTION_MAX_CHARS,
+    NOTIFICATION_OPTIONS_MAX,
+    ChannelTemplate,
+)
 from tai42_contract.errors import ErrorKind
+from tai42_contract.interactions.models import MediaItem, check_media_list
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
@@ -150,6 +157,116 @@ class ConversationMessage(BaseModel):
         return validate_entry_params(value)
 
 
+class AnswerPart(BaseModel):
+    """One message of an ordered multi-message answer — the platform's rich part shape.
+
+    It mirrors :class:`ChannelNotification`'s CONTENT surface exactly (``message`` plus the
+    optional ``media`` / ``template`` / ``options`` richer-send forms and their validators),
+    MINUS the per-delivery routing fields (``recipient`` / ``sender_identity``) — those stay
+    on the single delivery, never per part. The delivery machine sends each part as its own
+    ``ChannelNotification``, in order, chunking the ``message`` text at the channel width and
+    carrying the part's media/template/options alongside it, exactly as a single notification
+    does today.
+
+    A part is a NEW authoring surface, so it is STRICT FROM BIRTH: unknown keys are refused
+    (``extra="forbid"``) rather than silently dropped. A tool route authors parts as a JSON
+    array whose elements are each EITHER a plain string (shorthand for a text-only part) or a
+    part object — both normalize to THIS one model. Frozen.
+
+    ``message`` mirrors :class:`ChannelNotification.message`'s blank-vs-media RULE: non-blank BY
+    DEFAULT, EXCEPT it may be blank for a MEDIA-ONLY part — a caption-less image with no text
+    carrier. The admissible states are "``message`` non-blank" OR "blank ``message`` WITH non-empty
+    ``media``"; a blank ``message`` and no media has nothing to deliver and is refused. ``options``
+    REQUIRE a non-blank ``message`` (a tappable choice needs a prompt), and a ``template`` rides a
+    non-blank ``message`` too — so a media-only part carries only ``media``. Unlike
+    ``ChannelNotification`` (always constructed in code), a part is authored as JSON where the
+    ``message`` key may be ABSENT, so it defaults to ``""`` — a media-only part is just ``{"media": …}``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    message: str = ""  # human-readable text; blank/omitted ONLY for a media-only part (media carries it)
+    media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
+    template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
+    options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+
+    @field_validator("message")
+    @classmethod
+    def _message_valid(cls, value: str) -> str:
+        # Mirrors ChannelNotification.message: length cap only here, with the blank-vs-media
+        # rule decided in :meth:`_message_or_media` once every field is bound.
+        if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
+            raise ValueError(f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}")
+        return value
+
+    @field_validator("media")
+    @classmethod
+    def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+        if value is not None:
+            check_media_list(value)
+        return value
+
+    @field_validator("options")
+    @classmethod
+    def _options_valid(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("options must be a non-empty list when present")
+        if len(value) > NOTIFICATION_OPTIONS_MAX:
+            raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
+        for option in value:
+            if not option.strip():
+                raise ValueError("each option must be a non-blank string")
+            if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
+                raise ValueError(
+                    f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _message_or_media(self) -> AnswerPart:
+        # Mirrors ChannelNotification._message_or_media: a part is non-blank text OR a
+        # media-only part (blank message carried by non-empty media). A blank message with no
+        # media has nothing to deliver; options require a non-blank message (a choice needs a
+        # prompt); a template rides a non-blank message (its ``not self.media`` branch).
+        if not self.message.strip():
+            if not self.media:
+                raise ValueError("message must be non-blank unless media carries the content")
+            if self.options is not None:
+                raise ValueError("a media-only (blank-message) part carries no options; a choice needs a prompt")
+        return self
+
+    @model_validator(mode="after")
+    def _media_template_exclusive(self) -> AnswerPart:
+        if self.media is not None and self.template is not None:
+            raise ValueError("media and template are mutually exclusive on one part")
+        return self
+
+    @model_validator(mode="after")
+    def _options_template_exclusive(self) -> AnswerPart:
+        if self.options is not None and self.template is not None:
+            raise ValueError("options and template are mutually exclusive on one part")
+        return self
+
+    def is_plain_text(self) -> bool:
+        """Whether this part carries nothing beyond its ``message`` — the case a
+        single-message answer degenerates to (``parts`` then adds nothing over the joined
+        ``answer`` and is dropped). A media-only part (blank message carrying media) is NOT
+        plain text — it adds the media the joined ``answer`` cannot carry."""
+        return self.media is None and self.template is None and self.options is None
+
+
+def joined_answer_text(parts: Sequence[AnswerPart]) -> str:
+    """The whole-text form of an ordered ``parts`` list: the NON-BLANK part messages joined
+    with a blank line — the single string every legacy reader (api-door callbacks, sync waits,
+    transcripts) consumes. A MEDIA-ONLY part (blank message) contributes NOTHING to the text,
+    so an all-media answer joins to the empty string; the media itself rides ``parts``, which a
+    parts-aware consumer delivers. The one definition both the wire :class:`ConversationAnswer`
+    and the host record share, so the joined text can never diverge between them."""
+    return "\n\n".join(part.message for part in parts if part.message.strip())
+
+
 class ConversationAnswer(BaseModel):
     """The outcome of one conversation turn — the body POSTed (HMAC-signed) to a
     ``door=api`` row's ``callback_url`` AND the bounded sync-wait payload.
@@ -157,7 +274,18 @@ class ConversationAnswer(BaseModel):
     ``message_id`` correlates it to the ``202``/``200`` the door returned. On
     ``status="error"`` the ``answer`` is generic client-safe text, never an internal
     detail. On ``status="silent"`` the turn produced no reply and ``answer`` is absent.
-    Frozen.
+
+    ``parts`` is the ordered list of :class:`AnswerPart` messages the turn produced when a
+    single joined string would lose something — more than one message, or one message
+    carrying media/options/a template. It is order-significant; when it is present ``answer``
+    equals the parts' NON-BLANK MESSAGE texts joined with ``"\n\n"`` (:func:`joined_answer_text`),
+    so every consumer of ``answer`` (api-door callbacks, sync waits, transcripts) keeps seeing
+    the whole text with zero migration while a parts-aware consumer reads ``parts`` and delivers
+    each as its own message (with its media/options). A single PLAIN-TEXT answer carries
+    ``parts=None`` (the joined ``answer`` says everything); a richer or multi-message answer
+    carries the parts. An ALL-MEDIA answer (every part media-only) joins to the EMPTY string, so
+    on ``answered``/``error`` a blank ``answer`` is admissible ONLY when ``parts`` carry the
+    content — the media rides ``parts``. Frozen.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -166,15 +294,40 @@ class ConversationAnswer(BaseModel):
     thread_id: str = Field(min_length=1)
     status: AnswerStatus
     answer: str | None = None
+    parts: list[AnswerPart] | None = None
 
     @model_validator(mode="after")
     def _answer_matches_status(self) -> ConversationAnswer:
-        """``answered``/``error`` carry non-blank answer text; ``silent`` carries none."""
+        """``answered``/``error`` carry answer text (a string, possibly EMPTY for an all-media
+        answer whose ``parts`` carry the content); ``silent`` carries none. A blank ``answer`` is
+        admissible on ``answered``/``error`` ONLY when ``parts`` is present — otherwise there is
+        nothing to deliver."""
         if self.status == "silent":
             if self.answer is not None:
                 raise ValueError("a silent answer carries no answer text")
-        elif not (self.answer or "").strip():
-            raise ValueError("an answered/error answer must carry non-blank text")
+            return self
+        if self.answer is None:
+            raise ValueError("an answered/error answer carries answer text (empty only for an all-media answer)")
+        if not self.answer.strip() and not self.parts:
+            raise ValueError("an answered/error answer with blank text must carry media-only parts")
+        return self
+
+    @model_validator(mode="after")
+    def _parts_mirror_the_answer(self) -> ConversationAnswer:
+        """A present ``parts`` list is non-empty, rides an ``answered``/``error`` outcome
+        (never ``silent``), and its NON-BLANK part MESSAGE texts join with ``"\n\n"`` to exactly
+        ``answer`` (a media-only part contributes nothing) — so the joined text a legacy consumer
+        reads and the ordered parts a parts-aware consumer delivers can never disagree. Each
+        part's own shape (message-or-media, media/options/template exclusivity) is enforced by
+        :class:`AnswerPart`."""
+        if self.parts is None:
+            return self
+        if not self.parts:
+            raise ValueError("parts must be a non-empty list when present")
+        if self.status == "silent":
+            raise ValueError("a silent answer carries no parts")
+        if joined_answer_text(self.parts) != (self.answer or ""):
+            raise ValueError("answer must equal the non-blank part messages joined with a blank line")
         return self
 
 
@@ -506,6 +659,7 @@ __all__ = [
     "ENTRY_PARAM_VALUE_MAX_CHARS",
     "GREETING_PLACEHOLDER",
     "ROUTE_NAME_RE",
+    "AnswerPart",
     "AnswerStatus",
     "BlankInboundTextError",
     "ConversationAnswer",
@@ -523,5 +677,6 @@ __all__ = [
     "Person",
     "PersonAddress",
     "TargetConversationConfig",
+    "joined_answer_text",
     "validate_entry_params",
 ]

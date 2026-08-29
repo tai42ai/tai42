@@ -74,26 +74,26 @@ class NotifyUser(BaseModel):
     media: list[MediaItem] | None = Field(
         default=None,
         description=(
-            "Optional display media sent WITH the message on the named channel. Requires a channel that "
-            "advertises media support (else a 501) and a named channel at all (else a 400); mutually "
-            "exclusive with template."
+            "Optional display media sent WITH the message. On a named channel it requires a channel that "
+            "advertises media support (else a 501); with no channel it is stored on the internal inbox "
+            "record and rendered there. Mutually exclusive with template."
         ),
     )
     template: ChannelTemplate | None = Field(
         default=None,
         description=(
-            "Optional pre-approved template for an out-of-window send on the named channel. Requires a "
-            "channel that advertises template support (else a 501) and a named channel at all (else a "
-            "400); mutually exclusive with media and options."
+            "Optional pre-approved template for an out-of-window send. On a named channel it requires a "
+            "channel that advertises template support (else a 501); with no channel it is stored on the "
+            "internal inbox record. Mutually exclusive with media and options."
         ),
     )
     options: list[str] | None = Field(
         default=None,
         description=(
-            "Optional tappable options sent WITH the message on the named channel; a tap enters the "
-            "conversation as a visitor message on channels that support it. Requires a channel that "
-            "advertises interactive support (else a 501) and a named channel at all (else a 400); "
-            "mutually exclusive with template, may combine with media."
+            "Optional tappable options sent WITH the message; a tap enters the conversation as a visitor "
+            "message on channels that support it. On a named channel it requires a channel that advertises "
+            "interactive support (else a 501); with no channel it is stored on the internal inbox record. "
+            "Mutually exclusive with template, may combine with media."
         ),
     )
 
@@ -139,9 +139,10 @@ async def notify_user(
     failure raises loudly, never a silent no-op:
 
     * a blank message, an unknown channel name, a blank recipient/audience, a
-      caller-supplied ``sender_identity``, ``media``/``template``/``options`` with no
-      named channel, or a channel's permanent refusal of the input's shape (retrying
-      cannot succeed) → 400;
+      caller-supplied ``sender_identity``, a contract-invalid ``media``/``template``/
+      ``options`` combination (an empty list, an over-cap value, or a mutually exclusive
+      media+template / options+template), or a channel's permanent refusal of the input's
+      shape (retrying cannot succeed) → 400;
     * a restricted caller addressing another identity (cross-identity denial) → 403;
     * a channel that cannot notify, or does not advertise the
       ``media``/``template``/``options`` capability the send needs → 501;
@@ -151,10 +152,11 @@ async def notify_user(
 
     ``media`` (display media sent with the message), ``template`` (a pre-approved
     out-of-window send) and ``options`` (tappable options a tap of which enters the
-    conversation) are OPTIONAL richer-send forms carried to the channel; the contract
-    enforces media/template and options/template are each mutually exclusive (options may
-    combine with media). Each needs a channel that advertises the matching capability —
-    otherwise the send is refused as a 501, never downgraded to a silent freeform send.
+    conversation) are OPTIONAL richer-send forms; the contract enforces media/template and
+    options/template are each mutually exclusive (options may combine with media). On a
+    named channel each needs a channel that advertises the matching capability — otherwise
+    the send is refused as a 501, never downgraded to a silent freeform send. With no
+    channel they are stored on the internal inbox record and rendered there.
 
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).

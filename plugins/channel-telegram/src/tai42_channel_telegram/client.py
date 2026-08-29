@@ -58,3 +58,42 @@ async def send_chat_action(chat_id: int, action: str) -> None:
             f"telegram sendChatAction rejected: "
             f"error_code={data.get('error_code')} description={data.get('description')!r}"
         )
+
+
+async def answer_callback_query(callback_query_id: str) -> None:
+    """POST one Bot API ``answerCallbackQuery`` so the tapped inline button stops
+    showing its loading spinner.
+
+    Fire-and-forget from the caller's view: returns on the Bot API's ``ok: true``
+    and raises :class:`~tai42_contract.channels.ChannelDeliveryError` on an unset
+    token, a transport error, a non-200 status, a non-JSON body, or ``ok: false``
+    — the inbound door swallows that failure (an unanswered callback only leaves a
+    spinner; it must never fail the webhook and trigger a redelivery). The request
+    URL embeds the bot token and never appears in error text.
+    """
+    settings = telegram_settings()
+    try:
+        token = require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
+    except ValueError as exc:
+        raise ChannelDeliveryError(str(exc)) from exc
+    try:
+        async with telegram_http() as client:
+            response = await client.post(
+                f"{settings.api_base_url}/bot{token}/answerCallbackQuery",
+                json={"callback_query_id": callback_query_id},
+            )
+    except httpx.HTTPError as exc:
+        raise ChannelDeliveryError(f"telegram answerCallbackQuery failed: {type(exc).__name__}: {exc}") from exc
+    if response.status_code != 200:
+        raise ChannelDeliveryError(
+            f"telegram answerCallbackQuery returned HTTP {response.status_code}: {response.text[:200]}"
+        )
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ChannelDeliveryError("telegram answerCallbackQuery returned a non-JSON body") from exc
+    if not data.get("ok"):
+        raise ChannelDeliveryError(
+            f"telegram answerCallbackQuery rejected: "
+            f"error_code={data.get('error_code')} description={data.get('description')!r}"
+        )

@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
+from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.channel import TwilioChannel
 from tai42_channel_twilio.correlation import PendingQuestionExistsError
@@ -62,6 +63,88 @@ async def test_select_rendering_numbers_options(fake_redis: FakeRedis, fake_http
 
     body = fake_httpx.calls[0]["data"]["Body"]
     assert body == "Which env?\n1. staging\n2. production\nReply with the text of one option."
+
+
+def test_channel_advertises_media_but_not_interactive_notifications():
+    # MMS media is real; SMS has no tappable buttons, so interactive is NOT advertised
+    # (the guard then refuses a notify with options — no fake affordance).
+    assert TwilioChannel.supports_media_notifications is True
+    assert getattr(TwilioChannel, "supports_interactive_notifications", False) is False
+
+
+async def test_deliver_attaches_image_media_and_appends_links(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted())
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a diagram"),
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/b.png", caption=None),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/spec", caption="the spec"),
+    ]
+    await TwilioChannel().deliver(make_delivery(question="See attached.", media=media))
+
+    data = fake_httpx.calls[0]["data"]
+    # Each image is a MediaUrl (repeated field, a list on the wire).
+    assert data["MediaUrl"] == ["https://cdn.test/a.png", "https://cdn.test/b.png"]
+    # The link rides as an appended Body line.
+    assert data["Body"] == "See attached.\nthe spec: https://docs.test/spec"
+
+
+async def test_deliver_rejects_data_uri_image_before_reserve_or_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
+    with pytest.raises(ChannelInputError, match="data: image"):
+        await TwilioChannel().deliver(make_delivery(media=media))
+    # Refused up front: nothing reserved, nothing sent.
+    assert not fake_httpx.calls
+    assert not fake_redis.store
+
+
+async def test_notify_attaches_image_media_and_appends_links(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(response(201, json={"sid": "SM_media"}))
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/y", caption="doc"),
+    ]
+    ids = await TwilioChannel().notify(ChannelNotification(message="Update.", media=media))
+
+    assert ids == ["SM_media"]
+    data = fake_httpx.calls[0]["data"]
+    assert data["MediaUrl"] == ["https://cdn.test/x.png"]
+    assert data["Body"] == "Update.\ndoc: https://docs.test/y"
+
+
+async def test_notify_media_only_sends_a_body_less_mms(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A media-only notification (blank message, image only) sends a body-less MMS: the Body form
+    # field is OMITTED entirely and only the MediaUrl rides — Twilio accepts that with media.
+    fake_httpx.responses.append(response(201, json={"sid": "SM_mediaonly"}))
+    media = [MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None)]
+    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+
+    assert ids == ["SM_mediaonly"]
+    data = fake_httpx.calls[0]["data"]
+    assert data["MediaUrl"] == ["https://cdn.test/x.png"]
+    assert "Body" not in data  # no empty Body sent
+
+
+async def test_notify_media_only_with_a_link_renders_the_link_as_the_body(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A media-only notification whose media carries a link renders that link AS the Body (no
+    # leading blank line from the empty message), alongside any image MediaUrl.
+    fake_httpx.responses.append(response(201, json={"sid": "SM_link"}))
+    media = [
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/y", caption="doc"),
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/x.png", caption=None),
+    ]
+    ids = await TwilioChannel().notify(ChannelNotification(message="", media=media))
+
+    assert ids == ["SM_link"]
+    data = fake_httpx.calls[0]["data"]
+    assert data["Body"] == "doc: https://docs.test/y"
+    assert data["MediaUrl"] == ["https://cdn.test/x.png"]
+
+
+async def test_notify_rejects_data_uri_image_before_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
+    with pytest.raises(ChannelInputError, match="data: image"):
+        await TwilioChannel().notify(ChannelNotification(message="hi", media=media))
+    assert not fake_httpx.calls
 
 
 async def test_reserve_precedes_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):

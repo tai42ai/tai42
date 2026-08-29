@@ -49,6 +49,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import BlankInboundTextError
 
+from tai42_channel_slack.blocks import is_select_action
 from tai42_channel_slack.channel import open_modal_view
 from tai42_channel_slack.correlation import (
     claim_dedupe,
@@ -466,17 +467,70 @@ async def slack_interactive(request: Request) -> Response:
 
 
 async def _handle_block_actions(payload: dict[str, Any]) -> Response:
-    """Open the form modal for a ``tai42_form_open`` click.
+    """Route one ``block_actions`` click.
 
-    Any other action is acked-ignored. A missing/expired form record (the button
-    outlived its question) is acked-ignored too — there is nothing to open. A live
-    record opens the modal inline with the payload's short-lived ``trigger_id``; a
-    failed ``views.open`` surfaces as a loud 500.
+    A ``tai42_form_open`` click opens the form modal; a ``tai42_select:<index>`` click
+    (a select-answer or suggested-reply tap, or a notify option) resolves the option
+    text; every other action is acked-ignored.
     """
     actions = payload.get("actions")
     action = actions[0] if isinstance(actions, list) and actions and isinstance(actions[0], dict) else None
-    if action is None or action.get("action_id") != FORM_OPEN_ACTION_ID:
+    if action is None:
         return JSONResponse({"status": "ignored"})
+    action_id = action.get("action_id")
+    if action_id == FORM_OPEN_ACTION_ID:
+        return await _open_form_modal(payload, action)
+    if isinstance(action_id, str) and is_select_action(action_id):
+        return await _resolve_option_tap(payload, action)
+    return JSONResponse({"status": "ignored"})
+
+
+async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -> Response:
+    """Resolve an option-button tap (``tai42_select:<index>``) to its option text.
+
+    The button's ``value`` IS the option text; the anchor message's ``ts`` (from the
+    payload container) is the correlation key the same as an in-thread reply. The tap
+    is gated by the SAME allowlist the typed-reply path applies (``_process_event``): a
+    tap from an allowlisted channel resolves against a live select/suggested-reply ask
+    through the shared ladder, or (a notify option / a correlation miss) enters the
+    conversation as a visitor message; a tap from a channel outside the allowlist bridges
+    directly, exactly as a typed message from that channel would, never touching a pending
+    ask. A malformed tap (no value, no anchor) is acked-ignored, never a 5xx.
+    """
+    value = action.get("value")
+    if not isinstance(value, str) or not value:
+        return JSONResponse({"status": "ignored"})
+    container = payload.get("container")
+    message_ts = container.get("message_ts") if isinstance(container, dict) else None
+    channel_obj = payload.get("channel")
+    channel = channel_obj.get("id") if isinstance(channel_obj, dict) else None
+    if not isinstance(channel, str) or not channel:
+        channel = container.get("channel_id") if isinstance(container, dict) else None
+    if not isinstance(message_ts, str) or not message_ts or not isinstance(channel, str) or not channel:
+        return JSONResponse({"status": "ignored"})
+    # A tap has no Events ``event_id``; the per-tap ``action_ts`` (else the anchor ts)
+    # is the conversation-seam dedupe key for a bridged (notify-option) turn.
+    action_ts = action.get("action_ts")
+    dedupe_id = action_ts if isinstance(action_ts, str) and action_ts else message_ts
+    settings = slack_settings()
+    recipients = set(settings.allowed_recipients)
+    if settings.default_recipient is not None:
+        recipients.add(settings.default_recipient)
+    if channel not in recipients:
+        # Defense-in-depth, mirroring the typed-reply gate: a tap from a non-allowlisted
+        # channel is not an answer to any ask — it bridges exactly as a typed message
+        # from that channel would.
+        return await _bridge(settings.bot_user_id, channel, value, dedupe_id)
+    return await _resolve_answer(message_ts, value, settings.bot_user_id, channel, dedupe_id)
+
+
+async def _open_form_modal(payload: dict[str, Any], action: dict[str, Any]) -> Response:
+    """Open the form modal for a ``tai42_form_open`` click.
+
+    A missing/expired form record (the button outlived its question) is acked-ignored
+    — there is nothing to open. A live record opens the modal inline with the payload's
+    short-lived ``trigger_id``; a failed ``views.open`` surfaces as a loud 500.
+    """
     interaction_id = action.get("value")
     if not isinstance(interaction_id, str) or not interaction_id:
         raise ValueError("tai42_form_open action carried no interaction id")

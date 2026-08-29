@@ -81,6 +81,8 @@ _LIST_ROW_TITLE_MAX_CHARS = 24  # list-row title
 _INTERACTIVE_BODY_MAX_CHARS = 1024  # interactive body text
 # The list-opening button label (its own 20-char cap); a fixed, generic prompt.
 _LIST_BUTTON_LABEL = "Choose an option"
+# The footer on the numbered-text fallback — the human types an option instead of tapping.
+_NUMBERED_FALLBACK_FOOTER = "Reply with the text of one option."
 
 # A Flow's name on Meta, the schema-hash suffix making it a deterministic label
 # for operator legibility — NOT a uniqueness key: Meta does not enforce flow-name
@@ -165,11 +167,12 @@ def _render_link(delivery: ChannelDelivery) -> str:
     return f"{delivery.question}\n\nAnswer here: {delivery.callback_url}"
 
 
-def _numbered_options(delivery: ChannelDelivery) -> str:
-    """The numbered-text fallback body for a select ask past the interactive caps."""
-    lines = [delivery.question]
-    lines.extend(f"{index}. {option}" for index, option in enumerate(delivery.options or [], start=1))
-    lines.append("Reply with the text of one option.")
+def _numbered_body(body: str, options: list[str]) -> str:
+    """The numbered-text fallback body for a tappable choice past the interactive
+    caps: the body, the options numbered 1-based, then the type-an-option footer."""
+    lines = [body]
+    lines.extend(f"{index}. {option}" for index, option in enumerate(options, start=1))
+    lines.append(_NUMBERED_FALLBACK_FOOTER)
     return "\n".join(lines)
 
 
@@ -183,11 +186,22 @@ def _interaction_ids(delivery: ChannelDelivery) -> list[tuple[str, str]]:
     return [(f"{delivery.interaction_id}:{index}", option) for index, option in enumerate(delivery.options or [])]
 
 
-def _select_send_kind(delivery: ChannelDelivery) -> str:
-    """Which native shape a select ask renders as: ``"buttons"``, ``"list"``, or
-    ``"fallback"`` (numbered text) when it fits neither interactive shape."""
-    options = delivery.options or []
-    if len(delivery.question) > _INTERACTIVE_BODY_MAX_CHARS:
+def _notification_option_ids(options: list[str]) -> list[tuple[str, str]]:
+    """``(id, title)`` per notification option, id = the bare 0-based index.
+
+    A notification tap is NOT a question answer: it enters the conversation as a
+    visitor message (the inbound handler bridges the tapped title). The id carries
+    no ``:``-separated interaction part, so ``_map_tap_to_answer`` can never mistake
+    it for a correlated reply to some unrelated pending ask on the same pair.
+    """
+    return [(str(index), option) for index, option in enumerate(options)]
+
+
+def _interactive_choice_kind(body: str, options: list[str]) -> str:
+    """Which native shape a tappable-choice message renders as: ``"buttons"``,
+    ``"list"``, or ``"fallback"`` (numbered text) when it fits neither interactive
+    shape. Shared by the select ask and the interactive notification."""
+    if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
         return "fallback"
     if (
         len(options) <= _BUTTON_MAX_COUNT
@@ -201,26 +215,31 @@ def _select_send_kind(delivery: ChannelDelivery) -> str:
     return "fallback"
 
 
+async def _send_choice(
+    phone_number_id: str, target: str, body: str, options: list[str], ids: list[tuple[str, str]]
+) -> list[str]:
+    """Send one tappable-choice message in its native shape and return its
+    ``wamid`` (one message). ``ids`` are the ``(id, title)`` reply ids; the numbered
+    fallback carries no ids (the human types an option). Shared by the select ask
+    and the interactive notification."""
+    kind = _interactive_choice_kind(body, options)
+    if kind == "buttons":
+        return [await send_interactive_buttons(phone_number_id=phone_number_id, to=target, body=body, buttons=ids)]
+    if kind == "list":
+        return [
+            await send_interactive_list(
+                phone_number_id=phone_number_id, to=target, body=body, button_text=_LIST_BUTTON_LABEL, rows=ids
+            )
+        ]
+    return [await send_message(phone_number_id=phone_number_id, to=target, body=_numbered_body(body, options))]
+
+
 async def _send_question(phone_number_id: str, target: str, delivery: ChannelDelivery) -> None:
     """Push a Tier-2 question to the target in its native shape."""
     if delivery.answer_format != "select":
         await send_message(phone_number_id=phone_number_id, to=target, body=delivery.question)
         return
-    kind = _select_send_kind(delivery)
-    if kind == "buttons":
-        await send_interactive_buttons(
-            phone_number_id=phone_number_id, to=target, body=delivery.question, buttons=_interaction_ids(delivery)
-        )
-    elif kind == "list":
-        await send_interactive_list(
-            phone_number_id=phone_number_id,
-            to=target,
-            body=delivery.question,
-            button_text=_LIST_BUTTON_LABEL,
-            rows=_interaction_ids(delivery),
-        )
-    else:
-        await send_message(phone_number_id=phone_number_id, to=target, body=_numbered_options(delivery))
+    await _send_choice(phone_number_id, target, delivery.question, delivery.options or [], _interaction_ids(delivery))
 
 
 def _require_recipient(requested: str | None, message: str) -> str:
@@ -258,23 +277,27 @@ def _link_line(item: MediaItem) -> str:
     return f"{item.caption}: {item.url}" if item.caption else item.url
 
 
-async def _send_body_and_media(phone_number_id: str, target: str, notification: ChannelNotification) -> list[str]:
-    """Send the freeform body (with any ``link`` items appended) then each
-    ``image`` item as its own image message; return every ``wamid`` in send order.
+def _body_with_links(message: str, links: list[MediaItem]) -> str:
+    """The message body with each ``link`` media item appended as its own line. A blank
+    ``message`` (a media-only send) contributes no leading blank line — the body is then the
+    link lines alone, or ``""`` when there are no links (an images-only send whose body is
+    skipped entirely)."""
+    link_lines = [_link_line(item) for item in links]
+    if not message.strip():
+        return "\n".join(link_lines)
+    if not link_lines:
+        return message
+    return "\n".join([message, *link_lines])
+
+
+async def _send_images(phone_number_id: str, target: str, images: list[MediaItem], sent: list[str]) -> list[str]:
+    """Send each ``image`` item as its own image message, extending ``sent`` with the
+    minted ``wamid`` in order and returning it.
 
     Each image is its own message, so there is no native per-send image cap here — the
     platform guard bounds the item count. A part that fails mid-send raises naming the
     wamids already delivered (partial delivery stays visible).
     """
-    media = notification.media or []
-    images = [item for item in media if item.kind == MediaKind.IMAGE]
-    links = [item for item in media if item.kind == MediaKind.LINK]
-
-    body = notification.message
-    if links:
-        body = "\n".join([body, *(_link_line(item) for item in links)])
-
-    sent: list[str] = [await send_message(phone_number_id=phone_number_id, to=target, body=body)]
     for image in images:
         try:
             sent.append(
@@ -283,6 +306,59 @@ async def _send_body_and_media(phone_number_id: str, target: str, notification: 
         except ChannelDeliveryError as exc:
             raise ChannelDeliveryError(f"WhatsApp multi-part send failed after delivering {sent}: {exc}") from exc
     return sent
+
+
+async def _send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[str]:
+    """Send a delivered question's accompanying display media as its own messages,
+    BEFORE the question — any ``link`` items as one text line-block, then each
+    ``image`` item as its own image message (the same per-item send as ``notify``).
+
+    Media rides ahead of the question so the actionable prompt (the last message,
+    carrying any tappable widget) stays at the foot of the chat. Sent before any
+    reservation, so a media failure raises with nothing reserved; a partial send
+    raises naming the wamids already delivered.
+    """
+    images = [item for item in media if item.kind == MediaKind.IMAGE]
+    links = [item for item in media if item.kind == MediaKind.LINK]
+    sent: list[str] = []
+    if links:
+        sent.append(
+            await send_message(
+                phone_number_id=phone_number_id, to=target, body="\n".join(_link_line(item) for item in links)
+            )
+        )
+    return await _send_images(phone_number_id, target, images, sent)
+
+
+async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[str]:
+    """Send a freeform notification: the body (with any ``link`` items appended,
+    rendered as native tappable buttons/list when ``options`` are present) then each
+    ``image`` item as its own image message; return every ``wamid`` in send order.
+
+    ``options`` are a tappable choice a tap enters into the conversation as a visitor
+    message (their reply ids carry no interaction part, so a tap is never mistaken for
+    an answer to a pending ask). A MEDIA-ONLY notification (blank message, no options) skips
+    the body send entirely and delivers just its image message(s); when it carries ``link``
+    items those render as the body text, so only a truly text-less images-only send omits the
+    body. A part that fails mid-send raises naming the wamids already delivered (partial
+    delivery stays visible).
+    """
+    media = notification.media or []
+    images = [item for item in media if item.kind == MediaKind.IMAGE]
+    links = [item for item in media if item.kind == MediaKind.LINK]
+    body = _body_with_links(notification.message, links)
+
+    if notification.options:
+        # options require a non-blank message (contract), so ``body`` is always non-blank here.
+        sent = await _send_choice(
+            phone_number_id, target, body, notification.options, _notification_option_ids(notification.options)
+        )
+    elif body:
+        sent = [await send_message(phone_number_id=phone_number_id, to=target, body=body)]
+    else:
+        # A media-only images-only send: no body message, just the image message(s) below.
+        sent = []
+    return await _send_images(phone_number_id, target, images, sent)
 
 
 async def _send_template(
@@ -296,10 +372,12 @@ async def _send_template(
 class WhatsAppChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol."""
 
-    # This channel sends images and out-of-window templates; the central
-    # notify_user capability guard reads these before dispatching either.
+    # This channel sends images and out-of-window templates, and renders a
+    # notification's tappable options as native reply buttons/list; the central
+    # notify_user capability guard reads these before dispatching each.
     supports_media_notifications: ClassVar[bool] = True
     supports_template_notifications: ClassVar[bool] = True
+    supports_interactive_notifications: ClassVar[bool] = True
     # This channel renders a form ask as a WhatsApp Flow; the ask_user helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
@@ -327,9 +405,13 @@ class WhatsAppChannel:
         The question is a freeform send, so the recipient is required but not
         allowlist-fenced (Meta's 24-hour window is the fence). An ask already past
         its deadline is refused loudly for every format before any reservation or
-        send. A select ask renders in its native shape (buttons/list/numbered
-        text); the reservation carries the ask's options and interaction id so an
-        interactive tap resolves back to the exact option text.
+        send. Any accompanying display ``media`` is sent FIRST — each ``image`` as
+        its own image message and any ``link`` items as a text line-block, the same
+        per-item send ``notify`` uses — so the question (carrying any tappable
+        widget) stays the last, actionable message; a media failure raises before
+        any reservation. A select ask renders in its native shape (buttons/list/
+        numbered text); the reservation carries the ask's options and interaction id
+        so an interactive tap resolves back to the exact option text.
         """
         settings = whatsapp_settings()
         phone_number_id = require_delivery_setting(
@@ -344,6 +426,11 @@ class WhatsAppChannel:
                 f"interaction {delivery.interaction_id} already timed out "
                 f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
             )
+
+        # Display media rides ahead of the question — sent before any reservation, so
+        # a media failure raises with nothing reserved.
+        if delivery.media:
+            await _send_media_prelude(phone_number_id, target, list(delivery.media))
 
         if delivery.answer_format in _TIER1_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
@@ -380,8 +467,10 @@ class WhatsAppChannel:
         human saw it). ``sender_identity`` set → send FROM that ``phone_number_id``;
         unset → the configured ``CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID``. When
         ``template`` is set the send is the out-of-window template (recipient
-        allowlist-or-known-contact); otherwise the freeform body plus any media
-        parts (freeform recipient unfenced). The recipient is always required.
+        allowlist-or-known-contact); otherwise the freeform body plus any tappable
+        ``options`` (native reply buttons/list — a tap enters the conversation as a
+        visitor message) and any media parts (freeform recipient unfenced). The
+        recipient is always required.
         """
         settings = whatsapp_settings()
         if notification.sender_identity is not None:
@@ -397,4 +486,4 @@ class WhatsAppChannel:
 
         if notification.template is not None:
             return await _send_template(settings, phone_number_id, target, notification.template)
-        return await _send_body_and_media(phone_number_id, target, notification)
+        return await _send_notification(phone_number_id, target, notification)

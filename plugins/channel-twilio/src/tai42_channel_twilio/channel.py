@@ -12,6 +12,20 @@ WhatsApp (``whatsapp:``-prefixed pair): a freeform ``Body`` is accepted only
 inside Twilio's 24-hour customer-service window, else Twilio rejects with error
 63016 as a ``ChannelDeliveryError``.
 
+Media (:class:`MediaItem`) rides ``deliver`` and ``notify`` as MMS/WhatsApp media:
+each ``image`` item attaches as a Twilio ``MediaUrl`` (a public https url — a
+``data:`` image is unrenderable BY NATURE and raises
+:class:`~tai42_contract.channels.ChannelInputError`), and each ``link`` item is
+appended to the ``Body`` as a labelled line (SMS carries no rich link unfurling).
+
+HONEST CEILING — options: an SMS/MMS message has no tappable buttons, so this
+channel does NOT advertise ``supports_interactive_notifications`` and never receives
+a ``notify`` carrying tappable options (the central guard refuses it up front). A
+``select`` ASK still renders its options as numbered ``Body`` lines and the human
+answers by TYPING one option (the inbound webhook forwards the typed reply verbatim
+to the callback door, which validates it against the option set) — the medium's
+honest ceiling, a real text-reply mapping, never a fake button affordance.
+
 The recipient allowlist governs ask_user deliveries; a bridge reply carries a
 ``sender_identity`` and goes solely to the address that initiated the
 conversation, bypassing the allowlist.
@@ -21,8 +35,15 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from typing import ClassVar
 
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification
+from tai42_contract.channels import (
+    ChannelDelivery,
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+)
+from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_twilio.client import send_message
 from tai42_channel_twilio.correlation import release_pending, reserve_pending
@@ -32,10 +53,36 @@ from tai42_channel_twilio.settings import TwilioSettings, require_delivery_setti
 _TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
+def _link_lines(media: list[MediaItem] | None) -> list[str]:
+    """The ``link`` media items rendered as labelled ``Body`` lines (SMS has no rich
+    link cards, so a link rides as text)."""
+    return [
+        f"{item.caption}: {item.url}" if item.caption else item.url
+        for item in (media or [])
+        if item.kind is MediaKind.LINK
+    ]
+
+
+def _image_media_urls(media: list[MediaItem] | None) -> list[str]:
+    """The ``image`` items' urls to attach as MMS ``MediaUrl`` — refusing a ``data:``
+    image (Twilio fetches a public url; an inline data URI has none) before any send."""
+    urls: list[str] = []
+    for item in media or []:
+        if item.kind is MediaKind.IMAGE:
+            if item.url.startswith("data:"):
+                raise ChannelInputError(
+                    "twilio cannot attach an inline data: image; MMS MediaUrl requires a public https url "
+                    f"(caption={item.caption!r})"
+                )
+            urls.append(item.url)
+    return urls
+
+
 def _render_question(delivery: ChannelDelivery) -> str:
-    """The SMS body for a Tier-2 ask (``text`` or ``select``): the question, plus
-    numbered options for a select ask."""
-    lines = [delivery.question]
+    """The SMS body for a Tier-2 ask (``text`` or ``select``): the question, any
+    ``link`` media as labelled lines, plus numbered options (a select answer set, or a
+    text ask's suggested replies) the human answers by typing one."""
+    lines = [delivery.question, *_link_lines(delivery.media)]
     if delivery.options:
         lines.extend(f"{index}. {option}" for index, option in enumerate(delivery.options, start=1))
         lines.append("Reply with the text of one option.")
@@ -43,9 +90,10 @@ def _render_question(delivery: ChannelDelivery) -> str:
 
 
 def _render_link(delivery: ChannelDelivery) -> str:
-    """The SMS body for a Tier-1 ask (``confirm`` or ``external``): the question
-    plus the tappable callback link."""
-    return f"{delivery.question}\n\nAnswer here: {delivery.callback_url}"
+    """The SMS body for a Tier-1 ask (``confirm`` or ``external``): the question, any
+    ``link`` media as labelled lines, then the tappable callback link."""
+    lines = [delivery.question, *_link_lines(delivery.media), "", f"Answer here: {delivery.callback_url}"]
+    return "\n".join(lines)
 
 
 def _resolve_target(settings: TwilioSettings, requested: str | None) -> str:
@@ -65,7 +113,16 @@ def _resolve_target(settings: TwilioSettings, requested: str | None) -> str:
 
 
 class TwilioChannel:
-    """Satisfies the ``tai42_contract.channels.Channel`` protocol."""
+    """Satisfies the ``tai42_contract.channels.Channel`` protocol.
+
+    Advertises ``supports_media_notifications`` (real MMS/WhatsApp media). It does NOT
+    advertise ``supports_interactive_notifications``: an SMS/MMS message has no tappable
+    buttons, so a ``notify`` with options is refused up front rather than sent with a
+    fake affordance. A ``select`` ask's options still render as numbered ``Body`` lines
+    answered by a typed reply (the honest medium ceiling).
+    """
+
+    supports_media_notifications: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Resolve the "To" number, then push the question to it.
@@ -86,9 +143,15 @@ class TwilioChannel:
                 f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
             )
 
+        # Resolve MMS media up front so a data: image is refused before any reservation
+        # or send (a permanent input error, never a retryable delivery failure).
+        media_urls = _image_media_urls(delivery.media)
+
         if delivery.answer_format in _TIER1_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
-            await send_message(to=target, from_number=from_number, body=_render_link(delivery))
+            await send_message(
+                to=target, from_number=from_number, body=_render_link(delivery), media_urls=media_urls or None
+            )
             return
 
         # Reserve before send: a fast reply's webhook can beat the send response,
@@ -101,7 +164,9 @@ class TwilioChannel:
             timeout_at=delivery.timeout_at,
         )
         try:
-            await send_message(to=target, from_number=from_number, body=_render_question(delivery))
+            await send_message(
+                to=target, from_number=from_number, body=_render_question(delivery), media_urls=media_urls or None
+            )
         except Exception:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(twilio_number=from_number, human_number=target)
@@ -129,5 +194,15 @@ class TwilioChannel:
         else:
             from_number = require_delivery_setting(settings.from_number, "CHANNEL_TWILIO_FROM")
             target = _resolve_target(settings, notification.recipient)
-        sid = await send_message(to=target, from_number=from_number, body=notification.message)
+        # Resolve MMS media up front (a data: image is refused here); link media rides
+        # as appended Body lines.
+        media_urls = _image_media_urls(notification.media)
+        link_lines = _link_lines(notification.media)
+        if notification.message.strip():
+            body = "\n".join([notification.message, *link_lines]) if link_lines else notification.message
+        else:
+            # Media-only (blank message): the Body is just any link lines — empty for an
+            # images-only send, which goes out as a body-less MMS carrying only its MediaUrl.
+            body = "\n".join(link_lines)
+        sid = await send_message(to=target, from_number=from_number, body=body, media_urls=media_urls or None)
         return [sid]

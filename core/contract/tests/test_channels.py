@@ -246,13 +246,36 @@ def test_delivery_select_requires_options():
     assert ok.options == ["yes", "no"]
 
 
-def test_delivery_non_select_forbids_options():
+def test_delivery_text_allows_suggested_reply_options():
+    from tai42_contract.channels import ChannelDelivery
+
+    # TEXT MAY carry options as SUGGESTED REPLIES — a tap submits the option's own text as
+    # the free-text answer, so they are an optional enhancement, never a constrained set.
+    ok = ChannelDelivery(**_delivery_kwargs(answer_format="text", options=["ok", "later"]))
+    assert ok.options == ["ok", "later"]
+
+
+def test_delivery_text_options_must_be_non_empty_when_present():
     from pydantic import ValidationError
 
     from tai42_contract.channels import ChannelDelivery
 
-    with pytest.raises(ValidationError, match="carries no options"):
-        ChannelDelivery(**_delivery_kwargs(options=["stray"]))
+    # A present-but-empty options list on a text question is a caller bug, not "no options".
+    with pytest.raises(ValidationError, match="non-empty list when present"):
+        ChannelDelivery(**_delivery_kwargs(answer_format="text", options=[]))
+
+
+def test_delivery_non_select_non_text_forbids_options():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelDelivery
+
+    # Only SELECT (required answer set) and TEXT (suggested replies) carry options; every
+    # other channel-deliverable format rejects them.
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    for fmt, extra in (("confirm", {}), ("form", {"schema": schema}), ("external", {})):
+        with pytest.raises(ValidationError, match="carries no options"):
+            ChannelDelivery(**_delivery_kwargs(answer_format=fmt, options=["stray"], **extra))
 
 
 def test_delivery_unknown_answer_format_rejected():
@@ -295,6 +318,48 @@ def test_delivery_non_form_forbids_schema():
     # A schema is meaningful only for "form"; any other format rejects it.
     with pytest.raises(ValidationError, match="carries no schema"):
         ChannelDelivery(**_delivery_kwargs(schema={"type": "object"}))
+
+
+def test_delivery_accepts_media():
+    from tai42_contract.channels import ChannelDelivery
+
+    # A question's display media rides the delivery (full parity with the inbox); it is a
+    # pure enhancement, so it is admitted on ANY format the channel deliverer supports.
+    item = _image_item()
+    delivery = ChannelDelivery(**_delivery_kwargs(media=[item]))
+    assert delivery.media == [item]
+    # Absent by default — a text-only question carries none.
+    assert ChannelDelivery(**_delivery_kwargs()).media is None
+
+
+def test_delivery_media_rejects_present_but_empty_list():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelDelivery
+
+    with pytest.raises(ValidationError, match="non-empty list when present"):
+        ChannelDelivery(**_delivery_kwargs(media=[]))
+
+
+def test_delivery_media_over_max_items_raises():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelDelivery
+    from tai42_contract.interactions.models import MEDIA_MAX_ITEMS, MediaItem, MediaKind
+
+    items = [MediaItem(kind=MediaKind.IMAGE, url=f"https://host/{i}.png") for i in range(MEDIA_MAX_ITEMS + 1)]
+    with pytest.raises(ValidationError, match=f"at most {MEDIA_MAX_ITEMS} items"):
+        ChannelDelivery(**_delivery_kwargs(media=items))
+
+
+def test_delivery_media_combines_with_select_options():
+    from tai42_contract.channels import ChannelDelivery
+
+    # Media (enhancement) and options (the select answer set) are independent — a select
+    # question may carry both, the card-with-a-list shape.
+    delivery = ChannelDelivery(**_delivery_kwargs(answer_format="select", options=["a", "b"], media=[_image_item()]))
+    assert delivery.options == ["a", "b"]
+    assert delivery.media is not None
 
 
 def test_delivery_recipient_defaults_to_none_and_accepts_an_address():
@@ -532,6 +597,49 @@ def test_notification_options_may_combine_with_media():
     assert notification.options == ["Item A"]
 
 
+# -- media-only (blank message) matrix -------------------------------------------------
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_notification_media_only_message_may_be_blank(blank: str):
+    # A caption-less image: a blank message is admissible when media carries it. ``message``
+    # stays REQUIRED (constructed in code), so a media-only sender passes ``""`` explicitly.
+    from tai42_contract.channels import ChannelNotification
+
+    item = _image_item()
+    assert ChannelNotification(message=blank, media=[item]).media == [item]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_notification_blank_message_without_media_is_refused(blank: str):
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="non-blank unless media"):
+        ChannelNotification(message=blank)
+
+
+def test_notification_media_only_carries_no_options():
+    # Options require a non-blank message — a tappable choice needs a prompt.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match=r"media-only .* carries no options"):
+        ChannelNotification(message="", media=[_image_item()], options=["Item A"])
+
+
+def test_notification_blank_message_with_only_template_is_refused():
+    # A template is not media, so a blank message carrying only a template has no text carrier.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification, ChannelTemplate
+
+    with pytest.raises(ValidationError, match="non-blank unless media"):
+        ChannelNotification(message="", template=ChannelTemplate(name="status_update", language="en_US"))
+
+
 def test_channel_capability_flags_are_an_optional_getattr_convention():
     from tai42_contract.channels import Channel
 
@@ -604,11 +712,12 @@ def test_validate_form_schema_hook_is_optional_and_does_not_tighten_the_check():
         with_hook.validate_form_schema({"type": "object"}, "q")
 
 
-def test_channel_delivery_shape_is_unchanged():
+def test_channel_delivery_shape():
     from tai42_contract.channels import ChannelDelivery
 
-    # The ask_user delivery path carries the form ``schema`` but deliberately gains
-    # NO media/template fields.
+    # The ask_user delivery path carries the form ``schema`` and the question's display
+    # ``media`` (full parity with the inbox), but never a ``template`` — a template is an
+    # out-of-window notification send, not a question delivery.
     assert set(ChannelDelivery.model_fields) == {
         "interaction_id",
         "recipient",
@@ -616,10 +725,10 @@ def test_channel_delivery_shape_is_unchanged():
         "answer_format",
         "schema",
         "options",
+        "media",
         "callback_url",
         "timeout_at",
     }
-    assert "media" not in ChannelDelivery.model_fields
     assert "template" not in ChannelDelivery.model_fields
 
 
@@ -818,3 +927,103 @@ def test_inbound_answer_types_exported():
 
     for name in ("InboundBridge", "InboundAnswerOutcome", "InboundAnswerResult", "AnswerForwardError"):
         assert name in channels_module.__all__
+
+
+# -- notify_in_order: the default sequential in-order primitive ------------------
+
+
+class _RecordingChannel:
+    """A channel that records the order it was asked to notify in, returning one id per
+    send. ``fail_on`` raises after recording the nth message (1-based) to stand in for a
+    provider refusing mid-sequence."""
+
+    def __init__(self, *, fail_on: int | None = None) -> None:
+        self.sent: list[str] = []
+        self._fail_on = fail_on
+
+    async def deliver(self, delivery: Any) -> None:  # pragma: no cover - unused here
+        return None
+
+    async def notify(self, notification: Any) -> list[str]:
+        self.sent.append(notification.message)
+        if self._fail_on is not None and len(self.sent) == self._fail_on:
+            from tai42_contract.channels import ChannelDeliveryError
+
+            raise ChannelDeliveryError("provider refused")
+        return [f"id-{len(self.sent)}"]
+
+
+def _notifications(*messages: str) -> list[Any]:
+    from tai42_contract.channels import ChannelNotification
+
+    return [ChannelNotification(message=m) for m in messages]
+
+
+def test_notify_in_order_is_exported():
+    import tai42_contract.channels as channels_module
+
+    assert "notify_in_order" in channels_module.__all__
+
+
+def test_notify_in_order_delivers_sequentially_and_returns_ids_in_order():
+    from tai42_contract.channels import notify_in_order
+
+    channel = _RecordingChannel()
+    seen: list[tuple[int, list[str]]] = []
+    results = asyncio.run(
+        notify_in_order(channel, _notifications("one", "two", "three"), on_sent=lambda i, ids: seen.append((i, ids)))
+    )
+
+    # Strictly in order, one id list per notification, and the progress hook fired once per
+    # send in send order.
+    assert channel.sent == ["one", "two", "three"]
+    assert results == [["id-1"], ["id-2"], ["id-3"]]
+    assert seen == [(0, ["id-1"]), (1, ["id-2"]), (2, ["id-3"])]
+
+
+def test_notify_in_order_stops_at_the_first_failure():
+    from tai42_contract.channels import ChannelDeliveryError, notify_in_order
+
+    channel = _RecordingChannel(fail_on=2)
+    seen: list[int] = []
+    with pytest.raises(ChannelDeliveryError):
+        asyncio.run(
+            notify_in_order(channel, _notifications("one", "two", "three"), on_sent=lambda i, _ids: seen.append(i))
+        )
+
+    # It stopped at the raise: the third message never went out and its progress never fired.
+    assert channel.sent == ["one", "two"]
+    assert seen == [0]  # only the first send's progress was recorded before the raise
+
+
+def test_notify_in_order_dispatches_to_a_native_deliver_ordered_when_declared():
+    from tai42_contract.channels import notify_in_order
+
+    class _BatchChannel:
+        """A channel that declares the OPTIONAL ``deliver_ordered`` native batch member."""
+
+        def __init__(self) -> None:
+            self.batches: list[list[str]] = []
+
+        async def deliver(self, delivery: Any) -> None:  # pragma: no cover - unused here
+            return None
+
+        async def notify(self, notification: Any) -> list[str]:  # pragma: no cover - never used here
+            raise AssertionError("notify_in_order must use the native deliver_ordered batch")
+
+        async def deliver_ordered(self, notifications: Any) -> list[list[str]]:
+            messages = [n.message for n in notifications]
+            self.batches.append(messages)
+            return [[f"batch-{i}"] for i in range(len(messages))]
+
+    channel = _BatchChannel()
+    seen: list[tuple[int, list[str]]] = []
+    results = asyncio.run(
+        notify_in_order(channel, _notifications("a", "b"), on_sent=lambda i, ids: seen.append((i, ids)))
+    )
+
+    # The whole batch went to the native member, never the per-message notify loop, and the
+    # progress hook still fired once per message in order.
+    assert channel.batches == [["a", "b"]]
+    assert results == [["batch-0"], ["batch-1"]]
+    assert seen == [(0, ["batch-0"]), (1, ["batch-1"])]

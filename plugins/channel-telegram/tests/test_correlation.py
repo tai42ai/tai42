@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from tai42_contract.channels import Correlation
 
+from tai42_channel_telegram.correlation import get_options, scoped_correlation_key, set_options
 from tai42_channel_telegram.correlation import telegram_correlation_store as store
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
@@ -100,6 +101,36 @@ async def test_specific_redis_url_configures_the_store(fake_redis):
     # The store URL is set by the channel_env fixture — a store call goes through
     # without a config error.
     assert await store.get_correlation("99") is None
+
+
+async def test_scoped_key_isolates_the_same_message_id_across_chats(fake_redis):
+    # A Telegram message_id is unique only PER CHAT: two chats can each anchor a pending
+    # ask on message_id 42. The chat-scoped key keeps them in separate namespaces, so one
+    # chat's reply can never resolve the other's ask.
+    key_a = scoped_correlation_key("chatA", "42")
+    key_b = scoped_correlation_key("chatB", "42")
+    assert key_a == "chatA:42"
+    await store.set_correlation(key_a, _entry(interaction_id="ask-A"), ttl_seconds=600)
+
+    # Chat B's reply carries the same message_id 42 but resolves NOTHING — its scoped key
+    # is a different Redis key entirely.
+    assert await store.get_correlation(key_b) is None
+    # Chat A's own reply still resolves its ask.
+    got = await store.get_correlation(key_a)
+    assert got is not None
+    assert got.interaction_id == "ask-A"
+    # The full Redis key is chat-namespaced.
+    assert "channel:telegram:corr:chatA:42" in fake_redis.data
+    assert "channel:telegram:corr:chatB:42" not in fake_redis.data
+
+
+async def test_options_record_is_chat_scoped_the_same_way(fake_redis):
+    # The option side record scopes by chat identically: a tap in chat B carrying the same
+    # anchor message_id 42 finds no record, while chat A's own record resolves.
+    await set_options("chatA", "42", ["red", "blue"], ttl_seconds=600)
+    assert await get_options("chatB", "42") is None
+    assert await get_options("chatA", "42") == ["red", "blue"]
+    assert "channel:telegram:opts:chatA:42" in fake_redis.data
 
 
 async def test_default_namespace_redis_url_configures_the_store(fake_redis, monkeypatch: pytest.MonkeyPatch):
