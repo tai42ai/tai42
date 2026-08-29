@@ -133,6 +133,30 @@ async def test_options_record_is_chat_scoped_the_same_way(fake_redis):
     assert "channel:telegram:opts:chatA:42" in fake_redis.data
 
 
+@pytest.mark.parametrize("ttl", [0, -3])
+async def test_set_options_non_positive_ttl_raises(fake_redis, ttl: int):
+    # A non-positive TTL would mint an options record with no expiry — refused loudly,
+    # and nothing is written.
+    with pytest.raises(ValueError, match="TTL must be positive"):
+        await set_options("chatA", "42", ["red", "blue"], ttl_seconds=ttl)
+    assert fake_redis.data == {}
+
+
+async def test_get_options_tolerates_non_json_record(fake_redis):
+    # A record that is not valid JSON is treated as "no options" (a graceful miss so the
+    # tap bridges), never a raise.
+    fake_redis.data["channel:telegram:opts:chatA:42"] = "not json{"
+    assert await get_options("chatA", "42") is None
+
+
+@pytest.mark.parametrize("stored", ['{"a": 1}', "[1, 2, 3]", '["ok", 7]'])
+async def test_get_options_ignores_records_that_are_not_a_list_of_strings(fake_redis, stored: str):
+    # Valid JSON but the wrong shape (an object, or a list carrying a non-string) is not a
+    # usable option list: ignored as "no options", never handed to the index mapping.
+    fake_redis.data["channel:telegram:opts:chatA:42"] = stored
+    assert await get_options("chatA", "42") is None
+
+
 async def test_default_namespace_redis_url_configures_the_store(fake_redis, monkeypatch: pytest.MonkeyPatch):
     from tai42_kit.settings import reset_all_settings
 

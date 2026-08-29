@@ -255,6 +255,46 @@ async def test_ok_true_without_message_id_raises(http_recorder, fake_redis, body
     assert fake_redis.data == {}
 
 
+@pytest.mark.parametrize(
+    "result", [{"message_id": 42}, {"message_id": 42, "chat": None}, {"message_id": 42, "chat": {}}]
+)
+async def test_ok_true_without_chat_id_raises(http_recorder, fake_redis, result: dict):
+    # A send that reports its message_id but no numeric result.chat.id is a loud error:
+    # the anchor is keyed by the authoritative chat id, so a reply could never be routed
+    # back without it. Nothing is stored.
+    http_recorder.responder = lambda request: httpx.Response(200, json={"ok": True, "result": result})
+    with pytest.raises(ChannelDeliveryError, match=r"carried no result\.chat\.id") as excinfo:
+        await TelegramChannel().deliver(_delivery())
+    assert "int-1" in str(excinfo.value)
+    assert _TOKEN not in str(excinfo.value)
+    assert fake_redis.data == {}
+
+
+async def test_deliver_options_store_failure_is_loud(http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch):
+    # The correlation is stored, but persisting the option side record fails: a select
+    # ask's button taps could never be routed, so the send raises rather than silently
+    # dropping the keyboard mapping (a typed reply would still resolve via the correlation).
+    async def broken_set_options(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("opts store down")
+
+    monkeypatch.setattr("tai42_channel_telegram.channel.set_options", broken_set_options)
+    with pytest.raises(ChannelDeliveryError, match="button taps cannot be routed") as excinfo:
+        await TelegramChannel().deliver(_delivery(answer_format="select", options=["red", "blue"]))
+    assert "was sent" in str(excinfo.value)
+
+
+async def test_notify_options_store_failure_is_loud(http_recorder, fake_redis, monkeypatch: pytest.MonkeyPatch):
+    # A notify's options render as a keyboard whose taps bridge via the side record;
+    # a failure persisting that record is loud (the taps could never be routed).
+    async def broken_set_options(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("opts store down")
+
+    monkeypatch.setattr("tai42_channel_telegram.channel.set_options", broken_set_options)
+    with pytest.raises(ChannelDeliveryError, match="button taps cannot be routed") as excinfo:
+        await TelegramChannel().notify(ChannelNotification(message="Pick one:", options=["a", "b"]))
+    assert "was sent" in str(excinfo.value)
+
+
 async def test_budget_spent_during_send_raises_without_storing(http_recorder, fake_redis):
     def slow_responder(request: httpx.Request) -> httpx.Response:
         time.sleep(0.2)

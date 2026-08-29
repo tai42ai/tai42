@@ -585,3 +585,67 @@ async def test_cross_chat_tap_finds_no_option_record_and_does_not_resolve(http_r
     assert channels.inbound_calls == []
     # Chat 999's own side record is untouched.
     assert fake_redis.data["channel:telegram:opts:999:42"]
+
+
+# --- _resolve_answer guards on the ForceReply / recipient path ---
+
+
+async def test_recipient_reply_without_update_id_is_rejected(http_recorder, fake_redis, channels):
+    # A ForceReply reply from a recipient chat reaches _resolve_answer, but update_id is
+    # the bridge's idempotency key: a reply lacking it is malformed (400), never resolved
+    # or bridged without one.
+    update = {
+        "message": {
+            "message_id": 1001,
+            "chat": {"id": 777},
+            "reply_to_message": {"message_id": 42},
+            "text": "the blue one",
+        }
+    }
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 400
+    assert _body(response) == {"error": "update carries no integer update_id"}
+    assert channels.inbound_calls == []
+
+
+async def test_recipient_reply_with_malformed_bot_token_misconfigures(
+    http_recorder, fake_redis, channels, monkeypatch: pytest.MonkeyPatch
+):
+    # Resolving a recipient-chat answer derives this bot's numeric id from the token; a
+    # token with no numeric prefix is a loud 500 (channel misconfigured), never a silent
+    # resolve. The typing action still fires (the token is non-empty, just malformed).
+    monkeypatch.setenv("CHANNEL_TELEGRAM_BOT_TOKEN", "no-colon-token")
+    reset_all_settings()
+    response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 500
+    assert _body(response) == {"error": "channel misconfigured"}
+    assert channels.inbound_calls == []
+
+
+# --- _resolve_callback defensive guards ---
+
+
+async def test_resolve_callback_non_dict_query_is_ignored(http_recorder, fake_redis):
+    # The defensive guard for a non-dict callback_query (the inbound() caller checks this,
+    # so it is only reachable by a direct call): acked-ignored, never a raise.
+    from tai42_channel_telegram.inbound import _resolve_callback
+    from tai42_channel_telegram.settings import telegram_settings
+
+    response = await _resolve_callback(telegram_settings(), {"callback_query": "not-a-dict"})
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+
+
+async def test_callback_tap_without_anchor_message_id_is_ignored(http_recorder, fake_redis, channels):
+    # A callback_query whose message carries no message_id has no anchor to key the option
+    # record on: acked-ignored (the query is still answered so the spinner clears), never a
+    # ladder call or a 5xx redelivery loop.
+    update = {
+        "update_id": 9,
+        "callback_query": {"id": "cb-1", "message": {"chat": {"id": 777}}, "data": "0"},
+    }
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    assert len(_answered_callbacks(http_recorder)) == 1
