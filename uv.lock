@@ -5242,7 +5242,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "2.0.1"
+version = "2.1.0"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5285,7 +5285,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "2.0.0"
+version = "2.1.0"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5328,7 +5328,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "2.0.0"
+version = "2.1.0"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5371,7 +5371,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "3.0.0"
+version = "3.1.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5414,7 +5414,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "2.0.0"
+version = "2.1.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5545,7 +5545,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.7.0"
+version = "5.8.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5579,7 +5579,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "6.3.0"
+version = "6.4.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6102,7 +6102,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.5.0"
+version = "9.6.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
