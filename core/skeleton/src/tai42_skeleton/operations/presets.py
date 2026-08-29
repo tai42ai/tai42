@@ -2046,6 +2046,11 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
             if not present:
                 raise
             logger.info("preset seeds: %r created concurrently by a sibling — treating as present", seed.name)
+            # Self-heal placement: the sibling committed the preset ROW then may have crashed
+            # (or still be) before its non-atomic tool_meta step — re-apply here so this worker
+            # restores the seed's folder/tags rather than leaving the concurrently-created
+            # preset stranded without placement.
+            await _apply_seed_tool_meta(seed)
     else:
         versions = await store.list_versions(seed.name)
         active = next(version for version in versions if version.is_current)
@@ -2062,6 +2067,16 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
             )
         elif not _seed_matches(seed, active_body):
             await _seed_upgrade(seed, active_body)
+        # Self-heal placement on the present branch. ``_seed_create`` commits the preset row +
+        # tag FIRST and applies tool_meta AFTER (a non-atomic window): a worker that crashed in
+        # between — or a race that stranded folder creation — leaves a preset present WITHOUT
+        # its seeded folder/``palette-node`` placement, and no versioned branch above repairs
+        # it. Re-apply the seed's tool_meta here so any boot/config-reload restores placement.
+        # The guards are fill-only (write display_name/tags/folder_id ONLY where absent): an
+        # operator-CHANGED value survives untouched. Fill-only cannot distinguish a
+        # crash-stranded NULL from a field the operator deliberately CLEARED, so a cleared
+        # tags/folder is re-filled by the seed on the next boot.
+        await _apply_seed_tool_meta(seed)
 
     # Local-load guard on every non-raising branch. A sibling's boot create/upgrade lands
     # store-side only — it does not fan out to this worker at boot — so a seed present in

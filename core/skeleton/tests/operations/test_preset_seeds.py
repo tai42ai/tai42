@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 import pytest
 from tai42_contract.presets import PresetSeed, PresetSeedToolMeta
 from tai42_contract.presets.errors import PresetNotFoundError
+from tai42_contract.tool_meta import FolderNameConflictError
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
@@ -30,6 +31,7 @@ from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.store import PresetStoreView
+from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
 
 from ..versioning.conftest import FakeVersioningPg
 
@@ -183,6 +185,107 @@ def test_rerun_is_a_noop(pg) -> None:
             # shipped default, so the applier is a pure no-op.
             versions = await instance.app.presets.store.list_versions("echo_default")
             assert len(versions) == 1
+
+    asyncio.run(run())
+
+
+# -- self-heal: a preset present WITHOUT its seeded tool_meta gets placement restored --
+
+
+def test_present_seed_reapplies_stripped_tool_meta(pg) -> None:
+    """``_seed_create`` commits the preset row + tag FIRST, then applies tool_meta — a
+    non-atomic window. A worker that crashes in between (or loses the folder race) leaves the
+    preset present WITHOUT its seeded folder/tags, and no versioned branch repairs it. The
+    applier's present branch must re-apply the seed's tool_meta so a later boot/config-reload
+    restores placement — idempotent and non-overwriting."""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            # Simulate the crashed-worker outcome: the preset row + shipped-default tag landed,
+            # but its tool_meta overlay never did. Drop the overlay row so the preset is present
+            # WITHOUT placement, exactly as a worker that died in the create->meta window leaves it.
+            await instance.app.tool_meta.store.delete_meta("echo_default")
+            assert await instance.app.tool_meta.store.get_meta("echo_default") is None
+
+            # A later boot/config-reload re-runs the applier. The preset is now PRESENT, so this
+            # drives the present branch — which re-applies the seed's tool_meta.
+            await preset_ops.apply_preset_seeds()
+
+            # Placement is restored: display_name, tags, and the folder_path resolved to a real id.
+            meta = await instance.app.tool_meta.store.get_meta("echo_default")
+            assert meta is not None
+            assert meta.display_name == "Echo Bot"
+            assert meta.tags == ["featured"]
+            assert meta.folder_id is not None
+            folders = {f.id: f for f in await instance.app.tool_meta.store.list_folders()}
+            leaf = folders[meta.folder_id]
+            assert leaf.name == "echoes"
+            assert leaf.parent_id is not None
+            assert folders[leaf.parent_id].name == "acme"
+            # Self-heal is placement-only — no version was re-shipped.
+            assert len(await instance.app.presets.store.list_versions("echo_default")) == 1
+
+    asyncio.run(run())
+
+
+# -- present branch never overwrites operator-CHANGED tool_meta (fill-only) ----
+
+
+def test_present_seed_preserves_operator_edited_tool_meta(pg) -> None:
+    """The present-branch ``_apply_seed_tool_meta`` re-apply runs for EVERY present seed on
+    every boot, including operator-edited ones. Its guards are fill-only: display_name, tags,
+    and folder_id are each written ONLY where the preset's overlay leaves that field absent.
+    The contract this pins: operator-CHANGED display metadata survives a re-run UNTOUCHED —
+    the seed never clobbers a value the operator set. (Fill-only cannot tell a crash-stranded
+    NULL from a deliberately operator-CLEARED field, so a field the operator CLEARS is re-filled
+    by the seed on the next boot; that is out of scope here, which pins the CHANGED case.)"""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            # The operator edits every display field: a custom display_name, a custom tag set,
+            # and a move into a real folder they created (a different id than the seed's leaf).
+            store = instance.app.tool_meta.store
+            operator_folder = await store.create_folder("operator-space")
+            await store.merge_meta(
+                "echo_default",
+                patch={
+                    "display_name": "Operator Renamed",
+                    "tags": ["operator-pick"],
+                    "folder_id": operator_folder.id,
+                },
+            )
+
+            # A later boot/config-reload re-runs the applier over the PRESENT preset — driving
+            # the present-branch tool_meta re-apply against the operator's overlay.
+            await preset_ops.apply_preset_seeds()
+
+            # All three operator values survive untouched — the fill-only guards saw each field
+            # already set and wrote nothing over it.
+            meta = await store.get_meta("echo_default")
+            assert meta is not None
+            assert meta.display_name == "Operator Renamed"
+            assert meta.tags == ["operator-pick"]
+            assert meta.folder_id == operator_folder.id
 
     asyncio.run(run())
 
@@ -680,6 +783,58 @@ def test_folder_path_blank_segment_raises_loudly(pg) -> None:
                 await resolve_folder_path("///")
             with pytest.raises(BadRequestError, match="folder path segment must not be blank"):
                 await resolve_folder_path("")
+
+    asyncio.run(run())
+
+
+# -- resolve_folder_path: a lost folder-create race reuses the sibling's folder ---
+
+
+def test_folder_path_reuses_sibling_folder_on_conflict(pg, monkeypatch) -> None:
+    """A multi-worker boot runs many resolvers against ONE Postgres concurrently. With
+    ``tool_folders`` carrying ``UNIQUE NULLS NOT DISTINCT (parent_id, name)``, a losing
+    worker's create raises :class:`FolderNameConflictError`. The resolver must not raise —
+    it re-reads and reuses the winning sibling's folder, so concurrent resolvers converge
+    on ONE folder per segment. True fixture concurrency does not interleave (the in-memory
+    fake never yields mid-op), so the interleaving is simulated: every segment's create
+    loses the race after the sibling commits, mirroring the real UNIQUE-constraint fire."""
+    from tai42_skeleton.operations.tool_meta import resolve_folder_path
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            real_create = PostgresToolMetaStore.create_folder
+            seen: set[tuple[str | None, str]] = set()
+            conflicts = {"n": 0}
+
+            async def racing_create(self, name, parent_id=None):
+                # A sibling worker wins this segment's race: it commits the folder first,
+                # then THIS worker's INSERT loses on UNIQUE (parent_id, name).
+                key = (parent_id, name)
+                if key not in seen:
+                    seen.add(key)
+                    await real_create(self, name, parent_id)
+                conflicts["n"] += 1
+                raise FolderNameConflictError(name, parent_id)
+
+            monkeypatch.setattr(PostgresToolMetaStore, "create_folder", racing_create)
+
+            # Every segment loses its create race, yet the resolver never raises — it re-reads
+            # and reuses the sibling's folder for each segment.
+            leaf = await resolve_folder_path("acme/echoes")
+            assert conflicts["n"] == 2  # both segments exercised the conflict-reuse branch
+
+            monkeypatch.setattr(PostgresToolMetaStore, "create_folder", real_create)
+            folders = {f.id: f for f in await instance.app.tool_meta.store.list_folders()}
+            # Exactly one folder per name — the resolvers converged, no duplicate sibling.
+            assert sorted(f.name for f in folders.values()) == ["acme", "echoes"]
+            assert leaf is not None
+            leaf_folder = folders[leaf]
+            assert leaf_folder.name == "echoes"
+            assert leaf_folder.parent_id is not None
+            assert folders[leaf_folder.parent_id].name == "acme"
+
+            # A later resolver on the same fresh path reuses the very same leaf id (convergence).
+            assert await resolve_folder_path("acme/echoes") == leaf
 
     asyncio.run(run())
 
