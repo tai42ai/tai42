@@ -84,6 +84,7 @@ function pendingQuestion(): ChatItem {
     question: 'Deploy?',
     answerFormat: 'confirm',
     options: null,
+    media: null,
     callbackUrl: null,
     schema: null,
     timeoutAt: new Date(Date.now() + 600_000).toISOString(),

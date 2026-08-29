@@ -109,6 +109,57 @@ async def test_deliver_keeps_the_schema_off_a_non_form_widget(fake_redis: FakeRe
     assert "schema" not in _only_entry(fake_redis)
 
 
+async def test_deliver_carries_question_media_in_the_frame(fake_redis: FakeRedis):
+    # A question's display media rides the chat.question frame in order, in the SAME
+    # {kind, url, caption?} shape a chat.media card carries — so the page renders it
+    # with the same media-card component; an image inline, a link as a safe anchor.
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            media=[
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.png", caption="a shot"),
+                MediaItem(kind=MediaKind.LINK, url="https://docs.example/p", caption="the doc"),
+            ],
+        )
+    )
+    payload = _only_entry(fake_redis)
+    assert payload["media"] == [
+        {"kind": "image", "url": "https://cdn.example/a.png", "caption": "a shot"},
+        {"kind": "link", "url": "https://docs.example/p", "caption": "the doc"},
+    ]
+
+
+async def test_deliver_media_caption_omitted_when_absent(fake_redis: FakeRedis):
+    # A captionless item carries no empty caption key — the same frame shape the
+    # media-card path emits.
+    await WebChannel().deliver(
+        make_delivery(answer_format="text", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.png")])
+    )
+    assert _only_entry(fake_redis)["media"] == [{"kind": "image", "url": "https://cdn.example/a.png"}]
+
+
+async def test_deliver_without_media_omits_the_key(fake_redis: FakeRedis):
+    # No media → the key is absent from the frame (no empty-value shape); regression
+    # that a plain text ask is unchanged.
+    await WebChannel().deliver(make_delivery(answer_format="text"))
+    assert "media" not in _only_entry(fake_redis)
+
+
+async def test_deliver_media_rides_a_select_question_with_its_options(fake_redis: FakeRedis):
+    # Media is orthogonal to the answer widget — a select ask carries both its options
+    # and its display media on the one frame.
+    await WebChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=["a", "b"],
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.png")],
+        )
+    )
+    payload = _only_entry(fake_redis)
+    assert payload["options"] == ["a", "b"]
+    assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/a.png"}]
+
+
 async def test_deliver_refuses_an_identity_the_doors_could_never_read_back(fake_redis: FakeRedis):
     # The split takes the LAST colon, so this leaves the identity ``odd:name`` — which
     # the stream door refuses, so the visitor could never open that transcript and the
@@ -315,6 +366,23 @@ async def test_notify_media_appends_one_media_card(fake_redis: FakeRedis):
     assert payload["text"] == "see this"
     assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
     assert "options" not in payload
+
+
+async def test_notify_media_only_card_carries_an_empty_text(fake_redis: FakeRedis):
+    # A media-only notification (blank message) lands as ONE chat.media card with an EMPTY text —
+    # the page renders the media card with no text bubble.
+    ids = await WebChannel().notify(
+        ChannelNotification(
+            message="",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png", caption="a pattern")],
+        )
+    )
+    payload = _only_media_entry(fake_redis)
+    assert payload["id"] == ids[0]
+    assert payload["text"] == ""  # no text bubble
+    assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
 
 
 async def test_notify_links_only_rides_the_media_array_as_a_card_attachment(fake_redis: FakeRedis):

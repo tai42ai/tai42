@@ -36,14 +36,8 @@ export function MediaCard({ item, onSend, locked }: MediaCardProps): ReactElemen
   return (
     <div className="tcw-row tcw-row--out tcw-row--start">
       <div className="tcw-media">
-        <Markdown markdown={item.text} className="tcw-prose" />
-        {item.media !== null ? (
-          <div className="tcw-media-items">
-            {item.media.map((element, index) => (
-              <MediaElement key={`${element.kind}-${index}-${element.url}`} element={element} />
-            ))}
-          </div>
-        ) : null}
+        {item.text !== '' ? <Markdown markdown={item.text} className="tcw-prose" /> : null}
+        {item.media !== null ? <MediaItems media={item.media} /> : null}
         {item.options !== null ? (
           <div className="tcw-media-options">
             {item.options.map((option, index) => (
@@ -60,6 +54,20 @@ export function MediaCard({ item, onSend, locked }: MediaCardProps): ReactElemen
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/** The list of attachments on a card or a question — inline images and safe
+ * outbound links in order. Shared by the media card and the question card so a
+ * question's media renders identically to a card's; every url is pre-vetted by the
+ * stream reducer. */
+export function MediaItems({ media }: { readonly media: readonly MediaItem[] }): ReactElement {
+  return (
+    <div className="tcw-media-items">
+      {media.map((element, index) => (
+        <MediaElement key={`${element.kind}-${index}-${element.url}`} element={element} />
+      ))}
     </div>
   );
 }

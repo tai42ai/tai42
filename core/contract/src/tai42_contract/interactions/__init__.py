@@ -40,6 +40,7 @@ from tai42_contract.interactions.models import (
     MediaKind,
     SuspendedInteraction,
     check_media_list,
+    served_media_id,
 )
 
 __all__ = [
@@ -68,6 +69,7 @@ __all__ = [
     "read_suspended_interaction_marker",
     "reset_park_completion",
     "reset_resume_continuation_tool",
+    "served_media_id",
     "set_park_completion",
     "set_resume_continuation_tool",
     "suspended_interaction_marker",

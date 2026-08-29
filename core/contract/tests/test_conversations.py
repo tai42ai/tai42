@@ -183,7 +183,7 @@ def test_conversation_answer_requires_answer_text_for_non_silent(status: str):
     from tai42_contract.conversations import ConversationAnswer
 
     body: dict[str, Any] = {"message_id": "m-1", "thread_id": "t", "status": status, "answer": None}
-    with pytest.raises(ValidationError, match="non-blank"):
+    with pytest.raises(ValidationError, match="carries answer text"):
         ConversationAnswer(**body)
 
 
@@ -201,6 +201,184 @@ def test_conversation_answer_silent_rejects_any_answer_field(answer: str):
 
     with pytest.raises(ValidationError, match="silent answer carries no answer text"):
         ConversationAnswer(message_id="m-1", thread_id="t", status="silent", answer=answer)
+
+
+# -- AnswerPart (the rich multi-message part shape) -----------------------------
+
+
+def test_answer_part_is_a_text_only_part():
+    from tai42_contract.conversations import AnswerPart
+
+    part = AnswerPart(message="just text")
+    assert part.message == "just text"
+    assert part.is_plain_text()
+
+
+def test_answer_part_carries_media_and_options():
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    part = AnswerPart(
+        message="here is the chart",
+        media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
+        options=["Yes", "No"],
+    )
+    assert not part.is_plain_text()
+    assert part.media is not None
+    assert part.media[0].url == "https://cdn.example/c.png"
+    assert part.options == ["Yes", "No"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_answer_part_rejects_a_blank_message(blank: str):
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="message must be non-blank"):
+        AnswerPart(message=blank)
+
+
+def test_answer_part_is_strict_from_birth_unknown_key_refused():
+    from tai42_contract.conversations import AnswerPart
+
+    # extra="forbid": a NEW authoring surface never silently drops an unknown key.
+    with pytest.raises(ValidationError):
+        # recipient is per-delivery, not per-part
+        AnswerPart(message="hi", recipient="+15550001111")  # pyright: ignore[reportCallIssue]
+
+
+def test_answer_part_media_and_template_are_exclusive():
+    from tai42_contract.channels import ChannelTemplate
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    with pytest.raises(ValidationError, match="media and template are mutually exclusive"):
+        AnswerPart(
+            message="hi",
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
+            template=ChannelTemplate(name="t", language="en"),
+        )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_answer_part_media_only_message_may_be_blank(blank: str):
+    # A media-only part: a caption-less image carries the content, message may be blank/omitted.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    part = AnswerPart(message=blank, media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")])
+    assert part.message == blank
+    assert not part.is_plain_text()  # media makes it a rich part, never dropped from parts
+    assert AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")]).message == ""
+
+
+def test_answer_part_media_only_carries_no_options():
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    with pytest.raises(ValidationError, match=r"media-only .* carries no options"):
+        AnswerPart(
+            message="", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")], options=["Yes"]
+        )
+
+
+# -- ConversationAnswer.parts (ordered multi-message) ---------------------------
+
+
+def _parts(*messages: str):
+    from tai42_contract.conversations import AnswerPart
+
+    return [AnswerPart(message=m) for m in messages]
+
+
+def test_conversation_answer_single_message_carries_no_parts():
+    from tai42_contract.conversations import ConversationAnswer
+
+    answer = ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="just one")
+    # A single-message answer carries parts=None; a legacy consumer reads ``answer``.
+    assert answer.parts is None
+
+
+def test_conversation_answer_parts_join_to_the_answer():
+    from tai42_contract.conversations import ConversationAnswer
+
+    answer = ConversationAnswer(
+        message_id="m-1",
+        thread_id="t",
+        status="answered",
+        answer="one\n\ntwo\n\nthree",
+        parts=_parts("one", "two", "three"),
+    )
+    # Order-significant parts, and ``answer`` is exactly the blank-line join of the part
+    # messages so every legacy consumer keeps reading the whole text.
+    assert answer.parts is not None
+    assert [p.message for p in answer.parts] == ["one", "two", "three"]
+    assert answer.answer == "one\n\ntwo\n\nthree"
+
+
+def test_conversation_answer_parts_must_join_to_the_answer():
+    from tai42_contract.conversations import ConversationAnswer
+
+    with pytest.raises(ValidationError, match="answer must equal the non-blank part messages joined"):
+        ConversationAnswer(
+            message_id="m-1", thread_id="t", status="answered", answer="one\n\ntwo", parts=_parts("one", "different")
+        )
+
+
+def test_conversation_answer_parts_reject_an_empty_list():
+    from tai42_contract.conversations import ConversationAnswer
+
+    with pytest.raises(ValidationError, match="parts must be a non-empty list"):
+        ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="x", parts=[])
+
+
+def test_conversation_answer_silent_carries_no_parts():
+    from tai42_contract.conversations import ConversationAnswer
+
+    with pytest.raises(ValidationError, match="silent answer carries no parts"):
+        ConversationAnswer(message_id="m-1", thread_id="t", status="silent", parts=_parts("one", "two"))
+
+
+def _media_part():
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    return AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")])
+
+
+def test_conversation_answer_all_media_answer_is_empty_string():
+    # Every part media-only: the joined text is "" and that is admissible BECAUSE parts carry
+    # the content. A media-only part contributes nothing to ``answer``.
+    from tai42_contract.conversations import ConversationAnswer
+
+    answer = ConversationAnswer(
+        message_id="m-1", thread_id="t", status="answered", answer="", parts=[_media_part(), _media_part()]
+    )
+    assert answer.answer == ""
+    assert answer.parts is not None
+    assert len(answer.parts) == 2
+
+
+def test_conversation_answer_mixed_media_only_joins_only_text_parts():
+    # [text, media-only, text]: the media-only part drops out of the joined answer.
+    from tai42_contract.conversations import ConversationAnswer
+
+    answer = ConversationAnswer(
+        message_id="m-1",
+        thread_id="t",
+        status="answered",
+        answer="one\n\ntwo",
+        parts=[*_parts("one"), _media_part(), *_parts("two")],
+    )
+    assert answer.answer == "one\n\ntwo"
+    assert answer.parts is not None
+    assert len(answer.parts) == 3
+
+
+def test_conversation_answer_blank_answer_without_parts_is_refused():
+    from tai42_contract.conversations import ConversationAnswer
+
+    with pytest.raises(ValidationError, match="blank text must carry media-only parts"):
+        ConversationAnswer(message_id="m-1", thread_id="t", status="answered", answer="")
 
 
 # -- Route rows -----------------------------------------------------------------

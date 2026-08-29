@@ -256,7 +256,17 @@ async def http_recorder(stub_app: _StubApp):
     state = SimpleNamespace(requests=[], responder=None)
 
     def default_responder(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
+        # Telegram resolves a send's ``chat_id`` (a numeric id OR an ``@username``) to a
+        # numeric ``result.chat.id`` on the reply; the correlation/options writers key by
+        # that numeric id. Echo the request's numeric ``chat_id`` as ``result.chat.id``, and
+        # a canonical numeric stand-in for a non-numeric (``@username``) send so it too
+        # yields a numeric anchor the inbound reader can match.
+        try:
+            chat_id = json.loads(request.content).get("chat_id")
+        except ValueError:
+            chat_id = None
+        resolved = int(chat_id) if isinstance(chat_id, str) and chat_id.lstrip("-").isdigit() else 777
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42, "chat": {"id": resolved}}})
 
     def handler(request: httpx.Request) -> httpx.Response:
         state.requests.append(request)

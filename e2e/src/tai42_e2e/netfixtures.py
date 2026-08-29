@@ -468,13 +468,28 @@ async def _form_or_json(request: Request) -> dict[str, Any]:
 # it — never a bypass. Any unexpected path is a loud 500, like the LlmStub unscripted rule.
 
 
+def _telegram_chat_id(raw: Any) -> int:
+    """The numeric ``chat.id`` a real Bot API send resolves to.
+
+    Telegram's returned Message objects always carry a numeric ``chat.id`` regardless
+    of whether the send addressed a numeric chat id or an ``@username``. A numeric
+    recipient echoes back verbatim as an int; a non-numeric ``@username`` resolves to a
+    deterministic synthetic numeric id (as the real API would), so the stub never leaks
+    a string where the plugin requires an int."""
+    text = str(raw)
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return abs(hash(text)) % 1_000_000_000 + 1
+
+
 class FakeTelegram:
     """A recording stub of the Telegram Bot API.
 
-    Serves ``sendMessage`` (minting a monotonically increasing ``message_id``) and
-    ``setWebhook`` (which the telegram plugin's ``on_startup`` hook calls, so boot
-    succeeds against the stub — both replicas fire it, one record each). Any other
-    path answers a loud 500."""
+    Serves ``sendMessage`` and ``sendPhoto`` (each minting a monotonically increasing
+    ``message_id`` and returning a Message with the numeric ``chat.id`` the send
+    resolved to) and ``setWebhook`` (which the telegram plugin's ``on_startup`` hook
+    calls, so boot succeeds against the stub — both replicas fire it, one record each).
+    Any other path answers a loud 500."""
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
@@ -530,6 +545,7 @@ class FakeTelegram:
         async def send_message(token: str, request: Request) -> JSONResponse:
             payload = await request.json()
             message_id = next(self._ids)
+            chat_id = _telegram_chat_id(payload.get("chat_id"))
             self.sent.append(
                 {
                     "token": token,
@@ -537,11 +553,33 @@ class FakeTelegram:
                     "text": payload.get("text", ""),
                     "reply_markup": payload.get("reply_markup"),
                     "message_id": message_id,
+                    "method": "sendMessage",
                 }
             )
-            return JSONResponse(
-                {"ok": True, "result": {"message_id": message_id, "chat": {"id": payload.get("chat_id")}}}
+            # A real Message object always carries a ``chat`` with a numeric ``id`` — the
+            # authoritative chat Telegram resolved the send to (the writer scopes its
+            # correlation anchor by it). Return the numeric id, never the raw chat_id.
+            return JSONResponse({"ok": True, "result": {"message_id": message_id, "chat": {"id": chat_id}}})
+
+        @app.post("/bot{token}/sendPhoto")
+        async def send_photo(token: str, request: Request) -> JSONResponse:
+            payload = await request.json()
+            message_id = next(self._ids)
+            chat_id = _telegram_chat_id(payload.get("chat_id"))
+            self.sent.append(
+                {
+                    "token": token,
+                    "chat_id": str(payload.get("chat_id")),
+                    "text": payload.get("caption", ""),
+                    "photo": payload.get("photo"),
+                    "reply_markup": payload.get("reply_markup"),
+                    "message_id": message_id,
+                    "method": "sendPhoto",
+                }
             )
+            # sendPhoto returns the same Message shape as sendMessage (with a ``photo``);
+            # the writer reads only ``message_id`` / ``chat.id`` from it.
+            return JSONResponse({"ok": True, "result": {"message_id": message_id, "chat": {"id": chat_id}}})
 
         @app.post("/bot{token}/setWebhook")
         async def set_webhook(token: str, request: Request) -> JSONResponse:
@@ -750,7 +788,7 @@ class FakeTwilio:
 
         @app.post("/Accounts/{account_sid}/Messages.json")
         async def create_message(account_sid: str, request: Request) -> JSONResponse:
-            form = dict((await request.form()).items())
+            form = await request.form()
             sid = f"SM{uuid.uuid4().hex}"
             self.messages.append(
                 {
@@ -758,6 +796,9 @@ class FakeTwilio:
                     "to": form.get("To"),
                     "from": form.get("From"),
                     "body": str(form.get("Body", "")),
+                    # MMS media rides as repeated ``MediaUrl`` form fields (one per image
+                    # item); ``getlist`` keeps every attachment, not just the last.
+                    "media_urls": [str(url) for url in form.getlist("MediaUrl")],
                     "sid": sid,
                 }
             )

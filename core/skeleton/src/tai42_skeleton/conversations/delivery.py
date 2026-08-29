@@ -20,10 +20,10 @@ from uuid import uuid4
 import httpx
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel, ChannelDeliveryError, ChannelInputError, ChannelNotification
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import AnswerPart, DeliveryReceipt
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
-from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError
+from tai42_skeleton.conversations.ledger import ChannelSendLedger, LedgerInconsistentError, SentChunk
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import PRUNE_START, ConversationRecordStore, PruneCursor
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -87,6 +87,98 @@ def split_message(text: str, max_chars: int) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _remaining_parts(parts: list[AnswerPart], sent: list[SentChunk]) -> list[tuple[int, str]]:
+    """The still-unsent portion of each answer part, as ``(part_index, remaining_text)`` in
+    order — the resume plan the send loop chunks and delivers. A TEXT part yields its unsent
+    tail; a MEDIA-ONLY part (blank ``message``) yields one ``(part_index, "")`` entry — a single
+    zero-text send carrying the part's media — but ONLY until it has a ledger entry, after which
+    it is complete and contributes nothing. A single-part text answer degenerates to
+    ``[(0, text[chars_sent:])]``, byte-identical to the old per-answer resume.
+
+    The ledger is append-only in send order, so its entries are all of part 0's chunks, then
+    part 1's, and so on. This validates that invariant and raises :class:`LedgerInconsistentError`
+    on anything that cannot describe ``parts`` — a part index past the answer, a part with more
+    characters ledgered than it holds, or a gap where an earlier part is not fully sent under a
+    later part that has already started (for a media-only earlier part, "fully sent" means it has
+    a ledger entry, since its char count is always zero). Corrupt state a resume must never send
+    the wrong content from, distinct from a transient store fault (which the caller lets
+    propagate)."""
+    sent_by_part: dict[int, int] = {}
+    seen_parts: set[int] = set()
+    for chunk in sent:
+        sent_by_part[chunk.part] = sent_by_part.get(chunk.part, 0) + chunk.chars
+        seen_parts.add(chunk.part)
+    for part_index, chars in sent_by_part.items():
+        if not 0 <= part_index < len(parts):
+            raise LedgerInconsistentError(
+                f"channel send ledger names part {part_index}, but the answer has {len(parts)} part(s)"
+            )
+        if chars > len(parts[part_index].message):
+            raise LedgerInconsistentError(
+                f"channel send ledger claims {chars} character(s) already sent of part {part_index} that is "
+                f"{len(parts[part_index].message)} character(s) long"
+            )
+    if seen_parts:
+        highest = max(seen_parts)
+        for earlier in range(highest):
+            # An earlier part must be COMPLETE before a later part starts: a text part when its
+            # ledgered chars equal its length, a media-only part when it has a ledger entry at
+            # all (its length is zero, so a char count cannot distinguish sent from unsent).
+            expected = len(parts[earlier].message)
+            done = earlier in seen_parts and sent_by_part.get(earlier, 0) == expected
+            if not done:
+                raise LedgerInconsistentError(
+                    f"channel send ledger resumes at part {highest} but part {earlier} is only "
+                    f"{sent_by_part.get(earlier, 0)}/{expected} character(s) sent"
+                )
+    plan: list[tuple[int, str]] = []
+    for part_index, part in enumerate(parts):
+        text = part.message
+        remaining = text[sent_by_part.get(part_index, 0) :]
+        if remaining:
+            plan.append((part_index, remaining))
+        elif not text.strip() and part_index not in seen_parts:
+            # A media-only part carries no text but still owes one zero-text send of its media;
+            # it is planned only until its ledger entry marks it delivered.
+            plan.append((part_index, ""))
+    return plan
+
+
+def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord, *, final: bool) -> ChannelNotification:
+    """The :class:`ChannelNotification` for one chunk of ``part``. The part's rich fields
+    (media, template, options) ride the FINAL chunk of the part — its completed message — so a
+    multi-chunk part's earlier chunks are plain text and the media/buttons land with the last.
+    A MEDIA-ONLY part has a single final chunk of ``""``: the notification then carries a blank
+    message plus the media, which the contract admits exactly because media is present.
+    ``recipient``/``sender_identity`` are the per-delivery routing the record carries, never
+    per-part."""
+    return ChannelNotification(
+        message=chunk,
+        recipient=record.client_address,
+        sender_identity=record.our_identity,
+        media=part.media if final else None,
+        template=part.template if final else None,
+        options=part.options if final else None,
+    )
+
+
+def _unsupported_rich_capability(channel: Channel, parts: list[AnswerPart]) -> str | None:
+    """The name of the FIRST richer-send capability a part needs that ``channel`` does not
+    advertise, or ``None`` when every part is renderable. The capability flags are the same
+    OPTIONAL class attributes ``notify_user`` guards on, read defensively with ``getattr`` —
+    a text-only channel (the answer path's historical shape) advertises none, so a plain-text
+    answer always passes. A part that needs an unadvertised capability can never be rendered,
+    so the executor refuses the record loudly rather than handing the channel a field it drops."""
+    for part in parts:
+        if part.media is not None and not getattr(channel, "supports_media_notifications", False):
+            return "media"
+        if part.template is not None and not getattr(channel, "supports_template_notifications", False):
+            return "template"
+        if part.options is not None and not getattr(channel, "supports_interactive_notifications", False):
+            return "interactive options"
+    return None
 
 
 # -- one-record delivery -----------------------------------------------------
@@ -181,18 +273,21 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
             "plugin or remove the route"
         ) from exc
 
+    # A single plain-text answer is one text-only part; a richer or multi-message answer
+    # delivers each part as its own message, in order, carrying its media/options. The loop
+    # below is IDENTICAL either way — it iterates ``(part_index, chunk, final)`` and a single
+    # part just yields one part index — so the single-part path stays byte-exact with the old
+    # per-answer send. ``part_texts`` drives the chunking/resume arithmetic; the rich fields
+    # ride the send.
+    parts = record.answer_parts or [AnswerPart(message=answer)]
+    part_texts = [part.message for part in parts]
     ledger = ChannelSendLedger(settings)
     # Account the attempt BEFORE the first fallible step, so every fault below is bounded
     # by ``delivery_max_attempts`` instead of leaving the record pending_delivery forever.
     attempts = await store.bump_attempt(record.message_id)
     try:
         sent = await ledger.sent_chunks(record.message_id)
-        chars_sent = sum(chunk.chars for chunk in sent)
-        if chars_sent > len(answer):
-            raise LedgerInconsistentError(
-                f"send ledger for record {record.message_id!r} claims {chars_sent} character(s) already sent of an "
-                f"answer that is {len(answer)} character(s) long"
-            )
+        plan = _remaining_parts(parts, sent)
     except LedgerInconsistentError:
         # A ledger that cannot describe the answer can never resume, so the record is
         # failed here — as a config error is — before the refusal is raised. A transient
@@ -205,15 +300,25 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
         raise
 
     if not sent:
+        # Refuse — before any chunk goes out — a part whose media/template/options the channel
+        # cannot render, so the executor never hands a channel a field it silently drops and
+        # never re-drives an unrenderable record forever.
+        missing = _unsupported_rich_capability(channel, parts)
+        if missing is not None:
+            await _refuse_unrenderable_parts(store, record, missing, attempts, token)
+            return
         # Fan-out cap is an ADMISSION decision, never retroactive: refuse an oversized answer
         # ONLY before any chunk has gone out. A resume (sent non-empty) always completes —
-        # a human has seen part of the answer and it cannot be un-sent.
-        answer_chunks = len(split_message(answer, max_chars))
+        # a human has seen part of the answer and it cannot be un-sent. The cap counts the
+        # chunks of EVERY part (each part is chunked independently — its boundaries are
+        # message boundaries), so the whole ordered answer is bounded by one knob.
+        answer_chunks = sum(len(split_message(text, max_chars)) for text in part_texts)
         if answer_chunks > settings.max_outbound_chunks:
             await _refuse_oversized_answer(store, record, channel, answer_chunks, attempts, token)
             return
 
     outbound_ids = [outbound_id for chunk in sent for outbound_id in chunk.outbound_ids]
+    chars_sent = sum(chunk.chars for chunk in sent)
     if sent:
         # Re-index the ledger's ids: a chunk accepted just before a crash may never have
         # reached the reverse index, and a receipt naming an unindexed id resolves to nothing.
@@ -227,13 +332,40 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
             len(answer),
             len(sent),
         )
-    remaining = answer[chars_sent:]
-    # An answer already fully out goes straight to the provisional write.
-    chunks = split_message(remaining, max_chars) if remaining else []
-    total_chunks = len(sent) + len(chunks)
+    # The remaining sends, flattened to ``(part_index, chunk, final)`` in send order: each
+    # still-unsent part portion is chunked at the channel width, the part index rides each ledger
+    # entry so a resume tells one part's chunks from the next's, and ``final`` marks the chunk
+    # that carries the part's media/options — the last NON-BLANK chunk of a text part (a trailing
+    # whitespace split-boundary chunk is ledger-only and rides no rich fields), or the single
+    # blank chunk of a MEDIA-ONLY part (whose whole deliverable IS the media). A text part's
+    # non-blank ``message`` always yields exactly one such chunk; a media-only part yields one
+    # ``[""]`` chunk that is itself final. An answer already fully out yields none.
+    pending: list[tuple[int, str, bool]] = []
+    for part_index, remaining in plan:
+        remaining_chunks = split_message(remaining, max_chars)
+        non_blank = [i for i, chunk in enumerate(remaining_chunks) if chunk.strip()]
+        if non_blank:
+            # The normal case: the part's rich fields ride its last NON-BLANK chunk.
+            rich_at: int | None = non_blank[-1]
+        elif not parts[part_index].message.strip():
+            # A genuine MEDIA-ONLY part (blank ``message``): its single ``""`` chunk IS the
+            # deliverable and carries the media, so it is final and sends below.
+            rich_at = len(remaining_chunks) - 1
+        else:
+            # A RESUME whose remaining is an all-whitespace TAIL of a TEXT part: the part's
+            # non-blank content — and the rich fields that rode its final non-blank chunk —
+            # already went out before the crash, and only the trailing split-boundary
+            # whitespace is left. Marking any of it ``final`` would either send a blank
+            # ``ChannelNotification`` (uncaught ValidationError → the record wedges) or
+            # DOUBLE-SEND the part's media. No chunk here is final: every remaining
+            # whitespace chunk stays ledger-skip, exactly as it would on a fresh send.
+            rich_at = None
+        for offset, chunk in enumerate(remaining_chunks):
+            pending.append((part_index, chunk, offset == rich_at))
+    total_chunks = len(sent) + len(pending)
     accepted_chunks = len(sent)
     try:
-        for chunk in chunks:
+        for part_index, chunk, final in pending:
             # Refresh the lease BEFORE each send, and bound the send strictly under it, so
             # the whole notify window is covered by a claim this worker holds — an accepted
             # chunk is never ledgered by a worker that has already been taken over.
@@ -251,20 +383,19 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
                     held,
                 )
                 return
-            if not chunk.strip():
-                # The channel contract has no blank message. A split boundary can leave a
-                # chunk of pure whitespace: it is ledgered as sent, so the resume arithmetic
-                # stays exact, and no provider call is made for it.
-                await ledger.append(record.message_id, len(chunk), [])
+            if not chunk.strip() and not final:
+                # A split boundary can leave a chunk of pure whitespace WITHIN a text part: it
+                # is ledgered as sent, so the resume arithmetic stays exact, and no provider call
+                # is made for it (a whitespace-only, non-final chunk carries neither text nor a
+                # part's rich fields). A media-only part's single blank chunk is instead FINAL —
+                # it carries the media — so it falls through to the send below, where the contract
+                # admits a blank message when media is present.
+                await ledger.append(record.message_id, len(chunk), [], part=part_index)
                 accepted_chunks += 1
                 continue
             try:
                 async with asyncio.timeout(settings.delivery_send_timeout_seconds):
-                    ids = await channel.notify(
-                        ChannelNotification(
-                            message=chunk, recipient=record.client_address, sender_identity=record.our_identity
-                        )
-                    )
+                    ids = await channel.notify(_part_notification(parts[part_index], chunk, record, final=final))
             except TimeoutError:
                 # Indeterminate: the provider may have taken the chunk. It is deliberately
                 # NOT ledgered, so a re-drive re-sends it — the same asymmetry the ledger
@@ -284,7 +415,7 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
             accepted = list(ids or [])
             # Ledger BEFORE the reverse index: a crash between the two costs an
             # unresolvable receipt, a crash before the ledger entry costs a duplicate message.
-            await ledger.append(record.message_id, len(chunk), accepted)
+            await ledger.append(record.message_id, len(chunk), accepted, part=part_index)
             await store.index_outbound(channel_name, accepted, record.message_id)
             outbound_ids.extend(accepted)
             accepted_chunks += 1
@@ -365,6 +496,24 @@ async def _refuse_oversized_answer(
                     sender_identity=record.our_identity,
                 )
             )
+    await store.mark_failed(record.message_id, attempts, time.time(), token)
+
+
+async def _refuse_unrenderable_parts(
+    store: ConversationRecordStore, record: ConversationRecord, missing: str, attempts: int, token: str
+) -> None:
+    """Fail a record whose parts need a richer-send capability the channel does not advertise.
+    A route/tool misconfiguration (a media/template/options part routed to a text-only channel):
+    the record fails loudly and terminally so it is never re-driven, and no half-rendered send
+    goes out. No client-safe reply is sent — the missing capability is an operator's business,
+    not a guest-facing size hint."""
+    logger.error(
+        "conversations: record %s carries a part needing %s, which channel %r does not advertise support for; "
+        "failing the record (a media/template/options part cannot be routed to a text-only channel)",
+        record.message_id,
+        missing,
+        record.channel,
+    )
     await store.mark_failed(record.message_id, attempts, time.time(), token)
 
 

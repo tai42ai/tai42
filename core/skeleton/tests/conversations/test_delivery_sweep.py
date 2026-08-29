@@ -18,12 +18,14 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import json
 import time
 
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError
-from tai42_contract.conversations import ConversationRoute, DeliveryReceipt
+from tai42_contract.conversations import AnswerPart, ConversationRoute, DeliveryReceipt
+from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import ledger as ledger_module
@@ -160,7 +162,50 @@ def _record(message_id: str, answer: str) -> ConversationRecord:
     )
 
 
-def _wire_channel(monkeypatch, channel: FakeChannel) -> None:
+def _parts_record(message_id: str, parts: list[AnswerPart]) -> ConversationRecord:
+    """A channel record carrying an ordered multi-message/rich answer — ``answer`` is the
+    NON-BLANK part messages joined (a media-only part contributes nothing), ``answer_parts`` the
+    parts the delivery machine sends one at a time."""
+    now = time.time()
+    return ConversationRecord(
+        message_id=message_id,
+        route_name="line",
+        door="channel",
+        thread_id=f"bridge:line:{message_id}",
+        client_address="+15550002222",
+        channel="twilio",
+        our_identity="+15550001111",
+        origin="client",
+        inbound_text=f"ask {message_id}",
+        answer_status="answered",
+        answer="\n\n".join(part.message for part in parts if part.message.strip()),
+        answer_parts=parts,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+class MediaFakeChannel:
+    """Records the FULL notification of every send (so a test can assert the media it carried)
+    and ADVERTISES media support, so the executor's capability guard lets a media part through.
+    ``crash_on`` abandons the send on the nth notification (a dead worker), matching
+    :class:`FakeChannel` — used to prove a media-only part resumes without re-sending."""
+
+    supports_media_notifications = True
+
+    def __init__(self, prefix: str = "out", *, crash_on: int | None = None) -> None:
+        self.notifications: list = []
+        self._prefix = prefix
+        self._crash_on = crash_on
+
+    async def notify(self, notification) -> list[str]:
+        self.notifications.append(notification)
+        if self._crash_on is not None and len(self.notifications) == self._crash_on:
+            raise WorkerDied("the worker died mid-send")
+        return [f"{self._prefix}-{len(self.notifications)}"]
+
+
+def _wire_channel(monkeypatch, channel) -> None:
     monkeypatch.setattr(delivery_module, "tai42_app", _FakeDeliveryApp(channel))
 
 
@@ -378,6 +423,284 @@ async def test_a_ledger_claiming_more_than_the_answer_refuses_loudly(monkeypatch
 
     with pytest.raises(RuntimeError, match="claims 99 character"):
         await delivery_module._deliver_channel(store, await _get(store, "m-bad"), "worker-1")
+
+
+# -- ordered multi-message (rich part) delivery -------------------------------
+
+
+async def test_a_multi_part_answer_delivers_each_part_as_its_own_message(monkeypatch, fake, store):
+    """An ordered multi-message answer sends each part as its own message, in order, and the
+    ledger records the part index of each chunk so a resume tells one part's chunks apart."""
+    parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
+    await store.create_record(_parts_record("m-multi", parts))
+    channel = FakeChannel("w1")
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-multi"), "worker-1")
+
+    assert channel.sends == ["first", "second", "third"]
+    record = await _get(store, "m-multi")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    assert record.outbound_message_ids == ["w1-1", "w1-2", "w1-3"]
+
+
+async def test_a_multi_part_send_refreshes_the_lease_before_every_part(monkeypatch, fake, store):
+    """Every part's send — like every chunk's — goes out under a freshly refreshed lease, so a
+    racing sweep can never reclaim the record mid-sequence and double-send a part."""
+    parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
+    await store.create_record(_parts_record("m-lease", parts))
+    assert await store.claim_delivery("m-lease", time.time() - 300, "worker-1", 120) == 1
+
+    observed: list[float] = []
+    channel = FakeChannel("w1", watch=lambda: observed.append(_claim(fake, "m-lease")[1]))
+    _wire_channel(monkeypatch, channel)
+    await delivery_module._deliver_channel(store, await _get(store, "m-lease"), "worker-1")
+
+    assert len(observed) == 3  # one refresh per part
+    assert all(expiry > time.time() for expiry in observed)
+
+
+async def test_a_multi_part_send_stops_and_fails_mid_sequence_on_a_refusal(monkeypatch, fake, store):
+    """A provider refusal on part two is terminal STOP-AND-FAIL: part three is never sent (order
+    is meaning — message three without two corrupts the answer), the record fails loudly, and the
+    id of the part that DID land is kept."""
+    parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
+    await store.create_record(_parts_record("m-stopfail", parts))
+    channel = FakeChannel("w1", fail_on=2)
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-stopfail"), "worker-1")
+
+    assert channel.sends == ["first", "second"]  # third never went out
+    assert (await _get(store, "m-stopfail")).delivery_status is DeliveryStatus.FAILED
+    assert await store.resolve_outbound("twilio", "w1-1") == "m-stopfail"
+
+
+async def test_a_multi_part_send_resumes_at_the_unsent_part(monkeypatch, fake, store):
+    """A worker died after part one. The re-drive resumes at part two using the per-part ledger,
+    re-sending neither part one nor a partial of it — a human is never texted part one twice."""
+    parts = [AnswerPart(message="first"), AnswerPart(message="second"), AnswerPart(message="third")]
+    await store.create_record(_parts_record("m-presume", parts))
+
+    # The worker dies on the SECOND send (part 1), after part 0 was ledgered but before part 1
+    # is: part 1's chunk is left unledgered so the re-drive re-sends it (a duplicate is the
+    # cheap side of a loss), and part 0 is never re-sent.
+    dying = FakeChannel("w1", crash_on=2)
+    _wire_channel(monkeypatch, dying)
+    with pytest.raises(WorkerDied):
+        await delivery_module._deliver_channel(store, await _get(store, "m-presume"), "worker-1")
+    assert dying.sends == ["first", "second"]  # part 1 was attempted but not ledgered
+    # The ledger names part 0 only, so the resume knows part 1 is where to pick up.
+    ledgered = await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-presume")
+    assert [(c.part, c.chars) for c in ledgered] == [(0, len("first"))]
+
+    # The dead worker's lease lapses; a new worker picks the record up.
+    _expire_claim(fake, "m-presume")
+    resuming = FakeChannel("w2")
+    _wire_channel(monkeypatch, resuming)
+    await delivery_module._deliver_channel(store, await _get(store, "m-presume"), "worker-2")
+
+    assert resuming.sends == ["second", "third"]  # part 0 never re-sent
+    record = await _get(store, "m-presume")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    # part 0's id (re-indexed from the ledger) then the resumed parts, in order.
+    assert record.outbound_message_ids == ["w1-1", "w2-1", "w2-2"]
+
+
+async def test_a_single_plain_text_answer_is_byte_identical_to_the_old_path(monkeypatch, fake, store):
+    """A plain single-message answer (answer_parts=None) degenerates to exactly today's send:
+    one part, chunked by width, its chunks ledgered as part 0 (proven by a mid-send crash below,
+    since a completed send clears the ledger)."""
+    await store.create_record(_record("m-single", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
+    channel = FakeChannel("w1", crash_on=2)  # crash after the first chunk is ledgered
+    _wire_channel(monkeypatch, channel)
+    with pytest.raises(WorkerDied):
+        await delivery_module._deliver_channel(store, await _get(store, "m-single"), "worker-1")
+
+    # The first chunk is ledgered under part 0 — the single-part path is the multi-part loop's
+    # degenerate case, byte-for-byte.
+    ledgered = await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-single")
+    assert [(c.part, c.chars) for c in ledgered] == [(0, _CHUNK_CHARS)]
+
+    _expire_claim(fake, "m-single")  # the dead worker's lease lapses
+    resuming = FakeChannel("w2")
+    _wire_channel(monkeypatch, resuming)
+    await delivery_module._deliver_channel(store, await _get(store, "m-single"), "worker-2")
+    assert resuming.sends == ["bbbbbbbbbb"]  # resumed at the unsent remainder, part 0 not re-sent
+    assert (await _get(store, "m-single")).delivery_status is DeliveryStatus.PROVISIONAL
+
+
+async def test_a_media_part_is_delivered_with_its_media(monkeypatch, fake, store):
+    """A media part rides a ChannelNotification carrying its media — the executor builds the
+    notification from the part's content fields, exactly as a single notification does today."""
+    # A short message so this module's width-10 chunking does not split it — the media rides
+    # the part's one (final, non-blank) chunk.
+    part = AnswerPart(message="look", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
+    await store.create_record(_parts_record("m-media", [part]))
+    channel = MediaFakeChannel("w1")
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-media"), "worker-1")
+
+    assert [n.message for n in channel.notifications] == ["look"]
+    assert channel.notifications[0].media is not None
+    assert channel.notifications[0].media[0].url == "https://cdn.example/i.png"
+    assert (await _get(store, "m-media")).delivery_status is DeliveryStatus.PROVISIONAL
+
+
+async def test_a_media_part_to_a_text_only_channel_is_refused_terminally(monkeypatch, fake, store):
+    """A media part routed to a channel that does not advertise media support can never render,
+    so the record fails loudly and terminally with NOTHING sent — never re-driven forever."""
+    part = AnswerPart(message="pic", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
+    await store.create_record(_parts_record("m-nocap", [part]))
+    channel = FakeChannel("w1")  # a text-only channel: no supports_media_notifications
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-nocap"), "worker-1")
+
+    assert channel.sends == []
+    assert (await _get(store, "m-nocap")).delivery_status is DeliveryStatus.FAILED
+
+
+async def test_a_media_only_part_is_delivered_as_one_text_less_send(monkeypatch, fake, store):
+    """A media-only part (blank message carrying media) delivers ONE notification with a blank
+    message and the media — a caption-less image — and a ledger entry (chars=0) is still written
+    so a resume knows it went out. A completed send clears the ledger."""
+    part = AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
+    await store.create_record(_parts_record("m-mediaonly", [part]))
+    channel = MediaFakeChannel("w1")
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-mediaonly"), "worker-1")
+
+    assert [n.message for n in channel.notifications] == [""]  # no text bubble
+    assert channel.notifications[0].media is not None
+    assert channel.notifications[0].media[0].url == "https://cdn.example/i.png"
+    record = await _get(store, "m-mediaonly")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    assert record.answer == ""  # an all-media answer joins to the empty string
+    assert record.outbound_message_ids == ["w1-1"]
+    assert await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-mediaonly") == []
+
+
+async def test_an_ordered_text_media_text_answer_delivers_three_sends_in_order(monkeypatch, fake, store):
+    """An ordered [text, media-only, text] answer sends three messages IN ORDER: the first text,
+    then the caption-less media (blank message), then the second text — the media-only part is a
+    full message in the sequence, not folded into a neighbour."""
+    parts = [
+        AnswerPart(message="one"),
+        AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
+        AnswerPart(message="three"),
+    ]
+    await store.create_record(_parts_record("m-tmt", parts))
+    channel = MediaFakeChannel("w1")
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_module._deliver_channel(store, await _get(store, "m-tmt"), "worker-1")
+
+    assert [n.message for n in channel.notifications] == ["one", "", "three"]
+    assert channel.notifications[0].media is None
+    assert channel.notifications[1].media is not None
+    assert channel.notifications[1].media[0].url == "https://cdn.example/i.png"
+    assert channel.notifications[2].media is None
+    record = await _get(store, "m-tmt")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    assert record.answer == "one\n\nthree"  # media-only part contributes nothing to the joined text
+    assert record.outbound_message_ids == ["w1-1", "w1-2", "w1-3"]
+
+
+async def test_a_media_only_part_is_not_re_sent_on_resume(monkeypatch, fake, store):
+    """A worker died after the media-only part (part 1) was ledgered but before part 2 went out.
+    The re-drive resumes at part 2 and re-sends NEITHER the text part 0 NOR the media-only part 1
+    — a media-only part's chars=0 ledger entry marks it delivered so a resume never doubles it."""
+    parts = [
+        AnswerPart(message="one"),
+        AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
+        AnswerPart(message="three"),
+    ]
+    await store.create_record(_parts_record("m-mresume", parts))
+
+    # Crash on the THIRD send (part 2), after part 0 and the media-only part 1 are ledgered.
+    dying = MediaFakeChannel("w1", crash_on=3)
+    _wire_channel(monkeypatch, dying)
+    with pytest.raises(WorkerDied):
+        await delivery_module._deliver_channel(store, await _get(store, "m-mresume"), "worker-1")
+    assert [n.message for n in dying.notifications] == ["one", "", "three"]
+    ledgered = await ChannelSendLedger(ConversationsSettings()).sent_chunks("m-mresume")
+    assert [(c.part, c.chars) for c in ledgered] == [(0, len("one")), (1, 0)]  # media-only ledgers chars=0
+
+    _expire_claim(fake, "m-mresume")
+    resuming = MediaFakeChannel("w2")
+    _wire_channel(monkeypatch, resuming)
+    await delivery_module._deliver_channel(store, await _get(store, "m-mresume"), "worker-2")
+
+    assert [n.message for n in resuming.notifications] == ["three"]  # part 0 and the media-only not re-sent
+    record = await _get(store, "m-mresume")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    assert record.outbound_message_ids == ["w1-1", "w1-2", "w2-1"]
+
+
+async def test_a_whitespace_tail_resume_of_a_text_part_sends_nothing(monkeypatch, fake, store):
+    """Regression: a text part ``"aaaaaaaaaa   "`` chunks to ``["aaaaaaaaaa", "   "]``. A crash
+    landed after the content chunk was ledgered but before the trailing whitespace chunk's
+    ledger-skip, so on resume the whole ``remaining`` is a pure-whitespace tail. It must send
+    NOTHING — never a blank ``ChannelNotification("   ")``, which the contract rejects
+    (message-non-blank), an uncaught ValidationError that would wedge the record permanently."""
+    part = AnswerPart(message="aaaaaaaaaa   ")  # 10 content chars + 3 trailing spaces
+    await store.create_record(_parts_record("m-wtail", [part]))
+    # The content chunk already went out and was ledgered (part 0, chars=10) pre-crash; the
+    # whitespace tail's ledger-skip never happened (the crash beat it).
+    await ChannelSendLedger(ConversationsSettings()).append("m-wtail", 10, ["w1-1"], part=0)
+
+    channel = FakeChannel("w2")
+    _wire_channel(monkeypatch, channel)
+    await delivery_module._deliver_channel(store, await _get(store, "m-wtail"), "worker-2")
+
+    assert channel.sends == []  # the whitespace tail is ledger-skip, never a blank send
+    record = await _get(store, "m-wtail")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL  # completes cleanly, not wedged
+    assert record.outbound_message_ids == ["w1-1"]
+
+
+async def test_a_whitespace_tail_resume_of_a_media_part_does_not_re_send_media(monkeypatch, fake, store):
+    """Regression: a part with BOTH text and media — its media rode the content chunk pre-crash.
+    A crash landed after that chunk was ledgered but before the trailing whitespace chunk, so on
+    resume ``remaining`` is a pure-whitespace tail. It must NOT be marked ``final`` (which would
+    DOUBLE-SEND the media); it stays ledger-skip and nothing goes out."""
+    part = AnswerPart(
+        message="aaaaaaaaaa   ",
+        media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")],
+    )
+    await store.create_record(_parts_record("m-wmedia", [part]))
+    # The content chunk (carrying the media, final=True) already went out and was ledgered.
+    await ChannelSendLedger(ConversationsSettings()).append("m-wmedia", 10, ["w1-1"], part=0)
+
+    channel = MediaFakeChannel("w2")
+    _wire_channel(monkeypatch, channel)
+    await delivery_module._deliver_channel(store, await _get(store, "m-wmedia"), "worker-2")
+
+    assert channel.notifications == []  # the media is never re-sent on the whitespace tail
+    record = await _get(store, "m-wmedia")
+    assert record.delivery_status is DeliveryStatus.PROVISIONAL
+    assert record.outbound_message_ids == ["w1-1"]
+
+
+async def test_a_ledger_entry_without_a_part_reads_as_part_zero(monkeypatch, fake, store):
+    """F5: a ledger entry written before the ``part`` field existed names a single-part answer,
+    so it reads as part 0 — a single-part answer whose first chunk was ledgered pre-upgrade
+    resumes cleanly at its remainder, never re-sending the pre-upgrade chunk."""
+    await store.create_record(_record("m-f5", "aaaaaaaaaabbbbbbbbbb"))  # 20 chars, 2 chunks at width 10
+    # A legacy entry: no "part" key at all.
+    key = ConversationsSettings().chunk_ledger_key("m-f5")
+    fake._lists[key] = [json.dumps({"chars": 10, "outbound_ids": ["w1-1"]})]
+
+    channel = FakeChannel("w2")
+    _wire_channel(monkeypatch, channel)
+    await delivery_module._deliver_channel(store, await _get(store, "m-f5"), "worker-2")
+
+    # Read as part 0, so the resume sends ONLY the remainder — never the pre-upgrade chunk.
+    assert channel.sends == ["bbbbbbbbbb"]
+    assert (await _get(store, "m-f5")).delivery_status is DeliveryStatus.PROVISIONAL
 
 
 # -- a long send holds its own lease ------------------------------------------
@@ -635,7 +958,10 @@ async def test_the_callback_post_is_signed_under_the_rows_secret(monkeypatch, fa
     sent = requests[0]
     assert sent.method == "POST"
     assert str(sent.url) == _CALLBACK_URL
-    assert sent.content == record.answer_payload().model_dump_json().encode()
+    # The executor serializes with ``exclude_none=True`` (so a silent answer and a
+    # single-message answer's null ``parts`` never ride the wire), and this asserts exactly
+    # the body it built.
+    assert sent.content == record.answer_payload().model_dump_json(exclude_none=True).encode()
     assert sent.headers["Content-Type"] == "application/json"
 
     signature = sent.headers["X-Tai-Signature"]

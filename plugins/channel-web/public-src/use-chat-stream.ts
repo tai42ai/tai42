@@ -69,6 +69,10 @@ interface QuestionBase {
   readonly interactionId: string;
   readonly question: string;
   readonly options: readonly string[] | null;
+  /** Display media shown WITH the question — inline images and safe outbound
+   * links, the same shape a media card carries. `null` when the question carries
+   * none. Display-only: never part of the answer. */
+  readonly media: readonly MediaItem[] | null;
   readonly timeoutAt: string;
   readonly ts: string;
 }
@@ -322,6 +326,11 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
       return { kind: 'malformed', event: frame.event };
     }
     if (options === undefined) return { kind: 'malformed', event: frame.event };
+    // The same vetted-media parse the media card uses — one off-shape item taints
+    // the whole frame, so an image `src`/link `href` on the question is as trusted
+    // as one on a card.
+    const media = mediaOf(payload.media);
+    if (media === undefined) return { kind: 'malformed', event: frame.event };
     return {
       kind: 'model',
       model: withItem(model, {
@@ -330,6 +339,7 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
         interactionId: interaction_id,
         question,
         options,
+        media,
         timeoutAt: timeout_at,
         ts,
         ...facet,

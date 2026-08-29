@@ -14,7 +14,8 @@ import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 
-from tai42_channel_slack.correlation import store_form_record
+from tai42_channel_slack.blocks import SELECT_ACTION_PREFIX
+from tai42_channel_slack.correlation import store_correlation, store_form_record
 from tai42_channel_slack.forms import (
     FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
@@ -26,6 +27,7 @@ from tai42_channel_slack.inbound import slack_interactive
 
 from .conftest import (
     TEST_BOT_TOKEN,
+    TEST_DEFAULT_RECIPIENT,
     TEST_SIGNING_SECRET,
     body_json,
     make_interactive_body,
@@ -116,6 +118,93 @@ async def test_unknown_payload_type_is_acked_ignored():
     response = await slack_interactive(_signed({"type": "shortcut"}))
     assert response.status_code == 200
     assert body_json(response) == {"status": "ignored"}
+
+
+# -- option-button taps (select / suggested-reply / notify options) -----------
+
+
+def _select_tap(
+    index: int = 1,
+    value: Any = "blue",
+    message_ts: str = "123.456",
+    channel_id: str = TEST_DEFAULT_RECIPIENT,
+    action_ts: str = "1700.1",
+) -> dict[str, Any]:
+    action: dict[str, Any] = {"action_id": f"{SELECT_ACTION_PREFIX}{index}", "type": "button", "action_ts": action_ts}
+    if value is not None:
+        action["value"] = value
+    return {
+        "type": "block_actions",
+        "user": {"id": "U0GUEST"},
+        "container": {"type": "message", "message_ts": message_ts, "channel_id": channel_id},
+        "channel": {"id": channel_id, "name": "chan"},
+        "actions": [action],
+    }
+
+
+async def test_select_button_tap_resolves_via_ladder(fake_redis, channels, stub_conversations):
+    # A tap on a select option button resolves through the ladder with the anchor
+    # message ts as the correlation key and the button value as the answer.
+    await store_correlation("123.456", _CALLBACK, "int-1", datetime.now(UTC) + timedelta(minutes=10))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    response = await slack_interactive(_signed(_select_tap(index=1, value="blue")))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "forwarded"}
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.correlation_key == "123.456"
+    assert call.answer == "blue"
+    assert call.bridge.provider_message_id == "1700.1"  # the tap's action_ts
+
+
+async def test_notify_option_tap_bridges_on_correlation_miss(fake_redis, channels, stub_conversations):
+    # A notify-option tap has no pending ask: the thread peek misses, so the option
+    # text enters the conversation as a visitor message (no ladder call).
+    response = await slack_interactive(_signed(_select_tap(index=0, value="apples")))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "accepted"}
+    assert channels.inbound_calls == []
+    assert len(stub_conversations.accept_calls) == 1
+    call = stub_conversations.accept_calls[0]
+    assert call.text == "apples"
+    assert call.client_address == TEST_DEFAULT_RECIPIENT
+
+
+async def test_tap_from_non_allowlisted_channel_bridges_without_resolving(fake_redis, channels, stub_conversations):
+    # A live ask is anchored on this ts, but the tap arrives from a channel OUTSIDE the
+    # allowlist. Mirroring the typed-reply path's gate (_process_event), the tap never
+    # reaches the answer ladder — it bridges directly, so a tap from a non-allowlisted
+    # channel can never resolve a pending ask, exactly as a typed message would not.
+    await store_correlation("123.456", _CALLBACK, "int-1", datetime.now(UTC) + timedelta(minutes=10))
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    response = await slack_interactive(_signed(_select_tap(index=1, value="blue", channel_id="C0OUTSIDE")))
+
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "accepted"}
+    assert channels.inbound_calls == []  # the ladder was never consulted
+    assert len(stub_conversations.accept_calls) == 1
+    call = stub_conversations.accept_calls[0]
+    assert call.text == "blue"
+    assert call.client_address == "C0OUTSIDE"
+
+
+async def test_select_tap_without_value_is_acked_ignored(fake_redis, channels, stub_conversations):
+    response = await slack_interactive(_signed(_select_tap(value=None)))
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "ignored"}
+    assert channels.inbound_calls == []
+    assert stub_conversations.accept_calls == []
+
+
+async def test_select_tap_without_anchor_ts_is_acked_ignored(fake_redis, channels, stub_conversations):
+    payload = _select_tap()
+    payload["container"] = {"type": "message"}  # no message_ts
+    response = await slack_interactive(_signed(payload))
+    assert response.status_code == 200
+    assert body_json(response) == {"status": "ignored"}
+    assert channels.inbound_calls == []
 
 
 async def test_non_utf8_body_is_400():

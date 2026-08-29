@@ -573,9 +573,22 @@ def test_interaction_text_valid_no_payload():
     assert _interaction(answer_format=AnswerFormat.TEXT).format_payload is None
 
 
-def test_interaction_text_forbids_payload():
-    with pytest.raises(ValueError, match="carries no format_payload"):
+def test_interaction_text_forbids_non_options_payload():
+    # TEXT carries no payload EXCEPT an optional ``options`` list; any other key is refused.
+    with pytest.raises(ValueError, match="carries only optional options"):
         _interaction(answer_format=AnswerFormat.TEXT, format_payload={"x": 1})
+
+
+def test_interaction_text_allows_suggested_reply_options():
+    # TEXT MAY carry ``options`` as suggested replies — a tap submits the option's own text
+    # as the free-text answer (which stays unconstrained), unlike SELECT's required set.
+    req = _interaction(answer_format=AnswerFormat.TEXT, format_payload={"options": ["ok", "later"]})
+    assert req.format_payload == {"options": ["ok", "later"]}
+
+
+def test_interaction_text_options_must_be_non_empty_when_present():
+    with pytest.raises(ValueError, match="non-empty list when present"):
+        _interaction(answer_format=AnswerFormat.TEXT, format_payload={"options": []})
 
 
 def test_interaction_confirm_forbids_payload():
@@ -854,6 +867,25 @@ def test_media_image_absolute_served_http_localhost_valid():
     # whose validator restricts http to localhost/127.0.0.1.
     url = "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
     assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
+
+
+def test_served_media_id_extracts_from_both_forms_and_rejects_the_rest():
+    import secrets
+
+    from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX, served_media_id
+
+    media_id = secrets.token_urlsafe(32)
+    # Both served forms yield the id: the same-origin relative reference an inbox ask stores,
+    # and the absolute reference a channel send mints from public_base_url.
+    assert served_media_id(MEDIA_ROUTE_PREFIX + media_id) == media_id
+    assert served_media_id("https://box.example" + MEDIA_ROUTE_PREFIX + media_id) == media_id
+    # A non-served image or a link carries no stored id.
+    assert served_media_id("https://cdn.example/p.png") is None
+    assert served_media_id("https://docs.example/p") is None
+    # Parse-robustness: the prefix is only located as the path prefix right after the origin —
+    # a prefix buried in a query or fragment is not mistaken for a served id.
+    assert served_media_id(f"https://cdn.example/x?next={MEDIA_ROUTE_PREFIX}{media_id}") is None
+    assert served_media_id(f"https://cdn.example/x#{MEDIA_ROUTE_PREFIX}{media_id}") is None
 
 
 def test_media_image_absolute_served_query_or_extra_segment_invalid():

@@ -119,9 +119,13 @@ class AskUser(Protocol):
         ``<= MEDIA_URL_MAX_CHARS`` (a data: URI ``<= MEDIA_DATA_URI_MAX_CHARS``),
         each caption ``<= MEDIA_CAPTION_MAX_CHARS``, and the summed url text across
         the list ``<= MEDIA_TOTAL_URI_CHARS``. Media never affects the human's
-        ANSWER, and it is NOT forwarded to channel deliveries — the Studio inbox is
-        where it renders. ``None`` (the default) attaches no media; a present list
-        must be non-empty.
+        ANSWER. It renders in the Studio inbox AND, on a channel-delivered ask, rides
+        the ``ChannelDelivery.media`` forwarded to the channel plugin (a channel that
+        renders media shows it with the question; one that renders only text ignores
+        it). A ``data:image/*`` served reference is ABSOLUTE on the channel path (a
+        vendor fetches it off-origin), so a channel ask carrying ``data:`` media
+        requires ``INTERACTIONS_PUBLIC_BASE_URL``. ``None`` (the default) attaches no
+        media; a present list must be non-empty.
 
         ``mode`` selects the wait discipline: ``"sync"`` (the default) blocks and
         returns the typed answer; ``"async"`` PARKS the caller, returning a

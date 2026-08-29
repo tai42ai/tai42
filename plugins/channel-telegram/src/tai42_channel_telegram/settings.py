@@ -41,6 +41,10 @@ class TelegramSettings(TaiBaseSettings):
     api_base_url: str = "https://api.telegram.org"
     # Wall-clock budget for one outbound HTTP call. Must be positive.
     http_timeout_seconds: float = Field(default=30, gt=0)
+    # How long the tappable-option side record for a NOTIFY survives so a later tap
+    # still resolves its option text into a bridged visitor message (a notify carries
+    # no deadline of its own). A select ask uses its remaining answer budget instead.
+    option_tap_ttl_seconds: int = Field(default=86_400, gt=0)
 
     @field_validator("allowed_recipients", mode="before")
     @classmethod

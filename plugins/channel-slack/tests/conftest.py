@@ -26,6 +26,7 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
+from tai42_contract.interactions.models import MediaItem
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
@@ -362,6 +363,7 @@ def make_delivery(
     recipient: str | None = None,
     schema: dict[str, Any] | None = None,
     interaction_id: str = "int-1",
+    media: list[MediaItem] | None = None,
 ) -> ChannelDelivery:
     """A valid ``ChannelDelivery`` with a comfortably-future default budget."""
     return ChannelDelivery(
@@ -371,6 +373,7 @@ def make_delivery(
         answer_format=answer_format,
         options=options,
         schema=schema,
+        media=media,
         callback_url=callback_url,
         timeout_at=timeout_at or (datetime.now(UTC) + timedelta(minutes=10)),
     )

@@ -676,6 +676,51 @@ async def test_notify_media_sends_body_with_links_then_each_image(fake_redis: Fa
     assert fake_httpx.calls[2]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
 
 
+async def test_notify_media_only_images_skip_the_body_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A media-only notification (blank message, images only) sends NO text body — just each
+    # image message, in order. WhatsApp has no empty-body send, so the body is skipped entirely.
+    fake_httpx.responses.append(_accepted("wamid.IMG1"))
+    fake_httpx.responses.append(_accepted("wamid.IMG2"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="",
+            recipient=ALLOWED_A,
+            media=[
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg", caption="Front"),
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.jpg"),
+            ],
+        )
+    )
+
+    assert ids == ["wamid.IMG1", "wamid.IMG2"]
+    assert len(fake_httpx.calls) == 2  # no body message — only the two images
+    assert fake_httpx.calls[0]["json"]["image"] == {"link": "https://cdn.example/a.jpg", "caption": "Front"}
+    assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
+
+
+async def test_notify_media_only_with_links_renders_links_as_the_body(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A media-only notification whose media carries a link item renders that link AS the body
+    # text (no leading blank line from the empty message), then any images.
+    fake_httpx.responses.append(_accepted("wamid.BODY"))
+    fake_httpx.responses.append(_accepted("wamid.IMG1"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="",
+            recipient=ALLOWED_A,
+            media=[
+                MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page"),
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.jpg"),
+            ],
+        )
+    )
+
+    assert ids == ["wamid.BODY", "wamid.IMG1"]
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Details page: https://docs.example/p/1"
+    assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
+
+
 async def test_notify_partial_media_send_names_already_sent_wamids(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # A multi-part send that fails on the Nth part raises naming the wamids already
     # delivered — partial delivery stays visible.
@@ -698,6 +743,174 @@ async def test_notify_partial_media_send_names_already_sent_wamids(fake_redis: F
     assert "wamid.BODY" in str(excinfo.value)
     assert "wamid.IMG1" in str(excinfo.value)
     assert len(fake_httpx.calls) == 3  # body, first image, failed second image
+
+
+async def test_deliver_media_sends_links_then_images_then_question(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A delivered question's display media rides AHEAD of the question: any link items
+    # as one text line-block, then each image as its own image message, then the
+    # question itself last (the actionable message at the foot of the chat).
+    fake_httpx.responses.append(_accepted("wamid.LINKS"))
+    fake_httpx.responses.append(_accepted("wamid.IMG1"))
+    fake_httpx.responses.append(_accepted("wamid.IMG2"))
+    fake_httpx.responses.append(_accepted("wamid.Q"))
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            question="Which one is broken?",
+            media=[
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg", caption="Front"),
+                MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page"),
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.jpg"),
+            ],
+        )
+    )
+
+    urls_and_types = [(call["url"], call["json"]["type"]) for call in fake_httpx.calls]
+    assert urls_and_types == [
+        (_MESSAGES_URL, "text"),  # the link line-block
+        (_MESSAGES_URL, "image"),  # image A
+        (_MESSAGES_URL, "image"),  # image B
+        (_MESSAGES_URL, "text"),  # the question, last
+    ]
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Details page: https://docs.example/p/1"
+    assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg", "caption": "Front"}
+    assert fake_httpx.calls[2]["json"]["image"] == {"link": "https://cdn.example/b.jpg"}
+    assert fake_httpx.calls[3]["json"]["text"]["body"] == "Which one is broken?"
+
+
+async def test_deliver_media_images_only_precede_the_question(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # No links: just each image, then the question — no empty link text message.
+    fake_httpx.responses.append(_accepted("wamid.IMG"))
+    fake_httpx.responses.append(_accepted("wamid.Q"))
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="text",
+            question="See attached?",
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg")],
+        )
+    )
+
+    assert [call["json"]["type"] for call in fake_httpx.calls] == ["image", "text"]
+    assert fake_httpx.calls[0]["json"]["image"] == {"link": "https://cdn.example/a.jpg"}
+    assert fake_httpx.calls[1]["json"]["text"]["body"] == "See attached?"
+
+
+async def test_deliver_media_reserves_after_the_media_send(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A Tier-2 select ask with media: the media is sent BEFORE the reservation and the
+    # interactive question, so the reserve-before-question invariant still holds.
+    fake_httpx.responses.append(_accepted("wamid.IMG"))
+    fake_httpx.responses.append(_accepted("wamid.Q"))
+
+    await WhatsAppChannel().deliver(
+        make_delivery(
+            answer_format="select",
+            options=["a", "b"],
+            question="Pick",
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg")],
+        )
+    )
+
+    kinds = [kind for kind, _ in fake_redis.events]
+    # image send, then reserve, then the interactive question send.
+    assert kinds == ["http_post", "redis_set", "http_post"]
+    assert fake_httpx.calls[1]["json"]["interactive"]["type"] == "button"
+
+
+async def test_deliver_media_failure_raises_before_any_reservation(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A media send that fails leaves nothing reserved — the media rides ahead of the
+    # reservation, so the pair stays free and the failure is loud.
+    fake_httpx.responses.append(response(400, json={"error": {"code": 131053, "message": "media download error"}}))
+
+    with pytest.raises(ChannelDeliveryError, match="after delivering"):
+        await WhatsAppChannel().deliver(
+            make_delivery(
+                answer_format="text",
+                media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/bad.jpg")],
+            )
+        )
+
+    assert not fake_redis.store  # nothing reserved
+    assert len(fake_httpx.calls) == 1  # the failed image only; the question was never sent
+
+
+async def test_deliver_without_media_sends_only_the_question(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Regression: a text-only ask still sends exactly one message, the question.
+    fake_httpx.responses.append(_accepted())
+
+    await WhatsAppChannel().deliver(make_delivery(answer_format="text", question="Deploy to prod?"))
+
+    assert len(fake_httpx.calls) == 1
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Deploy to prod?"
+
+
+async def test_notify_options_render_as_reply_buttons(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A notification's tappable options render as native reply buttons; each button's
+    # id is the bare index (no interaction part), so a tap bridges its title as a
+    # visitor message rather than being mistaken for a pending-ask answer.
+    fake_httpx.responses.append(_accepted("wamid.OPT"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(message="How did we do?", recipient=ALLOWED_A, options=["Great", "Poor"])
+    )
+
+    assert ids == ["wamid.OPT"]
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "interactive"
+    interactive = payload["interactive"]
+    assert interactive["type"] == "button"
+    assert interactive["body"] == {"text": "How did we do?"}
+    assert interactive["action"]["buttons"] == [
+        {"type": "reply", "reply": {"id": "0", "title": "Great"}},
+        {"type": "reply", "reply": {"id": "1", "title": "Poor"}},
+    ]
+    assert not fake_redis.store  # fire-and-forget: no correlation reserved
+
+
+async def test_notify_many_options_render_as_interactive_list(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    fake_httpx.responses.append(_accepted("wamid.LIST"))
+    options = [f"choice-{i}" for i in range(5)]  # >3 → past the button cap, within the list cap
+
+    await WhatsAppChannel().notify(ChannelNotification(message="Pick one", recipient=ALLOWED_A, options=options))
+
+    interactive = fake_httpx.calls[0]["json"]["interactive"]
+    assert interactive["type"] == "list"
+    assert interactive["action"]["button"] == "Choose an option"
+    assert interactive["action"]["sections"][0]["rows"] == [{"id": str(i), "title": f"choice-{i}"} for i in range(5)]
+
+
+async def test_notify_long_options_fall_to_numbered_text(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An option longer than the list row-title cap forces the numbered-text fallback for
+    # the whole notification — the human types an option (which enters the conversation).
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+    options = ["short", "x" * 25]
+
+    await WhatsAppChannel().notify(ChannelNotification(message="Pick", recipient=ALLOWED_A, options=options))
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == f"Pick\n1. short\n2. {'x' * 25}\nReply with the text of one option."
+
+
+async def test_notify_options_and_media_send_choice_then_images(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Options MAY combine with media: the body (with any link lines) carries the
+    # tappable choice, then each image rides as its own message.
+    fake_httpx.responses.append(_accepted("wamid.OPT"))
+    fake_httpx.responses.append(_accepted("wamid.IMG"))
+
+    ids = await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Rate it",
+            recipient=ALLOWED_A,
+            options=["Good", "Bad"],
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg")],
+        )
+    )
+
+    assert ids == ["wamid.OPT", "wamid.IMG"]
+    assert fake_httpx.calls[0]["json"]["interactive"]["type"] == "button"
+    assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg"}
 
 
 async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -774,9 +987,9 @@ async def test_template_known_contact_keys_on_send_from_number(fake_redis: FakeR
 async def test_channel_advertises_media_and_template_capabilities():
     assert WhatsAppChannel.supports_media_notifications is True
     assert WhatsAppChannel.supports_template_notifications is True
-    # Interactive (tappable options) is not a WhatsApp notify capability here; the
-    # absent flag reads False through the getattr convention.
-    assert getattr(WhatsAppChannel, "supports_interactive_notifications", False) is False
+    # Tappable notification options render as native reply buttons/list, so the
+    # central notify_user guard dispatches an options notification here instead of 501.
+    assert WhatsAppChannel.supports_interactive_notifications is True
 
 
 # --- Send-failure classification (the caller's retry decision) ----------------

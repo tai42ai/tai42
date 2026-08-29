@@ -791,6 +791,192 @@ async def test_tool_target_reply_expr_non_string_is_an_error(env, monkeypatch):
     assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
 
 
+# -- tool-route ordered multi-message parts (rich Part shape) ------------------
+
+
+class _MediaFakeChannel(FakeChannel):
+    """A FakeChannel that ADVERTISES media support, so the delivery executor's capability
+    guard lets a media part through and hands it the notification with its media attached."""
+
+    supports_media_notifications = True
+
+
+async def test_tool_route_array_reply_delivers_ordered_parts(env, monkeypatch):
+    # A tool route whose reply_expr emits a JSON array of strings produces an ORDERED
+    # multi-message answer: each string is its own part, delivered as its own message in order,
+    # and ``answer`` is the blank-line join every legacy reader still sees.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".messages")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"messages": ["first", "second", "third"]})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "first\n\nsecond\n\nthird"
+    assert record.answer_parts is not None
+    assert [p.message for p in record.answer_parts] == ["first", "second", "third"]
+    # Three SEPARATE messages, in order.
+    assert [n.message for n in channel.sends] == ["first", "second", "third"]
+
+
+async def test_tool_route_direct_list_result_mixes_string_and_part_object(env, monkeypatch):
+    # A no-reply_expr tool may return a list directly; its elements are EITHER a plain string
+    # (text-only part shorthand) or a part object — both normalize to the one internal part.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: ["plain", {"message": "rich object"}])
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_parts is not None
+    assert [p.message for p in record.answer_parts] == ["plain", "rich object"]
+    assert [n.message for n in channel.sends] == ["plain", "rich object"]
+
+
+async def test_tool_route_mixed_text_and_media_parts_deliver_in_order(env, monkeypatch):
+    # A mixed sequence: text, then a media part, then text — delivered in order, and only the
+    # media part's notification carries media.
+    channel = _MediaFakeChannel()
+    route = _tool_channel_route(reply_expr=".parts")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(
+        monkeypatch,
+        lambda kw: {
+            "parts": [
+                "intro text",
+                {"message": "the image", "media": [{"kind": "image", "url": "https://cdn.example/i.png"}]},
+                "closing text",
+            ]
+        },
+    )
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "intro text\n\nthe image\n\nclosing text"
+    assert record.answer_parts is not None
+    assert [p.message for p in record.answer_parts] == ["intro text", "the image", "closing text"]
+    # Order preserved, and the media rides ONLY the media part's notification.
+    assert [n.message for n in channel.sends] == ["intro text", "the image", "closing text"]
+    assert channel.sends[0].media is None
+    assert channel.sends[1].media is not None
+    assert channel.sends[1].media[0].url == "https://cdn.example/i.png"
+    assert channel.sends[2].media is None
+
+
+async def test_tool_route_empty_array_reply_is_a_loud_error(env, monkeypatch):
+    # An empty array has no message to send: a loud error outcome, never a silent drop.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".parts")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"parts": []})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "at least one message" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+async def test_tool_route_blank_array_element_is_a_loud_error(env, monkeypatch, blank):
+    # A blank string element would deliver an empty message: a loud error, never coerced away.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".parts")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"parts": ["ok", blank]})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "blank string" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_route_malformed_part_object_is_a_loud_error(env, monkeypatch):
+    # Parts are strict from birth: an unknown key in a part object is a loud error, never a
+    # silently dropped field.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".parts")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"parts": [{"message": "hi", "bogus": 1}]})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "not a valid part" in record.error
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_agent_structured_array_final_stays_one_serialized_message(env, monkeypatch):
+    # F1 STRICT ruling PIN: an agent whose structured final is a JSON array of strings is
+    # serialized to ONE string and delivered as ONE message — NEVER split into ordered parts.
+    # An agent's structured output may legitimately be a string array as DATA; only TOOL routes
+    # author multi-message parts. Reverting to magic-array detection reddens this.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+
+    class _ArrayAgent(Agent):
+        tool_name = "arr"
+        ToolInput = _EchoInput
+
+        async def run(self, *, user_message: str = "", thread_id: str | None = None, **kwargs):
+            return ["alpha", "beta", "gamma"]
+
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": _ArrayAgent()})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    # ONE serialized string, no parts — the array is DATA, not a multi-message answer.
+    assert record.answer_parts is None
+    assert record.answer == json.dumps(["alpha", "beta", "gamma"])
+    assert len(channel.sends) == 1
+    assert channel.sends[0].message == json.dumps(["alpha", "beta", "gamma"])
+
+
+def test_with_greeting_prepends_a_leading_part():
+    # A due first-contact greeting is its OWN leading message ahead of the turn's parts (the
+    # joined answer stays byte-identical to the old "greeting\n\nanswer" prefix).
+    outcome = turn_module._ResolvedOutcome(
+        answer_status="answered",
+        parts=[turn_module._text_part("first"), turn_module._text_part("second")],
+        error=None,
+    )
+    greeted = turn_module._with_greeting(outcome, "Welcome!")
+    assert isinstance(greeted, turn_module._ResolvedOutcome)
+    assert [p.message for p in greeted.parts] == ["Welcome!", "first", "second"]
+    assert greeted.answer == "Welcome!\n\nfirst\n\nsecond"
+
+
+def test_with_greeting_on_a_silent_outcome_is_greeting_only():
+    greeted = turn_module._with_greeting(turn_module._SilentOutcome(), "Welcome!")
+    assert isinstance(greeted, turn_module._ResolvedOutcome)
+    assert [p.message for p in greeted.parts] == ["Welcome!"]
+
+
 async def test_tool_target_denied_dispatch_is_an_error(env, monkeypatch):
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)

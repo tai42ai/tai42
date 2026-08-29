@@ -30,7 +30,6 @@ from __future__ import annotations
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     NOTIFICATION_ADDRESS_MAX_CHARS,
-    NOTIFICATION_MESSAGE_MAX_CHARS,
     Channel,
     ChannelInputError,
     ChannelNotification,
@@ -102,27 +101,31 @@ async def notify_user(
     so an addressed notification lands in the identity's feed even on the channel
     path. A blank value is rejected.
 
-    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms threaded onto
-    the ``ChannelNotification`` the channel receives (the contract enforces media/template
-    and options/template are each mutually exclusive; options may combine with media). All
-    three REQUIRE a named channel: the internal sink stores only
-    message/recipient/audience, so any supplied with ``channel=None`` is a loud
-    ``ValueError`` (a client error the operation door maps to a 400), never a silent
-    drop. A channel advertises support with the OPTIONAL class attributes
+    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms (the contract
+    enforces media/template and options/template are each mutually exclusive; options may
+    combine with media). On a NAMED channel they are threaded onto the
+    ``ChannelNotification`` the channel receives; on the INTERNAL sink (``channel=None``)
+    they are STORED on the feed record and returned by the read doors (rendering them, media
+    included, is the host inbox's own surface) — a clean break from the old
+    sink-refuses-rich-content rule.
+    On the channel path a channel advertises support with the OPTIONAL class attributes
     ``supports_media_notifications`` / ``supports_template_notifications`` /
     ``supports_interactive_notifications`` (absent = unsupported); the matching field sent
     to a channel that does not advertise it is a ``NotImplementedError`` (the operation
     door maps it to a 501) — a sibling channel that reads only ``notification.message`` must
     never accept the send while the extra content silently vanishes. The guard fires BEFORE
-    the in-app feed record, so a refused send leaves no phantom feed entry.
+    the in-app feed record, so a refused send leaves no phantom feed entry. (The sink path
+    stores rich content unconditionally — there is no channel to advertise a capability.)
 
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
     Raises ``ValueError`` for a blank message, an unknown channel name, a blank
-    ``recipient``/``audience``, or ``media``/``template``/``options`` with no named
-    channel; ``CrossIdentityAudienceError`` when a restricted caller addresses another
-    identity (a cross-identity authorization denial the operation door maps to a 403);
+    ``recipient``/``audience``, or a ``media``/``template``/``options`` combination the
+    contract refuses (a present-but-empty list, an over-cap value, or the mutually
+    exclusive media+template / options+template); ``CrossIdentityAudienceError`` when a
+    restricted caller addresses another identity (a cross-identity authorization denial
+    the operation door maps to a 403);
     ``NotImplementedError`` when a channel cannot notify or does not advertise the
     ``media``/``template``/``options`` capability; ``ChannelDeliveryError`` when a channel
     send fails; ``ChannelInputError`` when a channel permanently refuses the input's shape
@@ -147,32 +150,28 @@ async def notify_user(
     # operation door maps to a 403 (the write-side mirror of the read door).
     audience = clamp_write_audience(audience)
     if channel is None:
-        # Internal sink path: the sink stores the address verbatim, so a set
-        # value is guarded here (a channel, by contrast, owns its own recipient
-        # validation — the delivery path below is left untouched).
-        if media is not None or template is not None or options is not None:
-            # The sink carries no media/template/options column, so accepting any here
-            # would be a silent drop — refuse loudly as a client error (mapped to a 400).
-            raise ValueError(
-                "media, template and options require a named channel; the internal sink stores no rich content"
-            )
-        if recipient is not None and (not isinstance(recipient, str) or not recipient.strip()):
-            raise ValueError("recipient must be a non-empty address")
-        # The sink stores the recipient verbatim without constructing a ChannelNotification,
-        # so the contract's address cap does not apply here — enforce the same bound before
-        # the write, mirroring the message cap below (on the channel path the recipient rides
-        # the ChannelNotification, where the contract validator caps it).
-        if recipient is not None and len(recipient) > NOTIFICATION_ADDRESS_MAX_CHARS:
-            raise ValueError(
-                f"recipient must be at most {NOTIFICATION_ADDRESS_MAX_CHARS} characters, got {len(recipient)}"
-            )
-        # The sink stores the raw message without constructing a ChannelNotification, so
-        # the notification's message cap does not apply here — enforce the same wire bound
-        # before the write, mirroring the contract validator's text, so an over-cap message
-        # never lands unbounded in the replayed feed.
-        if len(message) > NOTIFICATION_MESSAGE_MAX_CHARS:
-            raise ValueError(f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(message)}")
-        await record_notification(message, recipient=recipient, audience=audience)
+        # Internal sink path. It now STORES ``media``/``template``/``options`` (parity with
+        # the channel path) rather than refusing them — a clean break from the old
+        # sink-carries-no-rich-content rule. The rich fields are validated exactly as the
+        # channel path validates them by constructing the notification the contract validates:
+        # the message cap, the recipient cap, the media/options caps AND the media-vs-template
+        # / options-vs-template exclusivity all raise here as a pydantic ``ValidationError`` (a
+        # ``ValueError`` the operation door maps to a 400), before any feed write. Media is
+        # stored RAW — a ``data:`` image renders directly under the inbox CSP — and is NOT
+        # substituted to a served reference here: the shared feed key carries no TTL, so an
+        # inline image can never outlive a served-media key the way a bounded interaction
+        # record's substituted reference is kept alive by its group horizon.
+        sink_notification = ChannelNotification(
+            message=message, recipient=recipient, media=media, template=template, options=options
+        )
+        await record_notification(
+            sink_notification.message,
+            recipient=sink_notification.recipient,
+            audience=audience,
+            media=sink_notification.media,
+            template=sink_notification.template,
+            options=sink_notification.options,
+        )
         return []
     channel_obj = _resolve_channel(channel)
     # Central capability guard — a channel that does not advertise the matching flag

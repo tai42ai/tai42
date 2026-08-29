@@ -151,7 +151,9 @@ class WebChannel:
         reservation and re-raises. Every format is appended as-is — the transcript
         entry carries the format and options, and the chat page renders the widget;
         the ``form`` question also carries its answer schema, and only the
-        ``external`` widget carries the callback ticket it must open.
+        ``external`` widget carries the callback ticket it must open. Any display
+        ``media`` rides the same frame in order and renders through the same
+        media-card component the notify path uses — display-only, never answered.
         """
         if math.ceil((delivery.timeout_at - datetime.now(UTC)).total_seconds()) <= 0:
             raise ChannelDeliveryError(
@@ -180,6 +182,12 @@ class WebChannel:
                     delivery.timeout_at,
                     callback_url=(delivery.callback_url if delivery.answer_format == _EXTERNAL_FORMAT else None),
                     schema=delivery.schema,
+                    # Display media rides the question frame in order, in the same
+                    # shape the media-card renders — an ``image`` inline, a ``link``
+                    # as a safe anchor; display-only, never part of the answer.
+                    media=(
+                        [_media_frame_item(item) for item in delivery.media] if delivery.media is not None else None
+                    ),
                 )
                 # Set INSIDE the gate: leaving the ``async with`` is a suspension
                 # point, and a cancellation delivered there would release the
@@ -216,9 +224,11 @@ class WebChannel:
         carrying ``media`` and/or ``options`` lands as ONE ``chat.media`` card entry: the
         message is its text, every media item rides the frame's media list in order (an
         ``image`` as an inline picture, a ``link`` as a card link element the page renders
-        as a safe anchor), and the options ride its option list. A ``data:`` image is
-        refused loudly — the page renders an image only from an absolute ``https`` source.
-        A template notification is refused loudly — this channel sends no vendor templates.
+        as a safe anchor), and the options ride its option list. A MEDIA-ONLY notification
+        (blank message) lands as the same card with an empty ``text`` — the page renders the
+        media card with no text bubble. A ``data:`` image is refused loudly — the page renders
+        an image only from an absolute ``https`` source. A template notification is refused
+        loudly — this channel sends no vendor templates.
         """
         if notification.template is not None:
             raise NotImplementedError("web channel sends no vendor templates; template notifications are not supported")
