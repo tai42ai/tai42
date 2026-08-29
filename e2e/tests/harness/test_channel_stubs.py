@@ -26,8 +26,22 @@ async def test_fake_telegram_records_mints_and_fails_loud() -> None:
             id1 = first.json()["result"]["message_id"]
             id2 = second.json()["result"]["message_id"]
             assert id2 > id1  # monotonic minted ids
+            # A real Message object carries a NUMERIC ``chat.id`` (never the raw string the
+            # send addressed) — the writer requires an int to scope its correlation anchor.
+            assert first.json()["result"]["chat"]["id"] == 111
             assert [r["text"] for r in stub.sent] == ["hi", "yo"]
             assert stub.sent[0]["message_id"] == id1
+
+            # sendPhoto returns the same Message shape (numeric ``chat.id`` + minted id) and
+            # records the caption as the searchable text — a media notification's send path.
+            photo = await client.post(
+                "/botTKN/sendPhoto", json={"chat_id": "111", "photo": "https://x/p.jpg", "caption": "cap"}
+            )
+            assert photo.status_code == 200
+            assert photo.json()["result"]["chat"]["id"] == 111
+            assert photo.json()["result"]["message_id"] > id2
+            assert stub.sent[-1]["text"] == "cap"
+            assert stub.sent[-1]["method"] == "sendPhoto"
 
             hook = await client.post("/botTKN/setWebhook", json={"url": "http://x/inbound", "secret_token": "s"})
             assert hook.json() == {"ok": True, "result": True}
@@ -69,10 +83,17 @@ async def test_fake_twilio_records_mints_and_fails_loud() -> None:
     try:
         async with httpx.AsyncClient(base_url=stub.api_base_url, timeout=5.0) as client:
             first = await client.post("/Accounts/AC1/Messages.json", data={"To": "+1", "From": "+2", "Body": "hi"})
-            second = await client.post("/Accounts/AC1/Messages.json", data={"To": "+1", "From": "+2", "Body": "yo"})
+            # An MMS send attaches each image as a repeated ``MediaUrl`` form field; the stub
+            # keeps every attachment (not just the last) so a media notify can be asserted.
+            second = await client.post(
+                "/Accounts/AC1/Messages.json",
+                data={"To": "+1", "From": "+2", "Body": "yo", "MediaUrl": ["https://x/a.jpg", "https://x/b.jpg"]},
+            )
             assert first.status_code == 201
             assert first.json()["sid"] != second.json()["sid"]  # distinct minted MessageSids
             assert [r["body"] for r in stub.messages] == ["hi", "yo"]
+            assert stub.messages[0]["media_urls"] == []
+            assert stub.messages[1]["media_urls"] == ["https://x/a.jpg", "https://x/b.jpg"]
             assert (await client.get("/Accounts/AC1/Messages.json")).status_code == 500
         stub.reset()
         assert stub.messages == []
