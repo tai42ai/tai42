@@ -2072,8 +2072,10 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
         # between — or a race that stranded folder creation — leaves a preset present WITHOUT
         # its seeded folder/``palette-node`` placement, and no versioned branch above repairs
         # it. Re-apply the seed's tool_meta here so any boot/config-reload restores placement.
-        # It is idempotent and non-overwriting (fills only fields the operator left absent), so
-        # an up-to-date preset and an operator-edited one both stay untouched.
+        # The guards are fill-only (write display_name/tags/folder_id ONLY where absent): an
+        # operator-CHANGED value survives untouched. Fill-only cannot distinguish a
+        # crash-stranded NULL from a field the operator deliberately CLEARED, so a cleared
+        # tags/folder is re-filled by the seed on the next boot.
         await _apply_seed_tool_meta(seed)
 
     # Local-load guard on every non-raising branch. A sibling's boot create/upgrade lands

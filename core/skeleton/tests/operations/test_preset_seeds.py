@@ -238,6 +238,58 @@ def test_present_seed_reapplies_stripped_tool_meta(pg) -> None:
     asyncio.run(run())
 
 
+# -- present branch never overwrites operator-CHANGED tool_meta (fill-only) ----
+
+
+def test_present_seed_preserves_operator_edited_tool_meta(pg) -> None:
+    """The present-branch ``_apply_seed_tool_meta`` re-apply runs for EVERY present seed on
+    every boot, including operator-edited ones. Its guards are fill-only: display_name, tags,
+    and folder_id are each written ONLY where the preset's overlay leaves that field absent.
+    The contract this pins: operator-CHANGED display metadata survives a re-run UNTOUCHED —
+    the seed never clobbers a value the operator set. (Fill-only cannot tell a crash-stranded
+    NULL from a deliberately operator-CLEARED field, so a field the operator CLEARS is re-filled
+    by the seed on the next boot; that is out of scope here, which pins the CHANGED case.)"""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["featured"], folder_path="acme/echoes"),
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            # The operator edits every display field: a custom display_name, a custom tag set,
+            # and a move into a real folder they created (a different id than the seed's leaf).
+            store = instance.app.tool_meta.store
+            operator_folder = await store.create_folder("operator-space")
+            await store.merge_meta(
+                "echo_default",
+                patch={
+                    "display_name": "Operator Renamed",
+                    "tags": ["operator-pick"],
+                    "folder_id": operator_folder.id,
+                },
+            )
+
+            # A later boot/config-reload re-runs the applier over the PRESENT preset — driving
+            # the present-branch tool_meta re-apply against the operator's overlay.
+            await preset_ops.apply_preset_seeds()
+
+            # All three operator values survive untouched — the fill-only guards saw each field
+            # already set and wrote nothing over it.
+            meta = await store.get_meta("echo_default")
+            assert meta is not None
+            assert meta.display_name == "Operator Renamed"
+            assert meta.tags == ["operator-pick"]
+            assert meta.folder_id == operator_folder.id
+
+    asyncio.run(run())
+
+
 # -- drift: content change upgrades to a new shipped-default version ----------
 
 
