@@ -38,8 +38,9 @@ the operator and Studio drive over the routing table.
   id rides the path (a uuid4, so it round-trips a path segment cleanly).
 - ``POST /api/conversations/{route_name}/thread/messages`` (AUTHED) — send an operator
   message BY HAND into a thread (no turn runs), delivered as the route identity. Body is
-  ``{thread_id, text, address}``; returns ``{message_id, thread_id}``. The ``thread_id`` and
-  ``address`` ride the body because the id holds a percent-encoded principal.
+  ``{thread_id, text, address, media?, options?}``; returns ``{message_id, thread_id}``. The
+  ``thread_id`` and ``address`` ride the body because the id holds a percent-encoded
+  principal; ``media``/``options`` are OPTIONAL richer-send forms delivered with the text.
 - ``GET /api/conversations/{route_name}/thread/mode?thread_id=`` (AUTHED) — read a thread's
   control mode and its source (``thread`` override or ``route`` default).
 - ``PUT /api/conversations/{route_name}/thread/mode`` (AUTHED) — set a thread's mode override
@@ -334,9 +335,10 @@ delete_conversation_person = register_operation_route(
 
 
 async def _extract_thread_message(request: Request) -> dict:
-    """The operator-send body ``{thread_id, text, address}`` as the operation's flat fields.
-    A non-object body, a missing/blank ``thread_id`` or a non-string ``text``/``address`` is
-    a loud 400 here; the operation owns the blank-text and thread-belongs guards.
+    """The operator-send body ``{thread_id, text, address, media?, options?}`` as the
+    operation's flat fields. A non-object body, a missing/blank ``thread_id``, a non-string
+    ``text``/``address`` or a non-list ``media``/``options`` is a loud 400 here; the operation
+    owns the blank-text, thread-belongs and media/options CONTENT guards (item shape, caps).
 
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips."""
@@ -345,7 +347,7 @@ async def _extract_thread_message(request: Request) -> dict:
     except ValueError as exc:
         raise BadRequestError("invalid JSON body") from exc
     if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of {thread_id, text, address}") from None
+        raise BadRequestError("body must be a JSON object of {thread_id, text, address, media?, options?}") from None
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise BadRequestError("thread_id is required and must be a non-blank string") from None
@@ -355,7 +357,15 @@ async def _extract_thread_message(request: Request) -> dict:
     address = body.get("address")
     if address is not None and not isinstance(address, str):
         raise BadRequestError("address must be a string or absent") from None
-    return {"thread_id": thread_id, "text": text, "address": address}
+    # Shape-only checks here; the operation coerces each media item through ``MediaItem`` and
+    # applies the contract caps/exclusivity, mapping a violation to a 400.
+    media = body.get("media")
+    if media is not None and not isinstance(media, list):
+        raise BadRequestError("media must be a list of media items or absent") from None
+    options = body.get("options")
+    if options is not None and not isinstance(options, list):
+        raise BadRequestError("options must be a list of strings or absent") from None
+    return {"thread_id": thread_id, "text": text, "address": address, "media": media, "options": options}
 
 
 async def _extract_thread_mode_query(request: Request) -> dict:

@@ -114,6 +114,12 @@ def _build_payload(
         if verifier is not None:
             payload["verifier"] = verifier
         return payload
+    if answer_format is AnswerFormat.TEXT and options:
+        # TEXT suggested replies: unlike SELECT (a constrained answer set), these are
+        # optional pre-filled answers a human MAY tap — a tapped option submits its own
+        # text as the free-text answer, which validates as any string. Stored so the inbox
+        # can render the chips and the channel delivery frame carries them alike.
+        return {"options": options}
     return None
 
 
@@ -376,15 +382,24 @@ async def ask_user(
     ``recipient`` (a channel delivery address — a WHERE) — and the two may be set
     together (address the question to identity A AND deliver it over a channel).
 
-    ``media`` is optional display-only content rendered WITH the question in the
-    Studio inbox — a list of ``MediaItem`` (or their dict form) each
-    ``{"kind": "image"|"link", "url", "caption"?}``. An ``image`` url is an
-    absolute ``https`` URL or a ``data:image/*`` URI; a ``link`` url is an
-    absolute ``http(s)`` URL; ``caption`` is the image alt text / link label. At
-    most eight items, within a per-question total URI budget. It never becomes
-    part of the answer — the human still answers via ``answer_format`` — and it is
-    NOT forwarded to channel deliveries: a channel receives the question text
-    only, while the inbox is where the media renders.
+    ``media`` is optional display content rendered WITH the question — a list of
+    ``MediaItem`` (or their dict form) each ``{"kind": "image"|"link", "url",
+    "caption"?}``. An ``image`` url is an absolute ``https`` URL or a ``data:image/*``
+    URI; a ``link`` url is an absolute ``http(s)`` URL; ``caption`` is the image alt
+    text / link label. Bounded by a loose item count within a per-question total URI
+    budget. It never becomes part of the answer — the human still answers via
+    ``answer_format``. It renders in the Studio inbox AND, when a ``channel`` delivers
+    the question, rides the delivery (as ``ChannelDelivery.media`` — the SAME stored
+    items, a ``data:`` image already substituted to its served reference) so the
+    channel shows it alongside the question text. Media is an ENHANCEMENT, not
+    structure, so it rides no capability flag: a channel that renders only text simply
+    ignores ``delivery.media`` and shows the question, never refusing the send.
+
+    ``options`` is the SELECT answer set (required there) and, for a ``text`` question,
+    an OPTIONAL list of SUGGESTED REPLIES: a tapped option submits its own text as the
+    free-text answer (a text answer accepts any string, so a suggested reply constrains
+    nothing). It is stored on the question and rides a ``channel`` delivery alike; it is
+    forbidden on ``confirm``/``form``/``external``.
 
     ``mode`` selects the wait discipline. ``"sync"`` (the default) blocks and
     returns the typed answer as described above. ``"async"`` PARKS the caller: it
@@ -412,6 +427,13 @@ async def ask_user(
         raise ValueError(f"unknown answer_format: {answer_format!r}") from exc
 
     is_external = fmt is AnswerFormat.EXTERNAL
+    # ``options`` are the SELECT answer set (required there) and, for TEXT, an OPTIONAL set
+    # of suggested replies a tap of which submits its OWN text as the free-text answer (text
+    # accepts any string, so a suggested reply constrains nothing). Every other format
+    # carries none — refuse loudly here, before any state is written, rather than silently
+    # drop them. The SELECT-requires-options check stays in ``_build_payload``.
+    if options is not None and fmt not in (AnswerFormat.SELECT, AnswerFormat.TEXT):
+        raise ValueError(f"options are not valid with answer_format {fmt.value!r}")
     # ``audience`` (the addressed identity) is validated loud and up front — a
     # blank/whitespace value can never address a real identity — mirroring the
     # ``notify_user`` guard so both surfaces reject it identically before any
@@ -462,8 +484,6 @@ async def ask_user(
                 validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
                 if validate_form_schema is not None:
                     validate_form_schema(schema, question)
-        if options is not None and fmt is not AnswerFormat.SELECT:
-            raise ValueError("options are only valid with answer_format 'select'")
         if recipient is not None and (not isinstance(recipient, str) or not recipient.strip()):
             # Rejected up-front as a clean ValueError — never a post-persist
             # pydantic error from the delivery frame's own recipient validator.
@@ -477,8 +497,6 @@ async def ask_user(
     if is_external:
         if link is None and channel is None:
             raise ValueError("answer_format 'external' requires a link (or a channel)")
-        if options is not None:
-            raise ValueError("answer_format 'external' does not accept options")
         if schema is not None:
             _normalize_schema(schema)
         if verifier is not None:
@@ -616,14 +634,32 @@ async def ask_user(
 
     async with client_ctx(RedisClient, settings.redis) as r:
         # A data:image is decoded once and stored BY REFERENCE before the request is
-        # built, so the durable record carries a same-origin served reference
-        # (``MEDIA_ROUTE_PREFIX{id}``) the inbox renders, never the inline bytes. The
-        # media keys start at ``idle_ttl`` and ``add`` extends them to the group
-        # horizon (an async park's own longer horizon included). https/link items pass
-        # through unchanged. ``substitute_media`` coerces every item through
-        # ``MediaItem`` — the media validation that raises before any store. dicts and
-        # MediaItem inputs are both accepted.
-        stored_media = await substitute_media(store, r, media, settings.idle_ttl_seconds) if media is not None else None
+        # built, so the durable record carries a served reference (``MEDIA_ROUTE_PREFIX{id}``)
+        # the inbox renders, never the inline bytes. The media keys start at ``idle_ttl`` and
+        # ``add`` extends them to the group horizon (an async park's own longer horizon
+        # included). https/link items pass through unchanged. ``substitute_media`` coerces
+        # every item through ``MediaItem`` — the media validation that raises before any
+        # store. dicts and MediaItem inputs are both accepted.
+        #
+        # This SAME stored list rides both the durable record (the inbox) AND, on a channel
+        # ask, the ``ChannelDelivery.media`` forwarded to the plugin. A channel vendor fetches
+        # media from its own servers, so a channel ask must carry an ABSOLUTE served url — a
+        # relative ``MEDIA_ROUTE_PREFIX{id}`` is unfetchable off-origin. So pass ``base_url``
+        # when a channel is set (``public_base_url`` is already hard-required above whenever a
+        # channel is set, so it is non-None here — a data: ask with no public base url has
+        # already failed loudly, matching the notify path's data:-image refusal); an
+        # inbox-only ask keeps the relative same-origin url the inbox renders.
+        stored_media = (
+            await substitute_media(
+                store,
+                r,
+                media,
+                settings.idle_ttl_seconds,
+                base_url=settings.public_base_url if channel is not None else None,
+            )
+            if media is not None
+            else None
+        )
         request = InteractionRequest(
             interaction_id=interaction_id,
             group_id=group,
@@ -714,6 +750,12 @@ async def ask_user(
             # For a form the normalized schema rides the delivery; ``_build_payload``
             # already required and normalized it above (before any persist).
             schema=(format_payload or {}).get("schema") if fmt is AnswerFormat.FORM else None,
+            # The question's display media rides the delivery too — the SAME stored items,
+            # here with any data: image substituted to an ABSOLUTE served reference (the
+            # channel branch above passed ``base_url``), so a vendor can fetch it off-origin;
+            # a channel that renders media shows it alongside the question and one that
+            # renders only text simply ignores it. None when the ask carried no media.
+            media=stored_media,
             callback_url=callback_url,
             timeout_at=timeout_at,
         )

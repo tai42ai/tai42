@@ -8,9 +8,15 @@ key is scoped by the interactions ``key_prefix`` (default ``interactions:``) —
 its own keys, so two deployments sharing one interactions Redis under distinct
 ``INTERACTIONS_KEY_PREFIX`` values keep separate feeds and never leak
 notifications across deployments. Each notification is one JSON record — ``id``,
-``message``, ``recipient``, an optional ``audience`` identity, and a server-side
-``created_at`` — pushed onto that per-deployment list; the read path returns the
-list newest-first for the Studio inbox to render.
+``message``, ``recipient``, an optional ``audience`` identity, the optional richer-send
+forms ``media`` (a list of ``MediaItem`` dicts) / ``template`` (a ``ChannelTemplate``
+dict) / ``options`` (a list of option strings), and a server-side ``created_at`` —
+pushed onto that per-deployment list; the read path returns the list newest-first — the
+rich fields (``media`` alongside the message) are STORED and RETURNED by the read doors,
+and rendering them is the host inbox's own surface, not a guarantee this platform makes.
+``media`` is stored RAW (kept as the caller passed it, so a ``data:`` image is returned
+inline under whatever CSP the host applies), never substituted to a served reference —
+the shared feed carries no TTL to bound a served key's lifetime.
 
 The feed is a bounded newest-first ring buffer: every write caps it (LTRIM) at
 ``interactions_settings().notifications_feed_max`` entries, keeping the newest N
@@ -52,6 +58,8 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from redis.asyncio import Redis
+from tai42_contract.channels import ChannelTemplate
+from tai42_contract.interactions.models import MediaItem
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -113,7 +121,17 @@ class NotificationSink:
         if ttl_seconds is not None:
             pipe.expire(feed_key, ttl_seconds)
 
-    async def record(self, r: Redis, message: str, recipient: str | None, audience: str | None = None) -> dict:
+    async def record(
+        self,
+        r: Redis,
+        message: str,
+        recipient: str | None,
+        audience: str | None = None,
+        *,
+        media: list[dict] | None = None,
+        template: dict | None = None,
+        options: list[str] | None = None,
+    ) -> dict:
         """Append one notification and return the stored record. The id and the
         ``created_at`` timestamp are minted here (server-side), never supplied by
         the caller.
@@ -124,6 +142,12 @@ class NotificationSink:
         reads a complete window of its own records. ``recipient`` is untouched — a
         channel delivery address, orthogonal to the ``audience`` identity.
 
+        ``media`` / ``template`` / ``options`` are the OPTIONAL richer-send forms the
+        notification carried (already JSON-serialized by the caller — a list of
+        ``MediaItem`` dicts, a ``ChannelTemplate`` dict, a list of option strings), stored
+        alongside the message and returned by the read doors — rendering them is the host
+        inbox's own surface. ``None`` for each keeps the plain record shape.
+
         Both feed writes are issued in ONE pipeline executed once, so a failure can
         never land the record on one feed but not the other."""
         record = {
@@ -131,6 +155,9 @@ class NotificationSink:
             "message": message,
             "recipient": recipient,
             "audience": audience,
+            "media": media,
+            "template": template,
+            "options": options,
             "created_at": datetime.now(UTC).isoformat(),
         }
         payload = json.dumps(record)
@@ -164,12 +191,22 @@ class NotificationSink:
         return [json.loads(item) for item in raw_items]
 
 
-async def record_notification(message: str, recipient: str | None = None, audience: str | None = None) -> dict:
+async def record_notification(
+    message: str,
+    recipient: str | None = None,
+    audience: str | None = None,
+    *,
+    media: list[MediaItem] | None = None,
+    template: ChannelTemplate | None = None,
+    options: list[str] | None = None,
+) -> dict:
     """Write one notification to the internal sink and return the stored record.
 
     Opens the interactions Redis connection and delegates to
     :meth:`NotificationSink.record`. When ``audience`` is set the record also lands
-    on that identity's per-identity feed. Every Redis or serialization failure
+    on that identity's per-identity feed. ``media``/``template``/``options`` are the
+    OPTIONAL richer-send forms (already contract-validated by the caller); they are
+    JSON-serialized here and stored on the record. Every Redis or serialization failure
     propagates loudly.
     """
     # The in-app feed is interactions-Redis-backed, so every feed write refuses with
@@ -187,7 +224,15 @@ async def record_notification(message: str, recipient: str | None = None, audien
         settings.key_prefix, settings.notifications_feed_max, settings.notifications_feed_ttl_seconds
     )
     async with client_ctx(RedisClient, settings.redis) as r:
-        return await sink.record(r, message, recipient, audience=audience)
+        return await sink.record(
+            r,
+            message,
+            recipient,
+            audience=audience,
+            media=[item.model_dump(mode="json") for item in media] if media is not None else None,
+            template=template.model_dump(mode="json") if template is not None else None,
+            options=options,
+        )
 
 
 async def read_notifications(audience: str | None = None) -> list[dict]:

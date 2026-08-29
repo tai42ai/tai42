@@ -1,17 +1,22 @@
-"""L18 — the first-contact greeting: prepended once, and its ``{pairing_code}`` is live.
+"""L18 — the first-contact greeting: delivered once as its own leading message, and its
+``{pairing_code}`` is live.
 
-A greeting-configured AGENT target. The FIRST admitted inbound from an address gets the
-configured greeting PREPENDED into that same turn's delivered answer (there is no
-separate greeting chunk; the greeting is the opening of the one answer). A SECOND inbound
-from that address carries no greeting — first contact is the person-row creation, and the row
-now exists. When the template references ``{pairing_code}``, a fresh code is minted at
-greeting time and rendered into the greeting; that code is a real, live pair code — redeeming
-it from another channel links the two (a greeting code can chain another channel).
+A greeting-configured target. The FIRST admitted inbound from an address is answered with
+the configured greeting delivered as its OWN LEADING message (a separate send), FOLLOWED by
+the turn's answer as the next send — the greeting is a message of its own, no longer text
+prepended into the one answer. The record still carries both joined (greeting + blank line +
+answer) as its whole ``answer`` text, so a transcript reader reads the turn as one answer. A
+SECOND inbound from that address carries no greeting — first contact is the person-row
+creation, and the row now exists. When the template references ``{pairing_code}``, a fresh
+code is minted at greeting time and rendered into the greeting message; that code is a real,
+live pair code — redeeming it from another channel links the two (a greeting code can chain
+another channel).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlencode
 
 import pytest
 
@@ -34,7 +39,6 @@ from ._bridge_support import (
     post_inbound,
     script_reply,
     wait_send_to,
-    wait_twilio_send,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -45,7 +49,7 @@ pytestmark = pytest.mark.skipif(
 _AGENT = "tools_agent"
 
 
-async def test_greeting_prepends_once_and_its_pairing_code_is_redeemable(
+async def test_greeting_leads_once_and_its_pairing_code_is_redeemable(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     port = bridge.stack.port_b
@@ -77,43 +81,57 @@ async def test_greeting_prepends_once_and_its_pairing_code_is_redeemable(
     answer2 = uniq("l18-ans2")
     script_reply(bridge.llm_stub, answer1, answer2)
 
-    # First inbound: the greeting is PREPENDED into the same delivered answer. The rendered
-    # greeting is exactly ``{greet} {code}`` and the answer follows it after a blank line.
+    # First inbound: the greeting leads as its OWN send, then the answer follows as the next
+    # send. The greeting message is exactly ``{greet} {code}`` and the second send is the bare
+    # answer — no longer one message with the greeting prepended.
     first = bridge.twilio_inbound(our_identity=BRIDGE_TWILIO_FROM, client=BRIDGE_TWILIO_CLIENT, text="hello", port=port)
     assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, first, port=port)).status_code == 204
-    send1 = await wait_twilio_send(bridge.fake_twilio, answer1)
-    assert send1["body"].startswith(f"{greet} "), send1["body"]
-    code = extract_pair_code(send1["body"])
-    assert send1["body"] == f"{greet} {code}\n\n{answer1}", send1["body"]
+    greeting_send, answer_send = await wait_send_to(bridge.fake_twilio, to=BRIDGE_TWILIO_CLIENT, count=2)
+    assert greeting_send["body"].startswith(f"{greet} "), greeting_send["body"]
+    code = extract_pair_code(greeting_send["body"])
+    assert greeting_send["body"] == f"{greet} {code}", greeting_send["body"]
+    assert answer_send["body"] == answer1, answer_send["body"]
 
-    # Second inbound from the SAME address: no greeting, no code — just the answer.
+    # The record still carries both joined as its whole answer text — the greeting, a blank
+    # line, then the answer — so a transcript reads the turn as one answer even though it was
+    # delivered as two messages.
+    thread_id = (await bridge.api().get(f"/api/conversations/{route_tw}/threads"))["items"][0]["thread_id"]
+    transcript = await bridge.api().get(
+        f"/api/conversations/{route_tw}/transcript?{urlencode({'thread_id': thread_id})}"
+    )
+    assert transcript["items"][0]["answer"] == f"{greet} {code}\n\n{answer1}", transcript["items"][0]
+
+    # Second inbound from the SAME address: no greeting, no code — just the answer, and only
+    # one send (no leading greeting message this time).
     second = bridge.twilio_inbound(
         our_identity=BRIDGE_TWILIO_FROM, client=BRIDGE_TWILIO_CLIENT, text="hello again", port=port
     )
     assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, second, port=port)).status_code == 204
-    send2 = await wait_twilio_send(bridge.fake_twilio, answer2)
-    assert send2["body"] == answer2, send2["body"]
-    assert not send2["body"].startswith(greet)
-    assert "LINK-" not in send2["body"]
+    sends = await wait_send_to(bridge.fake_twilio, to=BRIDGE_TWILIO_CLIENT, count=3)
+    assert sends[2]["body"] == answer2, sends[2]["body"]
+    # The greeting was delivered EXACTLY ONCE across both turns — the once-only invariant.
+    assert sum(1 for send in sends if send["body"].startswith(f"{greet} ")) == 1, [s["body"] for s in sends]
+    assert "LINK-" not in sends[2]["body"]
 
     # The greeting's minted code is a real, live pair code: redeeming it from whatsapp links
-    # the two conversations. The whatsapp side is itself a first contact, so it also fires its
-    # greeting here — the redeem answer is the greeting PLUS ``linked``, with a fresh code of
-    # its own (which could chain a third channel). So the reply ENDS WITH the linked text.
+    # the two conversations. The whatsapp side is itself a first contact, so it ALSO fires its
+    # greeting — delivered here as its own leading message (with a fresh code of its own that
+    # could chain a third channel), FOLLOWED by the ``linked`` reply as the next send.
     redeem = bridge.whatsapp_inbound(phone_number_id=BRIDGE_WHATSAPP_PHONE_ID, wa_id=BRIDGE_WHATSAPP_CLIENT, text=code)
     assert (await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, redeem, port=port)).status_code == 200
-    (linked_reply,) = await wait_send_to(bridge.fake_whatsapp, to=BRIDGE_WHATSAPP_CLIENT, needle=LINKED_TEXT)
-    assert linked_reply["body"].endswith(LINKED_TEXT), linked_reply["body"]
-    assert linked_reply["body"].startswith(f"{greet} "), linked_reply["body"]
+    wa_greeting, wa_linked = await wait_send_to(bridge.fake_whatsapp, to=BRIDGE_WHATSAPP_CLIENT, count=2)
+    assert wa_greeting["body"].startswith(f"{greet} "), wa_greeting["body"]
     # The whatsapp greeting minted its OWN fresh code, not the redeemed one.
-    assert extract_pair_code(linked_reply["body"]) != code, linked_reply["body"]
+    assert extract_pair_code(wa_greeting["body"]) != code, wa_greeting["body"]
+    assert wa_linked["body"] == LINKED_TEXT, wa_linked["body"]
 
 
-async def test_greeting_prepends_once_on_a_tool_target(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
-    """The greeting path is target-agnostic: a greeting-configured TOOL target prepends the
-    greeting into the SAME turn's tool reply on first contact, and the address's second message
-    carries none. The template is a fixed string (no ``{pairing_code}``), so the first answer is
-    exactly ``{greet}\\n\\n{tool reply}`` and the second the bare tool reply."""
+async def test_greeting_leads_once_on_a_tool_target(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
+    """The greeting path is target-agnostic: a greeting-configured TOOL target delivers the
+    greeting as its OWN leading message on first contact, then the tool reply as the next
+    send, and the address's second message carries no greeting. The template is a fixed string
+    (no ``{pairing_code}``), so the first send is exactly ``{greet}`` and the second the bare
+    tool reply; the record still stores both joined as ``{greet}\\n\\n{tool reply}``."""
     port = bridge.stack.port_b
 
     greet = uniq("l18-tool-greet")
@@ -134,22 +152,29 @@ async def test_greeting_prepends_once_on_a_tool_target(bridge: BridgeHarness, un
         payload_expr="{payload: .message}",
     )
 
-    # First contact: the tool echoes the message, and the greeting is PREPENDED into that same
-    # delivered answer.
+    # First contact: the greeting leads as its own send, then the tool echo as the next send.
     first = uniq("l18-tool-msg1")
     inbound1 = bridge.twilio_inbound(
         our_identity=BRIDGE_TWILIO_FROM_B, client=BRIDGE_TWILIO_CLIENT_B, text=first, port=port
     )
     assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound1, port=port)).status_code == 204
-    send1 = await wait_twilio_send(bridge.fake_twilio, first)
-    assert send1["body"] == f"{greet}\n\n{first}", send1["body"]
+    greeting_send, answer_send = await wait_send_to(bridge.fake_twilio, to=BRIDGE_TWILIO_CLIENT_B, count=2)
+    assert greeting_send["body"] == greet, greeting_send["body"]
+    assert answer_send["body"] == first, answer_send["body"]
 
-    # Second message from the SAME address: no greeting — just the tool reply.
+    # The record still carries both joined as its whole answer text (greeting, blank line,
+    # then the tool reply) — the transcript reads the turn as one answer.
+    thread_id = (await bridge.api().get(f"/api/conversations/{route}/threads"))["items"][0]["thread_id"]
+    transcript = await bridge.api().get(f"/api/conversations/{route}/transcript?{urlencode({'thread_id': thread_id})}")
+    assert transcript["items"][0]["answer"] == f"{greet}\n\n{first}", transcript["items"][0]
+
+    # Second message from the SAME address: no greeting — just the tool reply, one send.
     second = uniq("l18-tool-msg2")
     inbound2 = bridge.twilio_inbound(
         our_identity=BRIDGE_TWILIO_FROM_B, client=BRIDGE_TWILIO_CLIENT_B, text=second, port=port
     )
     assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound2, port=port)).status_code == 204
-    send2 = await wait_twilio_send(bridge.fake_twilio, second)
-    assert send2["body"] == second, send2["body"]
-    assert not send2["body"].startswith(greet)
+    sends = await wait_send_to(bridge.fake_twilio, to=BRIDGE_TWILIO_CLIENT_B, count=3)
+    assert sends[2]["body"] == second, sends[2]["body"]
+    # The greeting was delivered EXACTLY ONCE across both turns — the once-only invariant.
+    assert sum(1 for send in sends if send["body"] == greet) == 1, [s["body"] for s in sends]

@@ -33,6 +33,16 @@ def echo(text: str) -> str:
     return text
 
 
+@tai42_app.tools.tool
+def payload_tool(payload: dict, tag: str = "t") -> dict:
+    """A base tool with a structured ``payload`` argument.
+
+    A preset over it can DECLARE input-schema support (the test registers
+    ``PresetInputSchemaSupport(payload_arg="payload")``): the exposed tool advertises the
+    authored ``input_schema`` and routes the caller's validated object into ``payload``."""
+    return {"payload": payload, "tag": tag}
+
+
 def _plan_refs(fixed_kwargs: dict[str, Any]) -> list[str]:
     """Read the composed tool names out of a ``plan_tool`` preset's nested ``plan``
     config — the extractor a base tool declares so the platform never learns its

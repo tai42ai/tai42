@@ -31,8 +31,8 @@ from tai42_contract.channels import ChannelDeliveryError, InboundAnswerOutcome, 
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.settings import require_secret
 
-from tai42_channel_telegram.client import send_chat_action
-from tai42_channel_telegram.correlation import telegram_correlation_store
+from tai42_channel_telegram.client import answer_callback_query, send_chat_action
+from tai42_channel_telegram.correlation import get_options, scoped_correlation_key, telegram_correlation_store
 from tai42_channel_telegram.settings import TelegramSettings, bot_numeric_id, telegram_settings
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,9 @@ async def _resolve_answer(
 ) -> Response | None:
     """Resolve a ForceReply answer against its pending ask via the ONE shared ladder.
 
-    The correlation key is the anchor message's id; the answer is the reply text
+    The correlation key is the anchor message scoped by its chat (a Telegram
+    ``message_id`` is unique only per chat, so ``{chat_id}:{message_id}`` is what keeps
+    chat B's reply from resolving chat A's same-id ask); the answer is the reply text
     verbatim. The ladder forwards to the door and interprets the outcome (release /
     keep-and-notify / bridge) over the plugin's :class:`CorrelationStore` — the plugin
     keeps only its transport ack. Returns the webhook ack for a resolved/kept/bridged
@@ -129,7 +131,7 @@ async def _resolve_answer(
 
     result = await tai42_app.channels.handle_inbound_answer(
         channel_id="telegram",
-        correlation_key=str(replied_id),
+        correlation_key=scoped_correlation_key(str(chat_id), str(replied_id)),
         answer=text,
         store=telegram_correlation_store,
         bridge=InboundBridge(
@@ -146,6 +148,60 @@ async def _resolve_answer(
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         return None
     return JSONResponse({"data": {"status": _ACK_STATUS[result.outcome]}}, status_code=200)
+
+
+async def _resolve_callback(settings: TelegramSettings, update: dict[str, object]) -> Response:
+    """Resolve an inline-keyboard button tap (a ``callback_query`` update).
+
+    The tapped button's ``callback_data`` is the option's index; the anchor
+    ``message_id`` the query reports keys the side record holding that ask's option
+    list, so the index maps back to the exact option text. A select / suggested-reply
+    tap from a recipient chat resolves through the shared ladder (like a typed reply);
+    a notify-option tap (no pending ask — a correlation miss) enters the conversation
+    as a visitor message via the bridge. A tap for a message with no live option
+    record (an expired ask, a stale keyboard) is acked and ignored.
+
+    The callback query is answered first (best-effort) so the button's spinner clears
+    regardless of the routing outcome; a failure there is logged, never raised (an
+    unanswered callback must not 5xx the webhook and force a redelivery).
+    """
+    callback_query = update.get("callback_query")
+    if not isinstance(callback_query, dict):  # defensive — the caller checked this
+        return _ignored("update carries no callback_query")
+
+    query_id = callback_query.get("id")
+    if isinstance(query_id, str) and query_id:
+        try:
+            await answer_callback_query(query_id)
+        except ChannelDeliveryError as exc:
+            logger.warning("telegram inbound: answerCallbackQuery for %s failed: %s", query_id, exc)
+
+    message = callback_query.get("message")
+    chat = message.get("chat") if isinstance(message, dict) else None
+    message_id = message.get("message_id") if isinstance(message, dict) else None
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    data = callback_query.get("data")
+    if not isinstance(message_id, int) or not isinstance(chat, dict) or not isinstance(chat_id, int):
+        return _ignored("callback query carries no anchor message/chat id")
+    if not isinstance(data, str) or not (data.isascii() and data.isdigit()):
+        return _ignored("callback query carries no integer option index")
+
+    options = await get_options(str(chat_id), str(message_id))
+    if options is None:
+        return _ignored("callback query for a message with no live option record")
+    index = int(data)
+    if index >= len(options):
+        return _ignored("callback query option index is out of range")
+    text = options[index]
+
+    # A recipient-chat tap on a select/suggested-reply ask resolves via the ladder; a
+    # miss (a notify option, or an expired ask) falls through to the bridge — the same
+    # split the typed-reply path takes, keyed on the anchor message id.
+    if _is_recipient_chat(chat, settings):
+        resolved = await _resolve_answer(settings, message_id, chat_id, text, update)
+        if resolved is not None:
+            return resolved
+    return await _bridge(settings, chat_id, text, update)
 
 
 async def _bridge(settings: TelegramSettings, chat_id: int, text: str, update: dict[str, object]) -> Response:
@@ -229,6 +285,11 @@ async def inbound(request: Request) -> Response:
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
     if not isinstance(update, dict):
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+    # An inline-keyboard button tap arrives as a callback_query, not a message: it
+    # maps the tapped option's index back to its text and resolves/bridges it.
+    if isinstance(update.get("callback_query"), dict):
+        return await _resolve_callback(settings, update)
 
     message = update.get("message")
     if not isinstance(message, dict):

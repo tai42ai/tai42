@@ -8,7 +8,7 @@ import {
   secondsLeft,
   type QuestionItem,
 } from '@/question-card';
-import type { AnswerFormat, JsonSchema } from '@/use-chat-stream';
+import type { AnswerFormat, JsonSchema, MediaItem } from '@/use-chat-stream';
 
 afterEach(() => {
   cleanup();
@@ -46,6 +46,7 @@ function question(
     interactionId: 'int-1',
     question: 'Deploy to production?',
     options: format === 'select' ? ['Now', 'Tonight'] : null,
+    media: null,
     timeoutAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     ts: new Date().toISOString(),
     ...overrides,
@@ -132,6 +133,51 @@ describe('countdownAnnouncement', () => {
 });
 
 describe('QuestionCard', () => {
+  it('renders a question image and link through the shared media card', () => {
+    const media: MediaItem[] = [
+      { kind: 'image', url: 'https://example.com/a.png', caption: 'A shot' },
+      { kind: 'link', url: 'https://docs.example/p', caption: 'The doc' },
+    ];
+    renderCard(question('text', { media }));
+
+    const img = screen.getByRole('img', { name: 'A shot' });
+    expect(img).toHaveAttribute('src', 'https://example.com/a.png');
+    const anchor = screen.getByRole('link', { name: 'The doc' });
+    expect(anchor).toHaveAttribute('href', 'https://docs.example/p');
+    expect(anchor).toHaveAttribute('rel', 'noreferrer noopener');
+    // The prompt's own text field is still there — media is context, not a control.
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('shows a question card image even after the question is answered', () => {
+    renderCard(
+      question('confirm', {
+        media: [{ kind: 'image', url: 'https://example.com/a.png', caption: 'A' }],
+      }),
+      {
+        answered: true,
+      },
+    );
+
+    // The controls are gone, but the media stays — it is context for the prompt.
+    expect(screen.getByRole('img', { name: 'A' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument();
+  });
+
+  it('renders no media block for a question that carries none', () => {
+    const { container } = render(
+      <QuestionCard
+        question={question('text')}
+        answered={false}
+        onAnswer={vi.fn().mockResolvedValue(undefined)}
+        onAnswered={vi.fn()}
+        locked={false}
+      />,
+    );
+
+    expect(container.querySelector('.tcw-media-items')).toBeNull();
+  });
+
   it('sends a typed answer for the text format', async () => {
     const user = userEvent.setup();
     const { onAnswer, onAnswered } = renderCard(question('text'));

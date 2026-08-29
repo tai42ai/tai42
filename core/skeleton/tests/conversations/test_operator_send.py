@@ -187,6 +187,71 @@ async def test_operator_send_agent_appends_creates_and_delivers(env, monkeypatch
     assert record.delivery_status is DeliveryStatus.DELIVERED
 
 
+class RichFakeChannel(FakeChannel):
+    """A channel that advertises the richer-send capabilities, so the delivery machine sends
+    an operator part's media/options instead of refusing them as unrenderable."""
+
+    supports_media_notifications = True
+    supports_interactive_notifications = True
+
+
+async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    from tai42_contract.interactions import MediaItem, MediaKind
+
+    agent = RecordingAgent()
+    channel = RichFakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+
+    item = MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/receipt.png", caption="receipt")
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="here you go",
+        operator_principal="op-1",
+        media=[item],
+        options=["Thanks"],
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    # The legacy joined text is preserved for every plain reader; the rich part carries the
+    # media/options the delivery machine sends alongside it.
+    assert record.answer == "here you go"
+    assert record.answer_parts is not None
+    assert record.answer_parts[0].message == "here you go"
+    assert record.answer_parts[0].media == [item]
+    assert record.answer_parts[0].options == ["Thanks"]
+    # The delivered notification carries the operator's media/options (final chunk of the part).
+    assert channel.sends[0].message == "here you go"
+    assert channel.sends[0].media == [item]
+    assert channel.sends[0].options == ["Thanks"]
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_plain_text_carries_no_parts(env, monkeypatch):
+    # A text-only operator send stays byte-parity with the pre-rich path: no answer_parts.
+    channel = FakeChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="just text",
+        operator_principal="op-1",
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "just text"
+    assert record.answer_parts is None
+
+
 async def test_operator_send_tool_target_appends_nothing(env, monkeypatch):
     channel = FakeChannel()
     route = _channel_route(target_kind="tool")

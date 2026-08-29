@@ -67,7 +67,7 @@ async def test_verifier_forbidden_without_external():
 
 async def test_external_rejects_options(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_redis, fake_client_ctx)
-    with pytest.raises(ValueError, match="does not accept options"):
+    with pytest.raises(ValueError, match="options are not valid with answer_format 'external'"):
         await ask_user("q", answer_format="external", link="{callback_url}", options=["a"])
 
 

@@ -67,6 +67,16 @@ describe('MediaCard', () => {
     expect(container.textContent).not.toContain('**');
   });
 
+  it('renders no text bubble for a media-only card whose text is empty', () => {
+    const { container } = renderCard(
+      card({ text: '', media: [image('https://example.com/a.png', 'Item A')] }),
+    );
+
+    // No prose element at all — a caption-less media card shows just its media.
+    expect(container.querySelector('.tcw-prose')).toBeNull();
+    expect(screen.getByRole('img', { name: 'Item A' })).toBeInTheDocument();
+  });
+
   it('renders a markdown javascript: link as inert text, never a live anchor', () => {
     const { container } = renderCard(card({ text: '[x](javascript:alert(1))' }));
 

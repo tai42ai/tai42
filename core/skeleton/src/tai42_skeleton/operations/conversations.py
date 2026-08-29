@@ -16,15 +16,17 @@ from __future__ import annotations
 import secrets
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from tai42_contract.conversations import (
     CONVERSATION_MODES,
     ROUTE_NAME_RE,
+    AnswerPart,
     ConversationRoute,
     ConversationRouteCreate,
     ConversationTargetKind,
     TargetConversationConfig,
 )
+from tai42_contract.interactions import MediaItem
 from tai42_kit.utils.data import get_compiled_jq
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -1095,11 +1097,23 @@ async def _resolve_operator_target(
     errors=[BadRequestError, NotFoundError, NotSupportedError, OperationFailed, UnavailableError],
 )
 async def send_conversation_thread_message(
-    route_name: str, thread_id: str, text: str, address: str | None = None
+    route_name: str,
+    thread_id: str,
+    text: str,
+    address: str | None = None,
+    media: list[dict[str, Any]] | None = None,
+    options: list[str] | None = None,
 ) -> dict[str, Any]:
     """Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity, and
     return ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
     ``answered`` and delivered through the same machine a produced answer takes.
+
+    ``media`` (a list of ``{"kind", "url", "caption"?}`` display items) and ``options`` (a
+    list of tappable suggested replies) are OPTIONAL richer-send forms delivered ALONGSIDE
+    ``text`` — the message is then stored and delivered as one rich part, exactly as a
+    produced rich answer is. A contract-invalid value (an empty list, an over-cap value, or
+    media and options both given where they conflict) is a loud 400; omit both for a plain
+    text send.
 
     Allowed in either mode and it never flips the mode. Blank ``text`` is a loud 400, and a
     present-but-blank ``address`` is a 400. The thread-belongs-to-route guard is the thread
@@ -1125,6 +1139,20 @@ async def send_conversation_thread_message(
         raise BadRequestError("thread_id must be a non-blank thread identifier")
     if not text.strip():
         raise BadRequestError("text must be a non-blank message to send")
+    # Coerce and validate the rich fields up front, so a bad media/options value is a clean
+    # 400 here rather than a 500 from deep in the send. Constructing the AnswerPart the send
+    # will build applies every contract check (empty list, over-cap, media/options-vs shape).
+    media_items: list[MediaItem] | None = None
+    if media is not None or options is not None:
+        try:
+            media_items = (
+                [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
+                if media is not None
+                else None
+            )
+            AnswerPart(message=text, media=media_items, options=options)
+        except (ValidationError, ValueError) as exc:
+            raise BadRequestError(f"invalid media/options: {exc}") from exc
     manager = _require_backend()
     named_route = await _require_route(manager, route_name)
     caller = await resolve_caller()
@@ -1150,6 +1178,8 @@ async def send_conversation_thread_message(
             client_address=client_address,
             text=text,
             operator_principal=operator_principal,
+            media=media_items,
+            options=options,
         )
     except OperatorAppendError as exc:
         raise OperationFailed(str(exc)) from exc

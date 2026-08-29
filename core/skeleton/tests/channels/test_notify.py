@@ -304,23 +304,36 @@ async def test_empty_media_list_refusal_leaves_no_phantom_feed_entry(register_ch
     assert await notifications_sink.read_notifications() == []
 
 
-async def test_media_with_channel_none_rejected(sink_redis):
-    # The internal sink stores no rich content, so media with no named channel is a
-    # loud client error (→ 400), never a silent drop.
-    with pytest.raises(ValueError, match="media, template and options require a named channel"):
-        await notify_user("photo", media=[_IMAGE])
-    assert await notifications_sink.read_notifications() == []
+async def test_media_with_channel_none_stored_on_sink(sink_redis):
+    # Clean break: the internal sink STORES rich content (parity with the channel path)
+    # rather than refusing it, so media with no named channel lands on the feed record for
+    # the inbox to render — serialized as MediaItem dicts.
+    await notify_user("photo", media=[_IMAGE])
+    records = await notifications_sink.read_notifications()
+    assert len(records) == 1
+    assert records[0]["media"] == [_IMAGE.model_dump(mode="json")]
+    assert records[0]["template"] is None
+    assert records[0]["options"] is None
 
 
-async def test_template_with_channel_none_rejected(sink_redis):
-    with pytest.raises(ValueError, match="media, template and options require a named channel"):
-        await notify_user("hi", template=_TEMPLATE)
-    assert await notifications_sink.read_notifications() == []
+async def test_template_with_channel_none_stored_on_sink(sink_redis):
+    await notify_user("hi", template=_TEMPLATE)
+    records = await notifications_sink.read_notifications()
+    assert records[0]["template"] == _TEMPLATE.model_dump(mode="json")
+    assert records[0]["media"] is None
 
 
-async def test_options_with_channel_none_rejected(sink_redis):
-    with pytest.raises(ValueError, match="media, template and options require a named channel"):
-        await notify_user("pick one", options=["Item A", "Item B"])
+async def test_options_with_channel_none_stored_on_sink(sink_redis):
+    await notify_user("pick one", options=["Item A", "Item B"])
+    records = await notifications_sink.read_notifications()
+    assert records[0]["options"] == ["Item A", "Item B"]
+
+
+async def test_media_and_template_mutually_exclusive_on_sink(sink_redis):
+    # The contract's exclusivity still holds on the sink path — the notification the sink
+    # validates through refuses media+template, and nothing is recorded.
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await notify_user("both", media=[_IMAGE], template=_TEMPLATE)
     assert await notifications_sink.read_notifications() == []
 
 
@@ -496,7 +509,7 @@ async def test_channel_none_returns_empty_id_list(sink_redis):
 
 @pytest.mark.parametrize("bad_recipient", ["", "   "])
 async def test_channel_none_blank_recipient_rejected(sink_redis, bad_recipient):
-    with pytest.raises(ValueError, match="recipient must be a non-empty address"):
+    with pytest.raises(ValueError, match="must be a non-empty address"):
         await notify_user("hello", recipient=bad_recipient)
     assert await notifications_sink.read_notifications() == []
 
@@ -542,7 +555,7 @@ async def test_channel_none_over_cap_recipient_rejected(sink_redis):
     # address in the replayed feed record.
     over_cap = "x" * (NOTIFICATION_ADDRESS_MAX_CHARS + 1)
 
-    with pytest.raises(ValueError, match="recipient must be at most"):
+    with pytest.raises(ValueError, match="address must be at most"):
         await notify_user("hi", recipient=over_cap)
     assert await notifications_sink.read_notifications() == []
 

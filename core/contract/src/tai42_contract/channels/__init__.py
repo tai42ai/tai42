@@ -17,9 +17,10 @@ medium assigned the send (empty when the medium exposes none), never a bool.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -93,6 +94,15 @@ with warnings.catch_warnings():
         allowlist and refuses to send to an unlisted address; when omitted the
         plugin sends to its operator-configured default recipient. It is an
         address only, never a secret or credential.
+
+        ``media`` is OPTIONAL display media the channel renders alongside the
+        question (reusing :class:`MediaItem`, the same shape and list-level caps the
+        ask REQUEST carries); a present list is non-empty. It is a pure enhancement,
+        NOT structure: a channel that renders only text simply ignores it and shows
+        the question, so it rides no capability flag and is never refused for a
+        channel that cannot render it. ``options`` is REQUIRED for ``select`` (the
+        answer set) and OPTIONAL for ``text`` as SUGGESTED REPLIES — a tapped option
+        submits its own text as the free-text answer; every other format carries none.
         """
 
         model_config = ConfigDict(frozen=True)
@@ -105,7 +115,8 @@ with warnings.catch_warnings():
         # Intentionally named ``schema`` (matches the payload it carries); shadows the
         # deprecated ``BaseModel.schema()`` alias, which this model never uses.
         schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
-        options: list[str] | None = None  # present for select
+        options: list[str] | None = None  # required for select; optional suggested replies for text
+        media: list[MediaItem] | None = None  # display media rendered WITH the question; None -> none
         callback_url: str  # public /api/interactions/callback/{ticket} — the answer sink
         timeout_at: datetime  # tz-aware; the plugin may surface a deadline to the human
 
@@ -136,11 +147,30 @@ with warnings.catch_warnings():
                 raise ValueError("timeout_at must be timezone-aware (UTC)")
             return value.astimezone(UTC)
 
+        @field_validator("media")
+        @classmethod
+        def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+            # None means no media; a present list carries the same list-level caps
+            # (non-empty, item count, summed URI) the ask REQUEST enforces — media is the
+            # question's display enhancement the channel renders alongside it, so the
+            # delivery frame is bounded exactly as the ask that produced it. A channel that
+            # cannot render media ignores it (no capability flag), never refuses the send.
+            if value is not None:
+                check_media_list(value)
+            return value
+
         @model_validator(mode="after")
         def _check_options(self) -> ChannelDelivery:
+            # SELECT REQUIRES options — the answer set the human chooses from. TEXT MAY
+            # carry options as SUGGESTED REPLIES: a tapped option submits its own text as
+            # the free-text answer (text accepts any string), so they are an optional
+            # enhancement, never a constraint. Every other format carries none.
             if self.answer_format == AnswerFormat.SELECT:
                 if not self.options:
                     raise ValueError("select answer_format requires non-empty options")
+            elif self.answer_format == AnswerFormat.TEXT:
+                if self.options is not None and not self.options:
+                    raise ValueError("text answer_format options must be a non-empty list when present")
             elif self.options is not None:
                 raise ValueError(f"{self.answer_format} answer_format carries no options")
             return self
@@ -216,6 +246,16 @@ class ChannelNotification(BaseModel):
     several operator identities: an internal routing control set by the sending side,
     never caller-supplied, and an address only — never a secret.
 
+    ``message`` is the human-readable text, non-blank BY DEFAULT — EXCEPT it may be the empty
+    string ``""`` for a MEDIA-ONLY send: a caption-less image or other bubble that is just
+    ``media``, with no text carrier. The admissible states are "``message`` non-blank" OR
+    "blank ``message`` WITH non-empty ``media``"; a blank ``message`` and no media has nothing
+    to deliver and is refused. (``message`` stays REQUIRED — a media-only sender passes ``""``
+    explicitly — because every caller constructs it in code with the text in hand.) ``options``
+    REQUIRE a non-blank ``message`` — a tappable choice needs a prompt — so a media-only send
+    carries none; a ``template`` likewise rides a non-blank ``message`` (it is not ``media``, so
+    a blank message with only a template is refused).
+
     ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms reusing the
     same ``message`` as the human-readable equivalent. ``media`` is display media the
     channel sends alongside the message (reusing :class:`MediaItem`); a present
@@ -236,7 +276,7 @@ class ChannelNotification(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    message: str
+    message: str  # human-readable text; blank ("") ONLY for a media-only send (media carries it)
     recipient: str | None = None  # caller-requested address; None -> plugin default
     sender_identity: str | None = None  # internal sending identity; None -> plugin default
     media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
@@ -246,8 +286,9 @@ class ChannelNotification(BaseModel):
     @field_validator("message")
     @classmethod
     def _message_valid(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("message must be non-blank")
+        # Length cap only; whether a BLANK message is admissible depends on ``media`` (a
+        # media-only send carries no text) and is decided in :meth:`_message_or_media` once
+        # every field is bound.
         if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
             raise ValueError(f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}")
         return value
@@ -290,6 +331,20 @@ class ChannelNotification(BaseModel):
                     f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
                 )
         return value
+
+    @model_validator(mode="after")
+    def _message_or_media(self) -> ChannelNotification:
+        # A message is either non-blank text OR a media-only send: a blank message carried by
+        # non-empty media (a caption-less image). A blank message with no media has nothing to
+        # deliver and is refused. Options REQUIRE a non-blank message — a tappable choice needs
+        # a prompt — so a media-only send carries none. A template is not media, so a blank
+        # message with only a template is refused here too (its ``not self.media`` branch).
+        if not self.message.strip():
+            if not self.media:
+                raise ValueError("message must be non-blank unless media carries the content")
+            if self.options is not None:
+                raise ValueError("media-only (blank-message) notification carries no options; a choice needs a prompt")
+        return self
 
     @model_validator(mode="after")
     def _media_template_exclusive(self) -> ChannelNotification:
@@ -348,6 +403,20 @@ class Channel(Protocol):
     that omits it advertises no extra ask-time limits; its delivery path still
     refuses an unrenderable question or schema (a permanent
     :class:`ChannelInputError`).
+
+    A channel MAY also declare one OPTIONAL method, ``deliver_ordered(notifications)``,
+    for a NATIVE in-order batch (a bulk API, a transactional transcript append) — the
+    same documented-member convention as ``validate_form_schema`` and the capability
+    flags, NOT a Protocol method (so declaring it never tightens the runtime structural
+    check and a channel that omits it stays a valid ``Channel``). It takes a
+    ``Sequence[ChannelNotification]`` and returns ``list[list[str]]`` — the per-message
+    ids in send order, one list per notification — sending strictly in order and never
+    reordering, skipping or parallelising; the FIRST failure raises
+    :class:`ChannelDeliveryError` / :class:`ChannelInputError`, with the accepted ids
+    named in the exception message (as the WhatsApp body-then-media send does). A caller
+    reaches the default sequential behaviour through :func:`notify_in_order`, which
+    dispatches to ``deliver_ordered`` when declared and otherwise loops ``notify``; a
+    channel that declares neither still delivers a batch one ``notify`` at a time.
     """
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
@@ -384,6 +453,65 @@ class Channel(Protocol):
         :class:`NotImplementedError`.
         """
         raise NotImplementedError
+
+
+async def notify_in_order(
+    channel: Channel,
+    notifications: Sequence[ChannelNotification],
+    *,
+    on_sent: Callable[[int, list[str]], None] | None = None,
+) -> list[list[str]]:
+    """Deliver ``notifications`` to ``channel`` STRICTLY in order, returning the
+    per-message ids of each (one ``list[str]`` per notification, in the same order).
+
+    The default sequential in-order primitive every channel "inherits" by a caller using
+    this helper — the place a Protocol default can actually reach a structural
+    implementer. When the channel declares the OPTIONAL ``deliver_ordered`` member (read
+    defensively with ``getattr``, the platform's established convention for optional
+    channel abilities) the batch is handed to it as a native ordered send; otherwise each
+    notification is delivered with one awaited ``notify`` before the next goes out. Either
+    way delivery is never reordered, never parallelised and never skipped, and it STOPS at
+    the first raise (:class:`ChannelDeliveryError` / :class:`ChannelInputError`) — the
+    caller learns how far the sequence got from ``on_sent`` (and, for a native batch, from
+    the exception naming the accepted ids).
+
+    ``on_sent(index, ids)`` is the progress hook a caller uses to record each accepted send
+    (a send ledger, say); it fires once per notification in send order. It is intentionally
+    the ONLY progress seam — a caller that needs work BETWEEN sends (a per-send lease refresh)
+    drives ``notify`` itself rather than routing through this helper, which cannot express a
+    pre-send hook.
+
+    Two honesty caveats a durable caller must weigh before relying on ``on_sent``:
+
+    - This helper is NOT yet wired into the conversations delivery machine (which chunks and
+      ledgers each send inline in :mod:`tai42_skeleton.conversations.delivery`). It is the
+      documented in-order primitive, not the code path a durable ordered answer currently
+      flows through.
+    - Per-send timing holds ONLY on the sequential (``notify``-loop) path, where ``on_sent``
+      fires AFTER each accepted send and BEFORE the next goes out. On the native
+      ``deliver_ordered`` path the whole batch is sent inside that one call and ``on_sent``
+      fires per index only AFTER it returns — so a durable caller that needs per-send
+      ledgering interleaved with the sends must NOT rely on ``on_sent`` there; it should ledger
+      inline (as the conversations machine does) rather than through this helper.
+    """
+    ordered = list(notifications)
+    native = getattr(channel, "deliver_ordered", None)
+    if callable(native):
+        # ``deliver_ordered`` is a documented OPTIONAL member, not a Protocol method, so it
+        # is read off the instance untyped; cast it to its documented signature.
+        ordered_send = cast("Callable[[Sequence[ChannelNotification]], Awaitable[list[list[str]]]]", native)
+        results: list[list[str]] = await ordered_send(ordered)
+        if on_sent is not None:
+            for index, ids in enumerate(results):
+                on_sent(index, ids)
+        return results
+    results = []
+    for index, notification in enumerate(ordered):
+        ids = await channel.notify(notification)
+        results.append(ids)
+        if on_sent is not None:
+            on_sent(index, ids)
+    return results
 
 
 class Correlation(BaseModel):
@@ -560,4 +688,5 @@ __all__ = [
     "InboundAnswerOutcome",
     "InboundAnswerResult",
     "InboundBridge",
+    "notify_in_order",
 ]

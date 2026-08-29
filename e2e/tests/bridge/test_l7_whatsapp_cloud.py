@@ -507,16 +507,19 @@ async def test_notify_rich_content_capability_and_channel_guards(
     template = {"name": f"{marker}_t", "language": "en_US"}
 
     async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
-        # A channel WITHOUT the capability (twilio advertises neither) -> 501, never a
-        # silent downgrade to a freeform send.
-        media_501 = await mcp.call_tool(
+        # Twilio advertises ``supports_media_notifications`` (real MMS/WhatsApp media), so
+        # a media notify is DELIVERED — each image rides as an MMS ``MediaUrl`` attachment,
+        # never a 501 and never a silent downgrade that drops the media.
+        media_ok = await mcp.call_tool(
             "notify_user",
             {"message": marker, "channel": "twilio", "recipient": BRIDGE_TWILIO_CLIENT, "media": media},
             raise_on_error=False,
         )
-        assert media_501.is_error
-        assert "does not support media notifications" in tool_text(media_501)
+        assert not media_ok.is_error, tool_text(media_ok)
+        assert "notification sent via 'twilio'" in tool_text(media_ok)
 
+        # Templates remain a genuinely unsupported capability on twilio (a vendor
+        # WhatsApp-Cloud construct); the guard still fires -> 501, never a freeform downgrade.
         template_501 = await mcp.call_tool(
             "notify_user",
             {"message": marker, "channel": "twilio", "recipient": BRIDGE_TWILIO_CLIENT, "template": template},
@@ -525,20 +528,26 @@ async def test_notify_rich_content_capability_and_channel_guards(
         assert template_501.is_error
         assert "does not support template notifications" in tool_text(template_501)
 
-        # Rich content with NO named channel -> 400: the internal sink stores no rich content.
-        media_400 = await mcp.call_tool("notify_user", {"message": marker, "media": media}, raise_on_error=False)
-        assert media_400.is_error
-        assert "require a named channel" in tool_text(media_400)
+        # Rich content with NO named channel is now RECORDED to the internal sink (parity
+        # with the channel path) — the host inbox renders the stored media/template itself.
+        # This is the clean break from the old sink-refuses-rich-content rule.
+        media_sink = await mcp.call_tool("notify_user", {"message": marker, "media": media}, raise_on_error=False)
+        assert not media_sink.is_error, tool_text(media_sink)
+        assert "recorded to the internal sink" in tool_text(media_sink)
 
-        template_400 = await mcp.call_tool(
+        template_sink = await mcp.call_tool(
             "notify_user", {"message": marker, "template": template}, raise_on_error=False
         )
-        assert template_400.is_error
-        assert "require a named channel" in tool_text(template_400)
+        assert not template_sink.is_error, tool_text(template_sink)
+        assert "recorded to the internal sink" in tool_text(template_sink)
 
-    # A refused rich send left nothing dispatched: the capability/channel guard fired
-    # before twilio was ever asked to send.
-    assert bridge.fake_twilio.sends_matching(marker) == []
+    # The one dispatch twilio was asked for is the supported media send, carrying the image
+    # url as an MMS attachment. The refused template send and the channel-less sends left
+    # nothing on the wire — their guards fired before twilio was ever asked.
+    twilio_sends = bridge.fake_twilio.sends_matching(marker)
+    assert len(twilio_sends) == 1
+    assert twilio_sends[0]["to"] == BRIDGE_TWILIO_CLIENT
+    assert twilio_sends[0]["media_urls"] == [media[0]["url"]]
 
 
 async def test_freeform_notify_reaches_an_unlisted_recipient(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:

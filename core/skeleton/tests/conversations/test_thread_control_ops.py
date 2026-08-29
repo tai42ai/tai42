@@ -134,7 +134,7 @@ async def _seed_record(
 def _capture_operator_send(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
-    async def _fake(*, route, thread_id, client_address, text, operator_principal):
+    async def _fake(*, route, thread_id, client_address, text, operator_principal, media=None, options=None):
         calls.append(
             {
                 "route_name": route.route_name,
@@ -142,6 +142,8 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
                 "client_address": client_address,
                 "text": text,
                 "operator_principal": operator_principal,
+                "media": media,
+                "options": options,
             }
         )
         return "msg-1"
@@ -166,6 +168,8 @@ async def test_send_route_keyed_resolves_the_embedded_address(wired, monkeypatch
             "client_address": "+15550002222",
             "text": "on it",
             "operator_principal": "op-1",
+            "media": None,
+            "options": None,
         }
     ]
 

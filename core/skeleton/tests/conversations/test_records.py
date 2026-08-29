@@ -187,6 +187,73 @@ async def test_create_and_get_round_trip(monkeypatch):
     assert await store.get_record("nope") is None
 
 
+async def test_answer_parts_round_trip(monkeypatch):
+    """An ordered multi-message / rich answer survives the store round-trip: the ``answer_parts``
+    part models (message + media) persist as JSON in the content blob and reload intact."""
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    store = _store(monkeypatch, FakeRecordRedis())
+    parts = [
+        AnswerPart(message="hi"),
+        AnswerPart(message="the picture", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")]),
+    ]
+    record = _record(answer="hi\n\nthe picture", answer_parts=parts)
+    await store.create_record(record)
+
+    got = await store.get_record("m1")
+    assert got is not None
+    assert got.answer_parts is not None
+    assert [p.message for p in got.answer_parts] == ["hi", "the picture"]
+    assert got.answer_parts[1].media is not None
+    assert got.answer_parts[1].media[0].url == "https://cdn.example/i.png"
+    # The api-door payload carries the parts additively; ``answer`` is unchanged.
+    payload = got.answer_payload()
+    assert payload.answer == "hi\n\nthe picture"
+    assert payload.parts is not None
+    assert [p.message for p in payload.parts] == ["hi", "the picture"]
+
+
+async def test_all_media_answer_round_trip_and_empty_answer_consumers(monkeypatch):
+    """An ALL-MEDIA answer (every part media-only) stores ``answer=""`` with the parts, survives
+    the store round-trip, and each consumer of ``answer`` handles the empty text deliberately: the
+    api-door payload carries ``answer=""`` with the parts, the caller view publishes ``answer=""``
+    and the parts, and a text search finds nothing (no text to match) without raising."""
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    from tai42_skeleton.conversations.records import _record_matches
+
+    store = _store(monkeypatch, FakeRecordRedis())
+    parts = [
+        AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.png")]),
+        AnswerPart(media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/b.png")]),
+    ]
+    record = _record(answer="", answer_parts=parts)
+    await store.create_record(record)
+
+    got = await store.get_record("m1")
+    assert got is not None
+    assert got.answer == ""
+    assert got.answer_parts is not None
+    assert [p.media[0].url for p in got.answer_parts if p.media is not None] == [
+        "https://cdn.example/a.png",
+        "https://cdn.example/b.png",
+    ]
+    # api-door payload: answer is the empty string, the media rides parts.
+    payload = got.answer_payload()
+    assert payload.answer == ""
+    assert payload.parts is not None
+    assert len(payload.parts) == 2
+    # caller view publishes the empty answer and the parts (an allow-list read).
+    view = got.caller_view()
+    assert view["answer"] == ""
+    assert view["answer_parts"] is not None
+    # text search: an empty answer contributes no match, and matching never raises on it.
+    assert _record_matches(got, "picture") is False
+    assert _record_matches(got, "ask m1") is True  # still matches the inbound text
+
+
 async def test_claim_delivery_is_exactly_once(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
     await store.create_record(_record())

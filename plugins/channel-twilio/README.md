@@ -110,6 +110,26 @@ A `confirm` or `external` question arrives as a tappable link and is answered
 in the browser via the callback door — no SMS reply is expected or matched, and
 it never consumes the number pair.
 
+## Media and options (the medium's honest ceiling)
+
+Both `deliver` (questions) and `notify` (fire-and-forget) support **display
+media**: an `image` media item attaches as MMS/WhatsApp media (a repeated Twilio
+`MediaUrl` — a public `https` url; an inline `data:` image is refused with
+`ChannelInputError`, since Twilio fetches the url), and a `link` item is appended
+to the message body as a labelled line (SMS has no rich link cards). This channel
+therefore advertises `supports_media_notifications`. A **media-only** notify (a
+caption-less image, blank message) sends a **body-less MMS**: the `Body` field is
+omitted and only the `MediaUrl` rides — Twilio accepts that when media is present.
+
+An SMS/MMS message has **no tappable buttons**. So this channel deliberately does
+**not** advertise `supports_interactive_notifications`: a `notify` carrying
+tappable options is refused up front by the runtime rather than sent with a fake
+affordance. A `select` **ask** still renders its options as numbered body lines,
+and the human answers by **typing** one option — the inbound webhook forwards the
+typed reply verbatim to the callback door, which validates it against the option
+set. That typed-reply mapping is a real answer path, and it is the medium's honest
+ceiling for choice input; there is no button-tap or reply-by-number machinery.
+
 ## Security
 
 - Inbound requests authenticate via `X-Twilio-Signature`:

@@ -199,6 +199,50 @@ async def test_add_denormalizes_media_ids_onto_the_state_hash(fake_redis):
     assert await fake_redis.hget(store.state_key("i2"), "media_ids") is None
 
 
+def test_media_ids_of_reads_both_relative_and_absolute_served_forms():
+    # A channel ask stores the ABSOLUTE ``public_base_url``-minted served url, an inbox-only
+    # ask stores the RELATIVE same-origin reference — ``_media_ids_of`` extracts the id from
+    # either, and returns nothing for an off-origin https image or a plain link.
+    from tai42_skeleton.interactions.store import _media_ids_of
+
+    store = InteractionStore("t:")
+    rel_id, abs_id = "a" * 43, "b" * 43
+    refs = [
+        MediaItem(kind=MediaKind.IMAGE, url=MEDIA_ROUTE_PREFIX + rel_id),  # inbox-only relative
+        MediaItem(kind=MediaKind.IMAGE, url=f"https://host.example{MEDIA_ROUTE_PREFIX}{abs_id}"),  # channel absolute
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png"),  # off-origin: no stored id
+        MediaItem(kind=MediaKind.LINK, url="https://docs.example/p"),  # link: no stored id
+    ]
+    req = _request("i1", "g1", store).model_copy(update={"media": refs})
+
+    assert _media_ids_of(req) == [rel_id, abs_id]
+
+
+async def test_channel_ask_absolute_served_media_joins_index_and_extends_ttl(fake_redis):
+    # REGRESSION: a channel ask carries the ABSOLUTE served url. Its stored-media id must be
+    # denormalized onto the state hash, joined to the group media index, and TTL-extended by a
+    # later co-grouped add exactly as a relative inbox-only ask is — otherwise the bytes key
+    # expires on the bootstrap idle TTL and the image 404s while the park still lives.
+    store = InteractionStore("t:")
+    media_id = "c" * 43
+    key = store.media_key(media_id)
+    await fake_redis.hset(key, mapping={"mime": "image/png", "b64": "AA=="})
+    ref = MediaItem(kind=MediaKind.IMAGE, url=f"https://host.example{MEDIA_ROUTE_PREFIX}{media_id}")
+    q1 = _request("i1", "g1", store).model_copy(update={"media": [ref]})
+    await store.add(fake_redis, q1, idle_ttl=100)
+
+    # Denormalized onto the state hash and joined to the group index, keyed by the served id.
+    assert await fake_redis.hget(store.state_key("i1"), "media_ids") == media_id
+    assert media_id in await fake_redis.smembers(store.media_index_key("g1"))
+    assert await fake_redis.ttl(key) == 100
+
+    # A later co-grouped question with a longer horizon raises the absolute-served bytes TTL.
+    q2 = _request("i2", "g1", store)
+    await store.add(fake_redis, q2, idle_ttl=200)
+
+    assert await fake_redis.ttl(key) == 200
+
+
 async def test_no_media_add_makes_no_extra_round_trip(fake_redis, monkeypatch):
     # A no-media add issues exactly two server round trips: the phantom-purge eval and the
     # batched write pipeline. The media set-or-extend eval is queued INTO that write

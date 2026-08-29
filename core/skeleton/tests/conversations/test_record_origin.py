@@ -75,7 +75,9 @@ def test_operator_record_requires_the_sending_principal():
 
 
 def test_operator_record_still_requires_non_blank_answer():
-    with pytest.raises(ValueError, match="non-blank answer text"):
+    # A blank answer with NO answer_parts has nothing to deliver — refused. (A blank answer is
+    # admissible only for an all-media answer whose parts carry the content.)
+    with pytest.raises(ValueError, match="blank answer text must carry media-only answer_parts"):
         _record(origin="operator", inbound_text="", caller_principal="op-1", answer="  ")
 
 

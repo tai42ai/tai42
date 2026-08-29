@@ -136,9 +136,12 @@ async def _extract_create(request: Request) -> dict[str, Any]:
 
 async def _extract_save_version(request: Request) -> dict[str, Any]:
     body = await _json_object(request)
-    if not any(field in body for field in ("fixed_kwargs", "extensions", "output_schema", "description")):
+    if not any(
+        field in body for field in ("fixed_kwargs", "extensions", "output_schema", "input_schema", "description")
+    ):
         raise BadRequestError(
-            "body must provide at least one of 'fixed_kwargs', 'extensions', 'output_schema', 'description'"
+            "body must provide at least one of 'fixed_kwargs', 'extensions', 'output_schema', "
+            "'input_schema', 'description'"
         )
     fixed_kwargs = body.get("fixed_kwargs")
     if fixed_kwargs is not None and not isinstance(fixed_kwargs, dict):
@@ -150,6 +153,12 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
     # store's carry-forward sentinel in the operation.
     output_schema_provided = "output_schema" in body
     output_schema = read_output_schema(body.get("output_schema")) if output_schema_provided else None
+    # ``input_schema`` carry-forward mirrors ``output_schema`` exactly: PRESENT (even as
+    # ``null``) is a deliberate value (a ``null`` CLEARS the field); ABSENT carries the
+    # active value forward. ``None`` alone cannot signal both, so a presence flag drives
+    # the store's carry-forward sentinel in the operation.
+    input_schema_provided = "input_schema" in body
+    input_schema = read_input_schema(body.get("input_schema")) if input_schema_provided else None
     # ``description`` follows the None-carry sentinel: absent → carry forward (``None``);
     # present → set it (the resulting value is validated non-empty in the store view, so
     # an explicit ``""`` is rejected there). It must be a string when present.
@@ -163,6 +172,8 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
         "extensions": extensions,
         "output_schema": output_schema,
         "output_schema_provided": output_schema_provided,
+        "input_schema": input_schema,
+        "input_schema_provided": input_schema_provided,
         "description": description,
     }
 
@@ -195,6 +206,8 @@ async def _extract_validate(request: Request) -> dict[str, Any]:
         "extensions_value": body.get("extensions"),
         "output_schema_present": "output_schema" in body,
         "output_schema_value": body.get("output_schema"),
+        "input_schema_present": "input_schema" in body,
+        "input_schema_value": body.get("input_schema"),
     }
 
 

@@ -56,7 +56,10 @@ async def ask_user(
             - "external": the human acts on an EXTERNAL surface (sign, approve,
               pay) reached through ``link``, and the external system delivers the
               answer through a public callback URL. Returns the callback payload.
-        options: The allowed values; required for "select".
+        options: For "select", the allowed values (required) — the answer is one of
+            them. For "text", an OPTIONAL list of suggested replies: a tap submits that
+            option's text as the free-text answer (any string is still accepted), so it
+            is a convenience, not a constraint. Forbidden for "confirm"/"form"/"external".
         schema: A JSON schema describing the answer object; required for "form",
             optional for "external" (validates the callback payload). A "form"
             delivered over a ``channel`` must use the channel-deliverable subset
@@ -98,8 +101,10 @@ async def ask_user(
             served reference to it, not the inline bytes. ``caption`` is the image
             alt text or link label. The item count is bounded by a loose platform
             guard, within a per-request total URI budget. Media is display-only —
-            the human still answers via ``answer_format`` — and is NOT forwarded to
-            channel deliveries (a channel receives the question text only). Invalid
+            the human still answers via ``answer_format``. It renders in the Studio
+            inbox AND, when a ``channel`` delivers the question, rides the delivery so
+            the channel shows it alongside the question text; a channel that renders
+            only text ignores it (media is an enhancement, never a refusal). Invalid
             media fails the call before the question is stored.
         mode: The wait discipline. "sync" (the default) blocks and returns the
             typed answer. "async" PARKS the caller: it stores (and optionally

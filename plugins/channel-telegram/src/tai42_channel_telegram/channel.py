@@ -5,24 +5,39 @@ resolves the recipient chat: a caller-supplied ``delivery.recipient`` must be on
 ``CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS`` (fail closed) else the operator-set
 ``CHANNEL_TELEGRAM_DEFAULT_RECIPIENT``. EVERY failure on the deliver/notify path
 raises :class:`~tai42_contract.channels.ChannelDeliveryError`, operator
-misconfiguration included. The question goes as ONE ``sendMessage`` (the Bot API
-has no idempotency key, so a failed send raises rather than risk a duplicate).
+misconfiguration included. Each send is ONE Bot API call (the Bot API has no
+idempotency key, so a failed send raises rather than risk a duplicate).
 
-Tier-2 (``text``/``select``) carries ``reply_markup: {force_reply: true}`` so the
-reply arrives with ``reply_to_message``; the ``message_id -> callback_url``
-mapping is stored before ``deliver`` returns so the inbound door can route the
-answer. Tier-1 (``confirm``/``external``) carries a tappable URL button to the
-callback door instead — no correlation, no inbound involvement. ``form`` carries
-a **web_app** button to the same callback door: it opens the schema-rendered
-callback page as an in-chat webview and the page POSTs the answer straight to the
-door, so like Tier-1 there is no correlation and nothing arrives on the inbound
-route.
+Media (:class:`MediaItem`) rides both ``deliver`` and ``notify`` as a display
+enhancement: each ``image`` item is sent as its own ``sendPhoto`` message (caption
+= the item's caption), and each ``link`` item is appended to the text body as a
+labelled line — mirroring the per-item WhatsApp pattern. A ``data:`` image is
+unrenderable BY NATURE (``sendPhoto`` needs a public url) and raises
+:class:`~tai42_contract.channels.ChannelInputError`.
 
-``notify`` is fire-and-forget: ONE plain ``sendMessage`` (``chat_id`` + ``text``
-only), returning the sent ``message_id``. The recipient allowlist governs
-default/ask_user sends; a bridge reply carries ``sender_identity`` (this bot's
-numeric id) and goes to the initiating chat verbatim — a mismatched
-``sender_identity`` is refused.
+Options render as NATIVE inline keyboards (one callback button per option): a
+``select`` ask (the answer set), a ``text`` ask carrying suggested replies, and a
+notify carrying tappable options. The button's ``callback_data`` is the option's
+index; the option list is kept in a per-anchor side record so an inbound
+``callback_query`` maps the index back to the exact option text. A tap on a
+select/text ask resolves through the correlation ladder; a tap on a notify option
+enters the conversation as a visitor message (a correlation miss the inbound door
+bridges). The human may still TYPE a reply to any Tier-2 ask (the reply's
+``reply_to_message`` anchors the same correlation).
+
+Tier-2 (``text``/``select``) with no inline keyboard carries
+``reply_markup: {force_reply: true}`` so the reply arrives with
+``reply_to_message``; the ``message_id -> callback_url`` mapping is stored before
+``deliver`` returns so the inbound door can route the answer. Tier-1
+(``confirm``/``external``) carries a tappable URL button to the callback door
+instead — no correlation, no inbound involvement. ``form`` carries a **web_app**
+button to the same callback door: it opens the schema-rendered callback page as an
+in-chat webview and the page POSTs the answer straight to the door, so like Tier-1
+there is no correlation and nothing arrives on the inbound route.
+
+``notify`` is fire-and-forget. The recipient allowlist governs default/ask_user
+sends; a bridge reply carries ``sender_identity`` (this bot's numeric id) and goes
+to the initiating chat verbatim — a mismatched ``sender_identity`` is refused.
 
 Error text never includes the request URL — the bot token is embedded in it.
 """
@@ -35,28 +50,90 @@ from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
-from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelNotification, Correlation
+from tai42_contract.channels import (
+    ChannelDelivery,
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelNotification,
+    Correlation,
+)
+from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.settings import require, require_secret
 
 from tai42_channel_telegram.client import telegram_http
-from tai42_channel_telegram.correlation import telegram_correlation_store
+from tai42_channel_telegram.correlation import scoped_correlation_key, set_options, telegram_correlation_store
 from tai42_channel_telegram.settings import bot_numeric_id, telegram_settings
 
 # Tier-1 (confirm/external) is answered at the callback door via a tappable URL
-# button; text/select are Tier-2 (ForceReply + correlation, answered by typing).
+# button; text/select are Tier-2 (correlation, answered by tapping or typing).
 # ``form`` also targets the callback door but through a web_app webview button.
 _TIER1_FORMATS = frozenset({"confirm", "external"})
 
 
+def _images(media: list[MediaItem] | None) -> list[MediaItem]:
+    """The ``image`` items — each sent as its own ``sendPhoto`` message."""
+    return [item for item in (media or []) if item.kind is MediaKind.IMAGE]
+
+
+def _link_line(item: MediaItem) -> str:
+    """A ``link`` media item rendered as one appended text line."""
+    return f"{item.caption}: {item.url}" if item.caption else item.url
+
+
+def _link_lines(media: list[MediaItem] | None) -> list[str]:
+    """The ``link`` items rendered as labelled body lines (appended to the text)."""
+    return [_link_line(item) for item in (media or []) if item.kind is MediaKind.LINK]
+
+
+def _reject_unrenderable_media(media: list[MediaItem] | None) -> None:
+    """Refuse media the medium cannot render BY NATURE, before any send.
+
+    ``sendPhoto`` fetches a public url; an inline ``data:`` image has no url to
+    fetch, so it is a permanent :class:`ChannelInputError` (never a retryable
+    delivery failure) — refused up front so a multi-part send never lands its text
+    or earlier images and then fails on an unsendable one.
+    """
+    for item in _images(media):
+        if item.url.startswith("data:"):
+            raise ChannelInputError(
+                "telegram cannot send an inline data: image; sendPhoto requires a public https url "
+                f"(caption={item.caption!r})"
+            )
+
+
+def _photo_payload(chat_id: str, item: MediaItem) -> dict[str, Any]:
+    """The ``sendPhoto`` body for one ``image`` item (caption included when set)."""
+    payload: dict[str, Any] = {"chat_id": chat_id, "photo": item.url}
+    if item.caption is not None:
+        payload["caption"] = item.caption
+    return payload
+
+
+def _options_keyboard(options: list[str]) -> dict[str, Any]:
+    """An inline keyboard with one callback button per option, stacked vertically.
+
+    Each button's ``callback_data`` is the option's 0-based index (well under the Bot
+    API's 64-byte cap); the inbound door maps that index back to the option text via
+    the anchor's side record. The button label is the option text verbatim — an
+    over-long label is the medium's own limit (a loud ok:false on send), never a
+    silent truncation that would show a choice differing from what is submitted.
+    """
+    rows = [[{"text": option, "callback_data": str(index)}] for index, option in enumerate(options)]
+    return {"inline_keyboard": rows}
+
+
 def _question_text(delivery: ChannelDelivery) -> str:
-    """Render the question for a plain-text chat, format-aware: a select question
-    lists its options as guided text; the deadline is surfaced."""
+    """Render the question for a plain-text chat: the question, any ``link`` media
+    as labelled lines, then the surfaced deadline.
+
+    Select / suggested-reply options are NOT enumerated here — they render as the
+    inline keyboard (a clean native affordance), not numbered text.
+    """
     lines = [delivery.question]
-    if delivery.answer_format == "select" and delivery.options:
+    link_lines = _link_lines(delivery.media)
+    if link_lines:
         lines.append("")
-        lines.extend(f"- {option}" for option in delivery.options)
-        lines.append("")
-        lines.append("Reply with one of the options above.")
+        lines.extend(link_lines)
     lines.append(f"(Answer before {delivery.timeout_at.strftime('%Y-%m-%d %H:%M %Z')}.)")
     return "\n".join(lines)
 
@@ -107,34 +184,69 @@ def _resolve_target(recipient: str | None) -> str:
     return recipient
 
 
-async def _send_message(token: str, payload: dict[str, Any], context: str) -> dict[str, Any]:
-    """POST ``payload`` as one Bot API ``sendMessage`` and validate the response.
+async def _call_bot_api(token: str, method: str, payload: dict[str, Any], context: str) -> dict[str, Any]:
+    """POST ``payload`` to one Bot API ``method`` and validate the response.
 
     Returns the decoded ``ok: true`` body. A transport error, non-200 status,
     non-JSON body, or ``ok: false`` each raises
-    :class:`~tai42_contract.channels.ChannelDeliveryError` naming ``context``.
-    The request URL embeds the bot token and never appears in error text.
+    :class:`~tai42_contract.channels.ChannelDeliveryError` naming ``method`` and
+    ``context``. The request URL embeds the bot token and never appears in error
+    text.
     """
     try:
         async with telegram_http() as client:
-            response = await client.post(f"{telegram_settings().api_base_url}/bot{token}/sendMessage", json=payload)
+            response = await client.post(f"{telegram_settings().api_base_url}/bot{token}/{method}", json=payload)
     except httpx.HTTPError as exc:
-        raise ChannelDeliveryError(f"telegram sendMessage failed for {context}: {type(exc).__name__}: {exc}") from exc
+        raise ChannelDeliveryError(f"telegram {method} failed for {context}: {type(exc).__name__}: {exc}") from exc
 
     if response.status_code != 200:
         raise ChannelDeliveryError(
-            f"telegram sendMessage returned HTTP {response.status_code} for {context}: {response.text[:200]}"
+            f"telegram {method} returned HTTP {response.status_code} for {context}: {response.text[:200]}"
         )
     try:
         data = response.json()
     except ValueError as exc:
-        raise ChannelDeliveryError(f"telegram sendMessage returned a non-JSON body for {context}") from exc
+        raise ChannelDeliveryError(f"telegram {method} returned a non-JSON body for {context}") from exc
     if not data.get("ok"):
         raise ChannelDeliveryError(
-            f"telegram sendMessage rejected {context}: "
+            f"telegram {method} rejected {context}: "
             f"error_code={data.get('error_code')} description={data.get('description')!r}"
         )
     return data
+
+
+def _result_message_id(data: dict[str, Any], context: str) -> int:
+    """The integer ``result.message_id`` from an ``ok: true`` send, or raise.
+
+    Every send returns the id the medium minted; its absence on an ``ok`` body is a
+    loud :class:`ChannelDeliveryError` (a reply/tap could never be routed back to a
+    send with no id).
+    """
+    result = data.get("result")
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if not isinstance(message_id, int):
+        raise ChannelDeliveryError(f"telegram send ok response for {context} carried no result.message_id")
+    return message_id
+
+
+def _result_chat_id(data: dict[str, Any], context: str) -> int:
+    """The integer ``result.chat.id`` from an ``ok: true`` send, or raise.
+
+    The AUTHORITATIVE numeric chat id Telegram resolved the delivered message to. The
+    correlation and options writers scope their anchors by THIS id, never by the
+    configured ``recipient`` string — a recipient may be an ``@username`` (or the numeric
+    id), while the inbound reader only ever derives the numeric ``chat.id`` from an update.
+    Scoping the write by the same numeric id keeps writer and reader keys aligned so an
+    ``@username`` delivery's reply/tap still resolves. Its absence on an ``ok`` body is a
+    loud :class:`ChannelDeliveryError` (an anchor keyed on a missing chat could never be
+    read back).
+    """
+    result = data.get("result")
+    chat = result.get("chat") if isinstance(result, dict) else None
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    if not isinstance(chat_id, int):
+        raise ChannelDeliveryError(f"telegram send ok response for {context} carried no result.chat.id")
+    return chat_id
 
 
 class TelegramChannel:
@@ -144,6 +256,11 @@ class TelegramChannel:
     credentials with no stale per-instance snapshot.
     """
 
+    # This channel sends images (sendPhoto) and renders tappable options as native
+    # inline keyboards; the central notify_user capability guard reads these before
+    # dispatching a media or options notification.
+    supports_media_notifications: ClassVar[bool] = True
+    supports_interactive_notifications: ClassVar[bool] = True
     # A ``form`` ticket is delivered as a web_app button opening the
     # schema-rendered callback page in an in-chat webview (see ``deliver``).
     supports_form_delivery: ClassVar[bool] = True
@@ -156,6 +273,17 @@ class TelegramChannel:
             raise ChannelDeliveryError(
                 f"interaction {delivery.interaction_id} already timed out "
                 f"(timeout_at={delivery.timeout_at.isoformat()}); nothing was sent"
+            )
+
+        # Refuse an unrenderable media item BEFORE any send so a multi-part delivery
+        # never lands its images-or-text and then fails on an unsendable one.
+        _reject_unrenderable_media(delivery.media)
+
+        # Image media rides ahead of the question as its own sendPhoto message(s);
+        # link media is appended to the question text (see _question_text).
+        for image in _images(delivery.media):
+            await _call_bot_api(
+                token, "sendPhoto", _photo_payload(target, image), f"interaction {delivery.interaction_id} media"
             )
 
         payload: dict[str, Any] = {"chat_id": target, "text": _question_text(delivery)}
@@ -173,21 +301,24 @@ class TelegramChannel:
             }
         elif delivery.answer_format in _TIER1_FORMATS:
             payload["reply_markup"] = {"inline_keyboard": [[{"text": "Answer", "url": delivery.callback_url}]]}
+        elif delivery.options:
+            # A select ask (the answer set) or a text ask carrying suggested replies:
+            # a native inline keyboard, one callback button per option. A tap resolves
+            # via the correlation ladder; a manual reply to this message still anchors
+            # the same correlation.
+            payload["reply_markup"] = _options_keyboard(delivery.options)
         else:
             payload["reply_markup"] = {"force_reply": True, "input_field_placeholder": "Reply to answer"}
 
-        data = await _send_message(token, payload, f"interaction {delivery.interaction_id}")
+        data = await _call_bot_api(token, "sendMessage", payload, f"interaction {delivery.interaction_id}")
 
         if delivery.answer_format == "form" or delivery.answer_format in _TIER1_FORMATS:
             return
 
-        result = data.get("result")
-        message_id = result.get("message_id") if isinstance(result, dict) else None
-        if not isinstance(message_id, int):
-            raise ChannelDeliveryError(
-                f"telegram sendMessage ok response for interaction {delivery.interaction_id} "
-                f"carried no result.message_id"
-            )
+        message_id = _result_message_id(data, f"interaction {delivery.interaction_id}")
+        # The chat Telegram actually resolved the send to — the writer scopes its anchor
+        # by this numeric id, matching the numeric ``chat.id`` the inbound reader derives.
+        chat_id = _result_chat_id(data, f"interaction {delivery.interaction_id}")
 
         # Budget measured AFTER the send so the key expires at the deadline, not
         # deadline + send duration. A budget spent mid-send makes set_correlation
@@ -198,23 +329,49 @@ class TelegramChannel:
             interaction_id=delivery.interaction_id,
             ttl_deadline=delivery.timeout_at,
         )
+        # The anchor is scoped by the chat it was delivered to: a Telegram message_id is
+        # unique only per chat, so the reader (the inbound door) scopes by the incoming
+        # update's chat to resolve exactly this ask and never another chat's same-id ask.
+        # The response's ``result.chat.id`` is that chat's authoritative numeric id — an
+        # ``@username`` recipient never leaks into the key, so the reader's numeric-id key
+        # matches.
         try:
-            await telegram_correlation_store.set_correlation(str(message_id), entry, ttl_seconds=ttl_seconds)
+            await telegram_correlation_store.set_correlation(
+                scoped_correlation_key(str(chat_id), str(message_id)), entry, ttl_seconds=ttl_seconds
+            )
         except Exception as exc:
             raise ChannelDeliveryError(
                 f"question {delivery.interaction_id} was sent (message_id={message_id}) but its "
                 f"correlation could not be stored; the reply cannot be routed"
             ) from exc
 
-    async def notify(self, notification: ChannelNotification) -> list[str]:
-        """Send ``notification.message`` as ONE plain ``sendMessage`` (fire-and-forget).
+        if delivery.options:
+            # Keep the option list so an inbound callback_query maps its index back to
+            # the exact option text. A store failure is loud: the keyboard's taps could
+            # never be routed (a typed reply would still resolve via the correlation).
+            try:
+                await set_options(str(chat_id), str(message_id), delivery.options, ttl_seconds=ttl_seconds)
+            except Exception as exc:
+                raise ChannelDeliveryError(
+                    f"question {delivery.interaction_id} was sent (message_id={message_id}) but its "
+                    f"option list could not be stored; button taps cannot be routed"
+                ) from exc
 
-        With no ``sender_identity``: the allowlist gate of ``deliver``. With
-        ``sender_identity`` set it must equal this bot's numeric id (else a typed
-        refusal — never a send from the wrong face) and the message goes to
-        ``recipient`` verbatim, allowlist bypassed. Returns the sent
-        ``message_id`` as ``[str]``; any failure raises
-        :class:`~tai42_contract.channels.ChannelDeliveryError`.
+    async def notify(self, notification: ChannelNotification) -> list[str]:
+        """Send a fire-and-forget message; raise ``ChannelDeliveryError`` on any
+        failure. Returns every ``message_id`` Telegram assigned, in send order.
+
+        No reply is expected, so nothing touches the correlation store. The body (any
+        ``link`` media appended) is sent first — carrying an options inline keyboard
+        when present — then each ``image`` item as its own sendPhoto message. A MEDIA-ONLY
+        notification (blank message, no options) has no text body: the sendMessage is SKIPPED
+        and only the sendPhoto message(s) go out (a ``link`` item still renders as body text, so
+        only a truly text-less images-only send omits the message). A tap on an options button
+        enters the conversation as a visitor message, so the option list is kept in a side
+        record (bounded by ``CHANNEL_TELEGRAM_OPTION_TAP_TTL_SECONDS``) for the inbound door to
+        resolve. With ``sender_identity`` set it must equal this bot's numeric id (else a typed
+        refusal) and the message goes to ``recipient`` verbatim, allowlist bypassed; unset
+        applies the allowlist. Exactly one send attempt per part.
         """
         token = _require_delivery_secret(telegram_settings().bot_token, "CHANNEL_TELEGRAM_BOT_TOKEN")
         if notification.sender_identity is not None:
@@ -227,9 +384,46 @@ class TelegramChannel:
         else:
             target = _resolve_target(notification.recipient)
 
-        data = await _send_message(token, {"chat_id": target, "text": notification.message}, "notification")
-        result = data.get("result")
-        message_id = result.get("message_id") if isinstance(result, dict) else None
-        if not isinstance(message_id, int):
-            raise ChannelDeliveryError("telegram sendMessage ok response for notification carried no result.message_id")
-        return [str(message_id)]
+        # Refuse an unrenderable media item BEFORE any send (see deliver).
+        _reject_unrenderable_media(notification.media)
+
+        link_lines = _link_lines(notification.media)
+        if notification.message.strip():
+            body = "\n".join([notification.message, *link_lines]) if link_lines else notification.message
+        else:
+            # Media-only: no text body of our own; any link items still carry as body text.
+            body = "\n".join(link_lines)
+
+        sent: list[str] = []
+        if body.strip():
+            payload: dict[str, Any] = {"chat_id": target, "text": body}
+            if notification.options:
+                payload["reply_markup"] = _options_keyboard(notification.options)
+            data = await _call_bot_api(token, "sendMessage", payload, "notification")
+            message_id = _result_message_id(data, "notification")
+            sent.append(str(message_id))
+            if notification.options:
+                # options require a non-blank message (contract), so this rides the body send.
+                # Scope by the response's numeric ``result.chat.id`` (an ``@username`` recipient
+                # never leaks into the key), matching the id the inbound reader derives.
+                chat_id = _result_chat_id(data, "notification")
+                try:
+                    await set_options(
+                        str(chat_id),
+                        str(message_id),
+                        notification.options,
+                        ttl_seconds=telegram_settings().option_tap_ttl_seconds,
+                    )
+                except Exception as exc:
+                    raise ChannelDeliveryError(
+                        f"notification was sent (message_id={message_id}) but its option list could not be "
+                        f"stored; button taps cannot be routed"
+                    ) from exc
+
+        for image in _images(notification.media):
+            try:
+                photo = await _call_bot_api(token, "sendPhoto", _photo_payload(target, image), "notification media")
+            except ChannelDeliveryError as exc:
+                raise ChannelDeliveryError(f"telegram multi-part send failed after delivering {sent}: {exc}") from exc
+            sent.append(str(_result_message_id(photo, "notification media")))
+        return sent

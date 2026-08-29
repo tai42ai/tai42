@@ -34,10 +34,10 @@ from typing import Any, Final, Literal, cast, overload
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 from tai42_contract.interactions import (
-    MEDIA_ROUTE_PREFIX,
     InteractionRequest,
     InteractionResponse,
     InteractionState,
+    served_media_id,
 )
 
 ADD_EVENT = "interaction.add"
@@ -273,12 +273,16 @@ _DEFAULT_EXPIRY_TTL_MARGIN_SECONDS = 60
 
 def _media_ids_of(request: InteractionRequest) -> list[str]:
     # The stored-media ids a request's media references — items whose url is a served
-    # reference (``MEDIA_ROUTE_PREFIX{id}``); https/link/data: items carry none. A
-    # data:image is substituted to a served reference before the request is built, so
-    # by the time it reaches ``add`` only served references remain to index.
+    # reference; https/link/data: items carry none. A data:image is substituted to a
+    # served reference before the request is built, so by the time it reaches ``add``
+    # only served references remain to index. Both served forms count: the same-origin
+    # relative ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox-only ask stores, and the absolute
+    # ``public_base_url``-minted reference a channel ask stores — ``served_media_id``
+    # extracts the id from either, so a channel ask's bytes key is joined to the group
+    # index and TTL-extended past bootstrap idle, never left to 404 while the park lives.
     if not request.media:
         return []
-    return [item.url[len(MEDIA_ROUTE_PREFIX) :] for item in request.media if item.url.startswith(MEDIA_ROUTE_PREFIX)]
+    return [mid for item in request.media if (mid := served_media_id(item.url)) is not None]
 
 
 def _key_ttl(request: InteractionRequest, idle_ttl: int, now_ms: int, expiry_margin_s: int) -> int:

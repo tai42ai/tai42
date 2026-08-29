@@ -11,9 +11,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelNotification
+from tai42_contract.interactions.models import MediaItem, MediaKind
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.settings import reset_all_settings
 
+from tai42_channel_slack.blocks import SELECT_ACTION_PREFIX
 from tai42_channel_slack.channel import SlackChannel, _deliver_form, _render_text, open_modal_view
 from tai42_channel_slack.correlation import remaining_seconds
 from tai42_channel_slack.forms import build_message_blocks
@@ -238,6 +240,66 @@ async def test_tier1_formats_link_only_no_correlation(http_script, fake_redis, a
     assert fake_redis.store == {}
 
 
+def test_channel_advertises_media_and_interactive_notifications():
+    # The central notify guard reads these before handing a media / options
+    # notification to this channel.
+    assert SlackChannel.supports_media_notifications is True
+    assert SlackChannel.supports_interactive_notifications is True
+
+
+async def test_deliver_select_renders_option_buttons(http_script, fake_redis):
+    # A select ask renders its options as a Block Kit actions block of buttons (value =
+    # the option text, action_id = tai42_select:<index>); the text keeps the numbered
+    # fallback (a thread reply still answers).
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="select", options=["staging", "production"]))
+
+    payload = json.loads(http_script.requests[0].content)
+    blocks = payload["blocks"]
+    assert blocks[0] == {"type": "section", "text": {"type": "plain_text", "text": "Deploy to production?"}}
+    actions = blocks[-1]
+    assert actions["type"] == "actions"
+    assert [e["value"] for e in actions["elements"]] == ["staging", "production"]
+    assert [e["action_id"] for e in actions["elements"]] == [
+        f"{SELECT_ACTION_PREFIX}0",
+        f"{SELECT_ACTION_PREFIX}1",
+    ]
+    # The text fallback still lists the options and the reply-in-thread instruction.
+    assert "Options: staging, production" in payload["text"]
+
+
+async def test_deliver_text_with_suggested_replies_renders_buttons(http_script, fake_redis):
+    # A text ask MAY carry suggested replies (contract): they render as the same option
+    # buttons, and a tap submits the option text as the free-text answer.
+    http_script.results.append(_ok_response(ts="1.1"))
+    await SlackChannel().deliver(make_delivery(answer_format="text", options=["yes", "no"]))
+
+    actions = json.loads(http_script.requests[0].content)["blocks"][-1]
+    assert [e["value"] for e in actions["elements"]] == ["yes", "no"]
+
+
+async def test_deliver_media_renders_image_and_link_blocks(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="1.1"))
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a diagram"),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/spec", caption="the spec"),
+    ]
+    await SlackChannel().deliver(make_delivery(media=media))
+
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert blocks[0]["type"] == "section"  # the question
+    assert {"type": "image", "image_url": "https://cdn.test/a.png", "alt_text": "a diagram"} in blocks
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://docs.test/spec|the spec>"}} in blocks
+
+
+async def test_deliver_data_uri_image_is_refused_before_any_send(http_script, fake_redis):
+    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
+    with pytest.raises(ChannelInputError, match="data: image"):
+        await SlackChannel().deliver(make_delivery(media=media))
+    assert http_script.requests == []
+    assert fake_redis.store == {}
+
+
 async def test_deliver_form_posts_blocks_and_stores_record(http_script, fake_redis):
     http_script.results.append(_ok_response(ts="1.1"))
     delivery = make_delivery(answer_format="form", schema=_FORM_SCHEMA)
@@ -391,6 +453,58 @@ async def test_notify_sends_plain_payload_returns_ts_and_writes_nothing(http_scr
     assert payload == {"channel": TEST_DEFAULT_RECIPIENT, "text": "Deploy finished."}
     assert fake_redis.store == {}
     assert fake_redis.ttls == {}
+
+
+async def test_notify_options_render_buttons_with_text_fallback(http_script, fake_redis):
+    # Options render as an actions block of buttons; the text fallback lists them as
+    # suggestion lines so the notification preview shows them too.
+    http_script.results.append(_ok_response(ts="1.1"))
+    result = await SlackChannel().notify(ChannelNotification(message="Pick one:", options=["a", "b"]))
+
+    assert result == ["1.1"]
+    payload = json.loads(http_script.requests[0].content)
+    actions = payload["blocks"][-1]
+    assert actions["type"] == "actions"
+    assert [e["value"] for e in actions["elements"]] == ["a", "b"]
+    assert payload["text"] == "Pick one:\n• a\n• b"
+
+
+async def test_notify_media_renders_image_and_link_blocks(http_script, fake_redis):
+    http_script.results.append(_ok_response(ts="1.1"))
+    media = [
+        MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption=None),
+        MediaItem(kind=MediaKind.LINK, url="https://docs.test/x", caption="doc"),
+    ]
+    result = await SlackChannel().notify(ChannelNotification(message="See below.", media=media))
+
+    assert result == ["1.1"]
+    blocks = json.loads(http_script.requests[0].content)["blocks"]
+    assert blocks[0] == {"type": "section", "text": {"type": "plain_text", "text": "See below."}}
+    # A captionless image falls back to a generic alt text.
+    assert {"type": "image", "image_url": "https://cdn.test/a.png", "alt_text": "image"} in blocks
+    assert {"type": "section", "text": {"type": "mrkdwn", "text": "<https://docs.test/x|doc>"}} in blocks
+
+
+async def test_notify_media_only_posts_image_blocks_without_a_text_section(http_script, fake_redis):
+    # A media-only notification (blank message, image only) posts the image block(s) ALONE — no
+    # leading text section (Slack rejects an empty plain_text) and an empty text fallback.
+    http_script.results.append(_ok_response(ts="2.2"))
+    media = [MediaItem(kind=MediaKind.IMAGE, url="https://cdn.test/a.png", caption="a chart")]
+    result = await SlackChannel().notify(ChannelNotification(message="", media=media))
+
+    assert result == ["2.2"]
+    payload = json.loads(http_script.requests[0].content)
+    blocks = payload["blocks"]
+    assert blocks == [{"type": "image", "image_url": "https://cdn.test/a.png", "alt_text": "a chart"}]
+    assert not any(b.get("type") == "section" for b in blocks)  # no text section
+    assert payload["text"] == ""  # empty fallback — the blocks carry the content
+
+
+async def test_notify_data_uri_image_is_refused_before_any_send(http_script, fake_redis):
+    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
+    with pytest.raises(ChannelInputError, match="data: image"):
+        await SlackChannel().notify(ChannelNotification(message="hi", media=media))
+    assert http_script.requests == []
 
 
 async def test_notify_allowlisted_recipient_sends_to_it(http_script, fake_redis):

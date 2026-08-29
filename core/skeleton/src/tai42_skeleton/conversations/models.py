@@ -12,7 +12,13 @@ from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from tai42_contract.conversations import AnswerStatus, ConversationAnswer, ConversationDoor
+from tai42_contract.conversations import (
+    AnswerPart,
+    AnswerStatus,
+    ConversationAnswer,
+    ConversationDoor,
+    joined_answer_text,
+)
 
 
 class DeliveryStatus(StrEnum):
@@ -92,6 +98,14 @@ class ConversationRecord(BaseModel):
     # Client-facing text; ``None`` for a ``silent`` outcome, and for an ``error`` turn the
     # internal detail lives in ``error``.
     answer: str | None = None
+    # The ordered rich :class:`AnswerPart` messages the turn produced when a single joined
+    # string would lose something (more than one message, or one carrying media/options/a
+    # template). The delivery machine sends each as its own message, in order. ``None`` for a
+    # single PLAIN-TEXT answer (``answer`` is then the whole reply): mirrors
+    # :class:`ConversationAnswer.parts`, so a present list is non-empty and its part messages
+    # join with ``"\n\n"`` to exactly ``answer`` — intake dedup, transcripts and the api-door
+    # body all keep reading ``answer``.
+    answer_parts: list[AnswerPart] | None = None
     error: str | None = None
 
     delivery_status: DeliveryStatus = DeliveryStatus.PENDING_DELIVERY
@@ -106,18 +120,41 @@ class ConversationRecord(BaseModel):
     def _outcome_matches_status(self) -> ConversationRecord:
         """A record carries a turn outcome exactly when its status says it has one, so
         nothing reaching the delivery machine can be missing the outcome it must send.
-        An ``answered``/``error`` outcome carries non-blank answer text; a ``silent`` one
-        (an api-door no-reply the delivery machine still marks) carries none."""
+        An ``answered``/``error`` outcome carries answer text — a string, EMPTY only for an
+        all-media answer whose ``answer_parts`` carry the content, in which case ``answer_parts``
+        must be present. A ``silent`` one (an api-door no-reply the delivery machine still marks)
+        carries none."""
         answerless = self.delivery_status in ANSWERLESS_STATUSES
         if answerless != (self.answer_status is None):
             raise ValueError(
                 f"delivery_status {self.delivery_status.value!r} and answer_status "
                 f"{self.answer_status!r} disagree on whether this record carries an outcome"
             )
-        if self.answer_status in ("answered", "error") and not (self.answer or "").strip():
-            raise ValueError("an answered/error record must carry non-blank answer text")
+        if self.answer_status in ("answered", "error"):
+            if self.answer is None:
+                raise ValueError("an answered/error record carries answer text (empty only for an all-media answer)")
+            if not self.answer.strip() and not self.answer_parts:
+                raise ValueError("an answered/error record with blank answer text must carry media-only answer_parts")
         if self.answer_status == "silent" and self.answer is not None:
             raise ValueError("a silent record carries no answer text")
+        return self
+
+    @model_validator(mode="after")
+    def _parts_mirror_the_answer(self) -> ConversationRecord:
+        """The record's ``answer_parts`` obeys the same invariant the wire
+        :class:`ConversationAnswer` does: a present list is non-empty, rides an
+        ``answered``/``error`` outcome, and its NON-BLANK part messages join with ``"\n\n"`` to
+        exactly ``answer`` (a media-only part contributes nothing) — so the joined text the
+        send/transcript/callback paths read and the ordered parts the delivery machine sends can
+        never disagree."""
+        if self.answer_parts is None:
+            return self
+        if not self.answer_parts:
+            raise ValueError("answer_parts must be a non-empty list when present")
+        if self.answer_status not in ("answered", "error"):
+            raise ValueError("only an answered/error record carries answer_parts")
+        if joined_answer_text(self.answer_parts) != (self.answer or ""):
+            raise ValueError("answer must equal the non-blank answer_parts messages joined with a blank line")
         return self
 
     @model_validator(mode="after")
@@ -149,6 +186,7 @@ class ConversationRecord(BaseModel):
             thread_id=self.thread_id,
             status=self.answer_status,
             answer=self.answer,
+            parts=self.answer_parts,
         )
 
     def view(self) -> dict[str, object]:
@@ -176,6 +214,7 @@ class ConversationRecord(BaseModel):
                 "inbound_text",
                 "answer_status",
                 "answer",
+                "answer_parts",
                 "delivery_status",
                 "created_at",
                 "updated_at",

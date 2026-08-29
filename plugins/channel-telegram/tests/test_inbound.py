@@ -81,7 +81,7 @@ async def test_valid_reply_invokes_shared_ladder_and_acks_forwarded(http_recorde
     assert len(channels.inbound_calls) == 1
     call = channels.inbound_calls[0]
     assert call.channel_id == "telegram"
-    assert call.correlation_key == "42"  # the replied-to anchor message id
+    assert call.correlation_key == "777:42"  # the replied-to anchor scoped by its chat
     assert call.answer == "the blue one"
     assert call.bridge.channel_id == "telegram"
     assert call.bridge.our_identity == "123456"  # the bot's numeric id
@@ -421,3 +421,231 @@ async def test_ladder_retry_kept_outcome_acks_rejected(http_recorder, fake_redis
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "rejected"}}
     assert len(channels.inbound_calls) == 1
+
+
+# --- inline-keyboard callback taps (select / suggested-reply / notify options) ---
+
+
+def _callback_update(
+    chat_id: int = 777,
+    message_id: int = 42,
+    data: Any = "1",
+    update_id: int = 9,
+    username: str | None = None,
+) -> dict[str, Any]:
+    """A Telegram update carrying an inline-keyboard button tap (callback_query)."""
+    chat: dict[str, Any] = {"id": chat_id}
+    if username is not None:
+        chat["username"] = username
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": "cb-1",
+            "from": {"id": chat_id},
+            "message": {"message_id": message_id, "chat": chat},
+            "data": data,
+        },
+    }
+
+
+def _seed_options(fake_redis: Any, options: list[str], message_id: int = 42, chat_id: int = 777) -> None:
+    # The option side record is chat-scoped, exactly as the reader (get_options) looks
+    # it up: {chat_id}:{message_id} (a Telegram message_id is unique only per chat).
+    fake_redis.data[f"channel:telegram:opts:{chat_id}:{message_id}"] = json.dumps(options)
+
+
+def _answered_callbacks(recorder: Any) -> list[httpx.Request]:
+    return [r for r in recorder.requests if str(r.url).endswith("/answerCallbackQuery")]
+
+
+async def test_select_tap_maps_index_to_text_and_resolves_via_ladder(http_recorder, fake_redis, channels):
+    # A tap on a select button (callback_data = the index) maps back to the exact
+    # option text via the side record and resolves through the ladder with the anchor
+    # message id as the correlation key; the callback query is answered (spinner clears).
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    _seed_options(fake_redis, ["red", "blue"])
+    response = await inbound(make_inbound_request(_callback_update(data="1"), headers=_VALID_HEADERS))
+
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "forwarded"}}
+    assert len(channels.inbound_calls) == 1
+    call = channels.inbound_calls[0]
+    assert call.correlation_key == "777:42"  # the anchor scoped by its chat
+    assert call.answer == "blue"  # options[1]
+    assert call.bridge.provider_message_id == "9"  # the update id
+    assert len(_answered_callbacks(http_recorder)) == 1
+
+
+async def test_notify_option_tap_bridges_on_correlation_miss(http_recorder, fake_redis, channels, conversations):
+    # A notify-option tap has no pending ask: the ladder returns NO_CORRELATION and the
+    # option text enters the conversation as a visitor message (a bridged turn).
+    channels.inbound_outcome = InboundAnswerOutcome.NO_CORRELATION
+    _seed_options(fake_redis, ["a", "b", "c"])
+    response = await inbound(make_inbound_request(_callback_update(data="2"), headers=_VALID_HEADERS))
+
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert len(channels.inbound_calls) == 1  # the ladder was consulted first
+    assert len(conversations.accept_calls) == 1
+    assert conversations.accept_calls[0].text == "c"  # options[2]
+    assert conversations.accept_calls[0].client_address == "777"
+
+
+async def test_tap_from_non_recipient_chat_bridges_without_ladder(http_recorder, fake_redis, channels, conversations):
+    # A tap from a chat that is not a configured recipient never reaches the answer
+    # ladder — the option text bridges directly (the same gate the typed-reply path uses).
+    # The side record is scoped to that tap's own chat (111).
+    _seed_options(fake_redis, ["x", "y"], chat_id=111)
+    response = await inbound(make_inbound_request(_callback_update(chat_id=111, data="0"), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert channels.inbound_calls == []
+    assert len(conversations.accept_calls) == 1
+    assert conversations.accept_calls[0].text == "x"
+
+
+async def test_tap_with_no_option_record_is_acked_ignored(http_recorder, fake_redis, channels, conversations):
+    # A tap on a stale keyboard (the ask expired, the side record is gone) is acked and
+    # ignored — never a ladder call or a bridge, and never a 5xx redelivery loop.
+    response = await inbound(make_inbound_request(_callback_update(data="0"), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    assert conversations.accept_calls == []
+    # The callback query is still answered so the button spinner clears.
+    assert len(_answered_callbacks(http_recorder)) == 1
+
+
+@pytest.mark.parametrize("data", ["5", "-1", "abc", "", "²"])
+async def test_tap_with_bad_index_is_acked_ignored(http_recorder, fake_redis, channels, data: str):
+    # An out-of-range, negative, non-ASCII-digit or non-numeric callback_data is not an
+    # answer: acked and ignored, never a poison-tap redelivery loop.
+    _seed_options(fake_redis, ["only-one"])
+    response = await inbound(make_inbound_request(_callback_update(data=data), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+
+
+async def test_callback_answer_failure_does_not_fail_webhook(http_recorder, fake_redis, channels, caplog):
+    # answerCallbackQuery failing (a non-200) is logged and swallowed — the tap still
+    # resolves and the webhook still acks (never a 5xx that redelivers the whole update).
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    _seed_options(fake_redis, ["red", "blue"])
+    http_recorder.responder = lambda request: (
+        httpx.Response(500)
+        if str(request.url).endswith("/answerCallbackQuery")
+        else httpx.Response(200, json={"ok": True})
+    )
+    with caplog.at_level("WARNING"):
+        response = await inbound(make_inbound_request(_callback_update(data="0"), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "forwarded"}}
+    assert any("answerCallbackQuery" in record.message for record in caplog.records)
+
+
+# --- cross-chat isolation: a Telegram message_id is unique only PER CHAT ---
+
+
+async def test_typed_reply_correlation_key_is_scoped_by_the_replying_chat(http_recorder, fake_redis, channels):
+    # Two recipient chats (888 and 999) can each hold a pending ask anchored on the SAME
+    # message_id 42. A typed reply from chat 888 is handed to the ladder under ITS OWN
+    # scoped key 888:42 — never 999:42 — so it can only ever resolve chat 888's ask. The
+    # store keys on the full string (channel:telegram:corr:888:42), so chat 999's ask,
+    # stored under 999:42, is untouched.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    await inbound(make_inbound_request(_reply_update(chat_id=888, replied_message_id=42), headers=_VALID_HEADERS))
+    assert len(channels.inbound_calls) == 1
+    assert channels.inbound_calls[0].correlation_key == "888:42"
+    assert channels.inbound_calls[0].correlation_key != "999:42"
+
+
+async def test_callback_tap_correlation_key_is_scoped_by_the_tapping_chat(http_recorder, fake_redis, channels):
+    # The same isolation on the tap path: a button tap from chat 888 on an anchor whose
+    # message_id 42 is shared with another chat resolves under 888:42, never a bare 42 that
+    # a same-id anchor in chat 999 would also match.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    _seed_options(fake_redis, ["red", "blue"], message_id=42, chat_id=888)
+    await inbound(make_inbound_request(_callback_update(chat_id=888, message_id=42, data="1"), headers=_VALID_HEADERS))
+    assert len(channels.inbound_calls) == 1
+    assert channels.inbound_calls[0].correlation_key == "888:42"
+    assert channels.inbound_calls[0].answer == "blue"
+
+
+async def test_cross_chat_tap_finds_no_option_record_and_does_not_resolve(http_recorder, fake_redis, channels):
+    # Chat 999 delivered an options message anchored on message_id 42 (its side record is
+    # opts:999:42). A tap arriving from chat 888 carrying the same message_id 42 looks up
+    # opts:888:42 — a MISS — so it is acked-ignored and never resolves chat 999's ask.
+    _seed_options(fake_redis, ["red", "blue"], message_id=42, chat_id=999)
+    response = await inbound(
+        make_inbound_request(_callback_update(chat_id=888, message_id=42, data="1"), headers=_VALID_HEADERS)
+    )
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    # Chat 999's own side record is untouched.
+    assert fake_redis.data["channel:telegram:opts:999:42"]
+
+
+# --- _resolve_answer guards on the ForceReply / recipient path ---
+
+
+async def test_recipient_reply_without_update_id_is_rejected(http_recorder, fake_redis, channels):
+    # A ForceReply reply from a recipient chat reaches _resolve_answer, but update_id is
+    # the bridge's idempotency key: a reply lacking it is malformed (400), never resolved
+    # or bridged without one.
+    update = {
+        "message": {
+            "message_id": 1001,
+            "chat": {"id": 777},
+            "reply_to_message": {"message_id": 42},
+            "text": "the blue one",
+        }
+    }
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 400
+    assert _body(response) == {"error": "update carries no integer update_id"}
+    assert channels.inbound_calls == []
+
+
+async def test_recipient_reply_with_malformed_bot_token_misconfigures(
+    http_recorder, fake_redis, channels, monkeypatch: pytest.MonkeyPatch
+):
+    # Resolving a recipient-chat answer derives this bot's numeric id from the token; a
+    # token with no numeric prefix is a loud 500 (channel misconfigured), never a silent
+    # resolve. The typing action still fires (the token is non-empty, just malformed).
+    monkeypatch.setenv("CHANNEL_TELEGRAM_BOT_TOKEN", "no-colon-token")
+    reset_all_settings()
+    response = await inbound(make_inbound_request(_reply_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 500
+    assert _body(response) == {"error": "channel misconfigured"}
+    assert channels.inbound_calls == []
+
+
+# --- _resolve_callback defensive guards ---
+
+
+async def test_resolve_callback_non_dict_query_is_ignored(http_recorder, fake_redis):
+    # The defensive guard for a non-dict callback_query (the inbound() caller checks this,
+    # so it is only reachable by a direct call): acked-ignored, never a raise.
+    from tai42_channel_telegram.inbound import _resolve_callback
+    from tai42_channel_telegram.settings import telegram_settings
+
+    response = await _resolve_callback(telegram_settings(), {"callback_query": "not-a-dict"})
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+
+
+async def test_callback_tap_without_anchor_message_id_is_ignored(http_recorder, fake_redis, channels):
+    # A callback_query whose message carries no message_id has no anchor to key the option
+    # record on: acked-ignored (the query is still answered so the spinner clears), never a
+    # ladder call or a 5xx redelivery loop.
+    update = {
+        "update_id": 9,
+        "callback_query": {"id": "cb-1", "message": {"chat": {"id": 777}}, "data": "0"},
+    }
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    assert len(_answered_callbacks(http_recorder)) == 1

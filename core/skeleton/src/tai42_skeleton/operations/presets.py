@@ -92,13 +92,16 @@ class PresetVersionSave(BaseModel):
     """A new-preset-version request. At least one field must be present; an
     omitted field carries forward, an explicit ``[]`` clears (the store sentinel
     rule). ``output_schema`` carries forward when omitted, clears on an explicit
-    ``null``, and wins on an explicit object schema. ``description`` carries forward
-    when omitted and is SET by an explicit non-empty string (an explicit ``""`` is
-    rejected — the resulting description is validated non-empty on every save)."""
+    ``null``, and wins on an explicit object schema; ``input_schema`` follows the
+    SAME carry-forward rule (omitted carries, ``null`` clears, an object schema
+    wins). ``description`` carries forward when omitted and is SET by an explicit
+    non-empty string (an explicit ``""`` is rejected — the resulting description is
+    validated non-empty on every save)."""
 
     fixed_kwargs: dict[str, Any] | None = None
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None
     description: str | None = None
 
 
@@ -127,6 +130,7 @@ class PresetValidate(BaseModel):
     fixed_kwargs: dict[str, Any] | None = None
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None
 
 
 class PresetVersionTags(BaseModel):
@@ -628,6 +632,7 @@ def _store_record_view(
         "active_version": active_version,
         "extensions": [list(combo) for combo in body.extensions],
         "output_schema": body.output_schema,
+        "input_schema": body.input_schema,
         "conflicted": mgr.is_quarantined(name),
         "conflicted_reason": mgr.quarantine_reason(name),
         "uses": uses,
@@ -641,6 +646,7 @@ def _new_record_view(
     description: str,
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None,
     *,
     active_version: int,
     uses: list[str],
@@ -658,6 +664,7 @@ def _new_record_view(
         "active_version": active_version,
         "extensions": [list(combo) for combo in extensions],
         "output_schema": output_schema,
+        "input_schema": input_schema,
         "conflicted": False,
         "conflicted_reason": None,
         "uses": uses,
@@ -1049,6 +1056,7 @@ async def create_preset(
         description,
         extensions,
         output_schema,
+        input_schema,
         active_version=record.active_version,
         uses=uses_map.get(name, []),
         used_by=used_by_map.get(name, []),
@@ -1274,12 +1282,18 @@ async def save_version(
     output_schema: dict[str, Any] | None,
     output_schema_provided: bool,
     description: str | None,
+    input_schema: dict[str, Any] | None = None,
+    input_schema_provided: bool = False,
 ) -> dict[str, Any]:
     """Save a new version (carry-forward sentinels on omitted fields) then reload and
     fan out; 409 if the record is conflicted, 404 for an absent name. The
     ``list_changed`` emit is GUARDED on a real change to the serialized wire tool OR
     its extension combos. The response embeds the per-worker fleet report under
     ``fanout``."""
+    # ``input_schema`` mirrors ``output_schema``'s presence flag: an ABSENT field carries
+    # the active value forward (the ``CARRY_FORWARD`` sentinel the core accepts), a PRESENT
+    # one — including an explicit ``null`` that clears — is the deliberate value the store
+    # persists.
     row, report = await _save_version_core(
         name,
         fixed_kwargs=fixed_kwargs,
@@ -1287,6 +1301,7 @@ async def save_version(
         output_schema=output_schema,
         output_schema_provided=output_schema_provided,
         description=description,
+        input_schema=input_schema if input_schema_provided else CARRY_FORWARD,
     )
     # Embed the per-worker rebind fan-out report (mirrors the template writers): the
     # read-your-writes barrier proving the new version reached every serving worker.
@@ -1637,6 +1652,7 @@ async def _validate_create(
     fixed_kwargs: dict[str, Any],
     extensions: list[list[ExtensionElement]],
     output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The create route's full pre-store verdict for a brand-new preset — the exact
     ordered checks create runs before its store write (name safety → description
@@ -1672,6 +1688,7 @@ async def _validate_create(
         name=name,
         description=description or "",
         output_schema=output_schema,
+        input_schema=input_schema,
         extensions=extensions,
     )
 
@@ -1683,10 +1700,13 @@ async def _verdict_bind_chain(
     name: str,
     description: str,
     output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None = None,
     extensions: list[list[ExtensionElement]] | None = None,
 ) -> dict[str, Any]:
     """The shared tail both modes run: combo registry → output schema → dry-run
-    bake, as a verdict. ``extensions`` defaults to no combos for the bind chain's
+    bake → input-schema support → write validator, as a verdict — the SAME chain the
+    real create/save doors run, so the dry run never reports valid on a draft the
+    write door would 400. ``extensions`` defaults to no combos for the bind chain's
     combo/schema checks."""
     combos: list[list[ExtensionElement]] = extensions or []
     combo_error = _combo_registry_error(combos)
@@ -1696,19 +1716,30 @@ async def _verdict_bind_chain(
     if schema_error is not None:
         return _verdict(schema_error)
     bind_error = await _dry_run_bind_error(
-        base_tool, fixed_kwargs, name=name, description=description, output_schema=output_schema
+        base_tool,
+        fixed_kwargs,
+        name=name,
+        description=description,
+        output_schema=output_schema,
+        input_schema=input_schema,
     )
     if bind_error is not None:
         return _verdict(bind_error)
-    write_validator_error = await _write_validator_error(
-        PresetBody(
-            base_tool=base_tool,
-            description=description,
-            fixed_kwargs=fixed_kwargs,
-            extensions=combos,
-            output_schema=output_schema,
-        )
+    body = PresetBody(
+        base_tool=base_tool,
+        description=description,
+        fixed_kwargs=fixed_kwargs,
+        extensions=combos,
+        output_schema=output_schema,
+        input_schema=input_schema,
     )
+    # A set ``input_schema`` over a base tool with no registered support is the same loud
+    # authoring error the write door raises — mirror it as an invalid verdict, never a
+    # silently-ignored schema the dry run passes.
+    input_schema_error = _input_schema_authoring_error(body)
+    if input_schema_error is not None:
+        return _verdict(input_schema_error)
+    write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         return _verdict(write_validator_error)
     return _verdict(None)
@@ -1729,6 +1760,8 @@ async def validate_preset(
     extensions_value: Any = None,
     output_schema_present: bool = False,
     output_schema_value: Any = None,
+    input_schema_present: bool = False,
+    input_schema_value: Any = None,
 ) -> dict[str, Any]:
     """Report whether a preset draft would be accepted, running the SAME pre-store
     verdict the corresponding write route would — CREATE mode when no preset named
@@ -1753,6 +1786,7 @@ async def validate_preset(
             raise BadRequestError("body must contain a non-empty string 'base_tool'")
         extensions = read_create_extensions(extensions_present, extensions_value)
         output_schema = read_output_schema(output_schema_value) if output_schema_present else None
+        input_schema = read_input_schema(input_schema_value) if input_schema_present else None
         return await _validate_create(
             name,
             base_tool,
@@ -1760,6 +1794,7 @@ async def validate_preset(
             fixed_kwargs or {},
             extensions,
             output_schema,
+            input_schema,
         )
 
     # VERSION mode. The corresponding write route is save_version, whose FIRST
@@ -1781,6 +1816,10 @@ async def validate_preset(
     edit_extensions = read_edit_extensions(extensions_present, extensions_value)
     new_extensions = active.extensions if edit_extensions is None else edit_extensions
     new_output_schema = read_output_schema(output_schema_value) if output_schema_present else active.output_schema
+    # ``input_schema`` is a version field under the SAME presence-flag carry-forward as
+    # output_schema: PRESENT (even ``null``) is the deliberate value, ABSENT carries the
+    # active value forward — mirroring the save-version door exactly.
+    new_input_schema = read_input_schema(input_schema_value) if input_schema_present else active.input_schema
 
     new_fixed_kwargs = active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs
     # An authored-agent (``fixed_kwargs``) edit runs the full authoring validation
@@ -1796,6 +1835,7 @@ async def validate_preset(
         name=name,
         description=new_description,
         output_schema=new_output_schema,
+        input_schema=new_input_schema,
         extensions=new_extensions,
     )
 
