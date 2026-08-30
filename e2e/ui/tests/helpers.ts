@@ -10,6 +10,7 @@ import {
   type APIRequestContext,
   type APIResponse,
   type Page,
+  type Request,
   type Response,
 } from '@playwright/test';
 
@@ -154,29 +155,74 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
  * inbox stream is connected for seconds before they answer; this reproduces that
  * precondition deterministically instead of racing it.
  *
- * MECHANISM: the base GET and the stream share `/api/interactions` (the stream is its
- * `/stream` child). We watch responses and settle once the FIRST paged-base GET lands
- * AFTER a stream response — the connect-time resync, or, when the stream connects
- * during the initial page load, that shared load. One such GET always occurs (a
- * connect always fires a refetch), so this cannot hang on any engine, and gating on
- * "after a stream response" (event order is causal: the refetch is issued only once
- * the stream is up) makes it wait for the resync rather than the earlier initial load.
+ * MECHANISM (correct on BOTH engines): the base GET and the stream share
+ * `/api/interactions` (the stream is its `/stream` child). We track base GETs by
+ * request lifecycle and the moment a stream response first arrives (`streamUpAt`),
+ * then settle once the stream is up, NO base GET is in flight, and EITHER:
+ *   - a base GET has FINISHED after the stream came up — on Firefox that is the
+ *     separate connect-time resync (the initial load finished earlier, before the
+ *     slow stream connected); on Chromium the stream connects DURING the initial load,
+ *     so `refetchQueries` dedupes into it and no separate GET is issued — the initial
+ *     load finishing after the stream response IS that resync landing; OR
+ *   - a short grace has elapsed since the stream came up with no base GET in flight —
+ *     the pure safety net for the rare case where the initial load finished before the
+ *     stream response, so no base GET finishes afterward and none is coming.
+ * The "no base GET in flight" gate is what preserves the Firefox guarantee: the resync
+ * is dispatched synchronously when the stream response resolves, so it is in flight
+ * well within the grace window and blocks the grace path until it lands — grace can
+ * only fire when there is genuinely no resync coming (the Chromium-dedup case). This
+ * never hangs (a stream always connects on a configured stack) and never settles
+ * before the resync it must wait for.
  */
 export function armInboxResynced(page: Page): () => Promise<void> {
-  let streamSeen = false;
-  let resynced = false;
+  // The grace path is the rare-case safety net only (see below): on both engines the
+  // routine settle is via `baseFinishedAfterStream`, so a generous window costs nothing
+  // in practice while giving the Firefox resync ample room to appear before grace.
+  const GRACE_MS = 1_000;
+  let streamUpAt: number | null = null;
+  let baseFinishedAfterStream = false;
+  const inFlightBase = new Set<Request>();
+  const isBaseGet = (request: Request): boolean =>
+    request.method() === 'GET' && /\/api\/interactions\?/.test(request.url());
+
+  const onRequest = (request: Request) => {
+    if (isBaseGet(request)) inFlightBase.add(request);
+  };
   const onResponse = (response: Response) => {
-    const url = response.url();
-    if (url.includes('/api/interactions/stream')) {
-      streamSeen = true;
-    } else if (streamSeen && response.request().method() === 'GET' && /\/api\/interactions\?/.test(url)) {
-      resynced = true;
+    if (streamUpAt === null && response.url().includes('/api/interactions/stream')) {
+      streamUpAt = Date.now();
     }
   };
+  // requestfinished fires when the body fully lands (a real resync); requestfailed
+  // fires for an aborted/superseded refetch — that only clears the in-flight tracker,
+  // it is not a landed resync.
+  const onFinished = (request: Request) => {
+    if (!inFlightBase.delete(request)) return;
+    if (streamUpAt !== null) baseFinishedAfterStream = true;
+  };
+  const onFailed = (request: Request) => {
+    inFlightBase.delete(request);
+  };
+
+  page.on('request', onRequest);
   page.on('response', onResponse);
+  page.on('requestfinished', onFinished);
+  page.on('requestfailed', onFailed);
+
   return async () => {
-    await expect.poll(() => resynced, { timeout: 15_000 }).toBe(true);
+    await expect
+      .poll(
+        () =>
+          streamUpAt !== null &&
+          inFlightBase.size === 0 &&
+          (baseFinishedAfterStream || Date.now() - streamUpAt >= GRACE_MS),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    page.off('request', onRequest);
     page.off('response', onResponse);
+    page.off('requestfinished', onFinished);
+    page.off('requestfailed', onFailed);
   };
 }
 
