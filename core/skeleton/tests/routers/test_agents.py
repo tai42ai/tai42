@@ -277,6 +277,44 @@ async def test_run_streams_full_sequence_in_order_and_parses_back(one_agent):
     assert MessageFinal.model_validate(frames[6]).text == "hello"
 
 
+async def test_run_flushes_connect_comment_before_first_event(one_agent):
+    # The FIRST raw frame is a no-op SSE comment flushed at connect, BEFORE the first agent
+    # event (which can lag while the agent thinks). It makes the first body byte arrive at
+    # connect, so a fetch-reader client whose Fetch resolves a streamed response only on the
+    # first body byte (Firefox; Chromium resolves on the headers) sees the stream connected
+    # in ~0.1s instead of waiting up to a keepalive interval for the first frame. Mirrors the
+    # interactions stream's connect frame.
+    one_agent(_FakeAgent([MessageFinal(text="done")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    raw = await _collect(resp)
+    assert raw[0] == ": connected\n\n"
+    assert raw[0].startswith(":"), "the connect frame must be an ignorable SSE comment"
+    # It precedes every data frame: the first real event follows the connect comment.
+    assert _data_frames(raw)[0]["type"] == "message_final"
+
+
+async def test_close_at_connect_frame_leaks_no_tasks(one_agent):
+    # Closing the stream AT the connect-frame suspension (a client that drops the instant the
+    # stream connects, before any event) must leave NO background task alive. The connect
+    # frame is the FIRST suspension point and sits INSIDE the try whose finally cancels the
+    # producer + monitor; a yield placed BEFORE the try would let GeneratorExit skip the
+    # finally and LEAK those tasks (the live-run regression this pins). We assert on task
+    # liveness, not `agent.cancelled`: a producer cancelled before its body runs never enters
+    # astream, so the leak is only visible as an undone task.
+    agent = _FakeAgent(block=True)  # its astream would park until cancelled
+    one_agent(agent)
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    assert isinstance(resp, StreamingResponse)
+    gen = resp.body_iterator
+    before = asyncio.all_tasks()
+    assert await gen.__anext__() == ": connected\n\n"  # suspended at the connect-frame yield
+    spawned = asyncio.all_tasks() - before  # the producer + monitor the stream started
+    assert spawned, "the stream should have spawned its producer/monitor tasks"
+    await gen.aclose()  # GeneratorExit at that yield -> the finally must cancel + await them
+    leaked = [task for task in spawned if not task.done()]
+    assert leaked == [], f"closing at the connect frame leaked {len(leaked)} uncancelled task(s)"
+
+
 async def test_run_serializes_non_json_native_payload(one_agent):
     # A tool-result whose payload is a live non-JSON object serializes via
     # fallback=str instead of crashing the stream.

@@ -778,6 +778,33 @@ async def test_stream_cursor_captured_before_response_delivers_later_add(wired):
     assert _add_ids(frames) == ["late1"]
 
 
+async def test_stream_flushes_connect_comment_before_tail(wired):
+    # The FIRST body byte is a no-op SSE comment flushed at connect — BEFORE the tail's
+    # first (blocking) XREAD and therefore before any keepalive interval. This is what lets
+    # a fetch-reader client whose Fetch resolves a streamed response only on the first body
+    # byte (Firefox; Chromium resolves on the headers) treat the stream as connected in
+    # ~0.1s and run its connect-time base refetch now, instead of a full keepalive interval
+    # (default 15s) later — the inbox would otherwise be up to 15s stale on every connect.
+    # Pulling ONE frame must resolve WITHOUT any XREAD (proving it precedes the tail loop).
+    cursor = await _events_cursor(wired)
+    xread_calls = {"n": 0}
+    real_xread = wired.fake.xread
+
+    async def _counting_xread(streams, block=None):
+        xread_calls["n"] += 1
+        return await real_xread(streams, block=block)
+
+    wired.monkeypatch.setattr(wired.fake, "xread", _counting_xread)
+    gen = router._stream_events(cast(Request, _AliveRequest(alive=1)), wired.store, wired.settings, cursor)
+    try:
+        first = await gen.__anext__()
+    finally:
+        await gen.aclose()
+    assert first == router._CONNECT_FRAME
+    assert first.startswith(":"), "the connect frame must be an ignorable SSE comment"
+    assert xread_calls["n"] == 0, "the connect frame must flush before the tail's first XREAD"
+
+
 async def test_list_prunes_phantom_group(wired):
     # A group in the pending index whose stream expired must be pruned, not counted —
     # the list door prunes it — the reconciliation the pending read performs.
@@ -1187,7 +1214,9 @@ async def test_stream_tail_keepalive_then_disconnect(wired):
 
     cursor = await _events_cursor(wired)
     frames = await _collect_stream(router._stream_events(Request(scope, receive), wired.store, wired.settings, cursor))
-    assert frames == [": keepalive\n\n"]
+    # The connect comment flushes first (at connect, before the tail's first XREAD), then
+    # the idle window's due keepalive.
+    assert frames == [router._CONNECT_FRAME, ": keepalive\n\n"]
 
 
 async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
@@ -1229,8 +1258,9 @@ async def test_keepalive_is_deadline_driven_not_reset_by_filtered_events(wired):
         tail = [frame async for frame in gen]
     # The filtered window emitted nothing and left the deadline at 1010; only window 2's
     # deadline crossing emits a keepalive. A dropped `_now() >= next_keepalive` guard
-    # would instead fire a keepalive every non-yielding window, doubling the count.
-    assert tail == [": keepalive\n\n"]
+    # would instead fire a keepalive every non-yielding window, doubling the count. The
+    # connect comment flushes first, before either tail window.
+    assert tail == [router._CONNECT_FRAME, ": keepalive\n\n"]
 
 
 async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
@@ -1269,10 +1299,12 @@ async def test_keepalive_deadline_rearmed_by_delivered_frame(wired):
         # The tail arms the deadline at _now() + 10 == 1010.
         gen = router._stream_events(cast(Request, _AliveRequest(alive=2)), wired.store, wired.settings, "0-0")
         tail = [frame async for frame in gen]
-    # Only the entitled add rides the tail; the following idle window stays silent
-    # because delivering the add re-armed the deadline to 1018. Dropping the
-    # `if yielded` reset would leave the deadline at 1010 and emit a spurious keepalive.
-    assert len(tail) == 1, tail
+    # Only the entitled add rides the tail (after the leading connect comment); the
+    # following idle window stays silent because delivering the add re-armed the deadline
+    # to 1018. Dropping the `if yielded` reset would leave the deadline at 1010 and emit a
+    # spurious keepalive.
+    assert tail[0] == router._CONNECT_FRAME
+    assert len(tail) == 2, tail
     assert _add_ids(tail) == ["a1"]
     assert ": keepalive\n\n" not in tail
 
