@@ -9,7 +9,7 @@
  * answered value. The loud negative answers a nonexistent interaction (404).
  */
 import { expect, test } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, armInboxResynced, seedCredential, uniq } from './helpers';
 
 test('ask_user blocks a run, is answered in the browser, and the run unblocks', async ({
   page,
@@ -32,6 +32,8 @@ test('ask_user blocks a run, is answered in the browser, and the run unblocks', 
   });
 
   await seedCredential(page);
+  // Arm the resync guard BEFORE navigating (so the stream response is not missed).
+  const inboxResynced = armInboxResynced(page);
   await page.goto('/interactions');
 
   // The pending question streams into the inbox (SSE) as a text-format card.
@@ -39,6 +41,11 @@ test('ask_user blocks a run, is answered in the browser, and the run unblocks', 
     .getByTestId('interaction-card')
     .filter({ hasText: question });
   await expect(card).toBeVisible();
+  // Wait until the inbox stream has connected and its connect-time refetch of the
+  // paged pending base has landed, so answering cannot race that refetch and drop
+  // the just-answered card before its `interaction.answered` frame flips it (see
+  // `armInboxResynced` — this is the Firefox lane's answered-flip failure).
+  await inboxResynced();
 
   // Answer it in the browser (the text renderer's "Your answer" field + Submit).
   await card.getByRole('textbox', { name: 'Your answer' }).fill(answer);
@@ -99,12 +106,19 @@ test('a media-bearing question renders images + links in the inbox and still ans
   });
 
   await seedCredential(page);
+  // Arm the resync guard BEFORE navigating (so the stream response is not missed).
+  const inboxResynced = armInboxResynced(page);
   await page.goto('/interactions');
 
   const card = page
     .getByTestId('interaction-card')
     .filter({ hasText: question });
   await expect(card).toBeVisible();
+  // Wait until the inbox stream has connected and its connect-time refetch of the
+  // paged pending base has landed, so answering cannot race that refetch and drop
+  // the just-answered card before its `interaction.answered` frame flips it (see
+  // `armInboxResynced` — this is the Firefox lane's answered-flip failure).
+  await inboxResynced();
 
   // The gallery renders (no loud fallback for these valid items).
   const gallery = card.getByTestId('media-gallery');
