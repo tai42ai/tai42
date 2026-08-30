@@ -141,38 +141,51 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
  * pending base. ARM this BEFORE navigating to the inbox; `await` the returned
  * settle() after the card is on screen and BEFORE answering.
  *
- * WHY THIS EXISTS (the Firefox lane's three answered-flip failures share it): the
- * inbox's live list is the paged base (`GET /api/interactions`) overlaid with the
- * tail-only SSE deltas, and `useInteractionsStream` refetches that base on every
- * stream (re)connect. An answer submitted before that connect-time refetch LANDS
- * races it: the refetch returns the base WITHOUT the just-answered question (it is no
- * longer pending), which drops the card — and because the `interaction.answered`
- * frame carries only an id (no body) and the base no longer lists the question, the
- * frame cannot promote the card back, so it never flips to "Answered". On a
- * fast-connecting engine (Chromium) the refetch lands long before the answer; on a
- * slow-connecting one (this CI's Firefox, which takes ~0.4s to deliver the SSE
- * response headers) it lands AFTER the answer — the entire failure. A real operator's
- * inbox stream is connected for seconds before they answer; this reproduces that
- * precondition deterministically instead of racing it.
+ * WHY THIS EXISTS (the Firefox lane's answered-flip failures share it): the inbox's
+ * live list is the paged base (`GET /api/interactions`) overlaid with the tail-only SSE
+ * deltas, and `useInteractionsStream` refetches that base whenever its stream fetch
+ * connects. An answer submitted before that connect-time refetch LANDS races it: the
+ * refetch returns the base WITHOUT the just-answered question (it is no longer pending),
+ * which drops the card — and because the `interaction.answered` frame carries only an id
+ * (no body) and the base no longer lists the question, the frame cannot promote the card
+ * back, so it never flips to "Answered". A real operator's inbox stream is connected for
+ * seconds before they answer; this reproduces that precondition deterministically instead
+ * of racing it.
  *
- * MECHANISM (correct on BOTH engines): the base GET and the stream share
- * `/api/interactions` (the stream is its `/stream` child). We track base GETs by
- * request lifecycle and the moment a stream response first arrives (`streamUpAt`),
+ * ENGINE PARITY (why this used to be Firefox-only, and why it no longer is): Firefox's
+ * Fetch resolves a streamed response's promise only once the FIRST body byte arrives
+ * (Chromium resolves it on the headers). The interactions stream (`GET
+ * /api/interactions/stream`) is a TAIL-ONLY SSE with no backlog, so on a freshly opened
+ * inbox — whose question was already parked BEFORE the connect — it had nothing live to
+ * send and its first body byte USED to be the periodic `: keepalive` comment (~15s). That
+ * deferred Firefox's stream fetch, and the connect-time refetch it triggers, by a full
+ * keepalive interval. The skeleton's interactions router now flushes an immediate
+ * `: connected` SSE comment at connect (see `_CONNECT_FRAME` there), so the first body byte
+ * arrives in ~0.1s and BOTH engines resolve the stream fetch and land the resync promptly —
+ * Firefox no longer waits for the keepalive.
+ *
+ * MECHANISM (correct on BOTH engines, and regardless of connect latency): the base GET and
+ * the stream share `/api/interactions` (the stream is its `/stream` child). We track base
+ * GETs by request lifecycle and the moment a stream response first arrives (`streamUpAt`),
  * then settle once the stream is up, NO base GET is in flight, and EITHER:
- *   - a base GET has FINISHED after the stream came up — on Firefox that is the
- *     separate connect-time resync (the initial load finished earlier, before the
- *     slow stream connected); on Chromium the stream connects DURING the initial load,
- *     so `refetchQueries` dedupes into it and no separate GET is issued — the initial
- *     load finishing after the stream response IS that resync landing; OR
+ *   - a base GET has FINISHED after the stream came up — a separate connect-time resync
+ *     that the initial load did not absorb; OR
+ *   - on the engine/timing where the stream resolves DURING the initial load, `refetchQueries`
+ *     dedupes into it and no separate GET is issued — the initial load finishing after the
+ *     stream response IS that resync landing; OR
  *   - a short grace has elapsed since the stream came up with no base GET in flight —
  *     the pure safety net for the rare case where the initial load finished before the
  *     stream response, so no base GET finishes afterward and none is coming.
- * The "no base GET in flight" gate is what preserves the Firefox guarantee: the resync
- * is dispatched synchronously when the stream response resolves, so it is in flight
- * well within the grace window and blocks the grace path until it lands — grace can
- * only fire when there is genuinely no resync coming (the Chromium-dedup case). This
- * never hangs (a stream always connects on a configured stack) and never settles
- * before the resync it must wait for.
+ * The "no base GET in flight" gate is what preserves the guarantee: the resync is dispatched
+ * synchronously when the stream response resolves, so it is in flight well within the grace
+ * window and blocks the grace path until it lands — grace can only fire when there is
+ * genuinely no resync coming (the dedup case).
+ *
+ * The 30s poll budget is a DEFENSIVE CEILING, not a live dependency: against the fixed
+ * server both engines settle in ~1-3s. It stays generous so the suite also passes against an
+ * UNFIXED older server (whose stream still withholds its first byte until the ~15s keepalive,
+ * the old Firefox path) — two keepalive intervals of headroom — while a genuinely dead stream
+ * still fails loudly, just later. It never settles before the resync it must wait for.
  */
 export function armInboxResynced(page: Page): () => Promise<void> {
   // The grace path is the rare-case safety net only (see below): on both engines the
@@ -182,8 +195,16 @@ export function armInboxResynced(page: Page): () => Promise<void> {
   let streamUpAt: number | null = null;
   let baseFinishedAfterStream = false;
   const inFlightBase = new Set<Request>();
+  // The paged base is `GET /api/interactions` — the collection endpoint itself, matched by
+  // its path ending exactly there followed by a query string (`?…`, how the app pages it
+  // today) OR end-of-URL (a bare `GET /api/interactions`, so tracking never goes blind if
+  // the frontend ever drops the query). A following `/` segment (`/stream`, `/media/…`,
+  // `/{id}/answer`) is deliberately NOT the base and must not match — the `(?:\?|$)` anchor
+  // is what excludes them. COUPLING: this pattern IS the "which GET is the base refetch"
+  // contract; if the base door ever moves off `/api/interactions`, update it here or the
+  // settle silently degrades to the 1s grace and the answer-race reopens.
   const isBaseGet = (request: Request): boolean =>
-    request.method() === 'GET' && /\/api\/interactions\?/.test(request.url());
+    request.method() === 'GET' && /\/api\/interactions(?:\?|$)/.test(request.url());
 
   const onRequest = (request: Request) => {
     if (isBaseGet(request)) inFlightBase.add(request);
@@ -210,19 +231,26 @@ export function armInboxResynced(page: Page): () => Promise<void> {
   page.on('requestfailed', onFailed);
 
   return async () => {
-    await expect
-      .poll(
-        () =>
-          streamUpAt !== null &&
-          inFlightBase.size === 0 &&
-          (baseFinishedAfterStream || Date.now() - streamUpAt >= GRACE_MS),
-        { timeout: 15_000 },
-      )
-      .toBe(true);
-    page.off('request', onRequest);
-    page.off('response', onResponse);
-    page.off('requestfinished', onFinished);
-    page.off('requestfailed', onFailed);
+    // `finally` so the listeners are detached even when the poll times out (throws) —
+    // otherwise a failing settle would leak four page listeners into the rest of the test.
+    try {
+      await expect
+        .poll(
+          () =>
+            streamUpAt !== null &&
+            inFlightBase.size === 0 &&
+            (baseFinishedAfterStream || Date.now() - streamUpAt >= GRACE_MS),
+          // A defensive ceiling, not a live dependency (see the doc comment above): the
+          // fixed server settles in ~1-3s; this also covers an unfixed server's ~15s path.
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+    } finally {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+      page.off('requestfinished', onFinished);
+      page.off('requestfailed', onFailed);
+    }
   };
 }
 
