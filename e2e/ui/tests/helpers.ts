@@ -5,7 +5,13 @@
  * copied from tai-studio's own suite rather than imported across repos so the
  * two Node lockfiles stay uncoupled.
  */
-import { expect, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
+import {
+  expect,
+  type APIRequestContext,
+  type APIResponse,
+  type Page,
+  type Response,
+} from '@playwright/test';
 
 /** The pinned ports + seeded key; defaults MUST match the studio_runner. */
 export const UI_PORT = Number(process.env.TAI_E2E_UI_PORT ?? 8770);
@@ -126,6 +132,52 @@ export async function seedCredential(page: Page, key: string = API_KEY): Promise
     },
     [SESSION_KEY, key] as const,
   );
+}
+
+/**
+ * Wait until a freshly-opened `/interactions` inbox is LIVE AND RESYNCED, so an
+ * answer submitted next cannot race the stream's connect-time refetch of the paged
+ * pending base. ARM this BEFORE navigating to the inbox; `await` the returned
+ * settle() after the card is on screen and BEFORE answering.
+ *
+ * WHY THIS EXISTS (the Firefox lane's three answered-flip failures share it): the
+ * inbox's live list is the paged base (`GET /api/interactions`) overlaid with the
+ * tail-only SSE deltas, and `useInteractionsStream` refetches that base on every
+ * stream (re)connect. An answer submitted before that connect-time refetch LANDS
+ * races it: the refetch returns the base WITHOUT the just-answered question (it is no
+ * longer pending), which drops the card — and because the `interaction.answered`
+ * frame carries only an id (no body) and the base no longer lists the question, the
+ * frame cannot promote the card back, so it never flips to "Answered". On a
+ * fast-connecting engine (Chromium) the refetch lands long before the answer; on a
+ * slow-connecting one (this CI's Firefox, which takes ~0.4s to deliver the SSE
+ * response headers) it lands AFTER the answer — the entire failure. A real operator's
+ * inbox stream is connected for seconds before they answer; this reproduces that
+ * precondition deterministically instead of racing it.
+ *
+ * MECHANISM: the base GET and the stream share `/api/interactions` (the stream is its
+ * `/stream` child). We watch responses and settle once the FIRST paged-base GET lands
+ * AFTER a stream response — the connect-time resync, or, when the stream connects
+ * during the initial page load, that shared load. One such GET always occurs (a
+ * connect always fires a refetch), so this cannot hang on any engine, and gating on
+ * "after a stream response" (event order is causal: the refetch is issued only once
+ * the stream is up) makes it wait for the resync rather than the earlier initial load.
+ */
+export function armInboxResynced(page: Page): () => Promise<void> {
+  let streamSeen = false;
+  let resynced = false;
+  const onResponse = (response: Response) => {
+    const url = response.url();
+    if (url.includes('/api/interactions/stream')) {
+      streamSeen = true;
+    } else if (streamSeen && response.request().method() === 'GET' && /\/api\/interactions\?/.test(url)) {
+      resynced = true;
+    }
+  };
+  page.on('response', onResponse);
+  return async () => {
+    await expect.poll(() => resynced, { timeout: 15_000 }).toBe(true);
+    page.off('response', onResponse);
+  };
 }
 
 /**
