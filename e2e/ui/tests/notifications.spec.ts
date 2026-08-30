@@ -49,14 +49,15 @@ test('notify_user with no channel records to the internal sink and renders in th
     .poll(async () => (await readFeed(request)).some((n) => n.message === message))
     .toBe(true);
 
-  // UI: the notifications screen renders the recorded message as a table row.
+  // UI: the notifications inbox renders the recorded message on a card (the
+  // 6.3 sink inbox replaced the table with a card list).
   await seedCredential(page);
   await page.goto('/notifications');
-  const row = page
-    .getByTestId('notifications-table')
-    .getByRole('row')
+  const card = page
+    .getByTestId('notifications-list')
+    .getByTestId('notification-card')
     .filter({ hasText: message });
-  await expect(row).toBeVisible();
+  await expect(card).toBeVisible();
 });
 
 test('the notifications feed door denies an unauthenticated read', async ({ request }) => {
