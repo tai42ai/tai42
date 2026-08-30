@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
@@ -305,7 +306,10 @@ async def test_close_at_connect_frame_leaks_no_tasks(one_agent):
     one_agent(agent)
     resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
     assert isinstance(resp, StreamingResponse)
+    # body_iterator is typed as the broader AsyncContentStream; the stream endpoint always
+    # returns the async generator, whose __anext__/aclose drive the suspension under test.
     gen = resp.body_iterator
+    assert isinstance(gen, AsyncGenerator)
     before = asyncio.all_tasks()
     assert await gen.__anext__() == ": connected\n\n"  # suspended at the connect-frame yield
     spawned = asyncio.all_tasks() - before  # the producer + monitor the stream started
