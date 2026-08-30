@@ -72,6 +72,13 @@ logger = logging.getLogger(__name__)
 # not drop a connection while an agent thinks between events.
 _KEEPALIVE_SECONDS = 15
 _KEEPALIVE_FRAME = ": keepalive\n\n"
+# Flushed immediately at connect, before the first agent event (which can lag while the
+# agent thinks). An SSE comment is a no-op to the client parser, but it makes the FIRST
+# body byte arrive at connect — so a client whose Fetch resolves the response only on the
+# first body byte (Firefox; Chromium resolves on the headers) sees the stream connected in
+# ~0.1s instead of waiting up to a keepalive interval for the first frame. Mirrors the
+# interactions stream's connect frame.
+_CONNECT_FRAME = ": connected\n\n"
 
 # How often the disconnect monitor checks whether the client is gone. A dropped
 # client cancels the underlying run within this window even mid-stream, so an
@@ -184,13 +191,24 @@ async def _agent_event_stream(request: Request, agent: Agent, run_kwargs: dict[s
     producer task is cancelled in ``finally``, which propagates cancellation into
     ``astream`` so the abandoned run stops."""
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=_MAX_QUEUED_EVENTS)
-    producer = asyncio.ensure_future(_produce(agent, run_kwargs, queue))
-    monitor = asyncio.ensure_future(_wait_until_disconnected(request))
     # A persistent get-task across keep-alive timeouts: cancelling and re-issuing
     # a fresh ``queue.get()`` each idle tick could drop an item that arrived at the
     # cancellation boundary, so the same task is kept until it resolves.
     get_task: asyncio.Future[tuple[str, Any]] | None = None
+    # Pre-declared so the ``finally`` (which guards on ``is not None``) is valid even if the
+    # generator is closed before these tasks are created.
+    producer: asyncio.Future[None] | None = None
+    monitor: asyncio.Future[None] | None = None
     try:
+        producer = asyncio.ensure_future(_produce(agent, run_kwargs, queue))
+        monitor = asyncio.ensure_future(_wait_until_disconnected(request))
+        # Flush a no-op comment at connect, before the first (possibly-slow) agent event, so a
+        # fetch-reader client resolves the stream immediately rather than up to a keepalive
+        # interval later (see `_CONNECT_FRAME`). This is the FIRST suspension point and MUST
+        # sit INSIDE the try: a client disconnect here raises GeneratorExit at the yield, and
+        # only an in-try yield lets the finally cancel the producer/monitor — otherwise the
+        # live agent run would leak uncancelled.
+        yield _CONNECT_FRAME
         while True:
             if get_task is None:
                 get_task = asyncio.ensure_future(queue.get())

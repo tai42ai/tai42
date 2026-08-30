@@ -49,7 +49,8 @@ async def test_sse_tail_stall_raises_runtime_error(monkeypatch):
     store = InteractionStore(settings.key_prefix)
 
     gen = router._stream_events(cast(Request, _FakeRequest()), store, settings, "0-0")
-    # Tail-only: the first pull drives straight into the tail loop; the stalled XREAD
-    # trips the outer bound and the generator dies loudly.
+    # The first pull flushes the connect comment; the second drives into the tail loop,
+    # where the stalled XREAD trips the outer bound and the generator dies loudly.
+    assert await gen.__anext__() == router._CONNECT_FRAME
     with pytest.raises(RuntimeError, match="XREAD"):
         await gen.__anext__()

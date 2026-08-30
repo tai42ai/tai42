@@ -23,6 +23,7 @@ import { expect, test } from '@playwright/test';
 import {
   API_KEY,
   apiHeaders,
+  armInboxResynced,
   awaitToolRun,
   createClaimLink,
   mintKey,
@@ -142,6 +143,8 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   await expect(nav.getByRole('link', { name: 'System', exact: true })).toHaveCount(0);
 
   // Client-side navigation preserves the in-memory session (a full reload would drop it).
+  // Arm the resync guard BEFORE opening the inbox (so the stream response is not missed).
+  const ownedResynced = armInboxResynced(page);
   await nav.getByRole('link', { name: 'Interactions', exact: true }).click();
   await page.waitForURL('**/interactions');
 
@@ -156,9 +159,17 @@ test('owner → scoped owned key → QR-claim login → scoped shell, inbox answ
   const rootContext = await browser.newContext();
   const rootPage = await rootContext.newPage();
   await seedCredential(rootPage, API_KEY);
+  const rootResynced = armInboxResynced(rootPage);
   await rootPage.goto('/interactions');
   const rootCard = rootPage.getByTestId('interaction-card').filter({ hasText: question });
   await expect(rootCard).toBeVisible();
+
+  // Both inboxes must have their stream connected and connect-time refetch of the paged
+  // pending base landed before answering: otherwise the answer races that refetch, which
+  // — on a slow-connecting engine (Firefox) — lands after it and drops the just-answered
+  // card before its `interaction.answered` frame can flip it (see `armInboxResynced`).
+  await ownedResynced();
+  await rootResynced();
 
   // Answer it in the owned browser (the text renderer's field + Submit).
   await card.getByRole('textbox', { name: 'Your answer' }).fill(answer);

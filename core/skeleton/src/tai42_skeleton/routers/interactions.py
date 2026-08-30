@@ -114,6 +114,17 @@ logger = logging.getLogger(__name__)
 
 _KEEPALIVE_SECONDS = 15
 
+# The first SSE frame every stream flushes at connect, BEFORE the tail's first
+# (blocking) XREAD. An SSE comment (leading ``:``) is a no-op to EventSource and to a
+# fetch-reader SSE client, but it makes the FIRST body byte arrive at connect time — so a
+# client whose Fetch resolves the response only on the first body byte (Firefox; Chromium
+# resolves on the headers) treats the stream as connected in ~0.1s instead of waiting up to
+# ``_KEEPALIVE_SECONDS`` for the first keepalive. Without it, `useInteractionsStream`'s
+# connect-time base refetch — which fires when the stream fetch resolves — is deferred a
+# full keepalive interval on Firefox, leaving the inbox's pending list up to 15s stale on
+# every connect.
+_CONNECT_FRAME = ": connected\n\n"
+
 
 def _now() -> float:
     """The monotonic loop clock the keepalive deadline reads. A module-level seam so
@@ -380,6 +391,12 @@ async def _stream_events(request: Request, store: InteractionStore, settings: In
     # convergence. The stream self-terminates on client disconnect. Only this long-lived stream
     # opts out; real requests stay counted and are drained normally.
     mark_current_request_drain_exempt()
+
+    # Flush a no-op comment immediately, before the tail's first (blocking) XREAD: this
+    # is the first body byte, so a fetch-reader client resolves the stream at connect and
+    # runs its connect-time base refetch now — not up to a keepalive interval later (the
+    # Firefox inbox-staleness fix; see `_CONNECT_FRAME`).
+    yield _CONNECT_FRAME
 
     # The tail blocks ~15s per iteration; a dedicated fresh connection keeps it
     # off the shared pool the answer door needs. The socket read timeout is
