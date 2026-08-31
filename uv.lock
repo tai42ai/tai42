@@ -5585,7 +5585,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.8.0"
+version = "5.9.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5619,7 +5619,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "6.6.0"
+version = "6.7.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6017,7 +6017,7 @@ wheels = [
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "2.0.2"
+version = "2.1.0"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "langchain" },
@@ -6142,7 +6142,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.6.4"
+version = "9.7.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
