@@ -21,7 +21,7 @@ from typing import Any
 from opentelemetry import context as otel_context
 from opentelemetry.context import Context
 from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import TraceContext
+from tai42_contract.monitoring import TraceContext, get_ambient_trace_context
 
 from tai42_agents.settings import agents_limits_settings
 
@@ -72,8 +72,21 @@ def init_langgraph_config(config: dict[str, Any] | None = None) -> dict[str, Any
     if "recursion_limit" not in new_config:
         new_config["recursion_limit"] = agents_limits_settings().default_recursion_limit
 
-    trace_id = configurable.get("monitoring_trace_id", str(uuid.uuid4()).replace("-", ""))
+    # Trace-lineage precedence: an EXPLICITLY propagated context (the caller pinned
+    # `monitoring_trace_id`, e.g. an agent invoked directly by a monitored driver) wins;
+    # else the AMBIENT deposit a flow left when it drives this agent as a node — so the
+    # agent's spans JOIN the flow's trace instead of orphaning into a fresh one; else a
+    # freshly minted root trace (the standalone default, byte-identical to before).
+    trace_id = configurable.get("monitoring_trace_id")
     parent_span_id = configurable.get("monitoring_parent_span_id")
+    if not trace_id:
+        ambient = get_ambient_trace_context()
+        if ambient is not None and ambient.trace_id:
+            trace_id = ambient.trace_id
+            if parent_span_id is None:
+                parent_span_id = ambient.parent_span_id
+        else:
+            trace_id = str(uuid.uuid4()).replace("-", "")
     ctx = TraceContext(trace_id=trace_id, parent_span_id=parent_span_id)
     callbacks = tai42_app.monitoring.active.writer.get_monitoring_callbacks(ctx)
 
