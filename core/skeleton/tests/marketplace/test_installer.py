@@ -1030,7 +1030,6 @@ async def test_install_unwind_reload_back_failure_escalates(monkeypatch: pytest.
     [
         ("source", True),  # a required field entirely absent
         ("version", False),  # present-but-null
-        ("contract_range", False),  # present-but-null
     ],
 )
 async def test_install_resolve_missing_or_null_required_field_is_registry_response_error(
@@ -1040,9 +1039,11 @@ async def test_install_resolve_missing_or_null_required_field_is_registry_respon
     # data (a 502 at the boundary), never a caller error, and ``_require`` catches it
     # before any pip call. Null matters specially: the client's resolve boundary
     # type-checks a field only when it is present and non-null (a null is legitimate
-    # for the github-only optional pins), so a null ``version`` / ``contract_range``
-    # would otherwise reach ``Version(None)`` / ``SpecifierSet(None)`` — a ``TypeError``,
-    # not a typed parse error — and escape the operation boundary as an untyped 500.
+    # for the github-only optional pins), so a null ``version`` would otherwise reach
+    # ``Version(None)`` — a ``TypeError``, not a typed parse error — and escape the
+    # operation boundary as an untyped 500. (``contract_range`` is deliberately NOT in
+    # this set: a contract-less plugin legitimately carries a null one — see
+    # ``test_install_null_contract_range_is_contract_less_and_proceeds``.)
     h = Harness()
     spec = make_spec()
     resolved = make_resolved(spec)
@@ -1054,6 +1055,20 @@ async def test_install_resolve_missing_or_null_required_field_is_registry_respon
     with pytest.raises(RegistryResponseError, match=key):
         await h.installer().install("tai42/toolbox")
     _assert_no_pip(h)
+
+
+async def test_install_null_contract_range_is_contract_less_and_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A contract-less plugin (an mcp-server, or a descriptor-only connector shipping no
+    # package) imports no tai42-contract, so the registry serves ``contract_range`` null.
+    # That is NOT garbled data: there is no constraint to gate, so the install proceeds —
+    # matching ``compat.update_targets``, which also counts a null range compatible. The
+    # installed contract version is irrelevant here (nothing checks it).
+    monkeypatch.setattr(installer_module.importlib.metadata, "version", lambda name: "2.0.0")
+    h = Harness()
+    spec = make_spec()
+    h.registry.resolved = make_resolved(spec, contract_range=None)
+    await h.installer().install("tai42/toolbox")
+    assert h.pip.calls  # proceeded to install, no contract refusal on a null range
 
 
 async def test_install_resolve_advisories_not_list_is_registry_response_error(monkeypatch: pytest.MonkeyPatch) -> None:
