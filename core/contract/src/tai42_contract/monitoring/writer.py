@@ -10,8 +10,8 @@ they MUST NOT raise into application code. A monitoring outage cannot be allowed
 to break a flow. So call sites need NO ``try/except`` around them. (The one
 precondition that DOES raise is ``record_span`` with no ``trace_id`` — a caller
 bug, not a backend outage.) The module-level :func:`attribute_run` helper is
-fail-safe by construction: it only composes ``current_trace_id`` and
-``trace_attributes``, inheriting the latter's catch-and-log guarantee.
+fail-safe by construction: it composes ``writer`` over ``trace_attributes``,
+inheriting that method's catch-and-log guarantee.
 
 The NON-emit methods are NOT fail-safe and propagate errors loudly:
 ``flush`` / ``shutdown`` (fork-safety must not be silently skipped),
@@ -35,7 +35,7 @@ downstream/parent span in flows/agents).
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -51,6 +51,15 @@ from tai42_contract.monitoring.models import (
 # The stable trace ``name`` every run-attribution stamp carries, so attributed
 # runs group under one neutral name regardless of the door that drove them.
 RUN_ATTRIBUTION_TRACE_NAME = "run"
+
+# The documented ``metadata`` key a run's ROOT version rides in, so a writer can
+# lift it onto the backend's native version DIMENSION rather than leaving it a
+# plain metadata attribute. Vendor-neutral: a backend with a native version field
+# maps this key onto it (see the langfuse writer); one without keeps it as ordinary
+# metadata. Kept as a stable constant so the depositing seam and the writer name the
+# SAME key. Only the OUTERMOST attribution stamp sets it, so the value is unambiguous
+# (a single root version) no matter how tags accumulate across nested scopes.
+RUN_VERSION_METADATA_KEY = "run_version"
 
 
 @runtime_checkable
@@ -146,8 +155,18 @@ class MonitoringWriter(Protocol):
         name: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> AbstractContextManager[None]:
-        """Set trace-level name/tags/metadata on the ambient trace for the block."""
+        """Set trace-level name/tags/metadata on the ambient trace for the block.
+
+        ``user_id`` / ``session_id`` set the backend's native identity dimensions
+        when supplied; ``None`` leaves each unset. They are optional and
+        keyword-only, so an existing caller that sets only name/tags/metadata is
+        unaffected. A ROOT version is carried inside ``metadata`` under
+        :data:`RUN_VERSION_METADATA_KEY` (not a discrete parameter) so a backend
+        without a native version dimension keeps it as ordinary metadata.
+        """
         ...
 
     # --- guard query (returns None, never raises) --------------------------
@@ -217,16 +236,25 @@ def attribute_run(writer: MonitoringWriter, attribution: RunAttribution) -> Abst
     caller ENTERS the returned manager AROUND the whole run so the run's spans are
     created INSIDE the attribution scope. It RETURNS the manager rather than
     entering it — a one-shot enter/exit here would tear the scope down before any
-    span exists and silently no-op the stamp. Guarded by
-    :meth:`MonitoringWriter.current_trace_id`: a no-op manager outside a trace.
-    Fail-safe by construction — the stamp's fail-safety is
+    span exists and silently no-op the stamp.
+
+    It does NOT gate on :meth:`MonitoringWriter.current_trace_id`. A stamp deposited
+    BEFORE any trace is open is NOT lost: ``trace_attributes`` is context-scoped
+    (langfuse's ``propagate_attributes`` writes the attributes into the ambient OTel
+    context — see ``propagation.py``'s ``_set_propagated_attribute`` — and the span
+    processor lifts them onto the trace ROOT when a span is subsequently opened
+    inside the scope, ``span_processor.py``). Short-circuiting to a ``nullcontext``
+    when ``current_trace_id()`` is ``None`` therefore DROPPED the attribution on the
+    common case — a door that deposits then opens the run's first span — so the guard
+    is removed. Fail-safe by construction — the stamp's fail-safety is
     :meth:`MonitoringWriter.trace_attributes`'s (it catches + logs on enter/exit,
-    never raises).
+    never raises), so an emit-incapable writer's ``trace_attributes`` is a safe no-op
+    even with no trace ever opened.
     """
-    if writer.current_trace_id() is None:
-        return nullcontext()
     return writer.trace_attributes(
         name=RUN_ATTRIBUTION_TRACE_NAME,
         tags=attribution.tags,
         metadata=attribution.metadata,
+        user_id=attribution.user_id,
+        session_id=attribution.session_id,
     )

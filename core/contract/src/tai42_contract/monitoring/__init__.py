@@ -38,6 +38,7 @@ from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
 from tai42_contract.monitoring.writer import (
     RUN_ATTRIBUTION_TRACE_NAME,
+    RUN_VERSION_METADATA_KEY,
     MonitoringWriter,
     attribute_run,
 )
@@ -45,6 +46,7 @@ from tai42_contract.monitoring.writer import (
 __all__ = [
     "DEFAULT_LEVEL",
     "RUN_ATTRIBUTION_TRACE_NAME",
+    "RUN_VERSION_METADATA_KEY",
     "TRACE_PREVIEW_MAX_CHARS",
     "MetricsFilter",
     "MetricsResult",

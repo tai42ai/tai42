@@ -54,6 +54,7 @@ from tai42_contract.interactions import (
     reset_park_completion,
     set_park_completion,
 )
+from tai42_contract.monitoring import RunAttribution
 from tai42_kit.utils.data import run_jq_bounded
 
 from tai42_skeleton.agent.thread_reservation import BRIDGE_THREAD_PREFIX, PERSON_THREAD_PREFIX
@@ -73,6 +74,7 @@ from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.target_config import ConversationTargetConfigStore
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
 from tai42_skeleton.operations.errors import NotSupportedError, PermissionDenied
+from tai42_skeleton.tools.attribution import run_attribution
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 
 logger = logging.getLogger(__name__)
@@ -849,12 +851,53 @@ async def _target_outcome(
 
     A thread whose effective mode is ``manual`` runs NO target turn: this is where the
     suppression lives, so a pairing turn — dispatched on its own path, never through here —
-    stays live and a first-contact greeting still prepends onto the silent outcome."""
+    stays live and a first-contact greeting still prepends onto the silent outcome.
+
+    The run's generic attribution is deposited HERE — the single seam both the tool and
+    agent target turns route through — so whichever run chokepoint the target reaches (the
+    tool ``run_tool`` seam or the agent ``drive_live_caller_astream`` seam) stamps its
+    trace with this conversation's identity. tai42 stays flow-agnostic: it deposits only
+    generic dimensions (a person-or-address user, the resolved thread as session, the
+    route as a tag, the channel/our_identity as metadata) and interprets none of them."""
     if await effective_mode(route, intake.thread_id) == "manual":
         return await _manual_target_outcome(route, intake, text)
-    if route.target_kind == "tool":
-        return await _run_tool_turn(route, text, intake.thread_id, intake.client_address, person, params)
-    return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
+    with run_attribution(_conversation_attribution(route, intake, person)):
+        if route.target_kind == "tool":
+            return await _run_tool_turn(route, text, intake.thread_id, intake.client_address, person, params)
+        return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
+
+
+def _conversation_attribution(
+    route: ConversationRoute, intake: ConversationRecord, person: Person | None
+) -> RunAttribution:
+    """The generic :class:`RunAttribution` a conversation turn's run trace is stamped with.
+
+    ``user_id`` is person-FIRST — a resolved (linked or provisional) person's stable
+    ``person_id`` — falling back to the raw ``{channel}:{client_address}`` the door saw
+    when no person exists (the plain, non-multichannel path). ``session_id`` is the
+    RESOLVED thread — the route-keyed ``bridge:{route}:{address}`` or the ``@person``
+    aggregated thread — so a person's runs across channels group under one session.
+    ``tags`` carry the route; ``metadata`` carries the channel + our-identity (present
+    only for a channel door). All generic — the platform assigns no meaning."""
+    metadata: dict[str, Any] = {}
+    if intake.channel is not None:
+        metadata["channel"] = intake.channel
+    if intake.our_identity is not None:
+        metadata["our_identity"] = intake.our_identity
+    if person is not None:
+        user_id = person.person_id
+    elif intake.channel is not None:
+        user_id = f"{intake.channel}:{intake.client_address}"
+    else:
+        # API door with no resolved person: the address alone — never a literal
+        # "None:" prefix, since this string doubles as the erasure key.
+        user_id = intake.client_address
+    return RunAttribution(
+        user_id=user_id,
+        session_id=intake.thread_id,
+        tags=[f"route:{route.route_name}"],
+        metadata=metadata,
+    )
 
 
 async def _manual_target_outcome(route: ConversationRoute, intake: ConversationRecord, text: str) -> _ToolOutcome:

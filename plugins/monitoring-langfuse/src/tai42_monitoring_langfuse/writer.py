@@ -18,6 +18,7 @@ from langfuse import propagate_attributes
 from langfuse.langchain import CallbackHandler
 from tai42_contract.monitoring import (
     DEFAULT_LEVEL,
+    RUN_VERSION_METADATA_KEY,
     MonitoringLevel,
     Span,
     SpanKind,
@@ -46,6 +47,23 @@ def _emit(payload: Any) -> Any:
     SDK entry funnels every emit, so this is called at each ``input``/``output``
     site."""
     return mask_secrets(payload)
+
+
+def _split_run_version(metadata: dict[str, Any] | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Split the neutral ROOT-version key out of ``metadata`` into ``(version, rest)``.
+
+    The contract carries a run's root version inside ``metadata`` under
+    :data:`RUN_VERSION_METADATA_KEY` (a discrete ``trace_attributes`` version
+    parameter would not survive the neutral ``RunAttribution`` envelope). Langfuse
+    HAS a native ``version`` trace dimension, so lift the value onto it and drop the
+    key from the forwarded metadata (leaving it in would double it as a metadata
+    attribute). Absent key ⇒ ``(None, metadata)`` unchanged; the value is coerced to
+    ``str`` for the SDK's string dimension."""
+    if not metadata or RUN_VERSION_METADATA_KEY not in metadata:
+        return None, metadata
+    rest = {k: v for k, v in metadata.items() if k != RUN_VERSION_METADATA_KEY}
+    raw = metadata[RUN_VERSION_METADATA_KEY]
+    return (str(raw) if raw is not None else None), (rest or None)
 
 
 def _level_str(level: MonitoringLevel | None) -> str | None:
@@ -313,15 +331,30 @@ class LangfuseWriter:
         name: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> Iterator[None]:
         if self._m.is_disabled():
             yield
             return
 
+        # Lift the neutral ROOT-version metadata key onto Langfuse's native
+        # ``version`` dimension (not a plain metadata attribute), leaving the rest of
+        # ``metadata`` untouched. ``propagate_attributes`` accepts ``None`` for every
+        # dimension, so an absent user/session/version simply sets nothing.
+        version, forwarded_metadata = _split_run_version(metadata)
+
         cm = None
         try:
             self._m._ensure_built()
-            cm = propagate_attributes(trace_name=name, tags=tags, metadata=metadata)
+            cm = propagate_attributes(
+                trace_name=name,
+                tags=tags,
+                metadata=forwarded_metadata,
+                user_id=user_id,
+                session_id=session_id,
+                version=version,
+            )
             cm.__enter__()
         except Exception:
             logger.exception("trace_attributes setup failed")

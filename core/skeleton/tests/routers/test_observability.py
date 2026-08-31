@@ -316,6 +316,39 @@ async def test_runs_tags_comma_decoded():
     assert reader.list_calls[0]["filter"].tags == ["x", "y", "z"]
 
 
+async def test_runs_user_and_session_map_to_filter():
+    reader = _install(_FakeReader())
+    await router.list_runs(_req(_q(user="person-7", session="bridge:route:addr")))
+    filt = reader.list_calls[0]["filter"]
+    assert filt.user_id == "person-7"
+    assert filt.session_id == "bridge:route:addr"
+
+
+async def test_runs_version_maps_to_filter():
+    reader = _install(_FakeReader())
+    await router.list_runs(_req(_q(version="5")))
+    assert reader.list_calls[0]["filter"].version == "5"
+
+
+async def test_runs_meta_params_map_to_metadata_equalities():
+    reader = _install(_FakeReader())
+    await router.list_runs(_req(_q(**{"meta.channel": "sms", "meta.our_identity": "+1555"})))
+    assert reader.list_calls[0]["filter"].metadata == {"channel": "sms", "our_identity": "+1555"}
+
+
+async def test_runs_empty_meta_value_400():
+    _install(_FakeReader())
+    resp = await router.list_runs(_req(_q(**{"meta.channel": ""})))
+    assert resp.status_code == 400
+
+
+async def test_runs_bare_meta_key_400():
+    _install(_FakeReader())
+    # A keyless ``meta.`` param is malformed (a keyless equality matches nothing).
+    resp = await router.list_runs(_req("meta.=x"))
+    assert resp.status_code == 400
+
+
 async def test_runs_status_error_maps_to_error_level():
     reader = _install(_FakeReader())
     await router.list_runs(_req(_q(status="error")))

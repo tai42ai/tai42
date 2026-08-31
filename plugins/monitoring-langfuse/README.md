@@ -91,6 +91,39 @@ emit and read inside the block targets it. Scoping to an unregistered key
 raises (a silently mis-scoped block could leak traces across projects).
 `writer.disable()` suppresses all emission within a block.
 
+## Run attribution & data retention (operators read this)
+
+The platform attributes a run's trace with generic identity dimensions at its
+shared chokepoints: a **user** (`user_id`), a **session** (`session_id`), route
+`tags`, and free-form `metadata` (plus a preset's `preset:`/`preset-v:` tags and
+a root `version` when a registered preset is dispatched). This writer forwards
+them to Langfuse's native `user_id` / `session_id` / `version` / `tags` trace
+dimensions via `propagate_attributes`, so a run is filterable and groupable in
+Langfuse by exactly those dimensions — including from the `/api/observability/runs`
+door's `user` / `session` / `meta.<key>` query params.
+
+Because that identity lands in your Langfuse project, it is **your** data to
+govern. Two operator responsibilities:
+
+- **Set a deliberate retention policy.** Langfuse retains traces until you delete
+  them; decide a retention window that matches your privacy/compliance posture
+  and configure it in Langfuse (project data-retention settings or a scheduled
+  deletion job). The platform sets none on your behalf — a trace lives as long as
+  your Langfuse project keeps it.
+- **Know what `user_id` carries.** It is **person-id-first**: a conversation with
+  a resolved (linked or provisional) person is attributed by that person's stable
+  `person_id`. When no person exists (the plain, non-multichannel path) it falls
+  back to the **raw `{channel}:{client_address}`** the door saw — which, on a
+  channel door, is an end-user address (a phone number, a visitor id, an email) —
+  or, on the API door where no channel exists, the **bare `client_address`**
+  alone. Treat those trace attributes as personal data.
+- **Erasure story.** Langfuse deletes by `user_id`: to honour an erasure request,
+  delete that subject's traces in Langfuse keyed on the `user_id` above (the
+  `person_id`; the raw `{channel}:{address}` for an unlinked channel subject; or
+  the bare address for an unlinked API-door subject). Keeping
+  `user_id` person-id-first keeps a linked subject's whole cross-channel history
+  under one deletable key.
+
 ## Behavior notes
 
 - **Writer fail-safety** (contract invariant): the emit methods and the `Span`

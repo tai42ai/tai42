@@ -88,6 +88,17 @@ async def _run_continuation(
     the park's ``{interaction_id, answer}``. Runs in a detached task so a long resume
     never blocks the resolving door; the bind is refused loudly if the key can no
     longer carry the fire."""
+    # ATTRIBUTION SEAM (deliberately UNATTRIBUTED for now): this continuation/reaper
+    # re-drive resumes a parked run OUT OF BAND on a fresh detached task, so no ambient
+    # ``RunAttribution`` is deposited and ``run_tool``'s ``stamp_run_attribution`` no-ops
+    # — the run's trace here carries no user/session/route. The ORIGINAL turn that parked
+    # WAS attributed (the conversation door deposited it), so the parked question's own
+    # run is traced; only its resume tail is not. Attributing the resume would require the
+    # attribution to survive the park durably: the stored ``InteractionRequest`` gaining a
+    # NON-OPAQUE attribution field (the original ``RunAttribution``'s user_id/session_id/
+    # tags), re-deposited via ``run_attribution(...)`` around this ``run_tool`` call, so the
+    # resumed run rejoins its originating session. Left to a follow-up (the same known,
+    # non-regressing boundary the thread-index binding notes in ``interactions.helper``).
     async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
         await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
 

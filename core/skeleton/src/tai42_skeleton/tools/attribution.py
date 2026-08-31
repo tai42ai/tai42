@@ -18,9 +18,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 
-from tai42_contract.monitoring import RunAttribution, attribute_run
+from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY, RunAttribution, attribute_run
 
 _current_run_attribution: ContextVar[RunAttribution | None] = ContextVar("tai42_current_run_attribution", default=None)
+
+# Armed while the OUTERMOST registered-preset dispatch of a run holds the preset
+# attribution scope; a nested (sub-)preset dispatch seen armed layers NO second
+# preset stamp, so the root trace carries exactly the outermost preset's
+# ``preset:``/``preset-v:`` tags and its version — mirroring ``turn_budget``'s
+# ``_turn_budget_armed`` re-entrancy guard.
+_preset_attribution_armed: ContextVar[bool] = ContextVar("tai42_preset_attribution_armed", default=False)
 
 
 def get_run_attribution() -> RunAttribution | None:
@@ -70,3 +77,42 @@ def stamp_run_attribution() -> Iterator[None]:
 
     with attribute_run(get_monitoring().writer, attribution):
         yield
+
+
+@contextmanager
+def stamp_preset_attribution(preset_name: str, version: int) -> Iterator[None]:
+    """Layer a REGISTERED preset's identity onto the ambient run trace, once per run.
+
+    Merges the preset ``tags`` (``preset:{name}``, ``preset-v:{version}``) and
+    ``metadata`` (``preset_name``, ``preset_version``) onto whatever run attribution
+    the door already deposited — ``attribute_run`` re-enters ``trace_attributes``,
+    which the backend MERGES onto the ambient trace (tags append+dedup, metadata
+    unions), so the base attribution is preserved and the preset dimensions are
+    added. The version also rides :data:`RUN_VERSION_METADATA_KEY` so a backend with
+    a native version dimension (langfuse) lifts it onto the trace ROOT.
+
+    Stamps at the OUTERMOST preset dispatch only: a nested sub-preset dispatch sees
+    :data:`_preset_attribution_armed` and yields unwrapped, so nested preset tags
+    never pollute the root trace (the armed-guard discipline ``turn_budget`` uses).
+    Fail-safe by construction — ``attribute_run`` inherits ``trace_attributes``'s
+    catch-and-log guarantee. Only a REGISTERED preset reaches here; a draft/inline
+    run is never stamped (absent = draft, never ``preset-v:draft``)."""
+    if _preset_attribution_armed.get():
+        yield
+        return
+    token = _preset_attribution_armed.set(True)
+    try:
+        from tai42_skeleton.monitoring import get_monitoring
+
+        attribution = RunAttribution(
+            tags=[f"preset:{preset_name}", f"preset-v:{version}"],
+            metadata={
+                "preset_name": preset_name,
+                "preset_version": str(version),
+                RUN_VERSION_METADATA_KEY: str(version),
+            },
+        )
+        with attribute_run(get_monitoring().writer, attribution):
+            yield
+    finally:
+        _preset_attribution_armed.reset(token)

@@ -186,6 +186,16 @@ class _FakeCursor:
                 for d in sorted(pg.documents, key=lambda d: d["name"])
                 if d["kind"] == kind and d["is_active"]
             ]
+        elif norm.startswith("SELECT d.name, d.active_version, v.body FROM versioned_documents d"):
+            (kind,) = params
+            versioned_rows: list[tuple[str, int, Any]] = []
+            for doc in sorted(pg.documents, key=lambda d: d["name"]):
+                if doc["kind"] != kind or not doc["is_active"]:
+                    continue
+                ver = pg.version_row(doc["id"], doc["active_version"])
+                if ver is not None:
+                    versioned_rows.append((doc["name"], doc["active_version"], ver["body"]))
+            self._all = versioned_rows
         elif norm.startswith("SELECT d.name, v.body FROM versioned_documents d"):
             (kind,) = params
             rows: list[tuple[str, Any]] = []
@@ -196,6 +206,13 @@ class _FakeCursor:
                 if ver is not None:
                     rows.append((doc["name"], ver["body"]))
             self._all = rows
+        elif norm.startswith("SELECT d.active_version, v.body FROM versioned_documents d"):
+            kind, name = params
+            doc = pg.active_doc(kind, name)
+            if doc is not None:
+                ver = pg.version_row(doc["id"], doc["active_version"])
+                if ver is not None:
+                    self._one = (doc["active_version"], ver["body"])
         elif norm.startswith("SELECT v.body FROM versioned_documents d"):
             kind, name = params
             doc = pg.active_doc(kind, name)

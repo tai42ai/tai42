@@ -124,6 +124,8 @@ class NoOpWriter:
         name: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> Iterator[None]:
         yield
 
