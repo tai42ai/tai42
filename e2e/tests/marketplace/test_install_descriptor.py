@@ -20,16 +20,15 @@ drives that landed contract end to end:
   ``required_env`` is empty, and a connect with user-supplied config launches the managed
   stdio MCP server and reflects the config value back.
 
-It is part of the ``TAI_E2E_MARKETPLACE``-gated suite AND publish-circular skipped: the
-spec-source ingest branch lives only on the unpushed marketplace, and the isolated
-registry venv resolves tai42-contract from PyPI where the package-optional PluginSpec + the
-connector kind + the ``source='spec'`` classification are not yet published, so a
-descriptor seed is rejected until ``_MARKETPLACE_PIN`` (marketplace.py) is bumped to the
-published descriptor-capable marketplace commit.
+It is part of the ``TAI_E2E_MARKETPLACE``-gated suite (collected only with
+``TAI_E2E_MARKETPLACE=1``): the spec-source ingest branch (package-optional PluginSpec +
+connector kind + the ``source='spec'`` classification) rides the ``_MARKETPLACE_PIN``
+registry, so a descriptor seed publishes and this lifecycle runs end to end.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -69,15 +68,7 @@ from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import cli_env, installed_refs, ok_json, persisted_manifest, run_cli, tai_bin
 
-pytestmark = [
-    pytest.mark.backendless,
-    pytest.mark.skip(
-        reason="Publish-circular: the spec-source (source='spec') ingest lives only on the "
-        "unpushed marketplace, and the isolated registry venv resolves tai42-contract from PyPI "
-        "where the package-optional PluginSpec + connector kind are not yet published. "
-        "Un-skipped after _MARKETPLACE_PIN (marketplace.py) is bumped to the descriptor-capable commit."
-    ),
-]
+pytestmark = pytest.mark.backendless
 
 # The install-time client credentials for iota (the fixture values the install stores). The
 # secret is auto-masked from the live connector's client_secret_env even with no --secret.
@@ -122,13 +113,18 @@ async def descriptor_cleanup(marketplace_connectors_stack: TaiStack) -> AsyncIte
 
 
 @pytest.fixture(scope="module")
-async def iota_seeded(
+def iota_seeded(
     marketplace_service: MarketplaceService, package_index: FixturePackageIndex, oauth_idp: OAuthIdp
 ) -> str:
     """Publish both iota versions (0.1.0, then 0.2.0 adding a scope) into this module's
     registry, rendered against the module's OAuth/MCP stub. Returns the stub base so a
-    leg can recompute the exact bytes the registry digested."""
-    await seed_iota_listing(marketplace_service, package_index, oauth_idp.base_url)
+    leg can recompute the exact bytes the registry digested.
+
+    A SYNC module-scoped fixture driving the async seed through ``asyncio.run`` — the
+    harness convention for module-scoped seeding (see ``marketplace_service`` /
+    ``zeta_catalog`` in conftest): a module-scoped ``async def`` fixture would demand a
+    module-scoped asyncio loop the suite does not configure."""
+    asyncio.run(seed_iota_listing(marketplace_service, package_index, oauth_idp.base_url))
     return oauth_idp.base_url
 
 
@@ -348,10 +344,14 @@ async def test_cli_install_and_dry_run(
 
 
 @pytest.fixture(scope="module")
-async def kappa_seeded(marketplace_service: MarketplaceService, package_index: FixturePackageIndex) -> None:
+def kappa_seeded(marketplace_service: MarketplaceService, package_index: FixturePackageIndex) -> None:
     """Publish the kappa no-auth connector descriptor into this module's registry,
-    launching the managed stdio MCP server with the SUT interpreter."""
-    await seed_kappa_listing(marketplace_service, package_index, sys.executable)
+    launching the managed stdio MCP server with the SUT interpreter.
+
+    A SYNC module-scoped fixture driving the async seed through ``asyncio.run`` (the
+    harness convention for module-scoped seeding), not a module-scoped ``async def``
+    fixture the suite has no module-scoped asyncio loop for."""
+    asyncio.run(seed_kappa_listing(marketplace_service, package_index, sys.executable))
 
 
 async def test_kappa_installs_with_no_env_and_connects_with_config(
