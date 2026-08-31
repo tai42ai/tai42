@@ -81,7 +81,7 @@ uvicorn = ["uvicorn>=0.43"]
 # inside the per-provider match branches. Each pulls the llm base stack.
 anthropic = ["tai42-kit[llm]", "langchain-anthropic>=1.5.4"]
 mistral = ["tai42-kit[llm]", "langchain-mistralai>=1.1"]
-google = ["tai42-kit[llm]", "langchain-google-genai>=4.2"]
+google = ["tai42-kit[llm]", "langchain-google-genai>=4.3.7"]
 xai = ["tai42-kit[llm]", "langchain-xai>=1.2"]
 ollama = ["tai42-kit[llm]", "langchain-ollama>=1.0"]
 huggingface = [
