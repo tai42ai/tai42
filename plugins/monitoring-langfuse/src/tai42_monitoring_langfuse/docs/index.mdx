@@ -41,6 +41,29 @@ production write into the same project and each reads only its own traces.
 Reading a trace by id is the one unscoped call, because trace ids are globally
 unique.
 
+## Run attribution and data retention
+
+The platform tags each run's trace with generic identity at its shared
+chokepoints, and this backend forwards them to Langfuse's native trace
+dimensions: `user_id`, `session_id`, `version`, and `tags` — so runs are
+filterable and groupable by exactly those, including from the observability
+`user` / `session` / `meta.<key>` query params.
+
+`user_id` is **person-id-first**: a run with a resolved person is attributed by
+that person's stable `person_id`. With no person it falls back to the raw
+`{channel}:{client_address}` the door saw (an end-user address), or, on the API
+door where no channel exists, the bare `client_address`. Treat these as personal
+data.
+
+<Warning>
+That identity lands in **your** Langfuse project, so it is yours to govern. Set a
+deliberate retention policy — Langfuse keeps traces until you delete them; the
+platform sets none on your behalf. Honour erasure by deleting a subject's traces
+keyed on their `user_id` (the `person_id`, or the raw address for an unlinked
+subject); person-id-first keeps a linked subject's cross-channel history under
+one deletable key.
+</Warning>
+
 ## Quirks
 
 - The package pins the Langfuse SDK to a narrow range because it reaches into SDK
