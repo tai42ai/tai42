@@ -158,8 +158,17 @@ a later `statuses` webhook carries `sent`/`delivered`/`read`/`failed`. The same
 `POST` endpoint records those receipts through the interactions facet — `failed`
 (e.g. a message outside the 24-hour session window, error 131047) marks the
 answer failed loudly; `sent`/`delivered` confirm it; `read` is informational and
-ignored. A status for a message the bridge does not track is acknowledged, never
-retried.
+ignored.
+
+A `wamid` the conversation bridge does not own is not a dead end: it may be a
+**flow send** (`notify_user`, which runs no conversation record). The webhook then
+resolves the `wamid` through the send-outcome receipt index and, on a hit, posts a
+`delivery_receipt` event onto the send's originating monitoring trace, nested under
+its send span — `ERROR` for a `failed` receipt (carrying the provider `errors`),
+informational otherwise. This is observability only: it annotates the flow's trace,
+never re-sending or failing the flow. Only a genuine miss — neither the bridge nor
+any flow send owns the `wamid` — keeps the untracked-message log; either way the
+status is acknowledged, never retried.
 
 ## Security
 

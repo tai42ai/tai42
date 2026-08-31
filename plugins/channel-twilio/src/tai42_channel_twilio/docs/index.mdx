@@ -37,10 +37,14 @@ never mutates your Twilio account):
 - **Inbound message** (HTTP POST) → `{public base URL}/api/channels/twilio/inbound`
 - **Delivery status callback** (HTTP POST) → `{public base URL}/api/channels/twilio/status`
 
-The status callback surfaces a **late** delivery failure: Twilio accepts the
-send, then posts a `failed`/`undelivered` status, which flips the answer record
-to `failed`. This is how the WhatsApp 24-hour service window is surfaced on the
-async path.
+The status callback surfaces a **late** delivery outcome. For a **bridge**
+message Twilio accepts the send, then posts a `failed`/`undelivered` status,
+which flips the answer record to `failed` (this is how the WhatsApp 24-hour
+service window is surfaced on the async path); a `delivered` status confirms it.
+For a **flow send** (`notify_user`, which runs no bridge record) the status is
+resolved to that send and posted as a `delivery_receipt` event onto its
+monitoring trace — `failed` as an `ERROR`. A status neither owns is acknowledged
+and ignored.
 
 ## Create a bridge route
 
