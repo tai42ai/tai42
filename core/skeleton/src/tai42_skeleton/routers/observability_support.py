@@ -183,6 +183,28 @@ def _parse_tags(raw: str | None) -> list[str]:
     return [t.strip() for t in text.split(",") if t.strip()]
 
 
+def _parse_meta(q: Any) -> dict[str, str]:
+    """Collect the ``meta.<key>=<value>`` query params into the neutral
+    ``MonitoringFilter.metadata`` equality map.
+
+    Each ``meta.<key>`` param is one string-equality clause on the trace's
+    ``metadata`` (the reader maps it to the backend's per-key metadata filter). A
+    bare ``meta.`` prefix with no key, or an empty value, is malformed (→ 400) — a
+    keyless or valueless equality would match nothing meaningfully."""
+    meta: dict[str, str] = {}
+    for raw_key in q:
+        if not raw_key.startswith("meta."):
+            continue
+        key = raw_key[len("meta.") :]
+        if not key:
+            raise RequestParseError("meta.<key> requires a non-empty key")
+        value = q.get(raw_key)
+        if value is None or value == "":
+            raise RequestParseError(f"meta.{key} requires a non-empty value")
+        meta[key] = value
+    return meta
+
+
 def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy | None]:
     """Build the neutral ``MonitoringFilter`` + ``OrderBy`` for the run list from
     the query string. Every clause is optional; an all-empty query yields
@@ -191,7 +213,11 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
     List- or dict-typed params are JSON-encoded in the query string (``tags`` may
     be a JSON list or a comma-separated string). ``status=error`` maps to a
     level==ERROR clause; ``status=success`` is unfiltered (the absence of errors
-    is not a trace-level clause). The ``minCost`` / ``maxCost`` / ``minTokens`` /
+    is not a trace-level clause). ``user`` / ``session`` / ``version`` filter on the
+    backend's native user/session/version identity dimensions (``version`` matches a
+    run's stamped ROOT version — e.g. a preset's ``preset-v`` version); each
+    ``meta.<key>=<value>`` adds one metadata string-equality clause. The
+    ``minCost`` / ``maxCost`` / ``minTokens`` /
     ``maxTokens`` / ``minLatencyMs`` / ``maxLatencyMs`` ranges are inclusive;
     latency is exposed in ms and converted to the contract's seconds. An inverted
     range is rejected by the contract (→ 400). Sort: ``sort`` ∈ {createdAt, cost,
@@ -204,6 +230,11 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
         raise RequestParseError(f"status must be {one_of(RUN_STATUSES)}")
     level = MonitoringLevel.ERROR if status == "error" else None
 
+    user_id = q.get("user") or None
+    session_id = q.get("session") or None
+    version = q.get("version") or None
+    metadata = _parse_meta(q)
+
     min_latency_ms = _q_float(q, "minLatencyMs")
     max_latency_ms = _q_float(q, "maxLatencyMs")
     min_cost = _q_float(q, "minCost")
@@ -212,8 +243,21 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
     max_tokens = _q_float(q, "maxTokens")
 
     has_clause = any(
-        v is not None and v != []
-        for v in (tags or None, level, min_cost, max_cost, min_tokens, max_tokens, min_latency_ms, max_latency_ms)
+        v is not None and v != [] and v != {}
+        for v in (
+            tags or None,
+            level,
+            user_id,
+            session_id,
+            version,
+            metadata or None,
+            min_cost,
+            max_cost,
+            min_tokens,
+            max_tokens,
+            min_latency_ms,
+            max_latency_ms,
+        )
     )
     filter_: MonitoringFilter | None = None
     if has_clause:
@@ -221,6 +265,10 @@ def parse_run_filter(request: Request) -> tuple[MonitoringFilter | None, OrderBy
             filter_ = MonitoringFilter(
                 tags=tags,
                 level=level,
+                user_id=user_id,
+                session_id=session_id,
+                version=version,
+                metadata=metadata,
                 min_cost=min_cost,
                 max_cost=max_cost,
                 min_tokens=int(min_tokens) if min_tokens is not None else None,

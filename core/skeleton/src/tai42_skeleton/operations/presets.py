@@ -998,7 +998,16 @@ async def _create_preset_core(
     except PresetExistsError as exc:
         raise ConflictError(f"preset {name!r} already exists") from exc
     try:
-        await mgr.register(name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema)
+        await mgr.register(
+            name,
+            base_tool,
+            fixed_kwargs,
+            extensions,
+            description,
+            output_schema,
+            input_schema,
+            version=record.active_version,
+        )
     except Exception as register_exc:
         try:
             await instance.app.versioning.store.delete("preset", name)

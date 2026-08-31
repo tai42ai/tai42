@@ -331,6 +331,61 @@ async def test_list_traces_summarizes_without_bodies(manager, mock_client):
     assert list_kwargs["environment"] == "tai"
 
 
+async def test_list_traces_version_filter_rides_native_param(manager, mock_client):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _route_metrics(mock_client, tokens={"a": 1})
+    _errors_for(mock_client, [])
+
+    await LangfuseReader(manager).list_traces(from_timestamp=now, filter=MonitoringFilter(version="5"))
+
+    # ``version`` is a native trace.list param (not an advanced-filter clause).
+    assert mock_client.api.trace.list.call_args.kwargs["version"] == "5"
+
+
+async def test_version_metric_sort_is_unsupported(manager, mock_client):
+    # The metrics ``traces`` view has no version column, so a metric SORT combined
+    # with a version filter raises rather than misranking on a dropped clause.
+    with pytest.raises(MonitoringReadNotSupportedError, match="version"):
+        await LangfuseReader(manager).list_traces(
+            from_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            limit=5,
+            filter=MonitoringFilter(version="5"),
+            order_by=OrderBy(field="total_cost", direction="desc"),
+        )
+
+
+async def test_version_stamp_and_filter_round_trip(manager, mock_client, monkeypatch):
+    """The version a run is STAMPED with is the same dimension a filter QUERIES.
+
+    The writer lifts the neutral ``RUN_VERSION_METADATA_KEY`` onto langfuse's native
+    ``version`` dimension; the reader maps ``MonitoringFilter.version`` onto the same
+    native trace.list ``version`` param. So a run stamped at version V is queryable
+    by V — proven end to end without a live server."""
+    from unittest.mock import MagicMock
+
+    from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY, MonitoringFilter
+
+    from tai42_monitoring_langfuse.writer import LangfuseWriter
+
+    # STAMP: the writer forwards the run version onto the native ``version`` dimension.
+    propagate = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("tai42_monitoring_langfuse.writer.propagate_attributes", propagate)
+    with LangfuseWriter(manager).trace_attributes(
+        name="run", tags=["preset:wv", "preset-v:5"], metadata={RUN_VERSION_METADATA_KEY: "5"}
+    ):
+        pass
+    stamped_version = propagate.call_args.kwargs["version"]
+    assert stamped_version == "5"
+
+    # FILTER: querying by that same value rides the same native ``version`` param.
+    _list_returns(mock_client, [_trace_row(id="a")])
+    _route_metrics(mock_client, tokens={"a": 1})
+    _errors_for(mock_client, [])
+    await LangfuseReader(manager).list_traces(filter=MonitoringFilter(version=stamped_version))
+    assert mock_client.api.trace.list.call_args.kwargs["version"] == stamped_version
+
+
 async def test_list_traces_token_join_absent_is_none_not_zero(manager, mock_client):
     _list_returns(mock_client, [_trace_row(id="a"), _trace_row(id="b")])
     # only "a" has a usage row; "b" is absent from the metrics result.

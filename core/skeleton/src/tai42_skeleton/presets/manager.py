@@ -10,7 +10,10 @@ what is actually bound:
   truth for a registered preset's baked kwargs. The kernel bakes the values as
   hidden ``ArgTransform`` defaults with no readable closure, so both the tool
   face and the ephemeral-agent run path read baked kwargs FROM THIS MAP
-  (:meth:`get_spec` / :meth:`baked_kwargs`), never from the tool object;
+  (:meth:`get_spec` / :meth:`baked_kwargs`), never from the tool object. A parallel
+  ``name -> active_version`` map, captured in lockstep with the spec (from the same
+  version-aware read), lets the run chokepoint attribute a dispatched preset with the
+  version it is actually bound at (:meth:`active_version`);
 * a **quarantine map** of names whose stored preset could not register at load
   (name taken by a foreign tool, or a missing / preset-owned base tool) to the
   human-readable reason — surfaced as ``conflicted`` records carrying that reason
@@ -65,6 +68,12 @@ class PresetManager:
         # dropped on teardown, rebuilt wholesale on rehydration — so it always
         # mirrors what is bound.
         self._specs: dict[str, PresetBody] = {}
+        # name -> the store ACTIVE version bound as the live tool, captured TOGETHER
+        # with the body it was built from (a single version-aware read) and held in
+        # lockstep with ``_specs``. The run chokepoint reads it to stamp a dispatched
+        # preset's ``preset-v:`` tag + root version onto the run trace, so the value
+        # a run is attributed with is exactly the version currently bound.
+        self._versions: dict[str, int] = {}
         # names whose stored preset could not register at load (conflicted),
         # mapped to the human-readable reason surfaced as ``conflicted_reason``.
         self._quarantine: dict[str, str] = {}
@@ -101,6 +110,13 @@ class PresetManager:
     def is_registered(self, name: str) -> bool:
         """Whether ``name`` is a live registered preset."""
         return name in self._specs
+
+    def active_version(self, name: str) -> int | None:
+        """The store active version currently bound for ``name``, or ``None`` when no
+        preset by that name is registered. The run chokepoint reads it to attribute a
+        dispatched preset's run with its ``preset-v:`` tag + root version; ``None`` for
+        a non-preset/draft key leaves the run unstamped."""
+        return self._versions.get(name)
 
     def registered_names(self) -> frozenset[str]:
         """Every live registered preset name."""
@@ -153,6 +169,8 @@ class PresetManager:
         description: str = "",
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
+        *,
+        version: int = 1,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec (public entry).
 
@@ -160,11 +178,18 @@ class PresetManager:
         :meth:`_register`. A name already owned by one of OUR presets raises
         :class:`PresetExistsError`; a name held by a foreign live tool raises
         :class:`PresetNameConflictError` — the manager never silently clobbers a
-        live tool or sibling preset."""
+        live tool or sibling preset.
+
+        ``version`` is the store active version this spec was read at, retained beside
+        the body so the run chokepoint can attribute a dispatch with it; the create
+        door passes the just-created record's ``active_version`` (defaults to ``1`` —
+        the version a fresh create always mints)."""
         if not is_valid_preset_name(name):
             raise ValueError(f"invalid preset name {name!r}: must match {_PRESET_NAME_RE.pattern}")
         async with self._locks[name]:
-            await self._register(name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema)
+            await self._register(
+                name, base_tool, fixed_kwargs, extensions, description, output_schema, input_schema, version=version
+            )
 
     async def _register(
         self,
@@ -175,6 +200,8 @@ class PresetManager:
         description: str = "",
         output_schema: dict[str, Any] | None = None,
         input_schema: dict[str, Any] | None = None,
+        *,
+        version: int,
     ) -> None:
         """Bind ``name`` as a runnable tool from its full spec — the UNLOCKED core.
 
@@ -230,6 +257,9 @@ class PresetManager:
             output_schema=output_schema,
             input_schema=input_schema,
         )
+        # The version is captured in lockstep with the spec it was read at, so the two
+        # never drift (both are dropped together in ``_remove_registration``).
+        self._versions[name] = version
 
     # -- reload one (edit path) -----------------------------------------------
 
@@ -253,8 +283,12 @@ class PresetManager:
         per-name lock is never re-acquired (the lock is not reentrant)."""
         async with self._locks[name]:
             captured = self._specs.get(name)
+            captured_version = self._versions.get(name)
             self._remove_registration(name)
-            body = await self._app.presets.store.get_active_body(name)
+            # One version-aware read: the freshly-active version and its body are
+            # captured TOGETHER so the version retained beside the re-bound body is the
+            # one it was actually built from (never a skewed second read).
+            version, body = await self._app.presets.get_active_versioned_body(name)
             try:
                 await self._register(
                     name,
@@ -264,6 +298,7 @@ class PresetManager:
                     body.description,
                     body.output_schema,
                     body.input_schema,
+                    version=version,
                 )
             except Exception:
                 if captured is not None:
@@ -275,6 +310,7 @@ class PresetManager:
                         captured.description,
                         captured.output_schema,
                         captured.input_schema,
+                        version=captured_version if captured_version is not None else version,
                     )
                 raise
 
@@ -313,6 +349,10 @@ class PresetManager:
                 body = self._specs.get(name)
                 if body is None:
                     continue
+                # Reconciliation re-binds the SAME stored version against a freshly-bound
+                # base tool (nothing was saved), so the retained version is carried across
+                # the teardown unchanged.
+                version = self._versions.get(name, 1)
                 self._remove_registration(name)
                 if body.base_tool in live:
                     try:
@@ -324,6 +364,7 @@ class PresetManager:
                             body.description,
                             body.output_schema,
                             body.input_schema,
+                            version=version,
                         )
                         continue
                     except Exception:
@@ -351,17 +392,20 @@ class PresetManager:
         boot."""
         prior = self._specs
         self._specs = {}
+        self._versions = {}
         self._quarantine = {}
         records = await self._app.presets.store.list_presets()
-        # One batched active-body read instead of a per-record round-trip.
-        bodies = await self._app.presets.list_active_bodies()
+        # One batched version-aware read instead of a per-record round-trip: each
+        # preset's active version and body are captured TOGETHER, so the version the
+        # engine retains beside a body is exactly the one it was built from.
+        versioned = await self._app.presets.list_active_versioned_bodies()
         preset_names = {rec.name for rec in records}
         # Snapshot the live tools ONCE, before registering any preset, so a name
         # found here that is NOT one of ours is genuinely a foreign tool.
         live = set(await self._app.tools.get_tools())
         for rec in records:
-            body = bodies.get(rec.name)
-            if body is None:
+            version_body = versioned.get(rec.name)
+            if version_body is None:
                 # The record list and the active-body map are two separate store
                 # round-trips; a delete landing between them leaves a record whose
                 # active body is already gone. Skip it — the list route makes the
@@ -374,10 +418,17 @@ class PresetManager:
                     rec.name,
                 )
                 continue
-            await self._rehydrate_one(rec.name, body, prior, preset_names, live)
+            version, body = version_body
+            await self._rehydrate_one(rec.name, version, body, prior, preset_names, live)
 
     async def _rehydrate_one(
-        self, name: str, body: PresetBody, prior: dict[str, PresetBody], preset_names: set[str], live: set[str]
+        self,
+        name: str,
+        version: int,
+        body: PresetBody,
+        prior: dict[str, PresetBody],
+        preset_names: set[str],
+        live: set[str],
     ) -> None:
         bound = name in live
         ours = name in prior
@@ -387,9 +438,10 @@ class PresetManager:
             logger.error("preset %r quarantined: %s", name, reason)
             return
         if bound and ours and prior[name] == body:
-            # Already registered as this exact preset — re-adopt the spec without a
-            # rebind (the tool + its branches are untouched).
+            # Already registered as this exact preset — re-adopt the spec + its version
+            # without a rebind (the tool + its branches are untouched).
             self._specs[name] = body
+            self._versions[name] = version
             return
         if bound:
             # Ours but its active body changed — tear the stale registration down
@@ -408,7 +460,14 @@ class PresetManager:
             return
         try:
             await self._register(
-                name, base, body.fixed_kwargs, body.extensions, body.description, body.output_schema, body.input_schema
+                name,
+                base,
+                body.fixed_kwargs,
+                body.extensions,
+                body.description,
+                body.output_schema,
+                body.input_schema,
+                version=version,
             )
         except Exception:
             reason = "registration failed"
@@ -425,6 +484,7 @@ class PresetManager:
             self._safe_remove(branch)
         self._safe_remove(name)
         self._specs.pop(name, None)
+        self._versions.pop(name, None)
 
     def _safe_remove(self, name: str) -> None:
         """Remove a bound tool, tolerating a name that was never bound.

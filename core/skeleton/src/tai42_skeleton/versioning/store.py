@@ -233,6 +233,54 @@ class PostgresVersionedStore(VersionedStore):
             rows = await cur.fetchall()
         return dict(rows)
 
+    async def list_active_versioned_bodies(self, kind: str) -> dict[str, tuple[int, dict[str, Any]]]:
+        """Every active document's ``(active_version, body)`` of ``kind``, keyed by name.
+
+        The version-aware sibling of :meth:`list_active_bodies`: the active version
+        pointer and its body are read TOGETHER in one JOIN statement, so a consumer
+        that must retain the version beside the body (the preset engine's rehydration)
+        can never pair a body with a version from a skewed second read. Concrete-only
+        (not on the ``VersionedStore`` protocol): reached through the concretely-typed
+        ``_versioned_store`` accessor."""
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT d.name, d.active_version, v.body FROM versioned_documents d "
+                "JOIN versioned_document_versions v ON v.document_id = d.id AND v.version = d.active_version "
+                "WHERE d.kind = %s AND d.is_active ORDER BY d.name",
+                (kind,),
+            )
+            rows = await cur.fetchall()
+        return {name: (active_version, body) for name, active_version, body in rows}
+
+    async def get_active_version_and_body(self, kind: str, name: str) -> tuple[int, dict[str, Any]]:
+        """The active ``(version, body)`` of one document, read TOGETHER in one JOIN.
+
+        The version-aware sibling of :meth:`get_active_body`: the active version and
+        its body are captured in a SINGLE statement so the two can never disagree
+        (the preset engine's edit reload retains the freshly-active version beside the
+        body it re-binds). Raises :class:`DocumentNotFoundError` for an unknown
+        document, matching :meth:`get_active_body`. Concrete-only (reached through the
+        concretely-typed ``_versioned_store`` accessor)."""
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT d.active_version, v.body FROM versioned_documents d "
+                "JOIN versioned_document_versions v ON v.document_id = d.id AND v.version = d.active_version "
+                "WHERE d.kind = %s AND d.name = %s AND d.is_active",
+                (kind, name),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise DocumentNotFoundError(kind, name)
+        return row[0], row[1]
+
     async def get(self, kind: str, name: str) -> DocumentRecord:
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,

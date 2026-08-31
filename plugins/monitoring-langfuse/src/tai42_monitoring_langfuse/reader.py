@@ -450,6 +450,7 @@ class LangfuseReader:
                 name=filter.name if filter else None,
                 user_id=filter.user_id if filter else None,
                 session_id=filter.session_id if filter else None,
+                version=filter.version if filter else None,
                 tags=(filter.tags or None) if filter else None,
                 filter=filter_json,
                 request_options=self._request_options(),
@@ -903,9 +904,9 @@ def _timestamp_clauses(t0: datetime | None, t1: datetime | None) -> list[dict[st
 
 def _trace_advanced_filter(filter: MonitoringFilter | None) -> list[dict[str, Any]]:
     """The trace.list advanced filter. ``name`` / ``user_id`` / ``session_id`` /
-    ``tags`` / ``environment`` ride native params; ``level`` plus the cost /
-    token / latency / metadata clauses go here. Traces have no ``model`` column —
-    a model filter on traces is unsupported."""
+    ``version`` / ``tags`` / ``environment`` ride native params; ``level`` plus the
+    cost / token / latency / metadata clauses go here. Traces have no ``model``
+    column — a model filter on traces is unsupported."""
     if filter is None:
         return []
     if filter.model is not None:
@@ -938,12 +939,19 @@ def _metrics_supported_clauses(filter: MonitoringFilter) -> list[dict[str, Any]]
 
 def _metrics_unsupported_clauses(filter: MonitoringFilter) -> list[str]:
     """The names of ``filter`` clauses the metrics ``traces`` view has no column
-    for: ``level`` / ``model`` and the cost / token / latency ranges."""
+    for: ``level`` / ``model`` / ``version`` and the cost / token / latency ranges.
+
+    ``version`` is a native trace.list column (used on the timestamp-sort path) but
+    the metrics ``traces`` view exposes no version dimension, so a metric SORT
+    combined with a version filter raises here rather than misranking a page on a
+    silently-dropped clause."""
     unsupported: list[str] = []
     if filter.level is not None:
         unsupported.append("level")
     if filter.model is not None:
         unsupported.append("model")
+    if filter.version is not None:
+        unsupported.append("version")
     for name, value in (
         ("min_cost", filter.min_cost),
         ("max_cost", filter.max_cost),

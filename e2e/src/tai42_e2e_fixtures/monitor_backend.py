@@ -130,8 +130,18 @@ class _RecordingWriter(NoOpWriter):
         name: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> Iterator[None]:
-        attribution = {"name": name, "tags": list(tags or []), "metadata": dict(metadata or {})}
+        # Record the two identity dimensions alongside tags/metadata so a spec can
+        # prove a run's person/thread attribution reached the writer, not just its tags.
+        attribution = {
+            "name": name,
+            "tags": list(tags or []),
+            "metadata": dict(metadata or {}),
+            "user_id": user_id,
+            "session_id": session_id,
+        }
         _push(_TRACE_ATTRS_KEY, attribution)
         token = _active_attribution.set(attribution)
         try:

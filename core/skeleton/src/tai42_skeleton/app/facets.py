@@ -561,6 +561,36 @@ class PresetsFacet(_Facet):
         raw = await self._app._versioned_store.list_active_bodies("preset")
         return {name: PresetBody.model_validate(body) for name, body in raw.items()}
 
+    async def list_active_versioned_bodies(self) -> dict[str, tuple[int, PresetBody]]:
+        """Every preset's ``(active_version, active_body)``, keyed by name — one batched
+        JOIN read that captures the version pointer and its body TOGETHER (never a
+        skewed second read). The version-aware sibling of :meth:`list_active_bodies`,
+        used by the rehydration path so the engine retains each preset's version beside
+        its body. Reached through the concrete ``_versioned_store``."""
+        from tai42_contract.presets import PresetBody
+
+        raw = await self._app._versioned_store.list_active_versioned_bodies("preset")
+        return {name: (version, PresetBody.model_validate(body)) for name, (version, body) in raw.items()}
+
+    async def get_active_versioned_body(self, name: str) -> tuple[int, PresetBody]:
+        """One preset's ``(active_version, active_body)``, read TOGETHER in one JOIN.
+
+        The version-aware sibling of ``store.get_active_body`` used by the edit-reload
+        path so the freshly-active version is retained beside the body it re-binds.
+        Maps the generic store's ``DocumentNotFoundError`` to
+        :class:`~tai42_contract.presets.errors.PresetNotFoundError`, mirroring
+        :class:`~tai42_skeleton.presets.store.PresetStoreView`. Reached through the
+        concrete ``_versioned_store``."""
+        from tai42_contract.presets import PresetBody
+        from tai42_contract.presets.errors import PresetNotFoundError
+        from tai42_contract.versioning.errors import DocumentNotFoundError
+
+        try:
+            version, body = await self._app._versioned_store.get_active_version_and_body("preset", name)
+        except DocumentNotFoundError as exc:
+            raise PresetNotFoundError(name) from exc
+        return version, PresetBody.model_validate(body)
+
     async def set_version_tags(self, name: str, version: int, tags: list[str]) -> None:
         """Replace the per-version ``tags`` annotation of one preset version.
 

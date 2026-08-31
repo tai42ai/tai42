@@ -377,10 +377,19 @@ class RunAttribution(BaseModel):
     defines per delivery, carried verbatim with no platform interpretation;
     ``metadata`` are attribution key/values. There is NO tenant/client/domain
     field: attribution only, never a multi-tenant qualifier.
+
+    ``user_id`` / ``session_id`` are the two backend-native identity DIMENSIONS a
+    run is grouped and traced by (a conversation's person-or-address, and its
+    resolved thread) — optional, since a door that lacks either legitimately omits
+    it. They stay generic: the platform assigns no meaning beyond "the value a
+    reader filters/groups on". A backend that has no native user/session notion
+    maps them into ordinary attributes.
     """
 
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    user_id: str | None = None
+    session_id: str | None = None
 
 
 class MonitoringFilter(BaseModel):
@@ -399,8 +408,12 @@ class MonitoringFilter(BaseModel):
     ``metadata`` values are strings: the clause is a string equality match, so
     a non-string attribute must be filtered by its string form. (Stored
     metadata elsewhere is ``Any``; the equality filter is deliberately narrower.)
-    ``name`` / ``user_id`` / ``session_id`` / ``model`` filter on backend
-    attributes that are not all present on the neutral result models.
+    ``name`` / ``user_id`` / ``session_id`` / ``version`` / ``model`` filter on
+    backend attributes that are not all present on the neutral result models.
+    ``version`` matches the run's ROOT version DIMENSION — the value a run is
+    stamped with (carried onto the backend's native version field, e.g. langfuse's
+    ``version``), so a run stamped at "flow F version V" is queryable by ``V`` even
+    though the version does not live in ``metadata``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -408,6 +421,7 @@ class MonitoringFilter(BaseModel):
     name: str | None = None
     user_id: str | None = None
     session_id: str | None = None
+    version: str | None = None
     level: MonitoringLevel | None = None
     model: str | None = None
     tags: list[str] = Field(default_factory=list)

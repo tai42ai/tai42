@@ -80,7 +80,9 @@ class RunFilterQuery(BaseModel):
     """The run time window, advanced filters, and sort shared by the run-list and export doors
     (exactly what ``parse_time_range`` + ``parse_run_filter`` read at the HTTP edge).
 
-    Spec metadata only — the doors parse their query at the HTTP edge."""
+    Spec metadata only — the doors parse their query at the HTTP edge. Beyond the declared
+    fields, any ``meta.<key>=<value>`` query param adds one metadata string-equality clause
+    (dynamic keys, so not a fixed field); an empty key or value is a 400."""
 
     from_: str | None = Field(
         default=None,
@@ -94,6 +96,16 @@ class RunFilterQuery(BaseModel):
         default=None, description='Tag filter as a JSON list (``["a","b"]``) or a comma-separated string.'
     )
     status: RunStatus | None = Field(default=None, description="Restrict to ``error`` runs; ``success`` is unfiltered.")
+    user: str | None = Field(
+        default=None, description="Filter to one run user (the backend's native user identity dimension)."
+    )
+    session: str | None = Field(
+        default=None, description="Filter to one run session/thread (the backend's native session dimension)."
+    )
+    version: str | None = Field(
+        default=None,
+        description="Filter to one run version (the backend's native version dimension; e.g. a preset's version).",
+    )
     min_cost: float | None = Field(default=None, alias="minCost", description="Inclusive lower bound on run cost.")
     max_cost: float | None = Field(default=None, alias="maxCost", description="Inclusive upper bound on run cost.")
     min_tokens: float | None = Field(

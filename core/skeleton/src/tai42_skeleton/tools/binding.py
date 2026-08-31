@@ -42,7 +42,7 @@ from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
-from tai42_skeleton.tools.attribution import stamp_run_attribution
+from tai42_skeleton.tools.attribution import stamp_preset_attribution, stamp_run_attribution
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.turn_budget import turn_budget
@@ -610,12 +610,30 @@ class ToolBinding:
         try:
             # Attribution WRAPS the drive together with the turn-budget arming (the same
             # door set), so the tool work and its spans run INSIDE the run's attribution
-            # scope; it no-ops when no ambient attribution is deposited.
+            # scope; it no-ops when no ambient attribution is deposited. When ``key`` is a
+            # REGISTERED preset, its identity + active version are layered onto the trace
+            # here (outermost preset dispatch only — a nested sub-preset re-dispatch sees
+            # the armed guard and adds nothing). A draft/inline run is not a registered
+            # preset, so it stays unstamped.
             with stamp_run_attribution():
                 async with turn_budget():
-                    return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+                    return await self._dispatch_attributed_by_preset(key, arguments, offload_sync=offload_sync)
         finally:
             reset_current_tool_invocation(invocation_token)
+
+    async def _dispatch_attributed_by_preset(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
+        """Dispatch ``key``, layering a registered preset's version-attribution around it.
+
+        When ``key`` names a registered preset with a retained active version, wrap the
+        dispatch in :func:`stamp_preset_attribution` so the run's trace carries the
+        ``preset:``/``preset-v:`` tags and root version; otherwise dispatch bare. The
+        armed-guard inside the stamp keeps a nested sub-preset from restamping."""
+        manager = self._app.preset_manager
+        version = manager.active_version(key) if manager.is_registered(key) else None
+        if version is None:
+            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        with stamp_preset_attribution(key, version):
+            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
 
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity, arguments

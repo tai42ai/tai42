@@ -286,9 +286,57 @@ def test_trace_attributes_propagates_and_restores(manager, monkeypatch):
     with writer.trace_attributes(name="run", tags=["run:7"], metadata={"k": "v"}):
         pass
 
-    factory.assert_called_once_with(trace_name="run", tags=["run:7"], metadata={"k": "v"})
+    # Every dimension is forwarded; an absent user/session/version is passed as None.
+    factory.assert_called_once_with(
+        trace_name="run", tags=["run:7"], metadata={"k": "v"}, user_id=None, session_id=None, version=None
+    )
     cm.__enter__.assert_called_once()
     cm.__exit__.assert_called_once_with(None, None, None)
+
+
+def test_trace_attributes_forwards_user_and_session(manager, monkeypatch):
+    factory = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("tai42_monitoring_langfuse.writer.propagate_attributes", factory)
+
+    with LangfuseWriter(manager).trace_attributes(name="run", user_id="person-1", session_id="thread-9"):
+        pass
+
+    kwargs = factory.call_args.kwargs
+    assert kwargs["user_id"] == "person-1"
+    assert kwargs["session_id"] == "thread-9"
+
+
+def test_trace_attributes_lifts_run_version_onto_native_version(manager, monkeypatch):
+    from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY
+
+    factory = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("tai42_monitoring_langfuse.writer.propagate_attributes", factory)
+
+    metadata = {"preset_name": "wv", "preset_version": "5", RUN_VERSION_METADATA_KEY: "5"}
+    with LangfuseWriter(manager).trace_attributes(name="run", tags=["preset:wv", "preset-v:5"], metadata=metadata):
+        pass
+
+    kwargs = factory.call_args.kwargs
+    # The neutral version key is lifted onto the native ``version`` dimension and
+    # DROPPED from the forwarded metadata (never doubled as a metadata attribute).
+    assert kwargs["version"] == "5"
+    assert kwargs["metadata"] == {"preset_name": "wv", "preset_version": "5"}
+    assert RUN_VERSION_METADATA_KEY not in kwargs["metadata"]
+
+
+def test_trace_attributes_run_version_only_metadata_becomes_none(manager, monkeypatch):
+    from tai42_contract.monitoring import RUN_VERSION_METADATA_KEY
+
+    factory = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("tai42_monitoring_langfuse.writer.propagate_attributes", factory)
+
+    with LangfuseWriter(manager).trace_attributes(name="run", metadata={RUN_VERSION_METADATA_KEY: "3"}):
+        pass
+
+    kwargs = factory.call_args.kwargs
+    assert kwargs["version"] == "3"
+    # Removing the only key leaves no metadata — forwarded as None, not an empty dict.
+    assert kwargs["metadata"] is None
 
 
 def test_trace_attributes_setup_and_teardown_fail_safe(manager, monkeypatch):

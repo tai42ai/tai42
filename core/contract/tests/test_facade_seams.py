@@ -20,8 +20,12 @@ def test_run_attribution_is_a_pure_key_value_envelope():
     empty = RunAttribution()
     assert empty.tags == []
     assert empty.metadata == {}
-    # No tenant/client/domain qualifier — attribution only.
-    assert set(RunAttribution.model_fields) == {"tags", "metadata"}
+    # The two identity dimensions default to unset (a door that lacks either omits it).
+    assert empty.user_id is None
+    assert empty.session_id is None
+    # No tenant/client/domain qualifier — attribution only, plus the two optional
+    # backend-native identity dimensions.
+    assert set(RunAttribution.model_fields) == {"tags", "metadata", "user_id", "session_id"}
 
 
 class _RecordingWriter:
@@ -30,7 +34,7 @@ class _RecordingWriter:
 
     def __init__(self, trace_id: str | None):
         self._trace_id = trace_id
-        self.trace_attr_calls: list[tuple[Any, Any, Any]] = []
+        self.trace_attr_calls: list[dict[str, Any]] = []
         self.entered = 0
         self.exited = 0
 
@@ -43,8 +47,12 @@ class _RecordingWriter:
         name: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> AbstractContextManager[None]:
-        self.trace_attr_calls.append((name, tags, metadata))
+        self.trace_attr_calls.append(
+            {"name": name, "tags": tags, "metadata": metadata, "user_id": user_id, "session_id": session_id}
+        )
         outer = self
 
         @contextmanager
@@ -63,15 +71,23 @@ def test_attribute_run_returns_the_wrapping_cm_without_entering_it():
     from tai42_contract.monitoring.writer import RUN_ATTRIBUTION_TRACE_NAME, MonitoringWriter
 
     writer = _RecordingWriter("trace-1")
-    attribution = RunAttribution(tags=["flow"], metadata={"k": "v"})
+    attribution = RunAttribution(tags=["flow"], metadata={"k": "v"}, user_id="u1", session_id="s1")
     # attribute_run is a free function composing over trace_attributes; the double
     # implements only the two methods the helper reads.
     cm = attribute_run(cast(MonitoringWriter, writer), attribution)
 
-    # It stamps under the stable run name with the attribution tags/metadata, and
-    # RETURNS the manager — a one-shot enter/exit here would tear the scope down
-    # before any span exists, so it must NOT be entered yet.
-    assert writer.trace_attr_calls == [(RUN_ATTRIBUTION_TRACE_NAME, ["flow"], {"k": "v"})]
+    # It stamps under the stable run name with the attribution tags/metadata AND the
+    # two identity dimensions, and RETURNS the manager — a one-shot enter/exit here
+    # would tear the scope down before any span exists, so it must NOT be entered yet.
+    assert writer.trace_attr_calls == [
+        {
+            "name": RUN_ATTRIBUTION_TRACE_NAME,
+            "tags": ["flow"],
+            "metadata": {"k": "v"},
+            "user_id": "u1",
+            "session_id": "s1",
+        }
+    ]
     assert writer.entered == 0
     assert writer.exited == 0
 
@@ -81,16 +97,25 @@ def test_attribute_run_returns_the_wrapping_cm_without_entering_it():
     assert writer.exited == 1
 
 
-def test_attribute_run_is_a_noop_outside_a_trace():
+def test_attribute_run_stamps_even_before_a_trace_is_open():
+    # GUARD REWORK: attribute_run no longer short-circuits to a nullcontext when
+    # current_trace_id() is None. langfuse's propagate_attributes is OTel-context-
+    # scoped, so a deposit made BEFORE the run's first span is lifted onto that span's
+    # trace root when it opens INSIDE the scope. The old guard dropped exactly that
+    # common case (a door deposits, then opens the first span), so it is gone: the
+    # stamp is ALWAYS attempted, and its fail-safety is trace_attributes' own.
     from tai42_contract.monitoring import RunAttribution, attribute_run
-    from tai42_contract.monitoring.writer import MonitoringWriter
+    from tai42_contract.monitoring.writer import RUN_ATTRIBUTION_TRACE_NAME, MonitoringWriter
 
-    writer = _RecordingWriter(None)
-    cm = attribute_run(cast(MonitoringWriter, writer), RunAttribution(tags=["x"]))
-    # Guarded by current_trace_id: no stamp attempted, and the manager is safe.
-    assert writer.trace_attr_calls == []
+    writer = _RecordingWriter(None)  # no active trace yet
+    cm = attribute_run(cast(MonitoringWriter, writer), RunAttribution(tags=["x"], user_id="u9"))
+    # The stamp is composed regardless of the (absent) trace, carrying the attribution.
+    assert writer.trace_attr_calls == [
+        {"name": RUN_ATTRIBUTION_TRACE_NAME, "tags": ["x"], "metadata": {}, "user_id": "u9", "session_id": None}
+    ]
     with cm:
-        pass
+        assert writer.entered == 1
+    assert writer.exited == 1
 
 
 # -- Connectors: ResolvedConnectionAuth + accessor -----------------------------

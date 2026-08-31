@@ -287,6 +287,103 @@ def test_reload_and_rollback_serve_right_kwargs(pg: FakeVersioningPg):
     asyncio.run(run())
 
 
+def test_active_version_retained_across_create_save_rollback_reload(pg: FakeVersioningPg):
+    async def run():
+        async with app.app_context(_manifest()):
+            store = app.presets.store
+            mgr = app.preset_manager
+            # A fresh create mints version 1 and the engine retains it beside the body.
+            await _create_versioned("wv", "weather", {"units": "v1"}, [])
+            assert mgr.active_version("wv") == 1
+            # A plain (non-preset) tool has no retained version.
+            assert mgr.active_version("weather") is None
+
+            # A save + reload advances the retained version to the new active one.
+            await store.save_version("wv", fixed_kwargs={"units": "v2"})
+            await mgr.reload("wv")
+            assert mgr.active_version("wv") == 2
+
+            # A rollback + reload re-points the retained version at the rolled-back one
+            # (the active pointer, not MAX).
+            await store.rollback("wv", 1)
+            await mgr.reload("wv")
+            assert mgr.active_version("wv") == 1
+
+            # Teardown drops the retained version in lockstep with the spec.
+            await mgr.remove("wv")
+            assert mgr.active_version("wv") is None
+
+    asyncio.run(run())
+
+
+def test_active_version_survives_rehydrate(pg: FakeVersioningPg):
+    async def run():
+        async with app.app_context(_manifest()):
+            store = app.presets.store
+            mgr = app.preset_manager
+            await _create_versioned("wv", "weather", {"units": "v1"}, [])
+            await store.save_version("wv", fixed_kwargs={"units": "v2"})
+            await mgr.reload("wv")
+            assert mgr.active_version("wv") == 2
+
+            # A reload_config wipe + rehydrate rebuilds the version from the store's
+            # single version-aware batched read — the retained value is not lost.
+            await mgr.remove("wv")
+            await mgr.rehydrate()
+            assert mgr.active_version("wv") == 2
+
+    asyncio.run(run())
+
+
+def test_run_tool_stamps_registered_preset_with_active_version(pg: FakeVersioningPg, monkeypatch):
+    """The run chokepoint attributes a registered preset dispatch with its version;
+    a plain tool is left unstamped."""
+
+    class _SpyWriter:
+        def __init__(self) -> None:
+            self.stamps: list[dict] = []
+
+        def current_trace_id(self):
+            return "t"
+
+        def trace_attributes(self, *, name, tags, metadata, user_id=None, session_id=None):
+            self.stamps.append({"tags": tags, "metadata": metadata})
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    class _SpyMonitoring:
+        def __init__(self, writer) -> None:
+            self.writer = writer
+
+    async def run():
+        async with app.app_context(_manifest()):
+            store = app.presets.store
+            mgr = app.preset_manager
+            await _create_versioned("wv", "weather", {"units": "v1"}, [])
+            await store.save_version("wv", fixed_kwargs={"units": "v2"})
+            await mgr.reload("wv")
+
+            writer = _SpyWriter()
+            import tai42_skeleton.monitoring as monitoring_mod
+
+            monkeypatch.setattr(monitoring_mod, "get_monitoring", lambda: _SpyMonitoring(writer))
+
+            # A registered-preset dispatch stamps preset:/preset-v: with the active version.
+            await app.tools.run_tool("wv", {"city": "x"})
+            preset_stamps = [s for s in writer.stamps if any(t.startswith("preset:") for t in (s["tags"] or []))]
+            assert len(preset_stamps) == 1
+            assert preset_stamps[0]["tags"] == ["preset:wv", "preset-v:2"]
+            assert preset_stamps[0]["metadata"]["preset_version"] == "2"
+
+            # A plain (non-preset) tool dispatch stamps NO preset attribution.
+            writer.stamps.clear()
+            await app.tools.run_tool("weather", {"city": "x", "units": "z"})
+            assert not [s for s in writer.stamps if any(t.startswith("preset:") for t in (s["tags"] or []))]
+
+    asyncio.run(run())
+
+
 def test_save_version_numbering_is_max_plus_one_post_rollback(pg: FakeVersioningPg):
     async def run():
         async with app.app_context(_manifest()):
@@ -509,11 +606,11 @@ def test_rehydrate_skips_record_whose_active_body_is_absent(pg: FakeVersioningPg
     async def run():
         async with app.app_context(_manifest()):
             mgr = app.preset_manager
-            # Two persisted presets. ``list_presets`` and ``list_active_bodies`` are
-            # two separate store reads, so a delete landing between them leaves a
+            # Two persisted presets. ``list_presets`` and ``list_active_versioned_bodies``
+            # are two separate store reads, so a delete landing between them leaves a
             # record whose active body is already gone. Model that read-skew: both
             # records survive in ``list_presets`` while ``absent`` is dropped from
-            # the active-body map.
+            # the active version+body map.
             await _create_versioned("present", "weather", {"units": "v"}, [])
             await _create_versioned("absent", "weather", {"units": "g"}, [])
 
@@ -521,14 +618,14 @@ def test_rehydrate_skips_record_whose_active_body_is_absent(pg: FakeVersioningPg
             for name in ("present", "absent"):
                 await mgr.remove(name)
 
-            real_bodies = app.presets.list_active_bodies
+            real_bodies = app.presets.list_active_versioned_bodies
 
             async def _bodies_without_absent():
                 bodies = await real_bodies()
                 bodies.pop("absent", None)
                 return bodies
 
-            monkeypatch.setattr(app.presets, "list_active_bodies", _bodies_without_absent)
+            monkeypatch.setattr(app.presets, "list_active_versioned_bodies", _bodies_without_absent)
 
             # A record with no active body must be SKIPPED, never a bare
             # ``bodies[rec.name]`` KeyError that aborts the whole boot/reload.
