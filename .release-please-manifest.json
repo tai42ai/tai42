@@ -12,7 +12,7 @@
   "plugins/channel-slack": "2.1.0",
   "plugins/channel-telegram": "2.1.0",
   "plugins/channel-twilio": "2.1.0",
-  "plugins/channel-web": "3.1.0",
+  "plugins/channel-web": "3.1.1",
   "plugins/channel-whatsapp": "2.1.0",
   "plugins/config-k8s": "1.0.7",
   "plugins/connector-atlassian": "2.0.1",
