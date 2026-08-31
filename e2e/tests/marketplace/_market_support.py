@@ -30,28 +30,44 @@ import pytest
 import yaml
 from fastmcp.client.client import CallToolResult
 
-from tai42_e2e.marketplace import registry_supports_declared_routes
+from tai42_e2e.marketplace import declared_routes_dispatch_failure, registry_supports_declared_routes
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
+# The registry venv not being built yet is the only benign reason this gate reads
+# False in a normal run: the checked-in pin resolves tai42-contract 2.x, so a booted
+# registry accepts declared routes and these legs RUN. The lazy-install skip only
+# fires if a leg somehow ran before its ``marketplace_service`` fixture booted the
+# registry; a dispatched ref (TAI_E2E_MARKETPLACE_REF) turns that into a hard fail.
 _DECLARED_ROUTES_SKIP_REASON = (
-    "pinned marketplace registry (_MARKETPLACE_PIN) runs tai42-contract <2 and cannot accept declared "
-    "routes; bump _MARKETPLACE_PIN to a routes-capable tai-marketplace commit after contract 2.0 publishes."
+    "the marketplace registry venv is not yet built, so the declared-routes gate cannot read its "
+    "tai42-contract major; this leg must run after its marketplace_service fixture boots the registry."
 )
 
 
 def skip_unless_registry_supports_declared_routes() -> None:
-    """Skip the calling leg loudly when the pinned registry cannot accept a
-    route-carrying fixture spec (:func:`registry_supports_declared_routes`).
+    """Guard any leg that admin-seeds a declared-routes fixture (epsilon /
+    epsilon_v2 / theta) on the registry's route capability
+    (:func:`registry_supports_declared_routes`).
 
-    Call at the top of any leg that admin-seeds a declared-routes fixture
-    (epsilon / epsilon_v2 / theta): an explicit ``pytest.skip`` with the
-    bump-the-pin remedy, never a swallowed seed failure. The shared skip helper the
-    route-mounting / router-merge / CLI route legs (and any future route-declaring
-    spec) reuse — it must be requested only after the registry venv is built (a leg
-    that depends on ``marketplace_service`` has already booted it)."""
-    if not registry_supports_declared_routes():
-        pytest.skip(_DECLARED_ROUTES_SKIP_REASON)
+    In a normal run the resolved registry ref runs tai42-contract 2.x, so this is a
+    no-op and the leg proceeds. When the gate is False the action depends on whether
+    a registry ref was DISPATCHED (:func:`declared_routes_dispatch_failure`):
+
+    * ref dispatched (``TAI_E2E_MARKETPLACE_REF`` set) → ``pytest.fail`` with the
+      dual-cause message (ordering bug vs contract-floor regression) — the fleet
+      validated a specific sha and a False gate is a real defect, never a skip;
+    * ref not dispatched → ``pytest.skip`` (the lazy-install window; never a swallowed
+      seed failure).
+
+    Request only after the registry venv is built (a leg that depends on
+    ``marketplace_service`` has already booted it)."""
+    if registry_supports_declared_routes():
+        return
+    detail = declared_routes_dispatch_failure()
+    if detail is not None:
+        pytest.fail(detail)
+    pytest.skip(_DECLARED_ROUTES_SKIP_REASON)
 
 
 def probe_payload(result: CallToolResult) -> dict[str, Any]:

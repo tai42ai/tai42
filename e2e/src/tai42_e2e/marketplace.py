@@ -71,11 +71,48 @@ _MARKETPLACE_PIN = "19b1ce33fd46baafff5f39a83003c5aa54ab8c53"
 # field (contract 2.0). A registry venv below it rejects route-carrying specs.
 _ROUTES_CAPABLE_CONTRACT_MAJOR = 2
 
+# The fleet-e2e workflow DISPATCHES the source sha under test here when a
+# tai-marketplace push drives the run, so the harness boots the registry at the
+# exact commit being validated instead of the checked-in pin. Unset (the normal
+# monorepo run), the pin governs.
+_MARKETPLACE_REF_ENV = "TAI_E2E_MARKETPLACE_REF"
+# A dispatched ref is a full 40-hex git commit sha; the workflow already applies
+# this same shape guard before exporting it, and this resolver re-checks so a
+# malformed value fails loudly here rather than surfacing as an opaque
+# ``git+…@<garbage>`` install error deep in ``_install_marketplace``.
+_MARKETPLACE_SHA_RE = r"[0-9a-f]{40}"
+
+
+def _marketplace_ref() -> str:
+    """The registry commit the out-of-band install resolves and the dedicated venv
+    is keyed by: the dispatched ``TAI_E2E_MARKETPLACE_REF`` when set (the fleet
+    workflow exports the source sha under test), else the checked-in
+    ``_MARKETPLACE_PIN``.
+
+    A dispatched value MUST be a full 40-char lowercase-hex commit sha
+    (:data:`_MARKETPLACE_SHA_RE`); anything else raises loudly, naming the env var
+    and the expected shape, so a mangled dispatch fails here rather than as an
+    opaque git-resolve error at install time."""
+    override = os.environ.get(_MARKETPLACE_REF_ENV)
+    if override is None:
+        return _MARKETPLACE_PIN
+    if re.fullmatch(_MARKETPLACE_SHA_RE, override) is None:
+        raise RuntimeError(
+            f"{_MARKETPLACE_REF_ENV}={override!r} is not a full 40-char lowercase-hex commit sha "
+            f"(expected /{_MARKETPLACE_SHA_RE}/); the fleet workflow exports the dispatched source sha"
+        )
+    return override
+
 
 def _registry_venv_dir() -> Path:
     """The DEDICATED venv the pinned registry installs into — a per-checkout,
-    per-pin directory under this e2e member (alongside its workspace ``.venv``),
+    per-ref directory under this e2e member (alongside its workspace ``.venv``),
     built once and reused across modules and sessions.
+
+    Keyed by the RESOLVED registry ref (:func:`_marketplace_ref`, the dispatched
+    ``TAI_E2E_MARKETPLACE_REF`` or the checked-in pin), first 12 chars: a dispatched
+    ref boots into its own venv rather than reusing a stale pin-keyed one, and a
+    later run at a different ref never collides with it.
 
     Per-checkout, not host-global: a shared system-temp directory lets concurrent
     runs on separate checkouts race on ``uv venv --clear``, one wiping another's
@@ -87,7 +124,7 @@ def _registry_venv_dir() -> Path:
     shared-venv install would DOWNGRADE that workspace package from PyPI and the
     skeleton would then quarantine its own routers at boot. A separate venv keeps
     the registry's dependency resolution wholly apart from the SUT's."""
-    return Path(__file__).resolve().parents[2] / f".tai42-e2e-marketplace-{_MARKETPLACE_PIN[:12]}"
+    return Path(__file__).resolve().parents[2] / f".tai42-e2e-marketplace-{_marketplace_ref()[:12]}"
 
 
 def _registry_python() -> Path:
@@ -104,14 +141,18 @@ def registry_supports_declared_routes() -> bool:
     is the first with a ``routes`` field; older contracts reject it as an extra
     input at seed time).
 
-    Gates the release-window skip of every e2e leg that admin-seeds a
-    route-carrying fixture (epsilon / epsilon_v2 / theta) into the registry: while
-    ``_MARKETPLACE_PIN`` runs an OLD tai-marketplace (tai42-contract <2) those
-    seeds are rejected, so the legs skip. Bumping ``_MARKETPLACE_PIN`` to a
-    routes-capable tai-marketplace commit once contract 2.0 publishes re-enables
-    them automatically. A plain importable predicate — pair it with
-    ``skip_unless_registry_supports_declared_routes`` for the pytest skip, and reuse
-    it from any future route-declaring spec (e.g. a reload-probe leg).
+    Gates every e2e leg that admin-seeds a route-carrying fixture (epsilon /
+    epsilon_v2 / theta) into the registry. The resolved ref (:func:`_marketplace_ref`)
+    runs a routes-capable tai-marketplace today (``_MARKETPLACE_PIN`` 19b1ce3 resolves
+    tai42-contract 2.x, whose PluginSpec carries ``routes``), so this is TRUE in a
+    normal run and those legs RUN. The gate remains as a guard, not a release-window
+    skip: it degrades to skip only when the registry venv is not yet built (lazy
+    install), and — when a ref is DISPATCHED via ``TAI_E2E_MARKETPLACE_REF`` — a False
+    verdict is escalated to a hard failure by the skip helper / browser guard (see
+    :func:`declared_routes_dispatch_failure`), because a dispatched ref that cannot
+    seed routes is a regression, not an expected window. A plain importable predicate —
+    pair it with ``skip_unless_registry_supports_declared_routes`` for the pytest skip,
+    and reuse it from any future route-declaring spec (e.g. a reload-probe leg).
 
     Reads the tai42-contract version installed in the REGISTRY venv
     (:func:`_registry_python`), never the SUT's workspace contract — the registry's
@@ -143,6 +184,42 @@ def registry_supports_declared_routes() -> bool:
     except InvalidVersion as exc:
         raise RuntimeError(f"registry venv reported an unparseable tai42-contract version {raw!r}") from exc
     return version.major >= _ROUTES_CAPABLE_CONTRACT_MAJOR
+
+
+def declared_routes_dispatch_failure() -> str | None:
+    """The skip-vs-FAIL decision for a route-carrying leg when
+    :func:`registry_supports_declared_routes` gated ``False``.
+
+    Returns ``None`` when NO registry ref was dispatched (``TAI_E2E_MARKETPLACE_REF``
+    unset) — the normal monorepo run, where a False gate is a legitimate
+    release-window skip (the registry venv may not be built yet, or the checked-in
+    pin genuinely predates the route surface). The caller SKIPS.
+
+    Returns a LOUD dual-cause message when a ref WAS dispatched — the caller must
+    FAIL, never skip, because the fleet dispatched a specific tai-marketplace sha to
+    validate and a False gate means one of two real defects, which the message
+    distinguishes:
+
+    * the registry venv is ABSENT — a harness ordering bug: the gated leg ran before
+      the registry booted, so the gate read a not-yet-installed venv rather than a
+      real capability verdict; vs
+    * the venv is built but runs tai42-contract major below the routes floor — the
+      dispatched marketplace ref REGRESSED its contract floor, dropping the ``routes``
+      surface every declared-routes leg requires."""
+    ref = os.environ.get(_MARKETPLACE_REF_ENV)
+    if ref is None:
+        return None
+    if not _registry_python().exists():
+        return (
+            f"registry venv {_registry_venv_dir()} is absent while marketplace ref {ref} was "
+            "dispatched via TAI_E2E_MARKETPLACE_REF: harness ordering bug — the gated leg ran "
+            "before the registry booted, so the declared-routes gate read a not-yet-built venv"
+        )
+    return (
+        f"the dispatched marketplace ref {ref} regressed its contract floor: its registry venv "
+        f"runs tai42-contract major < {_ROUTES_CAPABLE_CONTRACT_MAJOR}, so the PluginSpec ``routes`` "
+        "surface every declared-routes leg needs is gone"
+    )
 
 
 _FIXTURES_ENV = "TAI_E2E_MARKETPLACE_FIXTURES"
@@ -619,11 +696,13 @@ class MarketplaceService:
 
     @staticmethod
     def _install_marketplace() -> None:
-        """Create the dedicated registry venv and ``uv pip install`` the pinned
-        tai42-marketplace into it — apart from the SUT's workspace venv, so the
-        registry's own dependency caps never mutate the workspace's first-party
-        packages (the git insteadOf token config rewrites the URL — no token
-        handling here). Raises loudly on a non-zero exit with the captured output."""
+        """Create the dedicated registry venv and ``uv pip install`` tai42-marketplace
+        at the resolved ref (:func:`_marketplace_ref` — the dispatched
+        ``TAI_E2E_MARKETPLACE_REF`` or the checked-in pin) into it — apart from the
+        SUT's workspace venv, so the registry's own dependency caps never mutate the
+        workspace's first-party packages (the git insteadOf token config rewrites the
+        URL — no token handling here). Raises loudly on a non-zero exit with the
+        captured output."""
         venv = _registry_venv_dir()
         mk = subprocess.run(
             ["uv", "venv", "--clear", "--python", sys.executable, str(venv)],
@@ -635,7 +714,7 @@ class MarketplaceService:
             raise RuntimeError(
                 f"creating the registry venv at {venv} failed (exit {mk.returncode}):\n{mk.stdout}\n{mk.stderr}"
             )
-        spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_MARKETPLACE_PIN}#subdirectory=api"
+        spec = f"tai42-marketplace @ git+{_MARKETPLACE_GIT_URL}@{_marketplace_ref()}#subdirectory=api"
         proc = subprocess.run(
             ["uv", "pip", "install", "--python", str(_registry_python()), spec],
             capture_output=True,

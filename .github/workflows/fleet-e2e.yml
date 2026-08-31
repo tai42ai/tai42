@@ -95,12 +95,19 @@ jobs:
         id: src
         env:
           SRC_REPO: ${{ github.event.client_payload.repo }}
+          SRC_REF: ${{ github.event.client_payload.ref }}
         run: |
           set -euo pipefail
           case "$SRC_REPO" in
             tai-marketplace)
               echo "marketplace=true" >> "$GITHUB_OUTPUT"
-              echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV" ;;
+              echo "TAI_E2E_MARKETPLACE=1" >> "$GITHUB_ENV"
+              # Dispatch the source sha under test to the harness so the registry
+              # boots at that exact commit (not the checked-in pin). Same sha guard
+              # the status/checkout steps apply — a malformed ref never reaches the
+              # install spec.
+              [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
+              echo "TAI_E2E_MARKETPLACE_REF=$SRC_REF" >> "$GITHUB_ENV" ;;
             tai-studio)
               echo "marketplace=false" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::source repo not in fleet: $SRC_REPO"; exit 1 ;;
