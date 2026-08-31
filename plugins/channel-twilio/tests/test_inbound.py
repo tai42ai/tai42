@@ -489,6 +489,25 @@ async def test_status_unknown_sid_is_benign_204(status_handler, stub_app, caplog
     assert any("untracked message SM777" in record.message for record in caplog.records)
 
 
+async def test_status_flow_send_hit_posts_receipt_no_untracked_log(
+    status_handler, stub_app, caplog: pytest.LogCaptureFixture
+):
+    # The bridge does not own the sid (LookupError), but it is a flow send: the flow-send
+    # receipt seam resolves it and posts the receipt onto the trace, so NO untracked log.
+    stub_app.conversations.status_error = LookupError("outbound id SM777 maps to no answer record")
+    stub_app.channels.flow_receipt_result = True
+
+    with caplog.at_level("INFO"):
+        result = await status_handler(signed_request(_status_pairs("delivered"), path=_STATUS_PATH))
+
+    assert result.status_code == 204
+    (call,) = stub_app.channels.flow_receipt_calls
+    assert call["channel"] == "twilio"
+    assert call["provider_message_id"] == "SM777"
+    assert call["status"] is DeliveryReceipt.DELIVERED
+    assert not any("untracked message SM777" in record.message for record in caplog.records)
+
+
 async def test_status_bad_signature_is_401(status_handler, stub_app):
     result = await status_handler(signed_request(_status_pairs("failed"), path=_STATUS_PATH, token="other-token"))
 

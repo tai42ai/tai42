@@ -278,5 +278,11 @@ async def twilio_status(request: Request) -> Response:
     try:
         await tai42_app.conversations.record_delivery_status("twilio", message_sid, receipt)
     except LookupError as exc:
-        logger.info("twilio status for untracked message %s ignored: %s", message_sid, exc)
+        # Not a bridge outbound: it may be a flow send (``notify_user``). Post the receipt
+        # onto the flow's trace via the send-outcome index; only a genuine miss (neither the
+        # bridge nor a flow send owns the id) keeps the untracked-message log.
+        if not await tai42_app.channels.record_flow_send_receipt(
+            "twilio", message_sid, receipt, errors=form.get("ErrorCode")
+        ):
+            logger.info("twilio status for untracked message %s ignored: %s", message_sid, exc)
     return Response(status_code=204)

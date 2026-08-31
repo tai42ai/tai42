@@ -71,6 +71,15 @@ class InteractionsSettings(TaiBaseSettings):
     # positive — a non-positive TTL would delete keys on write.
     idle_ttl_seconds: int = Field(default=86400, gt=0)
 
+    # TTL (seconds) on a flow-send receipt-index entry: the
+    # ``provider_message_id -> {trace_id, span_id}`` map a ``notify_user`` channel send
+    # writes so a later out-of-band delivery receipt can be posted back onto the
+    # originating flow trace (the send-outcome monitoring layer's tier 2). Sized to the
+    # receipt-relevance window — long enough for a delayed carrier receipt to still
+    # correlate to its run, bounded (24h) so the index cannot accumulate. Must be
+    # positive — a non-positive TTL would delete the entry on write.
+    send_receipt_index_ttl_seconds: int = Field(default=86400, gt=0)
+
     # Public base URL of the host serving the interactions routes; required for
     # external-format questions (the callback URL is built from it). Must be
     # https:// — the callback URL is a bearer capability and the POST door carries
