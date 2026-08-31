@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: monitoring-langfuse
 package: tai42-monitoring-langfuse
-version: 2.0.2
+version: 2.1.0
 description: >-
   Langfuse monitoring backend for the TAI ecosystem — trace/span emission plus
   the observability read surface over Langfuse.
