@@ -137,11 +137,16 @@ class _FakeCursor:
             self._one = (1,) if any(m["folder_id"] == folder_id for m in pg.meta.values()) else None
 
         # -- tool_meta writes ------------------------------------------------
-        elif norm == "INSERT INTO tool_meta (tool_name) VALUES (%s) ON CONFLICT (tool_name) DO NOTHING":
-            # ``merge_meta`` materializes the row so the FOR UPDATE below has one to
-            # lock; DO NOTHING when it already exists.
+        elif norm == (
+            "INSERT INTO tool_meta (tool_name) VALUES (%s) "
+            "ON CONFLICT (tool_name) DO UPDATE SET tool_name = EXCLUDED.tool_name "
+            "RETURNING display_name, folder_id, tags, hidden, badges"
+        ):
+            # ``merge_meta`` locks-or-creates the row in ONE statement: the no-op
+            # ``DO UPDATE`` takes the row lock (a real Postgres would then block a
+            # concurrent delete) and RETURNS the current columns for the merge base.
             (tool_name,) = params
-            pg.meta.setdefault(
+            row = pg.meta.setdefault(
                 tool_name,
                 {
                     "tool_name": tool_name,
@@ -152,6 +157,7 @@ class _FakeCursor:
                     "badges": [],
                 },
             )
+            self._one = (row["display_name"], row["folder_id"], list(row["tags"]), row["hidden"], list(row["badges"]))
         elif norm.startswith("UPDATE tool_meta SET display_name"):
             display_name, folder_id, tags, hidden, badges, tool_name = params
             row = pg.meta[tool_name]
@@ -187,17 +193,6 @@ class _FakeCursor:
                 pg.meta[new_name] = row
 
         # -- tool_meta reads -------------------------------------------------
-        elif (
-            norm
-            == "SELECT display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s FOR UPDATE"
-        ):
-            (tool_name,) = params
-            row = pg.meta.get(tool_name)
-            self._one = (
-                None
-                if row is None
-                else (row["display_name"], row["folder_id"], list(row["tags"]), row["hidden"], list(row["badges"]))
-            )
         elif (
             norm
             == "SELECT tool_name, display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s"

@@ -192,10 +192,18 @@ class PostgresToolMetaStore(ToolMetaStore):
         # Atomic read-modify-write: the whole merge-patch runs in ONE transaction so
         # two concurrent patches to the same tool serialize on a row lock instead of
         # racing on separate connections (a get-then-upsert split loses an update).
-        # ``INSERT ... ON CONFLICT DO NOTHING`` first materializes the row so there is
-        # always something to lock — a concurrent creator either commits before us (we
-        # then read and merge on top of its row) or blocks until we commit — and
-        # ``SELECT ... FOR UPDATE`` then holds that row for the merge.
+        #
+        # ``INSERT ... ON CONFLICT DO UPDATE`` (a no-op self-write of ``tool_name``)
+        # LOCKS the row — pre-existing OR freshly inserted — and RETURNS its current
+        # columns in ONE statement, so the merge base is read under the lock with no
+        # unlocked window. This must NOT be a ``DO NOTHING`` + follow-up
+        # ``SELECT ... FOR UPDATE``: ``DO NOTHING`` does not lock a pre-existing
+        # conflicting row, so a concurrent ``delete_meta`` (the preset-create
+        # clean-slate cascade) could delete it in the gap before the locked read,
+        # leaving that read with zero rows — the concurrent-boot ``RETURNING``-none
+        # crash. With the lock taken by the upsert itself, a concurrent delete instead
+        # blocks until we commit; and if a delete committed first, the row is simply
+        # re-materialized here and the merge proceeds on a clean base.
         async with (
             client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
             pool.connection() as conn,
@@ -203,11 +211,9 @@ class PostgresToolMetaStore(ToolMetaStore):
             conn.cursor() as cur,
         ):
             await cur.execute(
-                "INSERT INTO tool_meta (tool_name) VALUES (%s) ON CONFLICT (tool_name) DO NOTHING",
-                (tool_name,),
-            )
-            await cur.execute(
-                "SELECT display_name, folder_id, tags, hidden, badges FROM tool_meta WHERE tool_name = %s FOR UPDATE",
+                "INSERT INTO tool_meta (tool_name) VALUES (%s) "
+                "ON CONFLICT (tool_name) DO UPDATE SET tool_name = EXCLUDED.tool_name "
+                "RETURNING display_name, folder_id, tags, hidden, badges",
                 (tool_name,),
             )
             current = _require_row(await cur.fetchone())
