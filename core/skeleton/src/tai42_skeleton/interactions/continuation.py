@@ -42,6 +42,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
 from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
+from tai42_skeleton.runs.chokepoint import resume_origin
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,16 @@ async def _run_continuation(
     # tags), re-deposited via ``run_attribution(...)`` around this ``run_tool`` call, so the
     # resumed run rejoins its originating session. Left to a follow-up (the same known,
     # non-regressing boundary the thread-index binding notes in ``interactions.helper``).
+    #
+    # LIFECYCLE CORRELATION: the ``resume_origin`` deposit names the parked
+    # interaction this fire resumes, so the runs-index chokepoint can link the
+    # resume dispatch's row to the parked dispatch's row (both carry this id).
+    # Flow-blind — an id, never resume state — and covering every resolution door
+    # by construction: answers, the expiry reaper, and reaper redelivery all fire
+    # through this one drive.
     async with bind_execution_identity(identity, bound_fingerprint=fingerprint or ""):
-        await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
+        with resume_origin(interaction_id):
+            await tai42_app.tools.run_tool(tool, {"interaction_id": interaction_id, "answer": answer})
 
 
 async def _run_and_clear(

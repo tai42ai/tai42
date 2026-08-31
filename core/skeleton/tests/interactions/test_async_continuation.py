@@ -387,6 +387,39 @@ async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypat
     assert seen[0]["user_id"] == "svc-key"  # the STORED identity, never "answerer-x"
 
 
+async def test_run_continuation_deposits_resume_origin_for_lifecycle_correlation(wired, monkeypatch):
+    # The runs-index correlation seam: the REAL continuation drive deposits the parked
+    # interaction's id (the ambient ``resume_origin``) around its ``run_tool``
+    # re-entry, so the resume dispatch's runs-index row can name the lifecycle it
+    # continues — and the deposit is scoped to the fire, reset afterwards.
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.authz import execution as execution_module
+    from tai42_skeleton.runs.chokepoint import get_resume_origin
+
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+
+    seen: list[str | None] = []
+
+    async def _fake_run_tool(tool, arguments):
+        seen.append(get_resume_origin())
+        return {"ran": True}
+
+    fake_app = SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool))
+    monkeypatch.setattr(continuation_module, "tai42_app", fake_app)
+
+    await wired.store.add(
+        wired.fake, _async_req(wired.store, iid="ro1"), idle_ttl=86400, continuation_fingerprint="fp-1"
+    )
+    token = set_request_user_id("answerer-x")
+    try:
+        assert await ops.answer_interaction("ro1", "go") == {"interaction_id": "ro1", "status": "answered"}
+    finally:
+        reset_request_user_id(token)
+    await _drain()
+    assert seen == ["ro1"]  # the run_tool re-entry saw the parked interaction's id
+    assert get_resume_origin() is None  # nothing leaks outside the detached fire
+
+
 async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch):
     # The detached continuation task is held by a strong reference while in flight, so
     # it can never be GC-collected mid-resume; the reference is dropped when it ends.
