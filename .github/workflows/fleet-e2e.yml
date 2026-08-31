@@ -112,22 +112,17 @@ jobs:
         run: git config --global url."https://x-access-token:${MP_TOKEN}@github.com/tai42ai/".insteadOf "https://github.com/tai42ai/"
       - name: Sync the locked venv
         # The registry is not in the lock; a marketplace leg installs it out-of-band
-        # at boot from its pinned ref (the git auth above lets that install reach the
-        # PRIVATE source).
+        # at boot into its OWN dedicated venv from its pinned ref (see
+        # tai42_e2e.marketplace._install_marketplace) — deliberately apart from this
+        # workspace venv so the registry's dependency caps never mutate the
+        # workspace's first-party packages. The git auth above lets that install
+        # reach the PRIVATE source. We must NOT `uv pip install` the registry into
+        # THIS venv: its api pins tai42-kit below the workspace's editable kit, so a
+        # reinstall here re-resolves and downgrades kit to a published wheel that
+        # predates the symbols the SOURCE skeleton imports (e.g.
+        # component_binding_declared, added in kit 3.7.0), which then crashes the
+        # Playwright webServer at import.
         run: uv sync --locked --package tai42-e2e
-      - name: Pin the marketplace registry at the dispatched sha
-        # tai-marketplace gates its own sha: reinstall the registry from that sha
-        # on top of the locked venv so the suite exercises the dispatched code.
-        # The package lives under api/ in the monorepo, so the spec targets that
-        # subdirectory.
-        if: github.event.client_payload.repo == 'tai-marketplace'
-        env:
-          MP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          SRC_REF: ${{ github.event.client_payload.ref }}
-        run: |
-          set -euo pipefail
-          [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
-          uv pip install --reinstall "tai42-marketplace @ git+https://x-access-token:${MP_TOKEN}@github.com/tai42ai/tai-marketplace@${SRC_REF}#subdirectory=api"
       - name: Clone tai-studio (dispatched sha when studio-dispatched, else main)
         env:
           SRC_REPO: ${{ github.event.client_payload.repo }}
