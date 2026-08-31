@@ -58,6 +58,10 @@ def test_security_headers_csp_directives():
     csp = security_headers("NONCEVALUE")["content-security-policy"]
     assert "default-src 'none'" in csp
     assert "script-src 'self' 'nonce-NONCEVALUE' 'wasm-unsafe-eval'" in csp
+    # ``worker-src`` is stated explicitly so the Web Worker policy does not silently
+    # inherit the nonce-bearing ``script-src`` (which would block a first-party
+    # ``new Worker(url)`` — e.g. the studio's jq worker).
+    assert "worker-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
     assert "object-src 'none'" in csp
     assert "base-uri 'none'" in csp

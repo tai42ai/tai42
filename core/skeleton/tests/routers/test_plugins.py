@@ -224,6 +224,44 @@ async def test_spa_direct_index_request_is_injected(studio_env):
     assert 'type="importmap"' in bytes(resp.body).decode()
 
 
+async def test_spa_missing_asset_extension_404s_not_shell(studio_env):
+    # A request for a static asset (extension-bearing last segment, not .html) that
+    # does not resolve to a real file is a genuine 404 — NEVER the index.html shell.
+    # Serving the HTML shell for a missing binary asset masks a 404 as a
+    # ``text/html`` body (a missing ``jq.wasm`` then fails wasm streaming compile on
+    # the ``<!do`` bytes). This is the industry-standard SPA-fallback contract.
+    for missing in ("assets/jq-deadbeef.wasm", "assets/vendor-nope.js", "styles/gone.css"):
+        resp = await router.serve_spa(_req(spa_path=missing))
+        assert resp.status_code == 404, missing
+        assert "text/html" not in (resp.headers.get("content-type") or ""), missing
+
+
+async def test_spa_missing_extensionless_route_serves_shell(studio_env):
+    # A history-API deep link (no file extension on the last segment) keeps the
+    # index.html fallthrough so client-side routing works on hard refresh.
+    resp = await router.serve_spa(_req(spa_path="agents/settings"))
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "text/html; charset=utf-8"
+    assert 'type="importmap"' in bytes(resp.body).decode()
+
+
+async def test_spa_existing_wasm_served_as_application_wasm(studio_env):
+    # An existing ``.wasm`` asset streams with ``application/wasm`` so the browser's
+    # streaming compilation (``WebAssembly.instantiateStreaming``) accepts it.
+    (studio_env.dist / "assets" / "jq-a1b2c3.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
+    resp = await router.serve_spa(_req(spa_path="assets/jq-a1b2c3.wasm"))
+    assert resp.status_code == 200
+    assert resp.media_type == "application/wasm"
+
+
+async def test_spa_csp_declares_worker_src_self(studio_env):
+    # ``worker-src 'self'`` is explicit so the Web Worker policy does not silently
+    # inherit ``script-src`` — the studio's jq worker loads first-party.
+    resp = await router.serve_spa(_req(spa_path="tools"))
+    csp = resp.headers["content-security-policy"]
+    assert "worker-src 'self'" in csp
+
+
 async def test_spa_guards_api_paths(studio_env):
     resp = await router.serve_spa(_req(spa_path="api/tools"))
     assert resp.status_code == 404

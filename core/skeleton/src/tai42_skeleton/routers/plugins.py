@@ -13,8 +13,11 @@ callback doors + static Studio UI assets; everything carrying data stays authed)
   ``studio-manifest.json`` file excluded on the realpath basename, long-lived
   caching for content-hashed filenames.
 - ``GET /{path}`` (PUBLIC, SPA history fallback) — serves the built Studio SPA:
-  static files as-is, every other GET falling back to ``index.html`` with the
-  security headers, the per-response CSP nonce, and the injected import map.
+  static files as-is; an extensionless GET (a history-API route) falls back to
+  ``index.html`` with the security headers, the per-response CSP nonce, and the
+  injected import map, while a MISSING static asset (an extension-bearing path
+  that is not ``.html``) is a genuine 404 — never the HTML shell, so a missing
+  binary asset can't be masked as ``text/html`` (the SPA-fallback contract).
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 
@@ -74,6 +77,23 @@ _HASHED_ASSET_PREFIX = "assets/"
 
 def _error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _is_static_asset_request(spa_path: str) -> bool:
+    """True when the request targets a static asset — the last path segment carries
+    a file extension that is not an HTML document (``.js``/``.css``/``.wasm``/…).
+
+    The SPA-fallback contract: an extension-bearing path is a request for a concrete
+    file, so a miss is a genuine 404, NEVER the index.html shell. Serving the shell
+    for a missing binary asset masks a 404 as a ``text/html`` body — a missing
+    ``jq.wasm`` then fails streaming WebAssembly compilation on the ``<!do`` bytes.
+    Extensionless paths (history-API deep links) keep the shell fallthrough so
+    client-side routing survives a hard refresh. ``.html``/``.htm`` are excluded so
+    a missing static HTML page (e.g. an OAuth callback) still degrades to the shell.
+    """
+    last_segment = spa_path.rsplit("/", 1)[-1]
+    suffix = Path(last_segment).suffix.lower()
+    return bool(suffix) and suffix not in (".html", ".htm")
 
 
 # -- Registry listing (AUTHED) -----------------------------------------------
@@ -224,10 +244,15 @@ async def serve_spa(request: Request) -> Response:
         try:
             target = resolve_under(dist_root, spa_path)
         except StudioPluginError as exc:
-            logger.warning("studio SPA path %r escaped the dist root — serving the shell instead: %s", spa_path, exc)
-            return _serve_index(dist_root)
+            logger.warning("studio SPA path %r escaped the dist root — falling through: %s", spa_path, exc)
+            target = None
         # index.html always goes through injection (byte-constant serving would
         # ship it without the import map — a dead app).
-        if target.is_file() and target.name != _INDEX_FILENAME:
+        if target is not None and target.is_file() and target.name != _INDEX_FILENAME:
             return _serve_static(dist_root, spa_path, target)
+        # A static-asset request (extension-bearing last segment, not .html) that did
+        # not resolve to a real file is a genuine 404 — never the index.html shell.
+        # This keeps missing binary assets from being masked as an HTML body.
+        if _is_static_asset_request(spa_path):
+            return _error("not found", 404)
     return _serve_index(dist_root)

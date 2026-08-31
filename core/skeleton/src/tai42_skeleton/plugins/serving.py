@@ -65,12 +65,18 @@ def security_headers(nonce: str) -> dict[str, str]:
     explicitly because they do NOT fall back to ``default-src``. ``img-src`` admits
     ``https:`` so a question's media images render directly from remote https
     origins (``http:`` stays excluded — mixed content); images cannot execute
-    script, so the ``script-src`` posture is unaffected.
+    script, so the ``script-src`` posture is unaffected. ``worker-src 'self'`` is
+    stated explicitly as future-proofing: today workers fall back to
+    ``script-src`` whose ``'self'`` already admits same-origin worker URLs, but a
+    later hardening (e.g. ``'strict-dynamic'``) would silently break them — the
+    explicit directive pins the studio's same-origin jq worker independently of
+    how ``script-src`` evolves.
     """
     csp = "; ".join(
         [
             "default-src 'none'",
             f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'",
+            "worker-src 'self'",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: https:",
             "connect-src 'self'",
