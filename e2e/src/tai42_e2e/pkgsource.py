@@ -345,13 +345,23 @@ class FixturePackageIndex:
         ``docs_files`` maps docs-relative posix paths (e.g. ``"index.mdx"``) to
         their text. Mirrors the pinned fetch shape: the docs subtree lists each file as
         a ``100644`` blob; each blob is served base64-encoded by its git object id. The
-        tag's root tree carries the ``docs`` subtree — directly at the root for a
-        standalone repo (``subpath=""``), or nested under each ``subpath`` segment for a
-        monorepo subdir listing (``plugins/connector-iota`` → root → ``plugins`` →
-        ``connector-iota`` → ``docs``), the exact segment-by-segment walk the docs ingest
-        makes to the docs subtree SHA. The root tree is addressable by BOTH the tag and
-        its own sha, so a fetch resolving the tag's root tree in one hop and one walking a
-        ref → root-sha first both land."""
+        tag's root tree carries the ``docs`` subtree, reached by walking ``subpath`` —
+        the in-repo segment path that PRECEDES the ``docs`` directory, matching the
+        registry's own ``_docs_dir_segments``:
+
+        * a descriptor-only (package-less) standalone listing has its ``docs`` at the
+          root (``subpath=""``);
+        * a descriptor-only monorepo subdir listing nests it under the listing subpath
+          (``plugins/connector-iota`` → root → ``plugins`` → ``connector-iota`` →
+          ``docs``);
+        * a PACKAGED github plugin uses the src-layout (``src/<import package>/docs`` —
+          the distribution name dash→underscore), so its caller passes
+          ``subpath="src/<import package>"``.
+
+        Whatever the segments, this stages the exact segment-by-segment walk the docs
+        ingest makes to the docs subtree SHA. The root tree is addressable by BOTH the
+        tag and its own sha, so a fetch resolving the tag's root tree in one hop and one
+        walking a ref → root-sha first both land."""
         blobs: dict[str, bytes] = {name: text.encode("utf-8") for name, text in docs_files.items()}
         docs_entries = [
             {

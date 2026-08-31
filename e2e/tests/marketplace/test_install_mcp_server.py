@@ -86,14 +86,6 @@ def _bound_tools(bound: dict[str, list[str]]) -> set[str]:
     return set(bound.get(ETA_MCP_TITLE) or [])
 
 
-@pytest.mark.skip(
-    reason="Full-stack mcp-server install verifies against the marketplace's mcp-server "
-    "ingest branch and the mcp-server contract kind. Both ship in the release wave this "
-    "check gates: the ingest lives only on the unpushed marketplace commit, and the "
-    "isolated registry venv resolves tai42-contract from PyPI where the mcp-server kind is "
-    "not yet published. Verified post-release, after _MARKETPLACE_PIN (marketplace.py) is "
-    "bumped to the published mcp-server marketplace commit."
-)
 async def test_install_go_live_and_uninstall_mcp_server(
     marketplace_service: MarketplaceService,
     package_index: FixturePackageIndex,
@@ -140,13 +132,6 @@ async def test_install_go_live_and_uninstall_mcp_server(
     )
 
 
-@pytest.mark.skip(
-    reason="Full-stack mcp-server preview verifies against the marketplace's mcp-server "
-    "ingest branch and the mcp-server contract kind, both shipping in the release wave this "
-    "check gates (the ingest lives only on the unpushed marketplace commit; the isolated "
-    "registry venv resolves tai42-contract from PyPI where the mcp-server kind is not yet "
-    "published). Verified post-release, after _MARKETPLACE_PIN (marketplace.py) is bumped."
-)
 async def test_eta_preview_reports_no_required_env_and_package_delivery(
     marketplace_service: MarketplaceService,
     package_index: FixturePackageIndex,

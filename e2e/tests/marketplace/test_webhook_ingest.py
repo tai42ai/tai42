@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from tai42_e2e.marketplace import (
+    DELTA_PACKAGE,
     DELTA_REF,
     DELTA_REPOSITORY_URL,
     IOTA_MONOREPO_NAME,
@@ -45,18 +46,10 @@ _IOTA_IDP_BASE = "https://iota-idp.invalid"
 
 pytestmark = [
     pytest.mark.backendless,
-    # PUBLISH-CIRCULAR (same pin bump as the mcp-server leg): the assertions here require the
-    # marketplace's github docs-ingest branch that fetches the tag's docs index over the
-    # git-data ``/git/trees/`` + ``/git/blobs/`` surfaces — a branch the e2e's pinned
-    # marketplace lacks. The e2e installs tai42-marketplace at ``_MARKETPLACE_PIN``
-    # (marketplace.py), which has no git-tree docs ingest, so ``sum('/git/trees/' ...) >= 1``
-    # is unsatisfiable until the pin is bumped to a marketplace carrying that branch. Verified
-    # alongside test_install_mcp_server, after ``_MARKETPLACE_PIN`` is bumped.
-    pytest.mark.skip(
-        reason="Publish-circular: asserts the marketplace github docs-ingest "
-        "(/git/trees + /git/blobs), which the e2e's pinned _MARKETPLACE_PIN marketplace "
-        "lacks. Un-skipped after the pin is bumped to a marketplace carrying it."
-    ),
+    # The github docs-ingest branch this module asserts — the tag's docs index fetched over
+    # the git-data ``/git/trees/`` + ``/git/blobs/`` surfaces — rides the ``_MARKETPLACE_PIN``
+    # registry (marketplace.py), so ``sum('/git/trees/' ...) >= 1`` is satisfied and these legs
+    # run end to end.
     # The github-ingest path here reads the in-process FixturePackageIndex (the release
     # surfaces it serves + the source=github ingest). Under TAI_E2E_REAL=marketplace-github the
     # ingest goes to real github, so this is the github-ingest mock leg — it steps aside. The
@@ -70,6 +63,12 @@ pytestmark = [
 ]
 
 _REPO_FULL_NAME = "tai42ai/tai-e2e-market-delta"
+
+# Delta is a PACKAGED github plugin (it ships a wheel/src layout), so the marketplace's
+# github docs-ingest walks the src-layout path ``src/<import package>/docs`` for its docs
+# tree — NOT the root ``docs/`` a descriptor-only (package-less) listing uses. The import
+# package is the distribution name with dashes→underscores (delta's src-layout dir).
+_DELTA_DOCS_SUBPATH = f"src/{DELTA_PACKAGE.replace('-', '_')}"
 
 # The mandatory docs landing page the github docs ingest fetches over the tree/blob
 # surfaces for delta's tag. Keyed docs-relative, so ``index.mdx``
@@ -113,8 +112,9 @@ async def test_signed_webhook_ingests_github_source(
     # from; the tag webhook fetches later versions' specs over the contents surface.
     package_index.register_github_release("v0.1.0", fixture_artifacts.delta_v1.plugin_yml)
     # Stage the tag's docs tree too: the github docs-ingest fetches docs over the tree/blob
-    # surfaces (never the tarball), and a published version must carry its docs index.
-    package_index.register_github_docs_tree("v0.1.0", _DELTA_DOCS)
+    # surfaces (never the tarball), and a published version must carry its docs index. Delta
+    # is a PACKAGED plugin, so the ingest walks the src-layout ``src/<import package>/docs``.
+    package_index.register_github_docs_tree("v0.1.0", _DELTA_DOCS, subpath=_DELTA_DOCS_SUBPATH)
     seeded = await mp.api.post(
         "/api/v1/admin/seed",
         json={
@@ -155,7 +155,7 @@ async def test_signed_webhook_ingests_github_source(
     # webhook fetches the spec at ``?ref=v0.2.0``, so the tag serves its own
     # stamped 0.2.0 spec (a version mismatch would be rejected).
     package_index.register_github_release("v0.2.0", fixture_artifacts.delta_v2.plugin_yml)
-    package_index.register_github_docs_tree("v0.2.0", _DELTA_DOCS)
+    package_index.register_github_docs_tree("v0.2.0", _DELTA_DOCS, subpath=_DELTA_DOCS_SUBPATH)
     body = {
         "ref": "refs/tags/v0.2.0",
         "repository": {"html_url": DELTA_REPOSITORY_URL, "full_name": _REPO_FULL_NAME},

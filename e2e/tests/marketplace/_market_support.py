@@ -35,8 +35,9 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
 # The registry venv not being built yet is the only benign reason this gate reads
-# False in a normal run: the checked-in pin resolves tai42-contract 2.x, so a booted
-# registry accepts declared routes and these legs RUN. The lazy-install skip only
+# False in a normal run: the checked-in pin resolves tai42-contract 4.x (whose PluginSpec
+# still carries the contract-2.0 `routes` field), so a booted registry accepts declared
+# routes and these legs RUN. The lazy-install skip only
 # fires if a leg somehow ran before its ``marketplace_service`` fixture booted the
 # registry; a dispatched ref (TAI_E2E_MARKETPLACE_REF) turns that into a hard fail.
 _DECLARED_ROUTES_SKIP_REASON = (
@@ -50,8 +51,9 @@ def skip_unless_registry_supports_declared_routes() -> None:
     epsilon_v2 / theta) on the registry's route capability
     (:func:`registry_supports_declared_routes`).
 
-    In a normal run the resolved registry ref runs tai42-contract 2.x, so this is a
-    no-op and the leg proceeds. When the gate is False the action depends on whether
+    In a normal run the resolved registry ref runs tai42-contract 4.x (which still
+    carries the contract-2.0 ``routes`` field), so this is a no-op and the leg proceeds.
+    When the gate is False the action depends on whether
     a registry ref was DISPATCHED (:func:`declared_routes_dispatch_failure`):
 
     * ref dispatched (``TAI_E2E_MARKETPLACE_REF`` set) → ``pytest.fail`` with the

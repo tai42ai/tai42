@@ -173,17 +173,9 @@ async def test_skeleton_proxy_parity(marketplace_service: MarketplaceService, ma
 
 
 # Defined LAST so it seeds iota only after the exact-membership legs above have run
-# against the pristine alpha/beta/gamma catalog. Publish-circular skipped like every
-# descriptor leg: the spec-source ingest lives only on the unpushed marketplace, and the
-# isolated registry venv resolves tai42-contract from PyPI where the package-optional
-# PluginSpec + connector kind are not yet published — un-skipped after _MARKETPLACE_PIN
-# (marketplace.py) is bumped to the descriptor-capable commit.
-@pytest.mark.skip(
-    reason="Publish-circular: the spec-source (source='spec') ingest lives only on the unpushed "
-    "marketplace; the isolated registry venv resolves tai42-contract from PyPI where the "
-    "package-optional PluginSpec + connector kind are not yet published. Un-skipped after "
-    "_MARKETPLACE_PIN (marketplace.py) is bumped."
-)
+# against the pristine alpha/beta/gamma catalog. The spec-source (``source='spec'``) ingest
+# — package-optional PluginSpec + connector kind — rides the ``_MARKETPLACE_PIN`` registry
+# (marketplace.py), so the descriptor listing publishes and browses here.
 async def test_descriptor_listing_browses_as_spec_connector(
     marketplace_service: MarketplaceService, package_index: FixturePackageIndex
 ) -> None:

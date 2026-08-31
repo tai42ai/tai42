@@ -59,13 +59,17 @@ _MARKETPLACE_GIT_URL = "https://github.com/tai42ai/tai-marketplace"
 # that CLI path and nothing older. An unresolvable pin fails the out-of-band
 # install loudly rather than silently resolving an older ``db init``-only ref.
 #
-# This pin runs a routes-capable tai-marketplace (tai42-contract >=2, whose
-# PluginSpec carries the ``routes`` field), so the registry accepts route-carrying
-# fixture specs at seed time and the route-marketplace legs RUN (they gate on
-# :func:`registry_supports_declared_routes`, which is satisfied here). This commit
-# is the first tai-marketplace with the contract-2 route surface (api pins
-# tai42-contract >=2,<3 + tai42-kit >=2,<3, resolving contract 2.1.0 + kit 2.0.0).
-_MARKETPLACE_PIN = "19b1ce33fd46baafff5f39a83003c5aa54ab8c53"
+# This pin runs the contract-4.x-era tai-marketplace: it carries the whole ingest
+# surface the marketplace suite drives — the descriptor-only (``source='spec'``)
+# listings branch (package-optional PluginSpec + connector kind), the mcp-server
+# ingest branch (contract-less ``mcp-server``-kind items), and the github
+# docs-ingest over the git-data ``/git/trees`` + ``/git/blobs`` surfaces — plus the
+# declared-plugin-routes surface the pre-4 pin already had. The api pins
+# tai42-contract >=4.1,<5 + tai42-kit[postgres] >=3.5,<4, resolving contract 4.2.0
+# against the v4 fleet, so the registry accepts route-carrying fixture specs at
+# seed time and the route-marketplace legs RUN (they gate on
+# :func:`registry_supports_declared_routes`, satisfied here).
+_MARKETPLACE_PIN = "2c22ee1ee2fc65696608fc5f1888dce2497145f3"
 
 # The first tai42-contract major whose PluginSpec accepts a declared ``routes``
 # field (contract 2.0). A registry venv below it rejects route-carrying specs.
@@ -143,8 +147,8 @@ def registry_supports_declared_routes() -> bool:
 
     Gates every e2e leg that admin-seeds a route-carrying fixture (epsilon /
     epsilon_v2 / theta) into the registry. The resolved ref (:func:`_marketplace_ref`)
-    runs a routes-capable tai-marketplace today (``_MARKETPLACE_PIN`` 19b1ce3 resolves
-    tai42-contract 2.x, whose PluginSpec carries ``routes``), so this is TRUE in a
+    runs a routes-capable tai-marketplace today (``_MARKETPLACE_PIN`` 2c22ee1 resolves
+    tai42-contract 4.x, whose PluginSpec carries ``routes``), so this is TRUE in a
     normal run and those legs RUN. The gate remains as a guard, not a release-window
     skip: it degrades to skip only when the registry venv is not yet built (lazy
     install), and — when a ref is DISPATCHED via ``TAI_E2E_MARKETPLACE_REF`` — a False
@@ -541,17 +545,36 @@ def render_iota_descriptor(idp_base_url: str, version: str, *, name: str = IOTA_
     ``0.1.0`` grants the single ``read`` scope; ``0.2.0`` adds ``write`` (the visible
     update delta). ``name`` overrides the top-level plugin name for the monorepo-style
     listing (its component tag routes to ``<namespace>-<name>``); the provider id stays
-    ``iota`` regardless. The MCP/oauth endpoints resolve to the stack's OAuth/MCP stub."""
+    ``iota`` regardless. The MCP/oauth endpoints resolve to the stack's OAuth/MCP stub.
+
+    The declared ``contract`` range is stamped to the workspace's own contract band
+    (:func:`_workspace_contract_range`), exactly as the wheel forge stamps every
+    contract-bearing fixture: the registry stores the descriptor's declared range and
+    returns it at resolve, where the installer gates it against the running
+    ``tai42-contract`` — a static range would go stale the moment a release window moved
+    the workspace contract past it (it was authored ``>=2,<3`` in the contract-2 era)."""
     scope_lines = [IOTA_SCOPE_V1] if version == IOTA_VERSION_V1 else [IOTA_SCOPE_V1, IOTA_SCOPE_V2_ADDED]
     scopes = "\n".join(f"            - {scope}" for scope in scope_lines)
-    values = {"IDP_BASE_URL": idp_base_url.rstrip("/"), "NAME": name, "VERSION": version, "SCOPES": scopes}
+    values = {
+        "IDP_BASE_URL": idp_base_url.rstrip("/"),
+        "NAME": name,
+        "VERSION": version,
+        "SCOPES": scopes,
+        "CONTRACT": _workspace_contract_range(),
+    }
     return render_descriptor_fixture(_descriptor_template("iota"), values).decode("utf-8")
 
 
 def render_kappa_descriptor(python: str) -> str:
     """Render the kappa no-auth-connector descriptor, launching the managed stdio MCP
-    server with ``python`` (the SUT interpreter that already has ``tai42_e2e_fixtures``)."""
-    return render_descriptor_fixture(_descriptor_template("kappa"), {"PYTHON": python}).decode("utf-8")
+    server with ``python`` (the SUT interpreter that already has ``tai42_e2e_fixtures``).
+
+    The declared ``contract`` range is stamped to the workspace band
+    (:func:`_workspace_contract_range`) like :func:`render_iota_descriptor`, so the
+    installer's resolve-time contract gate tracks the running ``tai42-contract`` instead
+    of the stale ``>=2,<3`` the template carried from the contract-2 era."""
+    values = {"PYTHON": python, "CONTRACT": _workspace_contract_range()}
+    return render_descriptor_fixture(_descriptor_template("kappa"), values).decode("utf-8")
 
 
 @dataclass

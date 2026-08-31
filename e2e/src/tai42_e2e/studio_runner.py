@@ -388,9 +388,10 @@ def _start_marketplace(infra: Infra, root: Path, runner: StudioRunnerSettings) -
         # while the shared pytest catalog stays alpha/beta/gamma. Its kinds are neither
         # tool nor extension, so it never disturbs the existing browse assertions.
         #
-        # Epsilon carries a declared `routes` block (contract 2.0). The resolved
-        # registry ref runs tai42-contract 2.x, so the registry accepts `routes` at
-        # seed time and this seed RUNS, mirroring the pytest route legs' gate. The gate
+        # Epsilon carries a declared `routes` block (contract 2.0's PluginSpec field).
+        # The resolved registry ref runs tai42-contract 4.x, which still carries that
+        # `routes` field, so the registry accepts `routes` at seed time and this seed
+        # RUNS, mirroring the pytest route legs' gate. The gate
         # only degrades to a skipped seed if the registry venv is not yet built; when a
         # ref is DISPATCHED (TAI_E2E_MARKETPLACE_REF), a False gate is escalated to a
         # hard failure with the dual-cause detail (ordering bug vs contract-floor
