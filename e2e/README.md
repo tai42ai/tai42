@@ -177,3 +177,17 @@ TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
 # the browser legs (built Studio dist + the tai-marketplace/web checkout):
 cd ui && TAI_E2E_MARKETPLACE=1 pnpm exec playwright test tests/marketplace.spec.ts tests/marketplace-web.spec.ts
 ```
+
+`TAI_E2E_MARKETPLACE_REF` (unset by default) pins the registry to a specific
+tai-marketplace commit instead of the checked-in pin: the value must be a full
+40-char lowercase-hex sha, the dedicated registry venv is keyed by it, and the
+out-of-band install resolves that commit. The fleet-e2e workflow sets it to the
+source sha under test when a tai-marketplace push drives the run, so the registry
+boots at the exact commit being validated. When it is set, a route-carrying leg
+whose registry cannot accept declared routes FAILS (rather than skips), naming
+whether the registry venv was absent (a harness ordering bug) or the dispatched
+ref regressed its tai42-contract floor. Reproduce a dispatched run locally:
+
+```bash
+TAI_E2E_MARKETPLACE_REF=<40-hex-sha> TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
+```
