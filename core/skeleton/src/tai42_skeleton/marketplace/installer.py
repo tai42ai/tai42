@@ -1363,7 +1363,10 @@ class Installer:
         ``PluginSpec`` (a malformed spec is a registry-data fault → 502, never a
         caller 400), requires the github artifact provenance (repository_url + tag
         for display, artifact_ref + sha256 for the verified fetch), and checks the
-        plugin's ``contract_range`` against the installed ``tai42-contract`` version.
+        plugin's ``contract_range`` against the installed ``tai42-contract`` version
+        WHEN one is declared — a contract-less plugin (an mcp-server, or a
+        descriptor-only connector shipping no package) imports no ``tai42-contract``,
+        so the registry serves ``contract_range`` null and there is nothing to gate.
         """
         for advisory in _require_list(resolved, "advisories"):
             if advisory.get("withdrawn_at") is None and advisory.get("severity") == "critical":
@@ -1394,21 +1397,27 @@ class Installer:
         elif source != "pypi":
             raise RegistryResponseError(f"registry returned an unknown install source {source!r}", status=None)
 
-        self._check_contract(_require(resolved, "contract_range"))
+        # A contract-BEARING plugin declares a range; a contract-less one (mcp-server /
+        # descriptor-only connector) has ``contract_range`` null — no constraint to gate,
+        # counted compatible, MATCHING ``compat.update_targets`` (a null range there also
+        # counts compatible). Only a present (non-null) range is checked.
+        contract_range = resolved.get("contract_range")
+        if contract_range is not None:
+            self._check_contract(contract_range)
         return spec, source
 
     def _check_contract(self, contract_range: str) -> None:
         """Require the installed ``tai42-contract`` version to satisfy the plugin's
-        ``contract_range``.
+        declared ``contract_range``.
 
         ``prereleases=True`` so a dev-versioned tai42-contract (an editable checkout
         reporting e.g. ``0.5.0.dev3``) inside the range still passes — a developer
         environment is not spuriously refused. A malformed range is registry data
         → 502, never a caller 400.
         """
-        # ``contract_range`` is a non-null string by construction — ``_require``
-        # rejects a null and the registry client's resolve boundary types the field
-        # when present — so this check owns only the string's FORMAT: a non-PEP440
+        # The caller only invokes this with a PRESENT (non-null) range — a contract-less
+        # plugin is skipped upstream — and the registry client's resolve boundary types
+        # the field when present, so this check owns only the string's FORMAT: a non-PEP440
         # specifier set is garbled registry data → 502, never a caller 400.
         try:
             specifier = SpecifierSet(contract_range)
@@ -1575,10 +1584,12 @@ def _require(resolved: dict[str, Any], key: str) -> Any:
     registry-data fault (502).
 
     The client boundary type-checks a field only when it is present and non-null
-    (a null there is legitimate for the github-only optional pins), so ``required``
-    has to mean non-null here: a null in an always-present field (``version``,
-    ``contract_range``, ``spec``, ``source``) is missing data, and rejecting it
-    keeps the ``str``-typed parsers downstream honest — they never see ``None``."""
+    (a null there is legitimate for the github-only optional pins and for a
+    contract-less plugin's ``contract_range``), so ``required`` has to mean non-null
+    here: a null in an always-present field (``version``, ``spec``, ``source``) is
+    missing data, and rejecting it keeps the ``str``-typed parsers downstream honest —
+    they never see ``None``. (``contract_range`` is NOT required here: a contract-less
+    plugin legitimately carries a null one, gated by presence at its own use site.)"""
     value = resolved.get(key)
     if value is None:
         raise RegistryResponseError(f"registry resolve response is missing {key!r}", status=None)

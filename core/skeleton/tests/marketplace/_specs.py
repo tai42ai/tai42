@@ -150,7 +150,7 @@ def make_resolved(
     artifact_ref: str | None = None,
     sha256: str | None = None,
     advisories: list[dict[str, Any]] | None = None,
-    contract_range: str = DEFAULT_CONTRACT_RANGE,
+    contract_range: str | None = DEFAULT_CONTRACT_RANGE,
 ) -> dict[str, Any]:
     """The registry resolve-response dict the installer consumes.
 
