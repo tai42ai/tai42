@@ -77,6 +77,12 @@ class _MemStore(VersionedStore):
     async def list_active_bodies(self, kind) -> dict[str, dict[str, Any]]:
         return {n: dict(d["versions"][d["active"]][0]) for (k, n), d in self.docs.items() if k == kind}
 
+    async def list_active_versioned_bodies(self, kind) -> dict[str, tuple[int, dict[str, Any]]]:
+        # The version-aware sibling of ``list_active_bodies``: each active body is
+        # paired with its active version in one read, mirroring the concrete store's
+        # single-JOIN read the preset rehydration path relies on.
+        return {n: (d["active"], dict(d["versions"][d["active"]][0])) for (k, n), d in self.docs.items() if k == kind}
+
     async def get(self, kind, name) -> DocumentRecord:
         doc = self._require(kind, name)
         return DocumentRecord(kind=kind, name=name, active_version=doc["active"], is_active=True, created_at="t")
