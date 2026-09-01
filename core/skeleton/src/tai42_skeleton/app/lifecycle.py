@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.presets.write_validators import PresetWriteValidatorRegistry
     from tai42_skeleton.sandbox import SandboxHolder
     from tai42_skeleton.template import ResourceManager
-    from tai42_skeleton.tools import ToolRefsRegistry
+    from tai42_skeleton.tools import ToolRefsRegistry, ToolRetryRegistry
     from tai42_skeleton.tools.binding import ToolBinding
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
@@ -319,6 +319,10 @@ class TaiMCPLifecycleMixin(ABC):
     @property
     def _tool_refs_registry(self) -> "ToolRefsRegistry":
         return self._serving_core._tool_refs_registry
+
+    @property
+    def _tool_retry_registry(self) -> "ToolRetryRegistry":
+        return self._serving_core._tool_retry_registry
 
     @property
     def _rename_referee_registry(self) -> "ToolRenameRefereeRegistry":
@@ -857,6 +861,11 @@ class TaiMCPLifecycleMixin(ABC):
         # update()/reload — the manifest's tool modules re-run their
         # @app.tools.tool(tool_refs=...) decorator each start(). Mirrors the reset above.
         self._tool_refs_registry.reset()
+
+        # Reset the per-tool retry-policy declarations for the same reload reason —
+        # a dropped @app.tools.tool(retry=...) declaration must not keep retrying a
+        # tool that no longer claims idempotency.
+        self._tool_retry_registry.reset()
 
         # Reset the rename-referee collection and the declared-preset-seed registry
         # alongside the registries above: a reload re-imports the plugin modules (which

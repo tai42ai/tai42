@@ -19,6 +19,13 @@ from tai42_contract.tools.invocation import (
     reset_current_tool_invocation,
     set_current_tool_invocation,
 )
+from tai42_contract.tools.retry import (
+    DEFAULT_RETRYABLE_KINDS,
+    MAX_ATTEMPTS_CEILING,
+    NEVER_RETRYABLE_KINDS,
+    ToolRetryBackoff,
+    ToolRetryPolicy,
+)
 
 if TYPE_CHECKING:
     from fastmcp.tools import Tool
@@ -65,12 +72,20 @@ class AppTools(Protocol):
     # Both keep the wrapped function's type. ``tool_refs`` is the optional declared
     # extractor for the composed tool names a preset of this base tool carries in
     # its baked ``fixed_kwargs`` (registered only when the manifest includes the
-    # tool).
+    # tool). ``retry`` is the optional declared :class:`ToolRetryPolicy` the host
+    # dispatch seam retries transient failures of this tool under (likewise
+    # registered only when the manifest includes the tool; no declaration = one
+    # attempt, exactly).
     @overload
     def tool(self, func: F, /) -> F: ...
     @overload
     def tool(
-        self, *args: Any, force: bool = False, tool_refs: ToolRefsExtractor | None = None, **kwargs: Any
+        self,
+        *args: Any,
+        force: bool = False,
+        tool_refs: ToolRefsExtractor | None = None,
+        retry: ToolRetryPolicy | None = None,
+        **kwargs: Any,
     ) -> Callable[[F], F]: ...
 
     @overload
@@ -117,11 +132,16 @@ class AppTools(Protocol):
 
 
 __all__ = [
+    "DEFAULT_RETRYABLE_KINDS",
+    "MAX_ATTEMPTS_CEILING",
+    "NEVER_RETRYABLE_KINDS",
     "AppTools",
     "ToolInfo",
     "ToolInvocation",
     "ToolRefsExtractor",
     "ToolRenameReferee",
+    "ToolRetryBackoff",
+    "ToolRetryPolicy",
     "current_tool_invocation",
     "reset_current_tool_invocation",
     "set_current_tool_invocation",
