@@ -1,15 +1,21 @@
-"""A REAL two-transaction Postgres concurrency test for the ``for_update`` locked read.
+"""REAL two-transaction Postgres concurrency tests for the versioned-document store.
 
-Proves the non-JOIN two-statement lock in ``PostgresVersionedStore.get_active_body`` does
-NOT raise a spurious ``DocumentNotFoundError`` when a second concurrent editor blocks on
-the row lock and the first commits a NEW active version. A single ``JOIN ... FOR UPDATE``
-trips an EvalPlanQual hazard under READ COMMITTED: the blocked scan re-evaluates the
-version join under its ORIGINAL snapshot, where the just-committed version row is
-invisible, and finds 0 rows for a document that plainly exists.
+Two races, both needing genuine MVCC + row locking:
 
-This needs real Postgres MVCC — there is no fake here. It is OPT-IN: set
-``TAI42_SKELETON_REAL_PG=1`` and point ``TAI_DATABASE_DEFAULT_PG_*`` at a live Postgres.
-Without the opt-in the test SKIPS VISIBLY with a clear reason (never a silent skip).
+* the ``for_update`` locked read: the non-JOIN two-statement lock in
+  ``PostgresVersionedStore.get_active_body`` must NOT raise a spurious
+  ``DocumentNotFoundError`` when a second concurrent editor blocks on the row lock and
+  the first commits a NEW active version. A single ``JOIN ... FOR UPDATE`` trips an
+  EvalPlanQual hazard under READ COMMITTED: the blocked scan re-evaluates the version
+  join under its ORIGINAL snapshot, where the just-committed version row is invisible,
+  and finds 0 rows for a document that plainly exists;
+* the concurrent-boot SEED claim: two replicas creating the same ``(kind, name)`` must
+  converge on ONE active document, and the loser must keep a USABLE transaction — a
+  raised unique violation would abort its whole unit of work.
+
+There is no fake here. These are OPT-IN: set ``TAI42_SKELETON_REAL_PG=1`` and point
+``TAI_DATABASE_DEFAULT_PG_*`` at a live Postgres. Without the opt-in they SKIP VISIBLY
+with a clear reason (never a silent skip).
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from collections.abc import AsyncIterator
 from typing import LiteralString
 
 import pytest
+from tai42_contract.versioning.errors import DocumentExistsError
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings
@@ -120,3 +127,46 @@ async def test_concurrent_editor_reads_committed_body_no_spurious_404(real_store
     await writer
 
     assert body == {"gen": 2}
+
+
+async def test_concurrent_seed_claims_converge_on_the_winner(real_store):
+    # Two platform replicas booting against one Postgres apply the same declared seed:
+    # both find the document absent and both claim it. The winner inserts; the loser's
+    # insert BLOCKS on the uncommitted index entry, then — once the winner commits —
+    # must resolve to "already seeded" WITHOUT aborting its transaction, so it can read
+    # the winner's body on that same unit of work and commit. A create that let the
+    # unique violation raise leaves the loser's transaction aborted, so this read dies
+    # with InFailedSqlTransaction and the boot handler takes the replica down.
+    store, kind = real_store
+    name = "editor"
+    winner_body = {"grants": {"tools": "write"}}
+
+    claimed = asyncio.Event()
+    loser_started = asyncio.Event()
+
+    async def winning_replica() -> None:
+        async with store.transaction() as tx:
+            await store.create(kind, name, winner_body, tx=tx)
+            claimed.set()
+            await loser_started.wait()
+            # Let the loser's INSERT reach Postgres and block on this uncommitted index
+            # entry BEFORE this transaction commits — the exact concurrent-boot race.
+            await asyncio.sleep(0.5)
+
+    async def losing_replica() -> dict:
+        await claimed.wait()
+        async with store.transaction() as tx:
+            loser_started.set()
+            with pytest.raises(DocumentExistsError):
+                await store.create(kind, name, {"grants": {"tools": "read"}}, tx=tx)
+            return await store.get_active_body(kind, name, tx=tx)
+
+    winner = asyncio.create_task(winning_replica())
+    seen_by_loser = await losing_replica()
+    await winner
+
+    # First writer wins, the loser read it, and the seed is stored exactly once.
+    assert seen_by_loser == winner_body
+    assert await store.get_active_body(kind, name) == winner_body
+    assert [record.name for record in await store.list(kind)] == [name]
+    assert [version.version for version in await store.list_versions(kind, name)] == [1]

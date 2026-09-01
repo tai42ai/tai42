@@ -7,9 +7,15 @@ to the real Postgres semantics the store leans on:
 
 * ``transaction()`` snapshots the tables on enter and RESTORES them on an
   exception (a real rollback), so a partial-failure write leaves no orphan;
+* a statement that RAISES inside a transaction ABORTS it, exactly as Postgres does:
+  every later statement on that connection fails with ``InFailedSqlTransaction``
+  until the block ends. Without this, a fake would silently accept work a real
+  database refuses and hide a poisoned-transaction defect;
 * the partial-unique index ``versioned_documents_active_name_unique`` is enforced
-  — inserting a second ACTIVE row for a ``(kind, name)`` raises a
-  ``UniqueViolation`` carrying the index name (as psycopg reports it);
+  — a second ACTIVE row for a ``(kind, name)`` is refused. A plain insert raises a
+  ``UniqueViolation`` carrying the index name (as psycopg reports it); an insert
+  carrying the store's ``ON CONFLICT ... DO NOTHING`` inference instead writes
+  nothing and returns no row;
 * the FK ``ON DELETE CASCADE`` removes a document's version rows with its row.
 
 An injectable ``fault`` forces a chosen statement to raise, driving the
@@ -25,7 +31,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from psycopg.errors import UniqueViolation
+from psycopg.errors import InFailedSqlTransaction, UniqueViolation
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
@@ -58,25 +64,32 @@ def _unwrap(value: Any) -> Any:
 
 
 class _FakeTxn:
-    """Snapshot-and-restore savepoint: rolls the tables back on any exception."""
+    """Snapshot-and-restore savepoint: rolls the tables back on any exception, and
+    marks the connection's transaction block open/closed so an erroring statement
+    inside it aborts the block (and a clean exit clears the abort)."""
 
-    def __init__(self, pg: FakeVersioningPg) -> None:
+    def __init__(self, pg: FakeVersioningPg, conn: _FakeConn) -> None:
         self._pg = pg
+        self._conn = conn
         self._snapshot: tuple[list[dict], list[dict]] | None = None
 
     async def __aenter__(self) -> _FakeTxn:
         self._snapshot = (copy.deepcopy(self._pg.documents), copy.deepcopy(self._pg.versions))
+        self._conn.in_transaction = True
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         if exc_type is not None and self._snapshot is not None:
             self._pg.documents, self._pg.versions = self._snapshot
+        self._conn.in_transaction = False
+        self._conn.aborted = False
         return False
 
 
 class _FakeCursor:
-    def __init__(self, pg: FakeVersioningPg) -> None:
+    def __init__(self, pg: FakeVersioningPg, conn: _FakeConn) -> None:
         self._pg = pg
+        self._conn = conn
         self.rowcount = 0
         self._one: Any = None
         self._all: list = []
@@ -88,6 +101,18 @@ class _FakeCursor:
         return False
 
     async def execute(self, sql: str, params: tuple = ()) -> None:
+        # A transaction block that already took a statement error refuses everything
+        # until it ends — the real Postgres rule the store's writes are shaped around.
+        if self._conn.aborted:
+            raise InFailedSqlTransaction("current transaction is aborted, commands ignored until end of transaction")
+        try:
+            await self._execute(sql, params)
+        except Exception:
+            if self._conn.in_transaction:
+                self._conn.aborted = True
+            raise
+
+    async def _execute(self, sql: str, params: tuple = ()) -> None:
         norm = " ".join(sql.split())
         pg = self._pg
         pg.executed.append(norm)
@@ -100,7 +125,14 @@ class _FakeCursor:
         if norm.startswith("INSERT INTO versioned_documents"):
             kind, name = params
             if any(d["kind"] == kind and d["name"] == name and d["is_active"] for d in pg.documents):
-                raise _ActiveNameViolation()
+                # ``ON CONFLICT ... DO NOTHING`` absorbs the live duplicate (nothing
+                # written, empty RETURNING); a plain insert trips the index.
+                # The fake pins the EXACT arbiter the migration's partial index
+                # supports; any drift (columns, predicate, action) must fail
+                # offline the way Postgres would reject or mis-absorb it.
+                if "ON CONFLICT (kind, name) WHERE is_active DO NOTHING" not in norm:
+                    raise _ActiveNameViolation()
+                return
             doc = {
                 "id": pg.next_doc_id(),
                 "kind": kind,
@@ -259,6 +291,10 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self, pg: FakeVersioningPg) -> None:
         self._pg = pg
+        # Transaction-block state, shared by every cursor opened on this connection:
+        # ``aborted`` is set by an erroring statement inside an open block.
+        self.in_transaction = False
+        self.aborted = False
 
     async def __aenter__(self) -> _FakeConn:
         return self
@@ -267,10 +303,10 @@ class _FakeConn:
         return False
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self._pg)
+        return _FakeCursor(self._pg, self)
 
     def transaction(self) -> _FakeTxn:
-        return _FakeTxn(self._pg)
+        return _FakeTxn(self._pg, self)
 
 
 class FakeVersioningPg:

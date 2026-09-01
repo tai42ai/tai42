@@ -56,6 +56,23 @@ async def test_duplicate_active_create_raises(pg, store):
     assert (exc.value.kind, exc.value.name) == ("preset", "dup")
 
 
+async def test_losing_create_leaves_its_transaction_usable(pg, store):
+    # The concurrent-boot seed race: two replicas apply the same declared seed, one wins
+    # the active-name claim. The LOSER must be able to treat "a sibling seeded this" as
+    # success and go on using its unit of work — reading the winner's body on the SAME
+    # transaction and committing. A create that let the duplicate RAISE would abort the
+    # whole transaction, so the loser's next statement would die with
+    # InFailedSqlTransaction instead.
+    await store.create("role", "editor", {"grants": "winner"})
+    async with store.transaction() as tx:
+        with pytest.raises(DocumentExistsError):
+            await store.create("role", "editor", {"grants": "loser"}, tx=tx)
+        assert await store.get_active_body("role", "editor", tx=tx) == {"grants": "winner"}
+    # First writer wins: exactly one active row, one version, the winner's body.
+    assert [(d["kind"], d["name"]) for d in pg.documents] == [("role", "editor")]
+    assert [v["body"] for v in pg.versions] == [{"grants": "winner"}]
+
+
 async def test_non_active_name_unique_violation_reraises(pg, store):
     # A unique violation that is NOT the active-name index must propagate RAW —
     # never be mis-mapped to DocumentExistsError (which is reserved for the live

@@ -12,9 +12,12 @@ The store is body-opaque: it NEVER inspects ``body`` (a typed view owns the shap
 Every write runs inside one ``conn.transaction()`` so a partial failure rolls the
 whole write back — no orphan version, no half-bumped pointer. The partial-unique
 index ``versioned_documents_active_name_unique`` enforces one ACTIVE row per
-``(kind, name)``; a duplicate active insert trips it and surfaces as
-:class:`DocumentExistsError`. The FK ``ON DELETE CASCADE`` drops a document's
-version rows with its active row on a hard :meth:`delete`.
+``(kind, name)``; a live duplicate surfaces as :class:`DocumentExistsError` —
+:meth:`create` ABSORBS the conflict (``ON CONFLICT ... DO NOTHING``, so a losing
+concurrent creator never aborts its transaction), while :meth:`rename` maps the
+raised violation (an ``UPDATE`` has no ``ON CONFLICT`` clause). The FK
+``ON DELETE CASCADE`` drops a document's version rows with its active row on a hard
+:meth:`delete`.
 
 Postgres is reached through the app-pooled ``PostgresClient`` so it shares one pool
 per DSN with the other durable stores, closed centrally at shutdown.
@@ -42,8 +45,8 @@ from tai42_kit.db import component_store_settings
 from tai42_skeleton.db import SKELETON_COMPONENT
 
 # Name of the partial-unique index enforcing one ACTIVE row per ``(kind, name)``
-# (see the skeleton init SQL). A create whose insert trips THIS index is a live
-# duplicate → ``DocumentExistsError``; any other unique violation re-raises.
+# (see the skeleton init SQL). A write that trips THIS index hit a live duplicate →
+# ``DocumentExistsError``; any other unique violation re-raises.
 _ACTIVE_NAME_UNIQUE_INDEX = "versioned_documents_active_name_unique"
 
 
@@ -121,22 +124,29 @@ class PostgresVersionedStore(VersionedStore):
         tx: VersionedStoreTransaction | None = None,
     ) -> DocumentRecord:
         async with self._cursor(tx) as cur:
-            try:
-                await cur.execute(
-                    "INSERT INTO versioned_documents (kind, name, active_version) "
-                    "VALUES (%s, %s, 1) RETURNING id, created_at",
-                    (kind, name),
-                )
-                doc_id, created_at = _require_row(await cur.fetchone())
-                await cur.execute(
-                    "INSERT INTO versioned_document_versions (document_id, version, body, tags) "
-                    "VALUES (%s, %s, %s, %s)",
-                    (doc_id, 1, Json(body), tags or []),
-                )
-            except UniqueViolation as exc:
-                if _is_active_name_violation(exc):
-                    raise DocumentExistsError(kind, name) from exc
-                raise
+            # The claim is CONFLICT-FREE: ``ON CONFLICT ... DO NOTHING`` absorbs the live
+            # duplicate, so a LOSING concurrent creator (two replicas seeding the same
+            # document as they boot) reads an empty ``RETURNING`` instead of taking a
+            # raised unique violation. A raised
+            # violation ABORTS the surrounding transaction, so a caller that treats "a
+            # sibling already seeded this" as success cannot go on using its unit of work
+            # (every later statement fails with ``InFailedSqlTransaction``), and every
+            # concurrent boot writes a Postgres ERROR line that reads like corruption.
+            # The inference clause repeats the index's columns AND its predicate, so ONLY
+            # the live-duplicate conflict is absorbed; any other unique violation raises.
+            await cur.execute(
+                "INSERT INTO versioned_documents (kind, name, active_version) VALUES (%s, %s, 1) "
+                "ON CONFLICT (kind, name) WHERE is_active DO NOTHING RETURNING id, created_at",
+                (kind, name),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise DocumentExistsError(kind, name)
+            doc_id, created_at = row
+            await cur.execute(
+                "INSERT INTO versioned_document_versions (document_id, version, body, tags) VALUES (%s, %s, %s, %s)",
+                (doc_id, 1, Json(body), tags or []),
+            )
             return DocumentRecord(
                 kind=kind, name=name, active_version=1, is_active=True, created_at=created_at.isoformat()
             )
