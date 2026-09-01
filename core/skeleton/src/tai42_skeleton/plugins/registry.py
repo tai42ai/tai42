@@ -16,10 +16,14 @@ Failure surface, split by blast radius:
   entry the marketplace listing and readiness count surface, and exclusion from
   the built registry. One broken plugin never takes the whole boot down (an
   empty registry is valid), and never a silent skip either.
-* A DEPLOYMENT fault — a required shared-vendor asset missing from the SPA
+* A DEPLOYMENT fault — a REQUIRED shared-vendor asset missing from the SPA
   dist — still raises :class:`StudioPluginError` and fails the boot: without
   the vendor assets NO plugin (nor the shell) can load, so continuing would
-  ship an unresolvable import map.
+  ship an unresolvable import map. An OPTIONAL vendor asset (see
+  ``OPTIONAL_VENDOR_MODULES``) is not a fault when absent: the skeleton and the
+  packaged SPA dist version independently, so an optional specifier is a
+  capability of the dist at hand — present, it is served and hashed; absent, the
+  map is exactly the required set.
 """
 
 from __future__ import annotations
@@ -90,6 +94,18 @@ VENDOR_MODULES: dict[str, str] = {
     "react-dom/client": "vendor/react-dom-client.js",
     "@tai42/studio-sdk": "vendor/studio-sdk.js",
     "@tai42/studio-sdk/host": "vendor/studio-sdk-host.js",
+}
+
+# Shared-vendor specifiers the SPA dist MAY ship. The skeleton and the packaged
+# studio dist version independently, so an optional specifier is a CAPABILITY of
+# the dist at hand, not a lockstep requirement: the served map keys it (and the
+# integrity walk hashes it) only when that dist actually carries the file, and a
+# dist without it gets exactly the required map. Only ESM modules the import map
+# resolves belong here — a specifier's runtime sidecars (workers, wasm) are
+# fetched by URL, carry no import-map integrity metadata, and are served like any
+# other dist file.
+OPTIONAL_VENDOR_MODULES: dict[str, str] = {
+    "@tai42/jq-studio": "vendor/jq-studio.js",
 }
 
 
@@ -200,6 +216,10 @@ class StudioPluginRegistry(BaseModel):
     # Vendor served-URL -> sha384, sourced by hashing the deployed SPA's
     # ``vendor/`` dir. Empty when no SPA dist is configured.
     vendor_integrity_by_url: dict[str, str] = {}
+    # The subset of ``OPTIONAL_VENDOR_MODULES`` the deployed SPA dist actually
+    # ships, resolved when the registry is built. Empty for a dist that carries
+    # none of them, which is exactly the required-only map.
+    optional_vendor_modules: dict[str, str] = {}
 
     def manifest_contents(self) -> list[dict]:
         """The authed registry listing payload: each plugin's parsed manifest."""
@@ -207,9 +227,10 @@ class StudioPluginRegistry(BaseModel):
 
     def import_map(self) -> dict:
         """The import map injected into ``index.html``: bare/subpath vendor
-        specifiers plus the ``integrity`` block covering every vendor asset AND
+        specifiers — the required set plus whatever optional ones this dist
+        ships — plus the ``integrity`` block covering every vendor asset AND
         every plugin bundle/chunk, keyed by fully-resolved absolute URL."""
-        imports = {spec: f"/{rel}" for spec, rel in VENDOR_MODULES.items()}
+        imports = {spec: f"/{rel}" for spec, rel in (self.optional_vendor_modules | VENDOR_MODULES).items()}
         integrity = dict(self.vendor_integrity_by_url)
         for plugin in self.plugins.values():
             integrity.update(plugin.integrity_by_url)
@@ -317,20 +338,30 @@ def _load_plugin(package: str) -> InstalledStudioPlugin:
     )
 
 
-def _vendor_integrity(dist_path: str | None) -> dict[str, str]:
-    """Hash every required shared-vendor asset under the deployed SPA's
-    ``vendor/`` dir. A missing required asset is loud — the app cannot boot
-    without it, so a silent omission would ship an unresolvable import map."""
+def _shipped_optional_vendor_modules(dist_path: str | None) -> dict[str, str]:
+    """The optional vendor specifiers the deployed SPA dist actually ships. A
+    specifier whose asset is absent is simply not offered: it never reaches the
+    served import map, so nothing can request an asset this dist does not have."""
+    if dist_path is None:
+        return {}
+    dist_root = Path(dist_path)
+    return {spec: rel for spec, rel in OPTIONAL_VENDOR_MODULES.items() if resolve_under(dist_root, rel).is_file()}
+
+
+def _vendor_integrity(dist_path: str | None, optional_modules: dict[str, str]) -> dict[str, str]:
+    """Hash every shared-vendor asset the served import map keys — the required
+    set plus the optional specifiers this dist ships. A listed asset that is
+    missing is loud: the map would name a URL the browser cannot resolve."""
     if dist_path is None:
         return {}
     dist_root = Path(dist_path)
     result: dict[str, str] = {}
-    for rel in VENDOR_MODULES.values():
+    for rel in (*VENDOR_MODULES.values(), *optional_modules.values()):
         asset = resolve_under(dist_root, rel)
         if not asset.is_file():
             raise StudioPluginError(
                 f"shared-vendor asset {rel!r} is missing from the SPA dist at {dist_root} — "
-                "the import map cannot resolve React/the SDK without it"
+                "the served import map keys it, so the shell would load an unresolvable specifier"
             )
         result[f"/{rel}"] = _hash_file(asset)
     return result
@@ -347,7 +378,8 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
     plugins (possibly none) form the registry. A duplicate listing is a
     manifest hygiene fault, not a plugin fault: the package loads once and the
     duplication is logged. Only the vendor-asset check may raise — a missing
-    vendor asset breaks every plugin and the shell, so it stays a boot failure.
+    REQUIRED vendor asset breaks every plugin and the shell, so it stays a boot
+    failure; an optional specifier the dist does not ship is simply not offered.
     """
     from tai42_skeleton.marketplace.compat import module_compat
     from tai42_skeleton.plugins.quarantine import quarantine_plugin
@@ -367,9 +399,11 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
         except Exception as exc:
             logger.exception("studio plugin %r failed to load; quarantining it", package)
             quarantine_plugin(package, f"studio plugin failed to load: {exc}")
+    optional_modules = _shipped_optional_vendor_modules(dist_path)
     return StudioPluginRegistry(
         plugins=plugins,
-        vendor_integrity_by_url=_vendor_integrity(dist_path),
+        vendor_integrity_by_url=_vendor_integrity(dist_path, optional_modules),
+        optional_vendor_modules=optional_modules,
     )
 
 
@@ -455,7 +489,8 @@ async def rebuild_studio_plugin_registry() -> None:
     registry = build_registry(studio_plugins, dist_path)
     set_current_registry(registry)
     logger.info(
-        "studio plugin registry built: %d plugin(s), %d vendor asset(s)",
+        "studio plugin registry built: %d plugin(s), %d vendor asset(s), optional vendor: %s",
         len(registry.plugins),
         len(registry.vendor_integrity_by_url),
+        sorted(registry.optional_vendor_modules) or "none",
     )

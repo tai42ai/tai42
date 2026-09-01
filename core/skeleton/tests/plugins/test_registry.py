@@ -5,6 +5,7 @@ startup/reload rebuild pass."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -444,6 +445,76 @@ def test_vendor_hashing_happy(tmp_path):
     assert all(v.startswith("sha384-") for v in registry.vendor_integrity_by_url.values())
 
 
+# -- Optional vendor specifiers ----------------------------------------------
+
+
+def _write_required_vendor(dist: Path) -> None:
+    """A dist shipping the REQUIRED vendor set and nothing optional."""
+    for rel in reg.VENDOR_MODULES.values():
+        (dist / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dist / rel).write_text(f"export const m = {rel!r};\n", encoding="utf-8")
+
+
+def test_optional_vendor_absent_leaves_map_and_integrity_untouched(tmp_path):
+    # A dist that ships none of the optional specifiers gets EXACTLY the required
+    # map and the required integrity set — an optional asset is never a boot
+    # requirement, so such a dist keeps booting unchanged.
+    _write_required_vendor(tmp_path)
+    registry = build_registry([], str(tmp_path))
+    assert registry.optional_vendor_modules == {}
+    assert registry.import_map()["imports"] == {spec: f"/{rel}" for spec, rel in reg.VENDOR_MODULES.items()}
+    assert set(registry.vendor_integrity_by_url) == {f"/{rel}" for rel in reg.VENDOR_MODULES.values()}
+
+
+def test_optional_vendor_present_is_served_and_hashed(tmp_path):
+    # A dist that DOES ship the optional module gets it keyed in the import map
+    # and hashed into the integrity block from its own bytes.
+    _write_required_vendor(tmp_path)
+    jq = tmp_path / "vendor" / "jq-studio.js"
+    jq.write_text("export const jq = 1;\n", encoding="utf-8")
+    registry = build_registry([], str(tmp_path))
+    assert registry.optional_vendor_modules == {"@tai42/jq-studio": "vendor/jq-studio.js"}
+    imap = registry.import_map()
+    assert imap["imports"]["@tai42/jq-studio"] == "/vendor/jq-studio.js"
+    # The required entries are untouched by the addition.
+    for spec, rel in reg.VENDOR_MODULES.items():
+        assert imap["imports"][spec] == f"/{rel}"
+    assert imap["integrity"]["/vendor/jq-studio.js"] == reg._hash_file(jq)
+
+
+def test_optional_vendor_sidecars_are_not_integrity_listed(tmp_path):
+    # A specifier's runtime sidecars (its worker, its wasm) are fetched by URL, not
+    # resolved through the import map, so they carry no integrity metadata and
+    # their absence is not a boot failure — only the ESM module is listed.
+    _write_required_vendor(tmp_path)
+    (tmp_path / "vendor" / "jq-studio.js").write_text("export const jq = 1;\n", encoding="utf-8")
+    (tmp_path / "vendor" / "jq-studio-worker.js").write_text("self.onmessage = () => {};\n", encoding="utf-8")
+    (tmp_path / "vendor" / "jq.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
+    integrity = build_registry([], str(tmp_path)).import_map()["integrity"]
+    assert "/vendor/jq-studio.js" in integrity
+    assert "/vendor/jq-studio-worker.js" not in integrity
+    assert "/vendor/jq.wasm" not in integrity
+
+
+def test_required_vendor_missing_stays_loud_next_to_an_optional_asset(tmp_path):
+    # Tolerance is scoped to the OPTIONAL set: a required asset missing from a dist
+    # that ships the optional module is still a loud boot failure.
+    _write_required_vendor(tmp_path)
+    (tmp_path / "vendor" / "jq-studio.js").write_text("export const jq = 1;\n", encoding="utf-8")
+    (tmp_path / reg.VENDOR_MODULES["react"]).unlink()
+    with pytest.raises(StudioPluginError, match=re.escape("shared-vendor asset 'vendor/react.js'")):
+        build_registry([], str(tmp_path))
+
+
+def test_optional_vendor_listed_but_missing_is_loud(tmp_path):
+    # An optional specifier that IS offered (resolved present at build) but whose
+    # file cannot be hashed keeps the loud failure: the map would otherwise name a
+    # URL the browser cannot resolve.
+    _write_required_vendor(tmp_path)
+    with pytest.raises(StudioPluginError, match=re.escape("shared-vendor asset 'vendor/jq-studio.js'")):
+        reg._vendor_integrity(str(tmp_path), {"@tai42/jq-studio": "vendor/jq-studio.js"})
+
+
 # -- Rebuild pass (startup/reload) -------------------------------------------
 
 
@@ -474,3 +545,21 @@ async def test_rebuild_pass_reflects_reload(tmp_path, monkeypatch):
     live["studio_plugins"] = ["acme_plugin"]
     await reg.rebuild_studio_plugin_registry()
     assert "acme_plugin" in reg.current_registry().plugins
+
+
+def test_vendor_sets_are_pinned_and_disjoint():
+    """The REQUIRED set is a boot guarantee and the OPTIONAL set is a deliberate
+    allow-list: demoting a required specifier (or colliding the two sets) must be
+    a loud, reviewed change — derived assertions cannot catch a one-line move."""
+    from tai42_skeleton.plugins import registry as reg
+
+    assert set(reg.VENDOR_MODULES) == {
+        "react",
+        "react/jsx-runtime",
+        "react-dom",
+        "react-dom/client",
+        "@tai42/studio-sdk",
+        "@tai42/studio-sdk/host",
+    }
+    assert set(reg.OPTIONAL_VENDOR_MODULES) == {"@tai42/jq-studio"}
+    assert not (set(reg.VENDOR_MODULES) & set(reg.OPTIONAL_VENDOR_MODULES))
