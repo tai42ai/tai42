@@ -34,6 +34,13 @@ def list_runs(
     ] = None,
     to: Annotated[str | None, typer.Option("--to", help="Range end: an ISO instant or a relative token.")] = None,
     status: Annotated[str | None, typer.Option("--status", help="Filter: 'error' or 'success'.")] = None,
+    user: Annotated[str | None, typer.Option("--user", help="Filter: runs stamped with this user identity.")] = None,
+    session: Annotated[
+        str | None, typer.Option("--session", help="Filter: runs stamped with this session identity.")
+    ] = None,
+    version: Annotated[
+        str | None, typer.Option("--version", help="Filter: runs stamped with this trace version dimension.")
+    ] = None,
     sort: Annotated[
         str | None, typer.Option("--sort", help="Sort field: createdAt, cost, latencyMs, totalTokens.")
     ] = None,
@@ -55,6 +62,12 @@ def list_runs(
         params["to"] = to
     if status is not None:
         params["status"] = status
+    if user is not None:
+        params["user"] = user
+    if session is not None:
+        params["session"] = session
+    if version is not None:
+        params["version"] = version
     if sort is not None:
         params["sort"] = sort
     if direction is not None:
