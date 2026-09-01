@@ -5368,7 +5368,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "2.1.0"
+version = "2.2.0"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5454,7 +5454,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "2.1.0"
+version = "2.2.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "httpx" },
@@ -5585,7 +5585,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.10.0"
+version = "5.11.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -6142,7 +6142,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.8.0"
+version = "9.9.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
