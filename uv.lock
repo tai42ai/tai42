@@ -5063,7 +5063,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "5.0.0"
+version = "5.1.0"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5497,7 +5497,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "4.3.0"
+version = "4.4.0"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5585,7 +5585,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.9.0"
+version = "5.10.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5619,7 +5619,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "6.7.0"
+version = "6.8.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6142,7 +6142,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.7.0"
+version = "9.8.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },

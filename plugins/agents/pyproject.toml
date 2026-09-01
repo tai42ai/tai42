@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-agents"
-version = "5.0.0"
+version = "5.1.0"
 description = "Ready-made agents for the TAI ecosystem — coding/deep agents, tool-calling, retrieval, voting, refinement, and vision agents — opt-in and manifest-loaded."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -29,7 +29,7 @@ dependencies = [
     # released workspace contract version, and the coordinated release train keeps
     # a published agents wheel paired with the contract release carrying its
     # imports (the ambient trace-context carrier lands with contract 5.10.0).
-    "tai42-contract>=5.9,<6",
+    "tai42-contract>=5.10,<6",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
     "tai42-kit>=3.8,<4",
@@ -93,7 +93,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=9.7,<10",
+    "tai42-skeleton>=9.8,<10",
 ]
 
 [tool.setuptools]

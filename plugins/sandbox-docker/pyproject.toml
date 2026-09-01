@@ -28,7 +28,7 @@ dependencies = [
     # and the tai42_app.sandboxes facet. The floor names the contract minor that
     # first ships the sandbox contract module.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.9,<6",
+    "tai42-contract>=5.10,<6",
     # TaiBaseSettings + settings cache and the sandbox lifecycle base. The floor
     # names the first kit minor carrying `tai42_kit.sandbox` (ManagedSandbox,
     # ManagedSandboxSession, SandboxDispatchSettings, the conformance suite), which
