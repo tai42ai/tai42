@@ -18,6 +18,7 @@ from tai42_skeleton.app import server as server_module
 from tai42_skeleton.monitoring import get_monitoring, init_monitoring, reset_monitoring
 from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 
 @pytest.fixture
@@ -51,7 +52,12 @@ class TestRunToolMonitoring:
             # extracted (not merely the input passed through).
             return {"echoed": x, "doubled": x * 2}
 
-        binding = ToolBinding(MagicMock(spec=server_module.TaiMCP))
+        app_mock = MagicMock(spec=server_module.TaiMCP)
+        # A mock app answers every property with a Mock; the dispatch seam must
+        # see a REAL empty retry registry (no declarations), never a Mock
+        # "policy" — this test proves the no-policy path opens no span.
+        app_mock._tool_retry_registry = ToolRetryRegistry()
+        binding = ToolBinding(app_mock)
         binding.get_tool = _async_return(_function_tool(my_tool))
 
         result = asyncio.run(binding.run_tool("my_tool", {"x": 5}))
@@ -81,7 +87,9 @@ def test_run_tool_resolves_fastmcp_context_injection():
         return f"x={x}|ctx={type(ctx).__name__}"
 
     function_tool = FunctionTool.from_function(ctx_tool)
-    binding = ToolBinding(MagicMock(spec=server_module.TaiMCP))
+    app_mock = MagicMock(spec=server_module.TaiMCP)
+    app_mock._tool_retry_registry = ToolRetryRegistry()
+    binding = ToolBinding(app_mock)
     binding.get_tool = _async_return(function_tool)
 
     server = FastMCP("ctx-test")

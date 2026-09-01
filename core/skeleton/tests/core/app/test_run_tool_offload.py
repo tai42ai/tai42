@@ -16,6 +16,7 @@ import pytest
 from tai42_skeleton.app import server as server_module
 from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 
 def _function_tool(fn):
@@ -32,7 +33,11 @@ def _async_return(value):
 
 
 def _binding_for(fn) -> ToolBinding:
-    binding = ToolBinding(MagicMock(spec=server_module.TaiMCP))
+    app_mock = MagicMock(spec=server_module.TaiMCP)
+    # A mock app answers every property with a Mock; the dispatch seam must see a
+    # REAL empty retry registry (no declarations), never a Mock "policy".
+    app_mock._tool_retry_registry = ToolRetryRegistry()
+    binding = ToolBinding(app_mock)
     binding.get_tool = _async_return(_function_tool(fn))
     return binding
 
@@ -127,7 +132,9 @@ def test_offload_true_still_resolves_a_ctx_tool():
     async def ctx_tool(x: int, ctx: Context) -> str:
         return f"x={x}|ctx={type(ctx).__name__}"
 
-    binding = ToolBinding(MagicMock(spec=server_module.TaiMCP))
+    app_mock = MagicMock(spec=server_module.TaiMCP)
+    app_mock._tool_retry_registry = ToolRetryRegistry()
+    binding = ToolBinding(app_mock)
     binding.get_tool = _async_return(FunctionTool.from_function(ctx_tool))
     server = FastMCP("ctx-test")
 

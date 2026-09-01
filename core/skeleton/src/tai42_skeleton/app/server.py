@@ -67,7 +67,7 @@ from tai42_skeleton.sandbox import SandboxHolder
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry
+from tai42_skeleton.tools import ToolRefsRegistry, ToolRegistry, ToolRetryRegistry
 from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
@@ -249,6 +249,10 @@ class ServingCore:
         # re-imports the tool modules and re-registers cleanly. Mirrors the
         # write-validator registry above.
         self._tool_refs_registry = ToolRefsRegistry()
+
+        # Per-tool declared retry-policy registry (@app.tools.tool(retry=...)),
+        # reset each start() for the same reload reason.
+        self._tool_retry_registry = ToolRetryRegistry()
 
         # Tool-rename referee registry + declared-preset-seed registry, reset each
         # start() alongside the registries above so a reload re-imports the plugin

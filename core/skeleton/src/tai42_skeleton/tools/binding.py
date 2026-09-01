@@ -33,6 +33,7 @@ from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, 
 from tai42_contract.tools import (
     ToolInvocation,
     ToolRefsExtractor,
+    ToolRetryPolicy,
     reset_current_tool_invocation,
     set_current_tool_invocation,
 )
@@ -49,6 +50,7 @@ from tai42_skeleton.tools.attribution import (
     stamp_run_attribution,
 )
 from tai42_skeleton.tools.context_bridge import bridge_context
+from tai42_skeleton.tools.retry import dispatch_with_retry
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.turn_budget import turn_budget
 
@@ -60,6 +62,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.extensions import ExtensionRegistry
     from tai42_skeleton.manifest import Manifest
     from tai42_skeleton.tools.registry import ToolRegistry
+    from tai42_skeleton.tools.retry import ToolRetryRegistry
     from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
 logger = logging.getLogger(__name__)
@@ -488,6 +491,10 @@ class ToolBinding:
     def _tool_refs_registry(self) -> "ToolRefsRegistry":
         return self._app._tool_refs_registry
 
+    @property
+    def _tool_retry_registry(self) -> "ToolRetryRegistry":
+        return self._app._tool_retry_registry
+
     def _require_manifest(self) -> "Manifest":
         manifest = self._manifest
         if manifest is None:
@@ -659,10 +666,36 @@ class ToolBinding:
                 run.observe(result)
                 return result
 
+    def _retry_policy_for(self, key: str, mcp_tool: Tool) -> ToolRetryPolicy | None:
+        """The declared retry policy governing a dispatch of ``key``, or ``None``.
+
+        Declared policies key on the REGISTERED base tool name (the ``retry``
+        parameter of ``@app.tools.tool``). A preset-backed dispatch carries its own
+        name but runs the base tool's body with baked constants, so an undeclared
+        transformed tool walks its ``parent_tool`` chain and inherits the first
+        declared ancestor's policy — the idempotency claim travels with the body.
+        An extension BRANCH tool inherits nothing: its stack may compose or
+        relocate execution the base's declaration never spoke for (a chain re-fires
+        OTHER tools), so only an exact-name declaration could ever arm it —
+        deliberately conservative on the double-send side."""
+        policy = self._tool_retry_registry.get(key)
+        tool_obj = mcp_tool
+        while policy is None and isinstance(tool_obj, TransformedTool):
+            tool_obj = tool_obj.parent_tool
+            policy = self._tool_retry_registry.get(tool_obj.name)
+        return policy
+
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity, arguments
         already stripped of the ``_UNSET`` sentinel. The turn budget (:meth:`run_tool`)
-        wraps this dispatch."""
+        wraps this dispatch.
+
+        A tool that DECLARED a retry policy has its invocation re-fired through
+        :func:`dispatch_with_retry` — inside the runs-index record and attribution
+        stamp (one row, one logical dispatch, whatever the attempt count) and after
+        the authorization + resolution below, which run ONCE per dispatch: the
+        decision was made for this call, and every attempt re-fires the same
+        resolved target. No policy = the loop degenerates to a single plain await."""
         # Execution-identity seam: decided at INVOCATION, before the tool is resolved, on
         # the exact arguments this call fires. With no identity bound it is a contextvar
         # read and the path below is untouched.
@@ -670,6 +703,7 @@ class ToolBinding:
         if execution_identity is not None:
             await self._authorize_execution_dispatch(execution_identity, key, arguments)
         mcp_tool = await self._resolve_run_target(key)
+        retry_policy = self._retry_policy_for(key, mcp_tool)
         if isinstance(mcp_tool, TransformedTool):
             # A prebuilt transformed tool (e.g. a preset) has no plain callable to
             # validate against — its ``fn`` takes one opaque ``**kwargs`` and its
@@ -677,28 +711,33 @@ class ToolBinding:
             # schema-validating ``run``, which applies the baked hidden constants
             # and REJECTS a caller that passes a baked key. Bridge the in-process
             # Context the same way the callable path does.
-            #
-            # The preset's forwarding fn re-enters the parent tool's ``run`` — and
-            # so its secret-revealing ``convert_result`` — in-process. Arm the gate
-            # so that reveal is suppressed and any secret-bearing return is carried
-            # out wrapper-intact (each downstream door then masks or reveals its own
-            # copy), instead of the ``ToolResult`` handing back already-revealed
-            # plaintext a recorder can no longer mask.
-            gate = InprocessRevealGate()
-            token = inprocess_reveal_gate.set(gate)
-            try:
-                with bridge_context(self._app.fastmcp):
-                    result = await mcp_tool.run(arguments)
-            finally:
-                inprocess_reveal_gate.reset(token)
-            if gate.has_park:
-                # An async ask_user parked the caller: return the sentinel object by
-                # TYPE (never the flattened ToolResult), so the preset path recognizes
-                # the park exactly as the direct-run path does.
-                return gate.park
-            if gate.has_payload:
-                return gate.payload
-            return _tool_result_value(result)
+
+            async def run_transformed_attempt() -> Any:
+                # The preset's forwarding fn re-enters the parent tool's ``run`` — and
+                # so its secret-revealing ``convert_result`` — in-process. Arm the gate
+                # so that reveal is suppressed and any secret-bearing return is carried
+                # out wrapper-intact (each downstream door then masks or reveals its own
+                # copy), instead of the ``ToolResult`` handing back already-revealed
+                # plaintext a recorder can no longer mask. A fresh gate per attempt: a
+                # failed attempt's stale gate state must never leak into the next.
+                gate = InprocessRevealGate()
+                token = inprocess_reveal_gate.set(gate)
+                try:
+                    with bridge_context(self._app.fastmcp):
+                        result = await mcp_tool.run(arguments)
+                finally:
+                    inprocess_reveal_gate.reset(token)
+                if gate.has_park:
+                    # An async ask_user parked the caller: return the sentinel object by
+                    # TYPE (never the flattened ToolResult), so the preset path recognizes
+                    # the park exactly as the direct-run path does. A park is a RETURN —
+                    # never a retried failure.
+                    return gate.park
+                if gate.has_payload:
+                    return gate.payload
+                return _tool_result_value(result)
+
+            return await dispatch_with_retry(key, retry_policy, run_transformed_attempt)
         if not isinstance(mcp_tool, FunctionTool):
             raise RuntimeError(f"Tool {key!r} has no callable body and cannot be run directly.")
 
@@ -728,16 +767,18 @@ class ToolBinding:
                 return await result
             return result
 
-        # In-process Context bridge: this invocation has no connected client, so
-        # an injected ``ctx.elicit()`` routes to the interactions ``ask_user``
-        # waiter and ``ctx.sample()`` falls back to the platform LLM. The bridge
-        # no-ops when a live request context is already active, so a capable
-        # client still resolves in-client. ``asyncio.to_thread`` copies
-        # contextvars into the offload thread, so the pushed context reaches the
-        # sync path too.
-        with bridge_context(self._app.fastmcp):
-            result = await run_validated_adapter(arguments)
+        async def run_function_attempt() -> Any:
+            # In-process Context bridge: this invocation has no connected client, so
+            # an injected ``ctx.elicit()`` routes to the interactions ``ask_user``
+            # waiter and ``ctx.sample()`` falls back to the platform LLM. The bridge
+            # no-ops when a live request context is already active, so a capable
+            # client still resolves in-client. ``asyncio.to_thread`` copies
+            # contextvars into the offload thread, so the pushed context reaches the
+            # sync path too.
+            with bridge_context(self._app.fastmcp):
+                return await run_validated_adapter(arguments)
 
+        result = await dispatch_with_retry(key, retry_policy, run_function_attempt)
         return _serialize_result(result)
 
     async def get_client_tools(self, names: list[str] | None = None) -> list[StructuredTool]:
@@ -918,7 +959,14 @@ class ToolBinding:
 
     # -- registration ----------------------------------------------------------
 
-    def tool(self, *args, force=False, tool_refs: "ToolRefsExtractor | None" = None, **kwargs) -> Any:
+    def tool(
+        self,
+        *args,
+        force=False,
+        tool_refs: "ToolRefsExtractor | None" = None,
+        retry: ToolRetryPolicy | None = None,
+        **kwargs,
+    ) -> Any:
         func_to_register = None
         decorator_args = args
 
@@ -941,6 +989,11 @@ class ToolBinding:
             # included tool's declared refs extractor lands, keyed by its bound name.
             if tool_refs is not None:
                 self._tool_refs_registry.register(name, tool_refs)
+            # Likewise for the declared retry policy — validated here so a malformed
+            # declaration (a dict is accepted and coerced) fails loudly at bind time,
+            # never silently at dispatch.
+            if retry is not None:
+                self._tool_retry_registry.register(name, ToolRetryPolicy.model_validate(retry))
             return self.bind_tool_func(*decorator_args, **kwargs)(func)
 
         if func_to_register is not None:

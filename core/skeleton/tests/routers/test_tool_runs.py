@@ -38,6 +38,7 @@ from tai42_skeleton.routers import tools as tools_router
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
 from tai42_skeleton.tools import binding as binding_module
 from tai42_skeleton.tools.binding import ToolBinding
+from tai42_skeleton.tools.retry import ToolRetryRegistry
 
 from .._fakes.tool_runs_redis import FakeRedis
 
@@ -606,7 +607,11 @@ def _real_binding_for(fn) -> ToolBinding:
     """A real ``ToolBinding`` whose ``get_tool`` yields ``fn`` — the same
     validate/call/offload path the sync door and the supervisor drive, with no
     mocked adapter."""
-    binding = ToolBinding(MagicMock(spec=server_module.TaiMCP))
+    app_mock = MagicMock(spec=server_module.TaiMCP)
+    # A mock app answers every property with a Mock; the dispatch seam must see a
+    # REAL empty retry registry (no declarations), never a Mock "policy".
+    app_mock._tool_retry_registry = ToolRetryRegistry()
+    binding = ToolBinding(app_mock)
 
     async def _get_tool(_key: str):
         return _function_tool(fn)
