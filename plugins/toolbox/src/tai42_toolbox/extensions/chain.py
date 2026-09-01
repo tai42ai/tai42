@@ -7,15 +7,35 @@ its own composed signature (the wrapped tool's parameters plus ``jq_expression``
 """
 
 import inspect
-from typing import Any
+from typing import Annotated, Any
 
 from makefun import create_function
+from pydantic import Field
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 from tai42_kit.utils.data import makefun_func_name
 
 from tai42_toolbox._internal.extensions.chain_executor import execute_chain
 from tai42_toolbox._internal.extensions.signature import with_added_params
+
+# The jq-typed parameter's schema annotation: the composed variant runs the
+# expression over the wrapped tool's raw output and hands the result to the
+# second tool as its kwargs object (see ``execute_chain``). Declared on the
+# ``Annotated`` parameter type so the derived tool schema carries it; purely
+# schema metadata, never validation.
+_JQ_EXPRESSION_PARAM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="expression",
+                blurb="the first tool's raw output",
+                returns="the second tool's kwargs object",
+            )
+        }
+    ),
+]
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="chain")
@@ -29,7 +49,7 @@ def chain(func, orig_name, orig_desc):
     # Keyword-only so the required controls can follow any defaulted parameter and arrive in ``kwargs``.
     composed_sig = with_added_params(
         sig.replace(return_annotation=Any),
-        inspect.Parameter("jq_expression", inspect.Parameter.KEYWORD_ONLY, annotation=str),
+        inspect.Parameter("jq_expression", inspect.Parameter.KEYWORD_ONLY, annotation=_JQ_EXPRESSION_PARAM),
         inspect.Parameter("next_tool_name", inspect.Parameter.KEYWORD_ONLY, annotation=str),
     )
 

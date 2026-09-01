@@ -25,6 +25,62 @@ def test_registers_as_transformer_named_chain(capture_registration):
     assert capture_registration(chain_module) == [("chain", ExtensionKind.TRANSFORMER, False)]
 
 
+def test_composed_variants_listed_schema_annotates_the_jq_param():
+    # The LISTED tool schema — the platform derives it from the composed callable
+    # exactly as here (FastMCP ``Tool.from_function``) — must carry the
+    # ``x-tai42-expression`` vendor annotation on ``jq_expression``: makefun
+    # composition must not strip the ``Annotated`` parameter metadata. The
+    # payload is pinned VERBATIM (it is the wire contract schema consumers read),
+    # and the annotation must stay confined to the one jq-typed parameter.
+    from fastmcp.tools import Tool
+
+    properties = Tool.from_function(chain(_tool, "tool", "desc")).parameters["properties"]
+
+    assert properties["jq_expression"]["type"] == "string"
+    assert properties["jq_expression"]["x-tai42-expression"] == {
+        "language": "jq",
+        "label": "expression",
+        "blurb": "the first tool's raw output",
+        "returns": "the second tool's kwargs object",
+    }
+    assert "x-tai42-expression" not in properties["next_tool_name"]
+    assert "x-tai42-expression" not in properties["user_id"]
+
+
+def test_composed_variants_listed_schema_is_otherwise_unchanged():
+    # Byte-identity guard: apart from the one added vendor key, the composed
+    # variant's listed schema must equal the schema of the same composition with
+    # a PLAIN ``str`` jq param — the annotation is additive-only.
+    import inspect as _inspect
+    import json
+
+    from fastmcp.tools import Tool
+    from makefun import create_function
+
+    from tai42_toolbox._internal.extensions.signature import with_added_params
+
+    branch = chain(_tool, "tool", "desc")
+    annotated = Tool.from_function(branch).parameters
+
+    plain_sig = with_added_params(
+        _inspect.signature(_tool).replace(return_annotation=Any),
+        _inspect.Parameter("jq_expression", _inspect.Parameter.KEYWORD_ONLY, annotation=str),
+        _inspect.Parameter("next_tool_name", _inspect.Parameter.KEYWORD_ONLY, annotation=str),
+    )
+
+    async def impl(*args: Any, **kwargs: Any):
+        return None
+
+    # Same composed docstring so FastMCP parses identical per-param descriptions
+    # for both — the diff under test is the annotation alone.
+    plain = Tool.from_function(
+        create_function(func_signature=plain_sig, func_impl=impl, func_name="tool_chain", doc=branch.__doc__)
+    ).parameters
+
+    assert annotated["properties"]["jq_expression"].pop("x-tai42-expression")
+    assert json.dumps(annotated, sort_keys=True) == json.dumps(plain, sort_keys=True)
+
+
 def test_wraps_a_tool_ending_in_var_keyword():
     # The two control kwargs must be inserted before a trailing **kwargs so
     # signature construction stays valid for such tools.
