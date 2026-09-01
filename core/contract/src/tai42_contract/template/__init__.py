@@ -22,7 +22,7 @@ companions are NOT jq strings and stay unannotated.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -87,16 +87,18 @@ class ConditionMixin(BaseModel):
     # backend callback overrides to pin its own input document. A surface whose
     # facts are sharper than "truthy proceeds" must override rather than inherit
     # this wording (see the access-control and backend callback schemas).
-    condition: str | None = Field(
-        default=None,
-        json_schema_extra={
-            EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                label="condition",
-                blurb="the declaring surface's input document",
-                returns="truthy to proceed; a falsy result gates the surface's action off",
-            )
-        },
-    )
+    condition: Annotated[
+        str | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="condition",
+                    blurb="the declaring surface's input document",
+                    returns="truthy to proceed; a falsy result gates the surface's action off",
+                )
+            }
+        ),
+    ] = None
     condition_id: str | None = None
     condition_kwargs: dict[str, Any] | None = None
 
@@ -105,16 +107,18 @@ class ExprMixin(BaseModel):
     # Same generic-honesty rule as ``ConditionMixin.condition``: every inheriting
     # surface evaluates ``expr`` over its own input document and consumes the
     # transformed result; surfaces with sharper facts override the field.
-    expr: str | None = Field(
-        default=None,
-        json_schema_extra={
-            EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                label="expression",
-                blurb="the declaring surface's input document",
-                returns="the transformed value the declaring surface consumes",
-            )
-        },
-    )
+    expr: Annotated[
+        str | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="expression",
+                    blurb="the declaring surface's input document",
+                    returns="the transformed value the declaring surface consumes",
+                )
+            }
+        ),
+    ] = None
     expr_id: str | None = None
     expr_kwargs: dict[str, Any] | None = None
 

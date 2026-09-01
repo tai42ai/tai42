@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -53,7 +53,7 @@ class AccessPolicy(ConditionMixin):
     # ``condition`` is inherited from ConditionMixin but redeclared here solely to
     # refine the vendor annotation with this surface's STRICT-TRUE fact (see
     # ``_ACCESS_CONDITION_ANNOTATION``): the enforcer allows only on boolean true.
-    condition: str | None = Field(default=None, json_schema_extra=_ACCESS_CONDITION_ANNOTATION)
+    condition: Annotated[str | None, Field(json_schema_extra=_ACCESS_CONDITION_ANNOTATION)] = None
 
 
 class RoleDefinition(ConditionMixin):
@@ -85,7 +85,7 @@ class RoleDefinition(ConditionMixin):
 
     # Same STRICT-TRUE override as AccessPolicy.condition: the enforcer admits this
     # jq base only when it evaluates to boolean true (see _ACCESS_CONDITION_ANNOTATION).
-    condition: str | None = Field(default=None, json_schema_extra=_ACCESS_CONDITION_ANNOTATION)
+    condition: Annotated[str | None, Field(json_schema_extra=_ACCESS_CONDITION_ANNOTATION)] = None
 
     # The reserved/admin tier: everything, jq base None, grant map skipped at
     # enforce. Mutually exclusive with a non-empty `grants` map (see below).
