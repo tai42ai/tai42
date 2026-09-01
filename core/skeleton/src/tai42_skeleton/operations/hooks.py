@@ -40,11 +40,12 @@ BEFORE the write, so a refusal leaves no record behind.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams, HookRegister
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 from tai42_skeleton.hooks import trigger_links
 from tai42_skeleton.hooks.cache import get_hooks_manager
@@ -142,6 +143,53 @@ async def list_hooks(topic: str | None = None) -> dict[str, Any]:
     return {"items": items, "total": len(items), "topic_verifiers": topic_verifiers, "trigger_auth": trigger_auth}
 
 
+# The jq-typed flat params carry the ``x-tai42-expression`` vendor annotation so the
+# generated MCP tool form (the RunPanel door) recognizes them as jq — the model-level
+# annotation on ``HookRegister.condition``/``expr`` never reaches this FLAT projection,
+# which fastmcp derives from the signature alone. The payloads state the HOOK surface's
+# facts: both expressions run over the parsed webhook delivery (payload_parser merges
+# structured bodies — JSON objects, XML, form fields — top-level with the query string;
+# arbitrary text arrives under raw_body). A hook's condition
+# proceeds on any TRUTHY result (``bool(result)``, unlike access control's strict-true),
+# and its expr must yield an OBJECT — the fired tool's kwargs. Declared as ``Annotated``
+# metadata on the parameter type so the schema fastmcp builds off the flat signature
+# carries it; schema METADATA only, never validation.
+_HOOK_CONDITION_PARAM = Annotated[
+    str | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="condition",
+                blurb="the parsed webhook delivery (structured bodies merged top-level with query "
+                "params; arbitrary text under raw_body)",
+                returns="truthy to fire the hook; a falsy result skips it",
+                caveats=[
+                    "an absent/empty condition always fires; a present condition that "
+                    "produces no output errors the fire loudly (it is not a silent skip)"
+                ],
+            )
+        }
+    ),
+]
+_HOOK_EXPR_PARAM = Annotated[
+    str | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="expression",
+                blurb="the parsed webhook delivery (structured bodies merged top-level with query "
+                "params; arbitrary text under raw_body)",
+                returns="an object — the fired tool's kwargs (the hook's static tool_kwargs win on a key clash)",
+                caveats=[
+                    "an absent/empty expression fires the tool with its static tool_kwargs only; "
+                    "a present expression must yield an object and errors the fire if it produces no output"
+                ],
+            )
+        }
+    ),
+]
+
+
 # ``authority_changing``: registering binds an api-key identity onto a topic the PUBLIC
 # ``/universal_webhook/{topic}`` door fires unauthenticated.
 @operation(
@@ -158,10 +206,10 @@ async def register_hook(
     tool: str,
     execution_key: str,
     tool_kwargs: dict[str, Any] | None = None,
-    condition: str | None = None,
+    condition: _HOOK_CONDITION_PARAM = None,
     condition_id: str | None = None,
     condition_kwargs: dict[str, Any] | None = None,
-    expr: str | None = None,
+    expr: _HOOK_EXPR_PARAM = None,
     expr_id: str | None = None,
     expr_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
