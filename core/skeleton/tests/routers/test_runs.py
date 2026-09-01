@@ -19,7 +19,7 @@ from starlette.requests import Request
 
 import tai42_skeleton.operations.runs as ops
 from tai42_skeleton.routers import runs as router
-from tai42_skeleton.runs.models import RunIndexFilter, RunRow
+from tai42_skeleton.runs.models import RunIndexFilter, RunOutcome, RunRow
 
 
 def _req(query: str = "", method: str = "GET") -> Request:
@@ -61,7 +61,7 @@ class _SpyStore:
         return 4
 
 
-def _row(run_id: str, outcome: str = "success", interaction_id: str | None = None) -> RunRow:
+def _row(run_id: str, outcome: RunOutcome = "success", interaction_id: str | None = None) -> RunRow:
     return RunRow(
         run_id=run_id,
         preset_name="wx",

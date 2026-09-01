@@ -67,6 +67,10 @@ STUDIO_ROUTE_ANCHORS: dict[str, tuple[str, str, dict | None]] = {
     "tai42_skeleton.routers.observability": ("GET", "/api/observability/runs", None),
     "tai42_skeleton.routers.presets": ("GET", "/api/presets", None),
     "tai42_skeleton.routers.resources": ("POST", "/api/resources/get", {}),
+    # The runs-index list door is an unconditional collection GET: with no run-index
+    # store configured on the bare stack it answers an empty page (200), proving the
+    # route is mounted without any seeded run.
+    "tai42_skeleton.routers.runs": ("GET", "/api/runs", None),
     "tai42_skeleton.routers.sandbox": ("GET", "/api/sandbox", None),
     "tai42_skeleton.routers.schedules": ("GET", "/api/schedules", None),
     "tai42_skeleton.routers.storage": ("GET", "/api/storage", None),
