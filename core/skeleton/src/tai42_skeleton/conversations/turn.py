@@ -521,6 +521,70 @@ def _tool_error(detail: str, route: ConversationRoute | None = None) -> _Resolve
     return _ResolvedOutcome(answer_status="error", parts=[_text_part(_error_answer_text(route))], error=detail)
 
 
+#: The terminal-outcome names a result envelope reports a NON-SUCCESS run with: the caller cut
+#: it short, it ended early, or it failed. A result naming one of these is a failed run — its
+#: ``result`` is partial (or empty) by construction, so it must never be mapped as an answer.
+#:
+#: EXACTLY the returned-envelope terminal vocabulary, and a CLOSED set on purpose: tools return
+#: arbitrary dicts, and a ``status`` from a tool's own vocabulary (``"queued"``,
+#: ``"not_found"``, ``"deleted"``) is an ordinary payload field that keeps mapping through
+#: ``reply_expr``. Two near-neighbours are deliberately OUT. ``"failed"`` is a park-completion
+#: FIRE status — the vocabulary a resumer names a DEFERRED terminal with (see
+#: :data:`PARK_COMPLETION_FAILED`), carried beside the result rather than inside it, and read
+#: on the completion-delivery path, not here. ``"errored"`` is run-STATUS REPORT vocabulary: a
+#: report ABOUT a run is a successful answer to a "how did it go?" turn and must MAP — a route
+#: whose whole purpose is relaying run status would otherwise fail every turn it answers
+#: honestly. Matching is exact and case-sensitive for the same reason: a fuzzy or case-folded
+#: match would swallow tool vocabularies that merely read like a terminal.
+_FAILED_RESULT_STATUSES: frozenset[str] = frozenset({"aborted", "stopped", "error"})
+
+#: The envelope keys naming WHY a non-success terminal failed, carried into the turn's error
+#: detail in this order: the failure text and its kind, the recorded exception, the outputs the
+#: run never produced, and the run handle the whole detail is traceable by. A falsy value (an
+#: absent key, an empty list, a blank string) is skipped, so the detail names only what the
+#: envelope actually carries. The partial ``result`` itself is deliberately excluded: the
+#: detail is recorded and logged, and a partial payload belongs in neither.
+_FAILED_RESULT_DETAIL_KEYS: tuple[str, ...] = ("error", "error_kind", "last_error", "missing_results", "session_id")
+
+#: Each failure key's rendered value is capped, so an envelope carrying a large payload under
+#: one of them cannot bloat the recorded detail.
+_FAILED_RESULT_DETAIL_LIMIT = 200
+
+#: Appended to a value the cap clipped, so a truncated detail never reads as a complete one.
+_FAILED_RESULT_DETAIL_ELLIPSIS = "…(truncated)"
+
+
+def _capped_repr(value: object) -> str:
+    """``value``'s repr, clipped to :data:`_FAILED_RESULT_DETAIL_LIMIT` with an explicit
+    truncation marker. Never silently: a clipped value that read as a whole one would make a
+    recorded detail lie about the envelope it came from."""
+    text = repr(value)
+    if len(text) <= _FAILED_RESULT_DETAIL_LIMIT:
+        return text
+    return text[:_FAILED_RESULT_DETAIL_LIMIT] + _FAILED_RESULT_DETAIL_ELLIPSIS
+
+
+def _failed_result_detail(result: object) -> str | None:
+    """The internal detail for a tool result that NAMES a non-success terminal, or ``None``
+    when it names none.
+
+    A result envelope reports its own outcome: a ``status`` of :data:`_FAILED_RESULT_STATUSES`
+    is a run that was aborted, stopped early, or failed. Anything else — a success, a status
+    from the tool's own vocabulary, a non-string ``status``, a dict with no ``status`` at all,
+    or a non-dict result — names no terminal and stays on the normal reply path.
+
+    The detail names the terminal plus whichever of :data:`_FAILED_RESULT_DETAIL_KEYS` the
+    envelope carries, each capped. It is recorded and logged, never delivered."""
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    if not isinstance(status, str) or status not in _FAILED_RESULT_STATUSES:
+        return None
+    reasons = [f"{key}={_capped_repr(value)}" for key in _FAILED_RESULT_DETAIL_KEYS if (value := result.get(key))]
+    reason_text = f" ({'; '.join(reasons)})" if reasons else ""
+    return f"tool result status {status!r}{reason_text}"
+
+
 async def _run_tool_turn(
     route: ConversationRoute,
     text: str,
@@ -542,6 +606,13 @@ async def _run_tool_turn(
     A reply that is ``None`` or blank is a deliberate silent outcome; a mapping fault, a
     denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
     whose detail is logged, never delivered.
+
+    A result that NAMES a non-success terminal (:func:`_failed_result_detail`) is that SAME
+    ``error`` outcome, decided BEFORE any mapping: a tool that reports its failure by returning
+    an outcome envelope rather than raising has produced a partial result, and the route's
+    ``reply_expr`` maps success only — so mapping it would answer a half-finished run as a
+    completed one. The failing status and the envelope's own failure keys ride the recorded
+    detail, so the failure stays diagnosable.
 
     The generic completion continuation (:data:`DELIVER_TOOL_COMPLETION_NAME`) is bound for
     the dispatch's duration, carrying this turn's ``thread_id`` as the opaque delivery
@@ -606,6 +677,14 @@ async def _run_tool_turn(
         # end the turn silently. No completion tool is bound — per the module docstring's
         # park-delivery paths, a tool target's resuming consumer owns delivery-back.
         return _SilentOutcome()
+    failure_detail = _failed_result_detail(result)
+    if failure_detail is not None:
+        # The tool RETURNED a non-success terminal instead of raising: the run was aborted,
+        # stopped early, or failed, so its result is partial by construction. The route carries
+        # only a success mapping, so mapping it would answer a half-finished run as a completed
+        # one (or fault inside jq). It is surfaced as the SAME failed turn a raising tool is.
+        logger.error("conversations: tool turn for route %r failed: %s", route.route_name, failure_detail)
+        return _tool_error(failure_detail, route)
     try:
         reply = await _tool_reply(route, result)
     except Exception as exc:

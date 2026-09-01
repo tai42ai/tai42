@@ -406,6 +406,244 @@ async def test_tool_target_reply_expr_yielding_null_is_silent(env, monkeypatch):
     assert channel.sends == []
 
 
+@pytest.mark.parametrize("status", ["aborted", "stopped", "error"])
+async def test_tool_target_result_naming_a_non_success_terminal_is_an_error(env, monkeypatch, status):
+    # A result envelope that NAMES a non-success terminal carries a partial (or empty) result
+    # its reply_expr would happily map into a reply that reads like a completed run. The turn
+    # reads the status first: the mapping never runs and the turn is a failed one.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"status": status, "result": {"reply": "half-finished"}})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    # The status is VISIBLE in the recorded detail, so the failure is diagnosable...
+    assert record.error is not None
+    assert status in record.error
+    # ...and the partial payload never reached the guest.
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_non_success_detail_carries_every_failure_key(env, monkeypatch):
+    # The recorded detail names WHY the terminal failed — the envelope's own failure keys — so
+    # an operator reading the record sees the failure, the outputs the run never produced and
+    # the run handle to trace it by, without the raw partial payload ever being delivered.
+    # Each key carries a token appearing NOWHERE else in the fixture, so dropping any one key
+    # from the rendering fails this test.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(
+        monkeypatch,
+        lambda kw: {
+            "status": "error",
+            "result": {"reply": "half-finished"},
+            "error": "node raised at step two",
+            "error_kind": "node_failure",
+            "last_error": "TimeoutError-zulu",
+            "missing_results": ["gamma-node-id"],
+            "session_id": "run-quebec",
+        },
+    )
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.error is not None
+    # The rendered KEY and its value, together: a bare token would also match a neighbouring
+    # key's value, and a bare ``error=`` is a substring of ``last_error=``.
+    for fragment in (
+        "error='node raised at step two'",
+        "error_kind='node_failure'",
+        "last_error='TimeoutError-zulu'",
+        "missing_results=['gamma-node-id']",
+        "session_id='run-quebec'",
+    ):
+        assert fragment in record.error
+    # The partial payload stays out of the detail entirely.
+    assert "half-finished" not in record.error
+
+
+async def test_tool_target_non_success_detail_skips_the_empty_failure_keys(env, monkeypatch):
+    # A key the envelope carries EMPTY (no missing outputs recorded, a blank message) names no
+    # reason, so it is not rendered — the detail says only what the envelope actually knows.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(
+        monkeypatch,
+        lambda kw: {
+            "status": "stopped",
+            "result": {"reply": "half-finished"},
+            "error": "",
+            "missing_results": [],
+            "session_id": "run-quebec",
+        },
+    )
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.error is not None
+    assert "missing_results" not in record.error
+    assert "error=" not in record.error
+    # The keys that DO carry a value still render.
+    assert "stopped" in record.error
+    assert "session_id='run-quebec'" in record.error
+
+
+async def test_tool_target_non_success_detail_is_capped_with_a_truncation_marker(env, monkeypatch):
+    # A failure value large enough to bloat the record is clipped — and says so, so a
+    # truncated detail never reads as a complete one.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"status": "error", "error": "boom-" + "x" * 10_000})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.error is not None
+    assert turn_module._FAILED_RESULT_DETAIL_ELLIPSIS in record.error
+    # Bounded by the cap plus the surrounding detail wording, nowhere near the 10KB value.
+    assert len(record.error) < 2 * turn_module._FAILED_RESULT_DETAIL_LIMIT
+    # The head of the clipped value survives, so the detail still names the failure.
+    assert "boom-" in record.error
+
+
+async def test_tool_target_non_success_diverts_before_the_reply_mapping(env, monkeypatch):
+    # The status is read BEFORE the mapping, not after it: a reply_expr that would FAULT on the
+    # partial envelope still yields the status detail. Were the order reversed, the recorded
+    # detail would name the mapping fault and the real terminal would be lost.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr='.result.reply | error("mapping ran")')
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"status": "aborted", "result": {"reply": "half-finished"}})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert record.error.startswith("tool result status 'aborted'")
+    assert "reply_expr" not in record.error
+    assert "mapping ran" not in record.error
+
+
+async def test_tool_target_partial_run_envelope_fails_the_turn(env, monkeypatch):
+    # The whole composed shape a cut-short run returns, end to end: the terminal it reached,
+    # the partial result it did produce, and the outputs it never did. The route's reply_expr
+    # maps the SUCCESS shape and would have answered from the partial result.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr='"Your quote is " + (.result.quote.amount | tostring)')
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(
+        monkeypatch,
+        lambda kw: {
+            "status": "aborted",
+            "result": {"quote": {"amount": 42}},
+            "missing_results": ["send_quote"],
+        },
+    )
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "aborted" in record.error
+    assert "missing_results=['send_quote']" in record.error
+    # The half-finished run is NEVER answered as a completed one.
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+
+
+async def test_tool_target_non_success_uses_the_route_error_reply_text(env, monkeypatch):
+    # A non-success terminal is surfaced exactly as any other failed tool run: the route's own
+    # guest-facing wording when it carries one.
+    spanish = "Lo sentimos, algo salió mal. Inténtalo de nuevo."
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null", error_reply_text=spanish)
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"status": "aborted", "result": {"reply": "half-finished"}})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert [n.message for n in channel.sends] == [spanish]
+
+
+async def test_tool_target_success_status_maps_through_reply_expr(env, monkeypatch):
+    # The success terminal is the mapped one — unchanged.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: {"status": "success", "result": {"reply": "all done"}})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "answered"
+    assert [n.message for n in channel.sends] == ["all done"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        # No status key at all — the arbitrary dict most tools return.
+        {"result": {"reply": "all done"}},
+        # A status key from a tool's OWN vocabulary: not a terminal-outcome name, so it stays
+        # on the reply path — the turn diverts only on a named non-success terminal.
+        {"status": "queued", "result": {"reply": "all done"}},
+        {"status": "not_found", "result": {"reply": "all done"}},
+        # A status REPORT about a run is a successful answer, not a terminal of THIS call.
+        {"status": "errored", "result": {"reply": "all done"}},
+        # The park-completion FIRE vocabulary is not a returned-envelope terminal either.
+        {"status": "failed", "result": {"reply": "all done"}},
+        # Matching is case-sensitive, so a look-alike casing is a tool's own vocabulary.
+        {"status": "Aborted", "result": {"reply": "all done"}},
+        # A null/non-string status is a plain payload field, never a terminal name.
+        {"status": None, "result": {"reply": "all done"}},
+        {"status": 500, "result": {"reply": "all done"}},
+        {"status": ["error"], "result": {"reply": "all done"}},
+    ],
+)
+async def test_tool_target_result_without_a_terminal_status_still_maps_through_reply_expr(env, monkeypatch, result):
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: result)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "answered"
+    assert [n.message for n in channel.sends] == ["all done"]
+
+
 async def test_tool_target_suspended_interaction_ends_the_turn_silently(env, monkeypatch):
     # A tool that async-parks the caller returns the generic SuspendedInteraction
     # sentinel; the turn recognizes it by TYPE (never a reply_expr mapping) and ends
