@@ -23,10 +23,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The repos under test. Each floor admits only wheels whose own tai42-kit and
-    # tai42-contract ranges can overlap the harness's direct kit and contract floors
-    # below — a lower floor lets an older wheel back in and makes the published
-    # harness unresolvable.
+    # The repos under test. The direct tai42-contract and tai42-kit floors below are
+    # the load-bearing constraint: they force the resolver past any member wheel whose
+    # own ranges predate the current fleet, so the published harness stays resolvable
+    # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=6.0,<7",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.8,<4",
