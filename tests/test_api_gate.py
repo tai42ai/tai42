@@ -159,6 +159,37 @@ def test_allowed_set_renders_comma_joined_sorted_no_brackets():
         ),
         # A typer ``Option`` help-only edit is documentation.
         ("Option(None, '--flag', help='old')", "Option(None, '--flag', help='new')"),
+        # Adding an x-tai42-expression annotation by wrapping a bare-literal default
+        # into a Field with the SAME default is documentation metadata.
+        ("None", "Field(default=None, json_schema_extra={'x-tai42-expression': 'jq:.a'})"),
+        # Wrapping a non-None literal default with a doc-only json_schema_extra is too.
+        ("42", "Field(default=42, json_schema_extra={'examples': [42]})"),
+        # ADDING a doc-only json_schema_extra to an existing Field (absent -> present).
+        (
+            "Field(default=None, gt=0)",
+            "Field(default=None, gt=0, json_schema_extra={'description': 'help'})",
+        ),
+        # EDITING an x-tai42-expression payload in place is documentation.
+        (
+            "Field(default=1, json_schema_extra={'x-tai42-expression': 'a'})",
+            "Field(default=1, json_schema_extra={'x-tai42-expression': 'b'})",
+        ),
+        # EDITING a description key inside json_schema_extra in place is documentation.
+        (
+            "Field(default=1, json_schema_extra={'description': 'a'})",
+            "Field(default=1, json_schema_extra={'description': 'b'})",
+        ),
+        # Adding a doc-only key alongside a preserved one is a doc-only delta.
+        (
+            "Field(default=1, json_schema_extra={'title': 't'})",
+            "Field(default=1, json_schema_extra={'title': 't', 'examples': [1]})",
+        ),
+        # A literal wrapped into a Field that adds a doc-only json_schema_extra AND a
+        # documentation keyword.
+        (
+            "None",
+            "Field(default=None, description='d', json_schema_extra={'title': 't'})",
+        ),
     ],
 )
 def test_doc_only_call_change_is_not_breaking(old: str, new: str):
@@ -191,6 +222,58 @@ def test_doc_only_call_change_is_not_breaking(old: str, new: str):
         (
             "typer.Typer(name='old', help='same')",
             "typer.Typer(name='new', help='same')",
+        ),
+        # A literal wrapped into a Field whose default DIFFERS from it is real surface,
+        # even when the wrap also adds json_schema_extra.
+        ("None", "Field(default=5, json_schema_extra={'description': 'd'})"),
+        # Adding json_schema_extra while ALSO changing a non-doc kwarg (gt) is breaking.
+        (
+            "Field(default=None, gt=0)",
+            "Field(default=None, gt=1, json_schema_extra={'description': 'd'})",
+        ),
+        # Adding json_schema_extra while ALSO changing the default is breaking.
+        (
+            "Field(default=None)",
+            "Field(default=5, json_schema_extra={'description': 'd'})",
+        ),
+        # Flipping a ``secret`` redaction marker in place is behaviour, not doc.
+        (
+            "Field(default=1, json_schema_extra={'secret': True})",
+            "Field(default=1, json_schema_extra={'secret': False})",
+        ),
+        # Flipping a settings ``reload`` disposition in place is behaviour.
+        (
+            "Field(default=1, json_schema_extra={'reload': 'recycle'})",
+            "Field(default=1, json_schema_extra={'reload': 'excluded'})",
+        ),
+        # Adding a behavioural ``secret`` marker via the wrap is breaking.
+        ("None", "Field(default=None, json_schema_extra={'secret': True})"),
+        # A mixed delta — a forgiven doc key AND a behavioural key together — stays breaking.
+        (
+            "Field(default=1, json_schema_extra={'x-tai42-expression': 'a'})",
+            "Field(default=1, json_schema_extra={'x-tai42-expression': 'b', 'secret': True})",
+        ),
+        # A callable (non-literal) json_schema_extra is never a doc-only delta.
+        (
+            "Field(default=1, json_schema_extra=_secret_marker)",
+            "Field(default=1, json_schema_extra=_public_marker)",
+        ),
+        # A ``**expansion`` inside json_schema_extra is non-literal — fails closed.
+        (
+            "Field(default=1, json_schema_extra={'description': 'a'})",
+            "Field(default=1, json_schema_extra={**base, 'description': 'b'})",
+        ),
+        # REMOVING a behavioural key entirely (present -> absent) stays breaking.
+        (
+            "Field(default=1, json_schema_extra={'secret': True})",
+            "Field(default=1)",
+        ),
+        # Wrapping a literal into a Field that also adds a non-doc kwarg (alias) is surface.
+        ("None", "Field(default=None, alias='y', json_schema_extra={'description': 'd'})"),
+        # json_schema_extra is Field-only: a Typer callee does not get the carve-out.
+        (
+            "typer.Typer(name='a', json_schema_extra={'description': 'd'})",
+            "typer.Typer(name='a', json_schema_extra={'description': 'e'})",
         ),
     ],
 )

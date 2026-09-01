@@ -27,7 +27,14 @@ additive and skipped. A doc-only change to a known decorator/constructor call �
 a pydantic ``Field(...)`` or a ``typer`` ``Typer``/``Option``/``Argument`` —
 editing only that callee's documentation keywords (``help``/``description``/
 ``title``/``examples`` and kin) is documentation metadata, not API surface, so it
-is not a breaking change. Any tooling failure — an unreadable
+is not a breaking change. A ``Field`` ``json_schema_extra`` mapping is forgiven only
+key by key: both sides must be literal string-keyed dicts (an absent mapping counts
+as empty) and every key whose value is added, removed or changed must be a known
+documentation key (``x-tai42-expression``/``description``/``title``/``examples``/
+``deprecated``). A behaviour-bearing key (``secret``, ``reload``, ``key_material``,
+``type`` — anything off that allowlist), a callable or otherwise non-literal
+mapping, keeps gating; the same key-level check governs wrapping a bare-literal
+default into ``Field(default=<same>, …)``. Any tooling failure — an unreadable
 config, a mode the config does not name, a module that cannot be loaded — raises
 loudly; the gate never passes a release on a classification it could not compute.
 
@@ -60,6 +67,15 @@ _DOC_KEYWORDS: dict[str, frozenset[str]] = {
     "Option": frozenset({"help", "rich_help_panel"}),
     "Argument": frozenset({"help", "rich_help_panel"}),
 }
+# The pydantic ``json_schema_extra`` mapping mixes documentation with behaviour:
+# alongside doc keys it carries ``secret`` (redaction), ``reload`` (settings reload
+# disposition), ``key_material``, schema-shaping keys like ``type`` and more. A
+# change to it is therefore forgiven only per key, and only for keys whose meaning
+# is purely documentation; every other key — known-behavioural or simply unknown —
+# keeps gating (fail closed). It is owned by ``Field`` only.
+_SCHEMA_EXTRA_KEYWORD = "json_schema_extra"
+_SCHEMA_EXTRA_CALLEES = frozenset({"Field"})
+_SCHEMA_EXTRA_DOC_KEYS = frozenset({"x-tai42-expression", "description", "title", "examples", "deprecated"})
 
 
 def _fail(message: str) -> NoReturn:
@@ -199,18 +215,104 @@ def _call_callee_name(func: ast.expr) -> str | None:
     return None
 
 
+def _pop_kwarg(node: ast.Call, name: str) -> ast.expr | None:
+    """Remove and return the value of the keyword literally named ``name`` from
+    ``node`` (mutating its ``keywords``), or ``None`` when it is absent. A
+    ``**expansion`` (``kw.arg is None``) is never matched and is left in place, so
+    a spread ``json_schema_extra`` survives into the structural comparison and, if
+    it differs at all, keeps the change breaking."""
+    for i, kw in enumerate(node.keywords):
+        if kw.arg == name:
+            del node.keywords[i]
+            return kw.value
+    return None
+
+
+def _literal_str_key_dict(node: ast.expr) -> dict[str, str] | None:
+    """Map each key to ``ast.dump`` of its value when ``node`` is an ``ast.Dict``
+    whose keys are ALL literal strings, else ``None``. A ``**expansion`` (a ``None``
+    key node) or a non-string/duplicate key makes the mapping non-literal and
+    returns ``None`` so the caller fails closed."""
+    if not isinstance(node, ast.Dict):
+        return None
+    result: dict[str, str] = {}
+    for key, value in zip(node.keys, node.values, strict=True):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None
+        if key.value in result:
+            return None
+        result[key.value] = ast.dump(value)
+    return result
+
+
+def _schema_extra_delta_is_doc_only(old_value: ast.expr | None, new_value: ast.expr | None) -> bool:
+    """True when a ``json_schema_extra`` change is confined to documentation keys.
+    Both values must be literal string-keyed dicts (an absent side, ``None``, counts
+    as the empty dict); the change is forgiven only when every key whose dumped value
+    differs between the two — added, removed or edited — is in
+    :data:`_SCHEMA_EXTRA_DOC_KEYS`. A non-dict/callable value, a non-literal key, or
+    any delta touching a behavioural or unknown key returns ``False`` (fail closed)."""
+    old_map = {} if old_value is None else _literal_str_key_dict(old_value)
+    new_map = {} if new_value is None else _literal_str_key_dict(new_value)
+    if old_map is None or new_map is None:
+        return False
+    for key in old_map.keys() | new_map.keys():
+        if old_map.get(key) != new_map.get(key) and key not in _SCHEMA_EXTRA_DOC_KEYS:
+            return False
+    return True
+
+
+def _is_literal_to_doc_field(old_node: ast.expr, new_node: ast.Call) -> bool:
+    """True when a plain-literal default was merely wrapped into a known callee's
+    call whose ONLY non-documentation content is a ``default=`` equal to that same
+    literal — e.g. ``None`` -> ``Field(default=None, json_schema_extra={...})``.
+    The default must be passed by keyword and be structurally identical to the old
+    literal; any positional argument, any missing/differing default, or any non-doc
+    keyword (``alias``/``ge``/…) makes it real surface and returns ``False``. A
+    wrapped ``json_schema_extra`` payload is allowed only when its delta versus the
+    empty mapping is documentation-only (see :func:`_schema_extra_delta_is_doc_only`)."""
+    callee = _call_callee_name(new_node.func)
+    if callee not in _SCHEMA_EXTRA_CALLEES or new_node.args:
+        return False
+    allowed_doc = _DOC_KEYWORDS[callee]
+    default_matches = False
+    for kw in new_node.keywords:
+        if kw.arg == "default":
+            if ast.dump(kw.value) != ast.dump(old_node):
+                return False
+            default_matches = True
+        elif kw.arg == _SCHEMA_EXTRA_KEYWORD:
+            if not _schema_extra_delta_is_doc_only(None, kw.value):
+                return False
+        elif kw.arg not in allowed_doc:
+            return False
+    return default_matches
+
+
 def _is_doc_only_call_change(old_expr: str, new_expr: str) -> bool:
-    """True only when both value expressions parse as calls to the SAME known
-    callee (a key of ``_DOC_KEYWORDS``) and are structurally equal after dropping
-    that callee's documentation-only keywords. A parse failure, a non-call
-    expression, an unknown callee or a callee mismatch returns ``False`` — the
-    classification stays breaking — and any other surprise propagates to the
-    caller as a loud crash."""
+    """True only when the value change is confined to documentation metadata of a
+    known decorator/constructor callee. Two shapes qualify:
+
+    * call -> call to the SAME known callee (a key of ``_DOC_KEYWORDS``) that is
+      structurally equal after dropping that callee's documentation-only keywords.
+      For an owning callee, ``json_schema_extra`` is compared separately, key by
+      key: the change is forgiven only when its delta touches documentation keys
+      alone (see :func:`_schema_extra_delta_is_doc_only`), so flipping a behavioural
+      key — and any change that also touches a non-doc keyword — stays breaking.
+    * literal -> call that merely wraps the old literal as ``default=`` on a known
+      callee with only documentation keywords besides it (see
+      :func:`_is_literal_to_doc_field`).
+
+    A parse failure, a non-call new expression, an unknown callee or a callee
+    mismatch returns ``False`` — the classification stays breaking — and any other
+    surprise propagates to the caller as a loud crash."""
     try:
         old_node = ast.parse(old_expr, mode="eval").body
         new_node = ast.parse(new_expr, mode="eval").body
     except (SyntaxError, ValueError):
         return False
+    if isinstance(new_node, ast.Call) and not isinstance(old_node, ast.Call):
+        return _is_literal_to_doc_field(old_node, new_node)
     if not (isinstance(old_node, ast.Call) and isinstance(new_node, ast.Call)):
         return False
     callee = _call_callee_name(old_node.func)
@@ -219,6 +321,13 @@ def _is_doc_only_call_change(old_expr: str, new_expr: str) -> bool:
     doc_keywords = _DOC_KEYWORDS.get(callee)
     if doc_keywords is None:
         return False
+    if callee in _SCHEMA_EXTRA_CALLEES:
+        old_extra = _pop_kwarg(old_node, _SCHEMA_EXTRA_KEYWORD)
+        new_extra = _pop_kwarg(new_node, _SCHEMA_EXTRA_KEYWORD)
+        if (old_extra is not None or new_extra is not None) and not _schema_extra_delta_is_doc_only(
+            old_extra, new_extra
+        ):
+            return False
     old_node.keywords = [kw for kw in old_node.keywords if kw.arg not in doc_keywords]
     new_node.keywords = [kw for kw in new_node.keywords if kw.arg not in doc_keywords]
     return ast.dump(old_node) == ast.dump(new_node)
