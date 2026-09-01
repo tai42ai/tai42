@@ -27,7 +27,7 @@ dependencies = [
     # The pure interface contract these tools register through — the tai42_app
     # handle and the tool facet.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.12,<6",
+    "tai42-contract>=6.0,<7",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Stripe REST module wires to.
     "tai42-kit[curl]>=3.8,<4",

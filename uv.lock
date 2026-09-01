@@ -5585,7 +5585,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "5.12.0"
+version = "6.0.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },

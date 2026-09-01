@@ -28,7 +28,7 @@ dependencies = [
     # handle and the WebhookVerifier / WebhookVerificationError types. The HMAC
     # work is pure standard library (hmac / hashlib); no other tai-* dependency.
     # Republished for the tai42-contract 5.x major (unified park protocol).
-    "tai42-contract>=5.12,<6",
+    "tai42-contract>=6.0,<7",
 ]
 
 [project.urls]
