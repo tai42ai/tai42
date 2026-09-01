@@ -26,6 +26,7 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import component_store_settings
 from tai42_kit.settings import reset_all_settings
 
+import tai42_skeleton.versioning.store as versioning_store
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.versioning.store import PostgresVersionedStore
 
@@ -60,12 +61,16 @@ async def _exec(sql: LiteralString, params: tuple = ()) -> None:
 
 
 @pytest.fixture
-async def real_store() -> AsyncIterator[tuple[PostgresVersionedStore, str]]:
+async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[PostgresVersionedStore, str]]:
     if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
         pytest.skip(
             f"real-Postgres concurrency test is opt-in: set {_OPT_IN_ENV}=1 and point the "
             "TAI_DATABASE_DEFAULT_PG_* env at a live Postgres to run it (needs real MVCC — no fake)"
         )
+    # The suite-wide autouse fixture points the store's ``client_ctx`` at the in-memory
+    # versioning fake so the offline suite never opens Postgres; this test needs the REAL
+    # thing (a fake cannot exhibit the MVCC/EvalPlanQual hazard), so restore the genuine seam.
+    monkeypatch.setattr(versioning_store, "client_ctx", client_ctx)
     # Rebuild the cached settings so ``TAI_DATABASE_DEFAULT_PG_*`` from the environment is read
     # (a stale cached settings object would target the wrong database).
     reset_all_settings()
