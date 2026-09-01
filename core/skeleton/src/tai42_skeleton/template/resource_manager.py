@@ -24,6 +24,12 @@ from tai42_skeleton.template.settings import template_cache_settings
 
 logger = logging.getLogger(__name__)
 
+# Vendor marker stamped on a schema that carries variable NAMES without inferred
+# types, so a consumer can tell a fully inferred schema from a degraded one
+# instead of reading the missing types as "this template takes no typed input".
+_INFERENCE_MARKER_KEY = "x-tai42-inference"
+_PARTIAL_INFERENCE = "partial"
+
 
 class TemplateNotFoundError(Exception):
     """A requested stored template does not exist.
@@ -446,7 +452,44 @@ class ResourceManager:
         else:
             raise ValueError("You must provide either a template or a template_id.")
 
+    def _variables_only_schema(self, content: str) -> dict[str, Any]:
+        """Build the degraded, names-only input schema for ``content``.
+
+        The template is parsed by the app's OWN sandboxed environment — the one
+        that renders it, so every registered filter and extension is known — and
+        each undeclared variable becomes an untyped property. Nothing is marked
+        required: the shapes are unknown here, not known-optional.
+
+        Author-broken Jinja raises ``TemplateError`` out of ``parse`` rather than
+        degrading to an empty schema: this environment is the authority on whether
+        the template PARSES. (Renderability is a stronger property — e.g. an
+        unknown Jinja *test* resolves only at render time — and belongs to the
+        render door, not to a schema read.)
+        """
+        names = sorted(meta.find_undeclared_variables(self._env.parse(content)))
+        return {
+            "type": "object",
+            "properties": {name: {"title": name} for name in names},
+            "required": [],
+            _INFERENCE_MARKER_KEY: _PARTIAL_INFERENCE,
+        }
+
     async def get_template_schema(self, content: str | None = None, template_id: str | None = None) -> dict[str, Any]:
+        """Return the JSON-Schema description of a template's inputs.
+
+        Reading a renderable template never fails. ``jinja2schema`` is the
+        enricher: when it can infer the template it returns typed, required-aware
+        properties. It supports only a subset of Jinja, though, and rejects plenty
+        of valid, renderable templates (dict literals, ``{% with %}``/``{% set %}``
+        blocks, ``{% include %}``, filters it does not know) with errors that are
+        NOT ``jinja2.TemplateError`` — so any failure of that call degrades to
+        :meth:`_variables_only_schema`, which carries the variable names and the
+        ``x-tai42-inference: partial`` marker.
+
+        Raises ``TemplateNotFoundError`` for a missing ``template_id`` and
+        ``jinja2.TemplateError`` only when the template itself is broken (the app's
+        own environment refuses to parse it) — an author error, not a read failure.
+        """
         if content is not None and template_id is not None:
             raise ValueError("Provide either 'content' OR 'template_id', not both.")
 
@@ -460,8 +503,24 @@ class ResourceManager:
                 # template, inferred as an empty schema rather than rejected.
                 raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
 
-        def _infer_schema():
-            return to_json_schema(infer(content), jsonschema_encoder=JSONSchemaDraft4Encoder)
+        def _infer_schema() -> dict[str, Any]:
+            # ``Storage.load`` contractually returns ``str``, and the block above
+            # raised on a missing template, so ``content`` is a real string here.
+            assert content is not None
+            try:
+                return to_json_schema(infer(content), jsonschema_encoder=JSONSchemaDraft4Encoder)
+            except Exception as exc:
+                # Broad ON PURPOSE and scoped to this one call: jinja2schema signals
+                # an unsupported construct as InferException, a bare ``Exception``
+                # ("stmt visitor ... not found"), or a ValueError from its own
+                # loader. None of those say the template is broken, so none may fail
+                # the read — they only mean "no types available".
+                logger.debug(
+                    "jinja2schema could not infer this template (%s: %s); degrading to a variables-only schema.",
+                    type(exc).__name__,
+                    exc,
+                )
+            return self._variables_only_schema(content)
 
         return await asyncio.to_thread(_infer_schema)
 
