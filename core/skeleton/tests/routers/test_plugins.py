@@ -224,6 +224,47 @@ async def test_spa_direct_index_request_is_injected(studio_env):
     assert 'type="importmap"' in bytes(resp.body).decode()
 
 
+def _served_importmap(resp) -> dict:
+    """The import map the browser parses out of the served shell."""
+    html = bytes(resp.body).decode()
+    body = html.split('type="importmap"', 1)[1].split(">", 1)[1].split("</script>", 1)[0]
+    return json.loads(body)
+
+
+async def test_spa_shell_boots_without_the_optional_vendor_module(studio_env):
+    # A dist shipping only the required vendor set boots and serves a map with no
+    # optional specifier — the optional asset is never a boot requirement.
+    resp = await router.serve_spa(_req(spa_path="index.html"))
+    assert resp.status_code == 200
+    imports = _served_importmap(resp)["imports"]
+    assert "@tai42/jq-studio" not in imports
+    assert imports["react"] == "/vendor/react.js"
+
+
+async def test_spa_shell_boots_with_the_optional_vendor_module(studio_env):
+    # A dist that ships the optional module resolves it through the map, and the
+    # module plus its runtime sidecars all serve from the dist.
+    dist = studio_env.dist
+    (dist / "vendor" / "jq-studio.js").write_text("export const jq = 1;\n", encoding="utf-8")
+    (dist / "vendor" / "jq-studio-worker.js").write_text("self.onmessage = () => {};\n", encoding="utf-8")
+    (dist / "vendor" / "jq.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
+    set_current_registry(build_registry(["acme_plugin"], str(dist)))
+    resp = await router.serve_spa(_req(spa_path="index.html"))
+    assert resp.status_code == 200
+    parsed = _served_importmap(resp)
+    assert parsed["imports"]["@tai42/jq-studio"] == "/vendor/jq-studio.js"
+    assert parsed["integrity"]["/vendor/jq-studio.js"].startswith("sha384-")
+    module = await router.serve_spa(_req(spa_path="vendor/jq-studio.js"))
+    assert module.status_code == 200
+    assert module.media_type == "text/javascript"
+    worker = await router.serve_spa(_req(spa_path="vendor/jq-studio-worker.js"))
+    assert worker.status_code == 200
+    assert worker.media_type == "text/javascript"
+    wasm = await router.serve_spa(_req(spa_path="vendor/jq.wasm"))
+    assert wasm.status_code == 200
+    assert wasm.media_type == "application/wasm"
+
+
 async def test_spa_missing_asset_extension_404s_not_shell(studio_env):
     # A request for a static asset (extension-bearing last segment, not .html) that
     # does not resolve to a real file is a genuine 404 — NEVER the index.html shell.

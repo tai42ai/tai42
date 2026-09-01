@@ -101,6 +101,21 @@ def test_import_map_includes_studio_sdk_host(tmp_path):
     assert imap["integrity"]["/vendor/studio-sdk-host.js"] == expected
 
 
+def test_render_importmap_carries_optional_specifier_when_dist_ships_it(tmp_path):
+    """An optional vendor specifier the dist ships survives the HTML escaping: its
+    ``/`` characters render as ``\\u002f`` and the browser's JSON parser decodes both
+    the scoped specifier and its URL back."""
+    for rel in (*reg.VENDOR_MODULES.values(), "vendor/jq-studio.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"export const m = {rel!r};\n", encoding="utf-8")
+    script = render_importmap_script(build_registry([], str(tmp_path)), "N0NCE")
+    body = script[script.index(">") + 1 : script.rindex("<")]
+    assert "/vendor/jq-studio.js" not in body  # escaped, never raw
+    parsed = json.loads(body)
+    assert parsed["imports"]["@tai42/jq-studio"] == "/vendor/jq-studio.js"
+    assert parsed["integrity"]["/vendor/jq-studio.js"] == reg._hash_file(tmp_path / "vendor" / "jq-studio.js")
+
+
 def test_render_importmap_is_valid_json_after_unescape():
     script = render_importmap_script(_registry(), "N0NCE")
     assert script.startswith('<script type="importmap" nonce="N0NCE">')
