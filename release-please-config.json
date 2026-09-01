@@ -537,7 +537,8 @@
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
-      "skip-changelog": true
+      "skip-changelog": true,
+      "release-as": "6.8.1"
     }
   }
 }
