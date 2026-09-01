@@ -13,7 +13,7 @@
     "test": "vitest run --coverage"
   },
   "devDependencies": {
-    "@tai42/studio-sdk": "^9.2.0",
+    "@tai42/studio-sdk": "^10.0.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.2",
