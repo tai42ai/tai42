@@ -30,7 +30,7 @@ dependencies = [
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=6.0,<7",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.8,<4",
-    "tai42-skeleton[toolbox,files]>=9.10,<10",
+    "tai42-skeleton[toolbox,files]>=9.11,<10",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=2.0,<3",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
