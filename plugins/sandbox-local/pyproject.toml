@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-sandbox-local"
-version = "1.0.1"
+version = "1.0.2"
 description = "Direct/host sandbox provider for the TAI ecosystem — runs a session's code as a plain host subprocess, no container and no isolation."
 readme = "README.md"
 requires-python = ">=3.13"

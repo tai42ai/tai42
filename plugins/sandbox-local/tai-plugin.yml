@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: sandbox-local
 package: tai42-sandbox-local
-version: 1.0.1
+version: 1.0.2
 description: >-
   Direct/host sandbox provider for the TAI ecosystem — runs a session's code as
   a plain host subprocess, no container and no isolation.
