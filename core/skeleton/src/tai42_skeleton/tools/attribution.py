@@ -35,6 +35,17 @@ def get_run_attribution() -> RunAttribution | None:
     return _current_run_attribution.get()
 
 
+def preset_attribution_armed() -> bool:
+    """Whether an OUTERMOST registered-preset dispatch already armed the preset
+    attribution scope on this run.
+
+    Read by the runs-index chokepoint to enumerate ONE row per outermost preset
+    dispatch: a nested sub-preset dispatch sees this armed (its ancestor set it) and
+    writes no second row, exactly as :func:`stamp_preset_attribution` layers no second
+    trace stamp. False at a top-level dispatch, before the stamp arms the guard."""
+    return _preset_attribution_armed.get()
+
+
 def set_run_attribution(attribution: RunAttribution | None) -> Token[RunAttribution | None]:
     """Bind ``attribution`` as the current run's attribution; pass the returned token to
     :func:`reset_run_attribution` to restore the previous value."""

@@ -132,6 +132,10 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/presets/{name}/rollback"),
     ("POST", "/api/presets/{name}/versions"),
     ("POST", "/api/run-tool"),
+    # The runs-index prune is reload-gated (a deployment-wide destructive purge, exactly
+    # like the checkpoint sweep) and declares NO 503 of its own: with the store OFF it
+    # reports a skip, never a 503. So the reload gate is its only 503 source.
+    ("POST", "/api/runs/prune"),
     ("POST", "/api/sub-mcp"),
     ("POST", "/api/tools-config/entries"),
     ("POST", "/api/tools/reload"),
@@ -290,6 +294,7 @@ _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
     ("POST", "/api/presets/{name}/rollback"),
     ("POST", "/api/presets/{name}/versions"),
     ("POST", "/api/run-tool"),
+    ("POST", "/api/runs/prune"),
     ("POST", "/api/schedules"),
     ("DELETE", "/api/schedules/{schedule_name}"),
     ("POST", "/api/sub-mcp"),

@@ -41,8 +41,13 @@ from tai42_kit.utils.data import makefun_func_name
 from tai42_skeleton.agent.binding import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
+from tai42_skeleton.runs.chokepoint import record_outermost_preset_run
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
-from tai42_skeleton.tools.attribution import stamp_preset_attribution, stamp_run_attribution
+from tai42_skeleton.tools.attribution import (
+    preset_attribution_armed,
+    stamp_preset_attribution,
+    stamp_run_attribution,
+)
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate, note_secret_reveal
 from tai42_skeleton.tools.turn_budget import turn_budget
@@ -627,13 +632,32 @@ class ToolBinding:
         When ``key`` names a registered preset with a retained active version, wrap the
         dispatch in :func:`stamp_preset_attribution` so the run's trace carries the
         ``preset:``/``preset-v:`` tags and root version; otherwise dispatch bare. The
-        armed-guard inside the stamp keeps a nested sub-preset from restamping."""
+        armed-guard inside the stamp keeps a nested sub-preset from restamping.
+
+        The OUTERMOST registered-preset dispatch is also the platform-side runs-index
+        write point: exactly one enumerable ``run_index`` row is recorded around it
+        (start + terminal outcome) via :func:`record_outermost_preset_run`, aligning a
+        row with the run's trace. The outermost check reads the SAME armed guard the
+        stamp uses (before it arms), so a nested sub-preset dispatch — like the trace
+        stamp — writes no second row. A non-preset/draft key (``version is None``) is
+        never a run row: a raw tool call is infrastructure plumbing that carries no
+        preset identity or version and would explode the index with nested tool calls;
+        its execution belongs to the tool-run surface, not this per-run enumeration.
+        The record is fail-safe (a store outage never breaks the dispatch)."""
         manager = self._app.preset_manager
         version = manager.active_version(key) if manager.is_registered(key) else None
         if version is None:
             return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+        # Read the outermost state BEFORE the stamp arms it: True here means an ancestor
+        # preset dispatch already owns this run's row.
+        outermost = not preset_attribution_armed()
         with stamp_preset_attribution(key, version):
-            return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+            if not outermost:
+                return await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+            async with record_outermost_preset_run(key, version) as run:
+                result = await self._dispatch_tool(key, arguments, offload_sync=offload_sync)
+                run.observe(result)
+                return result
 
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity, arguments

@@ -180,3 +180,68 @@ def test_spec_source_migration_widens_the_check_via_alter_on_a_populated_table()
     # No table recreate: a widening migration must not CREATE/DROP the table.
     assert "CREATE TABLE" not in sql
     assert "DROP TABLE" not in sql
+
+
+# ---------------------------------------------------------------------------
+# 0003_run_index — the platform-side runs index table
+# ---------------------------------------------------------------------------
+
+
+def _run_index_sql() -> str:
+    scripts = discover_migrations(skeleton_migrations_dir())
+    names = [(s.version, s.name) for s in scripts]
+    assert (3, "run_index") in names, f"the 0003_run_index migration must ship in the chain; got {names}"
+    return next(s.sql for s in scripts if s.version == 3)
+
+
+def _run_index_block(ddl: str) -> str:
+    match = re.search(r"CREATE TABLE IF NOT EXISTS run_index\s*\((.*?)\n\);", ddl, re.DOTALL)
+    assert match is not None, "run_index table not found in the 0003 migration"
+    return match.group(1)
+
+
+def test_run_index_table_columns_present() -> None:
+    """The runs-index row carries the enumeration columns: identity, preset
+    identity+version, the deep-link trace id, the attribution identity, the outcome,
+    and the start/end window. Text-level guards so a dropped/renamed column fails
+    without a live Postgres."""
+    block = _run_index_block(_run_index_sql())
+    assert re.search(r"\brun_id\s+TEXT\s+NOT NULL", block) is not None
+    assert re.search(r"\bpreset_name\s+TEXT\s+NOT NULL", block) is not None
+    assert re.search(r"\bpreset_version\s+INTEGER\s+NOT NULL", block) is not None
+    # trace_id / user_id / session_id / interaction_id / ended_at are NULLABLE
+    # (best-effort / in-flight; interaction_id is NULL for a plain uncorrelated run).
+    for nullable in ("trace_id", "user_id", "session_id", "interaction_id"):
+        line = next(ln for ln in block.splitlines() if ln.strip().startswith(nullable))
+        assert "NOT NULL" not in line, f"{nullable} must be nullable"
+    assert re.search(r"\bstarted_at\s+TIMESTAMPTZ\s+NOT NULL", block) is not None
+    ended_line = next(ln for ln in block.splitlines() if ln.strip().startswith("ended_at"))
+    assert "NOT NULL" not in ended_line
+
+
+def test_run_index_run_id_is_primary_key() -> None:
+    block = _run_index_block(_run_index_sql())
+    assert re.search(r"PRIMARY KEY\s*\(\s*run_id\s*\)", block) is not None
+
+
+def test_run_index_outcome_check_pins_the_vocabulary() -> None:
+    """The outcome column is CHECK-constrained to the closed run vocabulary, so a bad
+    outcome can never be persisted."""
+    block = _run_index_block(_run_index_sql())
+    assert re.search(r"outcome\s+TEXT\s+NOT NULL\s+DEFAULT\s+'running'", block) is not None
+    match = re.search(r"CHECK\s*\(outcome IN \(([^)]*)\)\)", block)
+    assert match is not None, "run_index must CHECK-constrain outcome"
+    values = {v.strip().strip("'") for v in match.group(1).split(",")}
+    assert values == {"running", "success", "error", "parked", "aborted"}
+
+
+def test_run_index_ships_the_filter_and_page_indexes() -> None:
+    """The list/prune paths need a ``started_at`` DESC index and the
+    preset/user/session/interaction filter indexes; text-level guards so a dropped
+    index fails without a live Postgres."""
+    ddl = _run_index_sql()
+    assert "CREATE INDEX IF NOT EXISTS run_index_started_at_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_preset_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_user_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_session_idx" in ddl
+    assert "CREATE INDEX IF NOT EXISTS run_index_interaction_idx" in ddl
