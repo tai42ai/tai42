@@ -27,7 +27,7 @@ dependencies = [
     # remote commands round-trip to the wire.
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=6.0,<7",
-    "typer>=0.12",
+    "typer>=0.27.2",
     # Imported directly (TyperGroup/TyperOption plumbing, click.shell_completion).
     "click>=8.3",
     # The one HTTP client the remote commands talk through.
