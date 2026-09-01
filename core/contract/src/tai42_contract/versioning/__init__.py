@@ -72,7 +72,9 @@ class VersionedStore(Protocol):
     ) -> DocumentRecord:
         """Insert a new document at ``active_version = 1`` plus its version 1, one
         transaction. Raise :class:`DocumentExistsError` if ``(kind, name)`` is
-        already a live document. Runs within ``tx`` when one is supplied."""
+        already a live document. Runs within ``tx`` when one is supplied; the
+        duplicate raise MUST leave a caller-supplied ``tx`` usable — losing a
+        concurrent create is an outcome, never a poisoned unit of work."""
         ...
 
     async def save_version(

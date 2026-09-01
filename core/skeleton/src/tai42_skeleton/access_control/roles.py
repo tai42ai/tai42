@@ -169,7 +169,12 @@ class RoleStoreView:
     async def seed(self, name: str, body: dict[str, Any]) -> bool:
         """Create the role only if it does not exist (idempotent create-only). Returns
         ``True`` when a new role was created, ``False`` when one already existed and was
-        left untouched (an operator edit survives a re-seed)."""
+        left untouched (an operator edit survives a re-seed).
+
+        Concurrent-boot safe: replicas seeding the same role at once converge on ONE
+        active row — the store's create ABSORBS the live-duplicate conflict rather than
+        raising a unique violation, so the losing replica takes the ``False`` branch
+        quietly, with no spurious duplicate-key ERROR in the server log."""
         try:
             await self._store.create(_KIND, name, body)
             return True
