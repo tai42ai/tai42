@@ -394,6 +394,17 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
                 accepted_chunks += 1
                 continue
             try:
+                # Send-outcome monitoring, tier 1: NO ambient ``send:<channel>`` span here by
+                # design. This runs in a detached spawned delivery task (``spawn_delivery`` /
+                # the stalled-delivery sweep / a post-restart re-drive), where the turn's trace
+                # has closed — a ``current_trace_id()``-gated span would silently no-op. Carrying
+                # the turn's trace explicitly would need it stamped onto ``ConversationRecord``
+                # by the turn engine (``conversations/turn.py``), which the send-outcome wave
+                # does not own. So bridge sends get RECEIPTS-tier coverage only: the record's own
+                # ledger + ``record_delivery_status`` receipt path is the authoritative
+                # delivered-vs-accepted signal for bridge messages (a ConversationRecord flow
+                # sends never run), and the tier-2 flow-send index deliberately covers only what
+                # that path does not.
                 async with asyncio.timeout(settings.delivery_send_timeout_seconds):
                     ids = await channel.notify(_part_notification(parts[part_index], chunk, record, final=final))
             except TimeoutError:
@@ -487,6 +498,8 @@ async def _refuse_oversized_answer(
         settings.max_outbound_chunks,
         record.channel,
     )
+    # No ambient send span here either (detached delivery task, closed trace) — the same
+    # receipts-tier scoping as the main channel send above.
     with contextlib.suppress(ChannelDeliveryError, TimeoutError):
         async with asyncio.timeout(settings.delivery_send_timeout_seconds):
             await channel.notify(

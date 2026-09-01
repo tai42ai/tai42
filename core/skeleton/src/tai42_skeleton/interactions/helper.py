@@ -46,6 +46,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
 
 from tai42_skeleton.access_control.user import clamp_write_audience
+from tai42_skeleton.channels.send_span import send_span
 from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.origin import get_interaction_origin
@@ -771,14 +772,23 @@ async def ask_user(
                 # would block the caller forever with the question persisted —
                 # so a timeout is a typed, retryable delivery failure.
                 attempt_timeout = deadline - loop.time()
-                try:
-                    await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
-                except TimeoutError as exc:
-                    raise ChannelDeliveryError(
-                        f"channel {channel!r} delivery timed out after {attempt_timeout:.1f}s "
-                        f"of the ask's {budget}s budget (interaction {interaction_id})",
-                        retryable=True,
-                    ) from exc
+                # Tier 1 of the send-outcome monitoring layer: one ``send:<channel>`` span
+                # per delivery ATTEMPT (the retry loop makes distinct sends, so a
+                # "attempt 1 failed retryable, attempt 2 accepted" sequence stays visible
+                # rather than collapsed into one span). A no-op outside a flow trace; a raised
+                # ``ChannelDeliveryError`` marks the attempt's span ERROR with the typed
+                # retry detail before the outer retry logic decides. ``deliver`` returns None
+                # on success — no correlatable provider id at this seam — so no tier-2 receipt
+                # index is written here (a delivery receipt for an ask rides its own callback).
+                with send_span(channel, recipient=recipient, attempt=attempt):
+                    try:
+                        await asyncio.wait_for(channel_obj.deliver(delivery_frame), timeout=attempt_timeout)
+                    except TimeoutError as exc:
+                        raise ChannelDeliveryError(
+                            f"channel {channel!r} delivery timed out after {attempt_timeout:.1f}s "
+                            f"of the ask's {budget}s budget (interaction {interaction_id})",
+                            retryable=True,
+                        ) from exc
             except BaseException as exc:
                 retry_in = _retry_delay(exc, attempt, deadline - loop.time(), settings)
                 if retry_in is not None:

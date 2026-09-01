@@ -46,6 +46,7 @@ from tai42_contract.channels import (
 from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.clients.impl.http import HttpxClient
 
+from tai42_skeleton.channels.send_span import send_span
 from tai42_skeleton.interactions.settings import interactions_settings
 
 logger = logging.getLogger(__name__)
@@ -209,9 +210,17 @@ async def _notify_guest(bridge: InboundBridge, message: str) -> None:
     """
     try:
         channel = tai42_app.channels.get(bridge.channel_id)
-        await channel.notify(
-            ChannelNotification(message=message, recipient=bridge.client_address, sender_identity=bridge.our_identity)
-        )
+        # Tier 1 send-outcome span, gated: this runs in the inbound-webhook context, which
+        # carries no ambient flow trace, so ``send_span`` no-ops here (a rootless span would
+        # attach to no run) — the notice is covered honestly without fabricating one. On the
+        # rare path where a trace IS ambient the failure would be recorded; either way the
+        # error is swallowed below, keeping this notice best-effort.
+        with send_span(bridge.channel_id, recipient=bridge.client_address):
+            await channel.notify(
+                ChannelNotification(
+                    message=message, recipient=bridge.client_address, sender_identity=bridge.our_identity
+                )
+            )
     except Exception:
         logger.warning(
             "inbound: failed to send the answer-rejected notice to %s on channel %r; continuing",

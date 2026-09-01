@@ -27,6 +27,8 @@ case only.
 
 from __future__ import annotations
 
+import logging
+
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     NOTIFICATION_ADDRESS_MAX_CHARS,
@@ -41,9 +43,13 @@ from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.notifications_sink import record_notification
+from tai42_skeleton.channels.send_receipts import index_flow_send
+from tai42_skeleton.channels.send_span import active_trace_id, send_span
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
+
+logger = logging.getLogger(__name__)
 
 
 class SenderIdentityNotAllowedError(Exception):
@@ -224,7 +230,36 @@ async def notify_user(
     # with no audience stores nothing.
     if audience is not None:
         await record_notification(message, recipient=recipient, audience=audience)
-    outbound_ids = await channel_obj.notify(notification)
+    # Tier 1 of the send-outcome monitoring layer: one structured ``send:<channel>`` span
+    # around the single send seam. A no-op outside a flow trace; on failure the span is
+    # marked ERROR with the typed ``ChannelDeliveryError``/``ChannelInputError`` detail and
+    # the error re-raised unchanged (this door still raises loudly). The recipient rides the
+    # span input, not metadata (see ``send_span``).
+    with send_span(channel, recipient=recipient) as span:
+        outbound_ids = await channel_obj.notify(notification)
+        if span is not None and outbound_ids:
+            # Success: stamp the accepted provider ids on the span. Gated on a live trace by
+            # ``span is not None``. The tier-2 index write is deliberately kept OUT of this
+            # block (see below): it is post-send monitoring bookkeeping, not part of the send.
+            span.update(output={"messaging.message.id": outbound_ids})
+    # Tier 2, AFTER the send span has closed SUCCESS-shaped: index each accepted id to this
+    # trace/span so a later out-of-band delivery receipt for the id can be posted back onto
+    # this run. The provider has already ACCEPTED the send, so this best-effort telemetry
+    # write must never alter control flow or the span outcome — an interactions-Redis outage
+    # here would otherwise raise a FALSE send failure (risking a double-send) and mark the
+    # span ERROR with a misleading Redis error. It is caught-and-logged, never raised.
+    if span is not None and outbound_ids:
+        trace_id = active_trace_id()
+        if trace_id is not None:
+            try:
+                await index_flow_send(channel, outbound_ids, trace_id=trace_id, span_id=span.id)
+            except Exception:
+                logger.warning(
+                    "flow-send receipt indexing failed for channel %r ids %r; the send succeeded, "
+                    "only later delivery-receipt correlation is lost",
+                    channel,
+                    outbound_ids,
+                )
     # ``None`` means accepted but no correlatable per-message id — an empty id set, not an
     # error and not a dropped id.
     if outbound_ids is None:

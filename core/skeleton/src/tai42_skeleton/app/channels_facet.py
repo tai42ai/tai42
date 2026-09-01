@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.channels import Channel, CorrelationStore, InboundAnswerResult, InboundBridge
+from tai42_contract.conversations import DeliveryReceipt
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -60,3 +61,18 @@ class ChannelsFacet:
             store=store,
             bridge=bridge,
         )
+
+    async def record_flow_send_receipt(
+        self, channel: str, provider_message_id: str, status: DeliveryReceipt, *, errors: Any = None
+    ) -> bool:
+        """Post a flow send's out-of-band delivery receipt back onto its trace (see
+        :meth:`AppChannels.record_flow_send_receipt`).
+
+        The tier-2 send-outcome path lives in :mod:`tai42_skeleton.channels.send_receipts`;
+        this facet is the contract-level seam the channel delivery-status webhooks reach it
+        through (a channel never imports the skeleton). Imported locally so the facet's
+        load-time surface stays the registry.
+        """
+        from tai42_skeleton.channels.send_receipts import record_flow_send_receipt
+
+        return await record_flow_send_receipt(channel, provider_message_id, status, errors=errors)

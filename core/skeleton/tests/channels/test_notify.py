@@ -34,6 +34,9 @@ from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
 from tai42_skeleton.interactions import media as media_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
+from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
+
+from .._fakes.recording_monitoring import RecordingMonitoring
 
 
 class RecordingChannel:
@@ -693,3 +696,94 @@ async def test_non_string_message_rejected(register_channel):
     with pytest.raises(ValueError, match="message must be a non-blank string"):
         await notify_user(42, channel="fake")  # type: ignore[arg-type]
     assert channel.notifications == []
+
+
+# -- send-outcome monitoring (tier 1 span + tier 2 receipt index) -----------------
+
+
+@pytest.fixture
+def recording_backend(monkeypatch):
+    """Install a recording monitoring backend and stub the tier-2 index write so the
+    seam's call args can be asserted without a Redis. Reset around the test."""
+    reset_monitoring()
+    backend = RecordingMonitoring()
+    init_monitoring(backend)
+    indexed: list[dict] = []
+
+    async def _index(channel, provider_message_ids, *, trace_id, span_id):
+        indexed.append({"channel": channel, "ids": provider_message_ids, "trace_id": trace_id, "span_id": span_id})
+
+    monkeypatch.setattr(notify_module, "index_flow_send", _index)
+    backend.indexed = indexed  # type: ignore[attr-defined]
+    yield backend
+    reset_monitoring()
+
+
+async def test_notify_emits_send_span_and_indexes_ids(register_channel, recording_backend):
+    recording_backend.writer.active_trace_id = "trace-1"
+    recording_backend.writer.next_span_id = "span-7"
+    register_channel("ids", IdReturningChannel(["m1", "m2"]))
+
+    assert await notify_user("split", channel="ids", recipient="+15550001111") == ["m1", "m2"]
+
+    (recorded,) = recording_backend.writer.spans
+    assert recorded["name"] == "send:ids"
+    assert recorded["input"] == {"recipient": "+15550001111"}
+    assert recorded["metadata"] == {"messaging.system": "ids", "messaging.operation": "send"}
+    assert recorded["span"].updates[0]["output"] == {"messaging.message.id": ["m1", "m2"]}
+    # Tier 2: each accepted id is indexed to this trace/span for a later receipt.
+    assert recording_backend.indexed == [
+        {"channel": "ids", "ids": ["m1", "m2"], "trace_id": "trace-1", "span_id": "span-7"}
+    ]
+
+
+async def test_notify_index_failure_does_not_fail_the_send_or_taint_the_span(
+    register_channel, recording_backend, monkeypatch, caplog
+):
+    # The tier-2 index write is best-effort telemetry AFTER the provider ACCEPTED the send:
+    # an interactions-Redis outage there must never raise a FALSE send failure (which could
+    # trigger a double-send) nor mark the span ERROR. The send still returns the provider
+    # ids and the span stays SUCCESS-shaped (only its success output update, no ERROR level).
+    recording_backend.writer.active_trace_id = "trace-1"
+    recording_backend.writer.next_span_id = "span-7"
+    register_channel("ids", IdReturningChannel(["m1", "m2"]))
+
+    async def _boom(channel, provider_message_ids, *, trace_id, span_id):
+        raise ConnectionError("interactions redis down")
+
+    monkeypatch.setattr(notify_module, "index_flow_send", _boom)
+
+    with caplog.at_level("WARNING"):
+        assert await notify_user("split", channel="ids") == ["m1", "m2"]
+
+    # The span carries ONLY its success output update — no ERROR level from the failed index.
+    (recorded,) = recording_backend.writer.spans
+    assert recorded["span"].updates == [
+        {"output": {"messaging.message.id": ["m1", "m2"]}, "metadata": None, "level": None, "status_message": None}
+    ]
+    # The failure is logged, not raised.
+    assert any("flow-send receipt indexing failed" in record.message for record in caplog.records)
+
+
+async def test_notify_failure_marks_error_span_and_reraises(register_channel, recording_backend):
+    recording_backend.writer.active_trace_id = "trace-1"
+    register_channel("boom", FailingChannel())
+
+    with pytest.raises(ChannelDeliveryError):
+        await notify_user("nope", channel="boom")
+
+    (update,) = recording_backend.writer.spans[0]["span"].updates
+    assert update["level"].value == "ERROR"
+    assert update["metadata"]["error.kind"] == "delivery_failed"
+    # A failed send indexes nothing (no accepted ids).
+    assert recording_backend.indexed == []
+
+
+async def test_notify_no_trace_emits_no_span_and_no_index(register_channel, recording_backend):
+    recording_backend.writer.active_trace_id = None
+    register_channel("ids", IdReturningChannel(["m1"]))
+
+    assert await notify_user("hi", channel="ids") == ["m1"]
+
+    assert recording_backend.writer.spans == []
+    assert recording_backend.indexed == []
