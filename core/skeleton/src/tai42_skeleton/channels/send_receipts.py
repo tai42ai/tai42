@@ -18,6 +18,13 @@ carries that one hop:
   with no active trace. It returns whether the id was a known flow send, so the webhook
   keeps its genuinely-unknown-id log only on a miss.
 
+Send-outcome queries are deliberately TWO surfaces. A flow send answers
+accepted-vs-delivered in one query here (send span + ``delivery_receipt`` in one
+trace); bridge-conversation deliveries belong to the conversation ledger. Never
+unify them at read time — federating the two stores costs a slow first fetch and
+cross-store pagination. If one query over both surfaces is ever needed, the shape
+is write-time stamping at the conversation seam.
+
 This index covers exactly what the conversation bridge's own ledger/receipt path does
 NOT — flow sends, which run no ConversationRecord. The bridge path stays untouched and
 authoritative for bridge messages.
