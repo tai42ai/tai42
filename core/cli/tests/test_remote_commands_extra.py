@@ -1255,6 +1255,9 @@ def test_traces_list_passes_all_filters(monkeypatch: pytest.MonkeyPatch) -> None
         assert params.get("from") == "30d"
         assert params.get("to") == "now"
         assert params.get("status") == "error"
+        assert params.get("user") == "u_42"
+        assert params.get("session") == "sess_7"
+        assert params.get("version") == "preset-v3"
         assert params.get("sort") == "cost"
         assert params.get("dir") == "desc"
         assert params.get("page") == "2"
@@ -1273,6 +1276,12 @@ def test_traces_list_passes_all_filters(monkeypatch: pytest.MonkeyPatch) -> None
             "now",
             "--status",
             "error",
+            "--user",
+            "u_42",
+            "--session",
+            "sess_7",
+            "--version",
+            "preset-v3",
             "--sort",
             "cost",
             "--dir",
