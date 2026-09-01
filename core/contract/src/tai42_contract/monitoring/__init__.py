@@ -36,6 +36,12 @@ from tai42_contract.monitoring.models import (
 )
 from tai42_contract.monitoring.monitoring import Monitoring
 from tai42_contract.monitoring.reader import MonitoringReader
+from tai42_contract.monitoring.trace_context_carrier import (
+    ambient_trace_context,
+    get_ambient_trace_context,
+    reset_ambient_trace_context,
+    set_ambient_trace_context,
+)
 from tai42_contract.monitoring.writer import (
     RUN_ATTRIBUTION_TRACE_NAME,
     RUN_VERSION_METADATA_KEY,
@@ -70,6 +76,10 @@ __all__ = [
     "SpanWindowItem",
     "TraceContext",
     "TraceNotFoundError",
+    "ambient_trace_context",
     "attribute_run",
+    "get_ambient_trace_context",
     "preview",
+    "reset_ambient_trace_context",
+    "set_ambient_trace_context",
 ]

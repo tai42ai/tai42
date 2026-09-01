@@ -80,6 +80,58 @@ def test_existing_config_is_preserved_and_extended() -> None:
     assert ctx.parent_span_id == "parent-9"
 
 
+def test_ambient_trace_context_is_adopted_when_no_explicit_id() -> None:
+    # A flow driving this agent as a node deposits its trace on the ambient carrier; with no
+    # explicit `monitoring_trace_id`, the agent JOINS that trace (id + anchor) instead of
+    # minting a fresh, orphaned one.
+    from tai42_contract.monitoring import TraceContext, ambient_trace_context
+
+    writer = _writer()
+    before = len(writer.contexts)
+    with ambient_trace_context(TraceContext(trace_id="flow-trace", parent_span_id="flow-span")):
+        init_langgraph_config()
+
+    assert len(writer.contexts) == before + 1
+    ctx = writer.contexts[-1]
+    assert ctx.trace_id == "flow-trace"
+    assert ctx.parent_span_id == "flow-span"
+
+
+def test_explicit_trace_id_wins_over_ambient() -> None:
+    # An explicitly propagated `monitoring_trace_id` is authoritative — the ambient deposit
+    # never overrides it.
+    from tai42_contract.monitoring import TraceContext, ambient_trace_context
+
+    writer = _writer()
+    before = len(writer.contexts)
+    existing = {"configurable": {"monitoring_trace_id": "explicit-trace"}}
+    with ambient_trace_context(TraceContext(trace_id="flow-trace", parent_span_id="flow-span")):
+        init_langgraph_config(existing)
+
+    assert len(writer.contexts) == before + 1
+    ctx = writer.contexts[-1]
+    assert ctx.trace_id == "explicit-trace"
+    assert ctx.parent_span_id is None
+
+
+def test_fresh_trace_minted_when_no_explicit_and_no_ambient() -> None:
+    # The standalone default (byte-identical to before): a fresh 32-char root trace id, no
+    # parent span, when neither an explicit id nor an ambient deposit is present.
+    from tai42_contract.monitoring import get_ambient_trace_context
+
+    assert get_ambient_trace_context() is None
+    writer = _writer()
+    before = len(writer.contexts)
+    init_langgraph_config()
+
+    assert len(writer.contexts) == before + 1
+    ctx = writer.contexts[-1]
+    assert ctx.trace_id is not None
+    assert len(ctx.trace_id) == 32
+    assert "-" not in ctx.trace_id
+    assert ctx.parent_span_id is None
+
+
 def test_top_level_recursion_limit_is_preserved() -> None:
     # ``recursion_limit`` is a standard ``RunnableConfig`` top-level key; the
     # builder copies the incoming mapping by value, so an overlaid limit (a falsy
