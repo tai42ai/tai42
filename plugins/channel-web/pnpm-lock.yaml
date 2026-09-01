@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@tai42/studio-sdk':
-        specifier: ^1.1.0
-        version: 1.1.0(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        specifier: ^10.0.0
+        version: 10.0.0(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       react:
         specifier: ^19.0.0
         version: 19.2.8
@@ -885,11 +885,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@tai42/api-client@1.1.0':
-    resolution: {integrity: sha512-9gd3yQ+iccOHNEuN6u8h5M6lzYeQPjt0cFiHgs1tI3wNqtYCI/VSqQKzD5k1Xp40cieMTYJtAWM2U53985A8OA==}
+  '@tai42/api-client@10.0.0':
+    resolution: {integrity: sha512-UPdaLeyiNOqfMGSMckh7UeXz5cQt9EkvD8ciaNMX/ozVwWfaxFPDbpeSgBfSXFcz7fi32m4iPi3ldB6ardQ6BQ==}
 
-  '@tai42/studio-sdk@1.1.0':
-    resolution: {integrity: sha512-XVJ7xFKq5ZE6ZRxdRfMLfeAgLAbivDgi69CmE3UK9Q5txQDi+Iw/ix5PJmmvvaZEDLTscNrUjnSbVBQI2gYfcg==}
+  '@tai42/studio-sdk@10.0.0':
+    resolution: {integrity: sha512-XxLlhc/JYRyMR2xR5LFs8PDtS8QIac3qibgicvQC1/6dmmzjBGbHKpaElfwlnDO6mhO9MzUqe0EPCXTtYIcVqA==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
@@ -1817,8 +1817,8 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
 snapshots:
 
@@ -2524,11 +2524,11 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.4':
     optional: true
 
-  '@tai42/api-client@1.1.0':
+  '@tai42/api-client@10.0.0':
     dependencies:
-      zod: 3.25.76
+      zod: 4.5.4
 
-  '@tai42/studio-sdk@1.1.0(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@tai42/studio-sdk@10.0.0(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       '@fontsource-variable/geist-mono': 5.3.0
       '@fontsource-variable/inter': 5.3.0
@@ -2538,7 +2538,7 @@ snapshots:
       '@radix-ui/react-select': 2.3.7(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@radix-ui/react-tabs': 1.1.21(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@radix-ui/react-tooltip': 1.2.16(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      '@tai42/api-client': 1.1.0
+      '@tai42/api-client': 10.0.0
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
     transitivePeerDependencies:
@@ -3469,4 +3469,4 @@ snapshots:
 
   yallist@3.1.1: {}
 
-  zod@3.25.76: {}
+  zod@4.5.4: {}

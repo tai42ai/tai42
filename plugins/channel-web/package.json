@@ -13,7 +13,7 @@
     "test": "vitest run --coverage"
   },
   "dependencies": {
-    "@tai42/studio-sdk": "^1.1.0",
+    "@tai42/studio-sdk": "^10.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
