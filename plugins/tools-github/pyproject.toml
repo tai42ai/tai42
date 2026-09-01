@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-tools-github"
-version = "1.0.6"
+version = "1.0.7"
 description = "GitHub provisioning tools for the TAI ecosystem: manifest-loaded repository-webhook setup tools that create a repository webhook, list a repository's webhooks with Link-header pagination, and delete a repository webhook — the provider-side counterpart to the runtime signature verifier."
 readme = "README.md"
 requires-python = ">=3.13"
