@@ -6,9 +6,9 @@ one ``channel.notify`` / ``channel.deliver`` call in — so the channel plugins 
 dumb typed-error raisers and the span shape (name, kind, metadata, typed-error
 detail) lives in ONE place. The span is emitted ONLY when a trace is ambient
 (``current_trace_id()``); outside a trace it is a no-op that just runs the call, so a
-standalone send (e.g. a webhook-context best-effort notice with no flow trace) never
-fabricates a rootless span. This mirrors the babelfish ``record_tool_span`` conditional
-emit, expressed through the tai42 contract writer the skeleton already uses.
+standalone send (e.g. a webhook-context best-effort notice with no ambient trace) never
+fabricates a rootless span. The conditional-emit idiom (span only under an active
+trace) is expressed through the tai42 contract writer the skeleton already uses.
 
 The SUCCESS output (the provider message ids) is set by the caller, which alone knows
 them; a FAILURE is marked here from the raised ``ChannelDeliveryError`` /
