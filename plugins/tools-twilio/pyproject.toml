@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract these tools register through — the tai42_app
     # handle and the tool facet.
+    # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=6.0,<7",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Twilio REST module wires to.
