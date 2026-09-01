@@ -10,12 +10,14 @@ from typing import cast
 import pytest
 from jinja2 import TemplateSyntaxError
 from starlette.requests import Request
+from tai42_contract.storage import Storage
 
 import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
 from tai42_skeleton.app import instance
-from tai42_skeleton.template import TemplateNotFoundError
+from tai42_skeleton.storage import StorageRegistry
+from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
 from .._fakes.bus import FakeBus
@@ -334,3 +336,85 @@ async def test_render_infra_error_propagates_as_500(manager, monkeypatch):
     monkeypatch.setattr(manager, "render_by_id_or_content", _boom)
     with pytest.raises(RuntimeError, match="redis down"):
         await router.render_template(_req({"template_id": "a.j2"}))
+
+
+# --- door-level: the REAL ResourceManager behind the route -------------------
+
+
+class _InMemoryStorage(Storage):
+    """Minimal Storage backend so the route can drive a real ResourceManager."""
+
+    def __init__(self):
+        self.items: dict[str, str] = {}
+
+    async def load(self, path: str) -> str:
+        try:
+            return self.items[path]
+        except KeyError as exc:
+            raise FileNotFoundError(path) from exc
+
+    async def list(self) -> list[str]:
+        return sorted(self.items)
+
+    async def upload(self, path: str, content: str) -> None:
+        self.items[path] = content
+
+    async def delete(self, path: str) -> None:
+        self.items.pop(path, None)
+
+    async def delete_dir(self, path: str) -> None:
+        prefix = path.rstrip("/") + "/"
+        for key in [k for k in self.items if k.startswith(prefix)]:
+            del self.items[key]
+
+
+@pytest.fixture
+def real_manager(monkeypatch):
+    """The route wired to a REAL ResourceManager over in-memory storage.
+
+    The fake manager above stubs ``get_template_schema``, so it can never catch a
+    schema-inference failure; this fixture drives the genuine inference path.
+    """
+    registry = StorageRegistry()
+    registry.register_storage(_InMemoryStorage)
+    tm = ResourceManager(registry.provider)
+    monkeypatch.setattr(templates_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=tm)))
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
+    return tm
+
+
+async def test_get_real_manager_uninferable_template_200_degraded(real_manager):
+    """A valid, renderable template that jinja2schema cannot infer reads back 200
+    with a degraded schema — not the 500 the op's declared errors forbid."""
+    upload = await router.upload_template(_req({"path": "d.j2", "content": "{{ {'a': 1} }}{{ who }}"}))
+    assert upload.status_code == 200
+
+    resp = await router.get_template(_req({"template_id": "d.j2"}))
+
+    assert resp.status_code == 200
+    body = _data(resp)["data"]
+    assert body["template"] == "{{ {'a': 1} }}{{ who }}"
+    assert body["schema"]["x-tai42-inference"] == "partial"
+    assert body["schema"]["properties"] == {"who": {"title": "who"}}
+
+
+async def test_get_real_manager_inferable_template_200_rich(real_manager):
+    """The enricher is untouched for a template jinja2schema understands."""
+    await router.upload_template(_req({"path": "r.j2", "content": "{{ name }}"}))
+
+    resp = await router.get_template(_req({"template_id": "r.j2"}))
+
+    assert resp.status_code == 200
+    schema = _data(resp)["data"]["schema"]
+    assert "x-tai42-inference" not in schema
+    assert schema["required"] == ["name"]
+
+
+async def test_get_real_manager_broken_jinja_400(real_manager):
+    """Author-broken Jinja stays an honest 400 through the real inference path."""
+    await router.upload_template(_req({"path": "b.j2", "content": "{{ unclosed"}))
+
+    resp = await router.get_template(_req({"template_id": "b.j2"}))
+
+    assert resp.status_code == 400
+    assert "template error" in _data(resp)["error"]

@@ -109,6 +109,10 @@ async def get_template(template_id: str) -> dict:
     A missing stored template is a ``404`` (never a leaked storage ``500``); a
     stored template with broken Jinja is author error — the schema inference parses
     it — surfaced as a ``400``. Genuine storage failures raise other types (``500``).
+
+    A renderable template always reads back ``200``: when type inference cannot
+    describe it, the schema degrades to variable names carrying an
+    ``x-tai42-inference: partial`` marker rather than failing the read.
     """
     # A field-specific 400 for a blank/absent id, ahead of the lexical path guard, so
     # the message names ``template_id`` rather than the guard's generic ``path``.
