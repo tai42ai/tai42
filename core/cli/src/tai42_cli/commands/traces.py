@@ -34,13 +34,6 @@ def list_runs(
     ] = None,
     to: Annotated[str | None, typer.Option("--to", help="Range end: an ISO instant or a relative token.")] = None,
     status: Annotated[str | None, typer.Option("--status", help="Filter: 'error' or 'success'.")] = None,
-    user: Annotated[str | None, typer.Option("--user", help="Filter: runs stamped with this user identity.")] = None,
-    session: Annotated[
-        str | None, typer.Option("--session", help="Filter: runs stamped with this session identity.")
-    ] = None,
-    version: Annotated[
-        str | None, typer.Option("--version", help="Filter: runs stamped with this trace version dimension.")
-    ] = None,
     sort: Annotated[
         str | None, typer.Option("--sort", help="Sort field: createdAt, cost, latencyMs, totalTokens.")
     ] = None,
@@ -49,6 +42,15 @@ def list_runs(
     page_size: Annotated[int | None, typer.Option("--page-size", help="Rows per page.")] = None,
     export: Annotated[bool, typer.Option("--export", help="Download the filtered list instead of paging it.")] = False,
     fmt: Annotated[str, typer.Option("--format", help="Export format: csv or json (only with --export).")] = "csv",
+    # The identity-dimension filters sit LAST: appending new options keeps every
+    # pre-existing parameter's positional slot stable across releases.
+    user: Annotated[str | None, typer.Option("--user", help="Filter: runs stamped with this user identity.")] = None,
+    session: Annotated[
+        str | None, typer.Option("--session", help="Filter: runs stamped with this session identity.")
+    ] = None,
+    version: Annotated[
+        str | None, typer.Option("--version", help="Filter: runs stamped with this trace version dimension.")
+    ] = None,
 ) -> None:
     """List observability runs, or download the filtered list with ``--export``.
 
