@@ -4,7 +4,32 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from tai42_contract.template import ConditionMixin
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, ConditionMixin, expression_annotation
+
+# The access-control surfaces' STRICT-TRUE override of the generic condition
+# payload. Unlike the truthy surfaces (hook registration, backend callbacks), the
+# enforcer admits a policy/role condition ONLY when it evaluates to boolean
+# ``true`` — see ``tai42_skeleton.access_control.policy.PolicyEnforcer.enforce``,
+# where ``result is not True`` DENIES — so any other value, INCLUDING any other
+# truthy result (a non-empty string, a number, an object), gates access off. The
+# jq string evaluates over the dumped :class:`JqAuthContext`; its known top-level
+# keys are glossed so an author writes against the real shape.
+_ACCESS_CONDITION_ANNOTATION: dict[str, Any] = {
+    EXPRESSION_ANNOTATION_KEY: expression_annotation(
+        label="condition",
+        blurb="the auth context (a dumped JqAuthContext)",
+        keys=[
+            ("sub", "the caller's subject id"),
+            ("scopes", "the caller's granted scopes"),
+            ("identity", "who the caller is — the token's identity claims"),
+            ("policy", "the caller's static policy data"),
+            ("context", "dynamic environment data for this decision"),
+            ("request", "the operation being authorized"),
+            ("system", "caller-supplied time/constants (e.g. the current epoch)"),
+        ],
+        returns="EXACTLY boolean true to allow; any other value — including any other truthy result — DENIES",
+    )
+}
 
 
 class IdentityRecord(BaseModel):
@@ -25,7 +50,10 @@ class AccessPolicy(ConditionMixin):
     # Static data required for policy decisions (e.g., {"plan_limit": 100})
     policy_data: dict[str, Any] = Field(default_factory=dict)
 
-    # Note: 'condition' field is provided by ConditionMixin
+    # ``condition`` is inherited from ConditionMixin but redeclared here solely to
+    # refine the vendor annotation with this surface's STRICT-TRUE fact (see
+    # ``_ACCESS_CONDITION_ANNOTATION``): the enforcer allows only on boolean true.
+    condition: str | None = Field(default=None, json_schema_extra=_ACCESS_CONDITION_ANNOTATION)
 
 
 class RoleDefinition(ConditionMixin):
@@ -51,8 +79,13 @@ class RoleDefinition(ConditionMixin):
     # The security posture a NEW role inherits its jq base (Layer 1) from —
     # "editor"/"viewer"; "admin" is reserved. Optional: the seeded roles carry
     # their own `condition` directly. The `condition`/`condition_id`/
-    # `condition_kwargs` fields (the jq base) come from ConditionMixin.
+    # `condition_kwargs` fields (the jq base) come from ConditionMixin; `condition`
+    # is redeclared below only to carry the STRICT-TRUE annotation.
     base_tier: str | None = None
+
+    # Same STRICT-TRUE override as AccessPolicy.condition: the enforcer admits this
+    # jq base only when it evaluates to boolean true (see _ACCESS_CONDITION_ANNOTATION).
+    condition: str | None = Field(default=None, json_schema_extra=_ACCESS_CONDITION_ANNOTATION)
 
     # The reserved/admin tier: everything, jq base None, grant map skipped at
     # enforce. Mutually exclusive with a non-empty `grants` map (see below).

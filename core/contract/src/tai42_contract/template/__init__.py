@@ -79,10 +79,14 @@ def expression_annotation(
 
 
 class ConditionMixin(BaseModel):
-    # The generic payload stays honest for EVERY inheriting surface (hook
-    # registration, access-control policies/roles, backend callbacks): each
-    # evaluates ``condition`` over its own input document and proceeds only on a
-    # truthy result. Surfaces with sharper facts override the field.
+    # The generic payload is the TRUTHY common denominator: a non-overriding
+    # inheriting surface (hook registration) evaluates ``condition`` over its own
+    # input document and proceeds on a truthy result. It is NOT the universal
+    # truth — the access-control policy/role require EXACTLY boolean ``true`` (any
+    # other truthy value DENIES), so they OVERRIDE with a strict-true payload; the
+    # backend callback overrides to pin its own input document. A surface whose
+    # facts are sharper than "truthy proceeds" must override rather than inherit
+    # this wording (see the access-control and backend callback schemas).
     condition: str | None = Field(
         default=None,
         json_schema_extra={

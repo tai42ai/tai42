@@ -1,11 +1,13 @@
 """The ``x-tai42-expression`` vendor annotation on jq-typed string fields.
 
-The mixins declare a generic payload on ``condition`` / ``expr``; each inheriting
-surface either carries it as-is (hook registration, access-control policy/role)
-or overrides it with surface-specific facts (the backend callback). The
-annotation is schema METADATA only and strictly additive: every other property —
-and the annotated properties themselves, minus the vendor key — must generate
-byte-identical schemas to plain field declarations.
+The mixins declare a generic TRUTHY payload on ``condition`` / ``expr``; each
+inheriting surface either carries it as-is (hook registration) or overrides it
+with surface-specific facts — the access-control policy/role with their
+STRICT-TRUE fact (only boolean ``true`` allows), the backend callback with its
+own input document. The annotation is schema METADATA only and strictly
+additive: every other property — and the annotated properties themselves, minus
+the vendor key — must generate byte-identical schemas to plain field
+declarations.
 """
 
 from __future__ import annotations
@@ -40,6 +42,25 @@ GENERIC_EXPR_PAYLOAD: dict[str, Any] = {
     "label": "expression",
     "blurb": "the declaring surface's input document",
     "returns": "the transformed value the declaring surface consumes",
+}
+
+# The access-control STRICT-TRUE override, pinned VERBATIM: the enforcer admits a
+# policy/role condition ONLY on boolean ``true``, so the generic "truthy proceeds"
+# wording would MISLEAD an author (a non-empty string or a number would deny).
+ACCESS_CONDITION_PAYLOAD: dict[str, Any] = {
+    "language": "jq",
+    "label": "condition",
+    "blurb": "the auth context (a dumped JqAuthContext)",
+    "keys": [
+        {"name": "sub", "gloss": "the caller's subject id"},
+        {"name": "scopes", "gloss": "the caller's granted scopes"},
+        {"name": "identity", "gloss": "who the caller is — the token's identity claims"},
+        {"name": "policy", "gloss": "the caller's static policy data"},
+        {"name": "context", "gloss": "dynamic environment data for this decision"},
+        {"name": "request", "gloss": "the operation being authorized"},
+        {"name": "system", "gloss": "caller-supplied time/constants (e.g. the current epoch)"},
+    ],
+    "returns": "EXACTLY boolean true to allow; any other value — including any other truthy result — DENIES",
 }
 
 # The callback overrides, pinned VERBATIM: both expressions run over the finished
@@ -159,8 +180,8 @@ def test_annotation_is_purely_additive_to_a_plain_declaration() -> None:
         (HookRegister, "expr", GENERIC_EXPR_PAYLOAD),
         (HookParams, "condition", GENERIC_CONDITION_PAYLOAD),
         (HookParams, "expr", GENERIC_EXPR_PAYLOAD),
-        (AccessPolicy, "condition", GENERIC_CONDITION_PAYLOAD),
-        (RoleDefinition, "condition", GENERIC_CONDITION_PAYLOAD),
+        (AccessPolicy, "condition", ACCESS_CONDITION_PAYLOAD),
+        (RoleDefinition, "condition", ACCESS_CONDITION_PAYLOAD),
         (CallbackSchema, "condition", CALLBACK_CONDITION_PAYLOAD),
         (CallbackSchema, "expr", CALLBACK_EXPR_PAYLOAD),
     ],
@@ -195,6 +216,43 @@ def test_callback_override_changes_only_the_annotation_payload() -> None:
     for schema in (annotated, control):
         schema.pop("title")
     assert json.dumps(annotated, sort_keys=True) == json.dumps(control, sort_keys=True)
+
+
+@pytest.mark.parametrize("model", [AccessPolicy, RoleDefinition])
+def test_access_control_override_changes_only_the_annotation_payload(model: type[BaseModel]) -> None:
+    # The access-control models redeclare ``condition`` solely to swap the generic
+    # truthy payload for the STRICT-TRUE one; type, default, and — because a
+    # redeclared inherited field keeps its parent slot — field ORDER must match a
+    # control that never overrode it. Removing the vendor key leaves byte-identical
+    # bytes, proving the override adds one key and changes nothing else.
+    class _PlainCondition(BaseModel):
+        condition: str | None = None
+        condition_id: str | None = None
+        condition_kwargs: dict[str, Any] | None = None
+
+    annotated = model.model_json_schema()
+    # The condition trio leads both schemas (ConditionMixin is first in the MRO).
+    assert list(annotated["properties"])[:3] == ["condition", "condition_id", "condition_kwargs"]
+    assert annotated["properties"]["condition"].pop(EXPRESSION_ANNOTATION_KEY) == ACCESS_CONDITION_PAYLOAD
+    control = _PlainCondition.model_json_schema()["properties"]["condition"]
+    control.pop("title", None)
+    annotated["properties"]["condition"].pop("title", None)
+    assert json.dumps(annotated["properties"]["condition"], sort_keys=True) == json.dumps(control, sort_keys=True)
+
+
+def test_generic_condition_payload_stays_the_truthy_denominator_for_non_overriders() -> None:
+    # The generic wording must remain honest for surfaces that inherit it: it may
+    # only ever promise "truthy proceeds", never "exactly true" — a strict-true
+    # surface (access control) is obligated to override, and does.
+    assert "truthy to proceed" in GENERIC_CONDITION_PAYLOAD["returns"]
+    assert HookRegister.model_json_schema()["properties"]["condition"][EXPRESSION_ANNOTATION_KEY] == (
+        GENERIC_CONDITION_PAYLOAD
+    )
+    # The strict-true surfaces must NOT carry the misleading generic wording.
+    for strict in (AccessPolicy, RoleDefinition):
+        payload = strict.model_json_schema()["properties"]["condition"][EXPRESSION_ANNOTATION_KEY]
+        assert payload == ACCESS_CONDITION_PAYLOAD
+        assert "EXACTLY boolean true" in payload["returns"]
 
 
 def test_unannotated_string_fields_are_byte_identical_to_plain_declarations() -> None:
