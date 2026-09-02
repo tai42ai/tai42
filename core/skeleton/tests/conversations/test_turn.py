@@ -863,6 +863,85 @@ async def test_tool_target_paused_envelope_never_maps_the_authored_reply_guard(e
     assert "your quote is ready" in [n.message for n in channel.sends]
 
 
+async def test_tool_target_mapping_failure_logs_value_free_result_shape(env, monkeypatch, caplog):
+    # A complete success terminal whose flagged nodes ride DIRECTLY under `result` (no
+    # `result.outputs` level) mapped by a reply_expr reading a stale `.result.outputs.*` path:
+    # the guard raises and the turn takes the mapping-failure arm. The diagnostic must name the
+    # shape mismatch (which keys exist, which level does not) while NEVER logging a
+    # guest-content value.
+    guard = (
+        ".result.outputs.compose_messages as $c "
+        "| if (($c // []) | length) == 0 "
+        'then error("the turn finished without a reply payload (outputs.compose_messages is empty)") '
+        "else $c end"
+    )
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=guard)
+    _wire(monkeypatch, FakeManager(route), channel)
+    # The real captured envelope: a success terminal, flagged nodes directly under `result`, and a
+    # guest reply VALUE that must NEVER reach the log — the value-free proof.
+    secret = "GUESTSECRET-zulu-must-not-be-logged"
+    envelope = {
+        "status": "success",
+        "result": {"compose_messages": {"messages": [{"text": secret}]}, "extract_todo": {"items": []}},
+        "missing_results": ["build_state_language", "build_state_consent"],
+    }
+    _wire_tool(monkeypatch, lambda kw: envelope)
+
+    with caplog.at_level(logging.ERROR, logger=_TURN_LOGGER):
+        message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+        await _settle()
+
+    # The turn took the correct disposition: a guest-safe error, the guard's cause recorded.
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "reply_expr" in record.error
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+
+    # The permanent shape diagnostic fired for this route...
+    shape_logs = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _TURN_LOGGER and "had shape:" in r.getMessage() and "tool-line" in r.getMessage()
+    ]
+    assert len(shape_logs) == 1
+    shape = shape_logs[0]
+    # ...and it names the decisive structure at once: a SUCCESS terminal whose `result` carries the
+    # flagged nodes directly (`compose_messages`, `extract_todo`) with NO `outputs` level — exactly
+    # the mismatch against the route's `.result.outputs.compose_messages` path. No inference needed.
+    assert "status='success'" in shape
+    assert "result_keys=['compose_messages', 'extract_todo']" in shape
+    assert "outputs_surface_sizes" not in shape  # there is no result.outputs level to size
+    assert "missing_results=['build_state_consent', 'build_state_language']" in shape
+    # ...but NO result VALUE ever crosses into the log — not in the shape line, not anywhere.
+    assert secret not in shape
+    assert all(secret not in r.getMessage() for r in caplog.records)
+
+
+async def test_result_shape_is_value_free_and_structural():
+    # Unit-pins the descriptor directly: it renders NAMES, the status token, surface SIZES and the
+    # missing_results names — never a guest VALUE, and never crashes on odd inputs.
+    secret = "PLAINTEXT-should-never-appear"
+    shape = turn_module._result_shape(
+        {
+            "status": "success",
+            "result": {"outputs": {"compose_messages": [{"text": secret}], "note": secret}},
+            "missing_results": ["compose_messages", "extract_todo"],
+        }
+    )
+    assert "status='success'" in shape
+    assert "keys=['missing_results', 'result', 'status']" in shape
+    assert "'compose_messages'" in shape
+    assert "'note'" in shape
+    assert "missing_results=['compose_messages', 'extract_todo']" in shape
+    assert secret not in shape  # the message VALUE never renders, only its surface name + size
+    # A non-dict result degrades to a type + length, never a repr of the value.
+    assert turn_module._result_shape("the reply text") == "type=str len=14"
+    assert turn_module._result_shape(42) == "type=int"
+
+
 async def test_tool_target_paused_envelope_binds_completion_and_delivers_on_resume(env, monkeypatch):
     # End-to-end: a paused envelope reaches the turn (the engine `flow_resume` caller kept the raw
     # dict), the turn ends silently, and the generic tool-route completion is bound around the
