@@ -8,11 +8,17 @@ no network. Async is driven with ``asyncio.run`` (the repo does not use pytest-a
 The park marker a tool returns here is the same reserved contract marker the in-process
 client-tool seam stamps onto an async ``ask_user``'s ``SuspendedInteraction`` sentinel;
 the tool body counts its invocations so a resume that re-ran it (a double-park) is caught.
+
+The substitution half of the hook is exercised directly at the end: an ordinary answer becomes
+the tool's result, while an answer saying the awaited outcome FAILED becomes a model-visible
+tool error instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -490,3 +496,159 @@ def test_marker_round_trips_through_msg_content_output() -> None:
             # having never seen the sentinel object the seam converted.
             "resume_owner": "agent_resume",
         }
+
+
+def test_a_failed_awaited_outcome_substitutes_a_model_visible_tool_error() -> None:
+    # The resume answer may itself say the awaited outcome did not arrive (a chained call whose
+    # nested run ended without a result). It is substituted as a tool ERROR the model reads —
+    # never as a value it would take for the tool's answer, and never as silence.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume, park_error_answer
+
+    key = "tai42:chained-park:k1"
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _resume_interrupt_with({key: park_error_answer("the call ended without a result")}):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "error"
+    assert message.content == "the call ended without a result"
+    # Replaced IN PLACE: the tool_call is answered, so the model is never left holding a
+    # dangling call or the raw park JSON.
+    assert message.id == "m1"
+    assert message.tool_call_id == "c1"
+
+
+def test_an_ordinary_answer_still_substitutes_as_a_success_result() -> None:
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "ask", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker("i1", None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="ask",
+            id="m1",
+        ),
+    ]
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _resume_interrupt_with({"i1": "the human said yes"}):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "success"
+    assert message.content == "the human said yes"
+
+
+@contextlib.contextmanager
+def _resume_interrupt_with(answers: dict[str, Any]):
+    """Stand in for the graph's RESUME pass: ``interrupt`` returns the answers map instead of
+    suspending, so the substitution half of the hook can be exercised without a live graph."""
+    from tai42_agents._internal.park import middleware as mw
+
+    original = mw.interrupt
+    mw.interrupt = lambda _payload: answers  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        mw.interrupt = original  # type: ignore[assignment]
+
+
+def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
+    # A CHAINED park presents at the claim point as what it is: this run's own park, keyed by
+    # the CALL it waits on and owned by this run's own resume continuation — the same one the
+    # chain's delivery path dispatches. So the claim check reaches the verdict the object seam
+    # already reached, with no chain-specific arm: the hook interrupts on it.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY, _park_or_resume
+
+    key = "tai42:chained-park:k1"
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker(key, None, AGENT_RESUME_TOOL_NAME)),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    seen: list[Any] = []
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _capture_interrupt(seen), pytest.raises(_Suspended):
+            _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert seen == [{AGENT_PARK_PAYLOAD_KEY: {"interactions": {key: None}}}]
+
+
+def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
+    # The fallback is untouched: a marker naming another run's continuation is not claimable
+    # here however it arrived, and never interrupts.
+    from langchain_core.messages import ToolMessage
+
+    from tai42_agents._internal.park.middleware import _park_or_resume
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        ToolMessage(
+            content=json.dumps(suspended_interaction_marker("i-nested", None, "nested_driver_resume")),
+            tool_call_id="c1",
+            name="flow",
+            id="m1",
+        ),
+    ]
+    seen: list[Any] = []
+    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    try:
+        with _capture_interrupt(seen):
+            update = _park_or_resume(messages)
+    finally:
+        reset_resume_continuation_tool(token)
+    assert seen == []
+    assert update is not None
+    (message,) = update["messages"]
+    assert message.status == "error"
+
+
+class _Suspended(Exception):
+    """Stands in for what ``interrupt`` does to the node: it never returns on a park pass."""
+
+
+@contextlib.contextmanager
+def _capture_interrupt(seen: list[Any]):
+    """Record what the hook would interrupt with, without suspending a graph. The stub RAISES,
+    because the real ``interrupt`` never returns on the park pass — returning a value here would
+    run the resume branch instead and prove nothing about the park."""
+    from tai42_agents._internal.park import middleware as mw
+
+    original = mw.interrupt
+
+    def _record(payload: Any) -> dict[str, Any]:
+        seen.append(payload)
+        raise _Suspended
+
+    mw.interrupt = _record  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        mw.interrupt = original  # type: ignore[assignment]

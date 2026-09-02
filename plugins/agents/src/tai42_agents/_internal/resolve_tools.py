@@ -15,7 +15,8 @@ Every resolved tool is scoped through
 :func:`~tai42_agents._internal.nested_dispatch.scope_nested_dispatch_all`: this is the
 one list an agent dispatches from, so it is where the ownership rule is enforced —
 a tool called INSIDE an agent turn cannot capture the completion binding that
-addresses the agent's own deferred answer.
+addresses the agent's own deferred answer, and a park-capable run's dispatch instead
+carries a CHAINED binding it can wait on.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import (
     NestedParkOwnershipError,
     SuspendedInteraction,
-    assert_park_adoptable,
+    resolve_park_adoption,
     suspended_interaction_marker,
 )
 from tai42_contract.secrets import mask_secrets
@@ -87,20 +88,25 @@ async def _as_structured_tool(
             # it and the in-graph park middleware recognizes the park by RESULT shape (never a
             # tool name), so a preset over ANY parking tool parks the agent. GENERIC.
             #
-            # Adopting the park is what suspends THIS run, so it is refused unless this run
-            # owns the park: a preset over a base that drives a nested run (a flow, another
-            # agent) surfaces a park resumed on that run's own path, which would never resume
-            # this one. Re-raised as a ``ToolException`` — the ONE exception class the loop's
-            # error middleware turns into a model-visible error ``ToolMessage`` — so the model
-            # reads the refusal and finishes the turn around it, instead of the turn aborting
-            # (or hanging on a park nothing will resume).
+            # WHICH park this run records is the ownership question: a preset over a base that
+            # drives a nested run (a flow, another agent) surfaces a park resumed on that run's
+            # own path, which would never resume this one. Under a CHAINED dispatch this run
+            # parks on the CALL instead — its own key, its own owner — and the nested run's
+            # terminal re-enters the loop through the chain's delivery tool; unchained, the
+            # park is refused. The refusal is re-raised as a ``ToolException`` — the ONE
+            # exception class the loop's error middleware turns into a model-visible error
+            # ``ToolMessage`` — so the model reads it and finishes the turn around it, instead
+            # of the turn aborting (or hanging on a park nothing will resume). The deadline
+            # rides through unchanged, so a chained park INHERITS the nested ask's horizon.
             try:
-                assert_park_adoptable(result.resume_owner, interaction_id=result.interaction_id, tool_name=preset.name)
+                park_key, park_owner = resolve_park_adoption(
+                    result.resume_owner, interaction_id=result.interaction_id, tool_name=preset.name
+                )
             except NestedParkOwnershipError as exc:
                 raise ToolException(str(exc)) from exc
             # The owner rides the WIRE form too: the claim point reads it off the serialized
             # ToolMessage, never off the sentinel this seam holds.
-            return suspended_interaction_marker(result.interaction_id, result.expiry_at, result.resume_owner)
+            return suspended_interaction_marker(park_key, result.expiry_at, park_owner)
         # This coroutine is the tool adapter this plugin registers with langchain:
         # langchain turns whatever it returns into the model-visible ToolMessage
         # (checkpoint and callback trace included). Mask here so the model never

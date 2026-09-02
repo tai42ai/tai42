@@ -58,8 +58,9 @@ from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
     finalize_drive,
-    park_continuation,
+    park_drive,
     register_agent_resume_tool,
+    register_chained_park_tool,
 )
 from tai42_agents._internal.park.driver import _collect_pending_interrupts
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
@@ -187,6 +188,10 @@ class ToolsAgentInput(BaseModel):
 # loading this agent (even with no deep engine present) still resumes its async parks. The
 # call is per-epoch idempotent, so a combined box binds it exactly once.
 register_agent_resume_tool()
+# ...and the completion tool that closes a CHAINED park: this loop's dispatches bind it, so the
+# nested run's driver must find it registered to fire the terminal back. Per-epoch idempotent
+# for the same reason.
+register_chained_park_tool()
 
 
 @tai42_app.agents.agent("tools_agent", tags={"agents"})
@@ -707,7 +712,7 @@ class ToolsAgent(Agent):
             completion_context=completion_context,
             bind=True,
         )
-        with park_continuation(park):
+        async with park_drive(park):
             state = await agent.ainvoke(Command(resume=resume_map), config)
             events = await finalize_drive(agent, config, None, park)
         for event in events:

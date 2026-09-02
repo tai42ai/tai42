@@ -50,6 +50,14 @@ class AgentsLimitsSettings(TaiBaseSettings):
     # oldest entry is evicted past this. Must be positive.
     embedding_dims_cache_size: int = Field(default=64, gt=0)
 
+    # Ceiling on how far ahead a CHAINED park's inherited horizon may reach. A chained park
+    # waits on a nested CALL, so it has no ask of its own and nothing expires it: its deadline
+    # is inherited from the ask the nested run is parked on, and this caps that inheritance so
+    # a run that asks for an unreasonably distant answer cannot pin a suspended agent open
+    # indefinitely. The effective horizon is the nearest of the inherited deadline, this cap,
+    # and the run's own retention bound. Must be positive.
+    chained_park_horizon_cap_hours: int = Field(default=24 * 7, gt=0)
+
     # Default LangGraph ``recursion_limit`` applied when a run pins none. Caps the
     # super-steps one turn's top-level graph may take (a tools-agent cycle is 2
     # super-steps), bounding paid model calls on a runaway loop. A caller-supplied
