@@ -266,6 +266,11 @@ string — here the raw code — so the route replies with just the code. The to
 mints for the conversation named by `(channel, our_identity)`, whose resolved
 target must itself have `multichannel` on.
 
+`reply_expr` maps a SUCCESSFUL result: a result whose own `status` names a
+non-success terminal (`aborted`, `stopped`, `error`) fails the turn regardless of
+the mapping — its result is partial by construction, so the guest gets the route's
+error reply and the status rides the record's `error` detail.
+
 ## Development
 
 Set up the dev venv and run the gates. `--no-sources` ignores the workspace-source
