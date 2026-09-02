@@ -41,6 +41,8 @@ async def execute_chain(
     # A parked first stage surfaces the sentinel; propagate it rather than feeding a park
     # signal into jq or the next tool. The chain re-surfaces exactly one park.
     if isinstance(first_result, SuspendedInteraction):
+        # Propagated WHOLE — the park's resume owner rides with the sentinel, so whoever
+        # claims it downstream still checks it owns it. Re-minting one here would drop that.
         return first_result
     jq_result = await run_jq_first(jq_expression, first_result)
     return await tai42_app.tools.run_tool(next_tool_name, jq_result)

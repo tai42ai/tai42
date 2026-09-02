@@ -74,12 +74,20 @@ def test_invalid_mode_raises(bind_fake_app):
         asyncio.run(execute_batch("tool", [], execution_mode="invalid"))  # type: ignore[arg-type]
 
 
-def _bind_parking_app(bind_fake_app) -> None:
+def _bind_parking_app(bind_fake_app, minted: list[SuspendedInteraction] | None = None) -> None:
     # A body that carries ``park`` async-parks: its run_tool returns the SuspendedInteraction
-    # SIGNAL (as a real parking tool-face does) rather than an ordinary result.
+    # SIGNAL (as a real parking tool-face does) rather than an ordinary result. The park's resume
+    # owner rides ON the sentinel, so the batch must re-surface this exact object, not re-mint one.
     async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
         if arguments.get("park"):
-            return SuspendedInteraction(interaction_id=arguments["park"], expiry_at=datetime(2026, 6, 1, tzinfo=UTC))
+            sentinel = SuspendedInteraction(
+                interaction_id=arguments["park"],
+                expiry_at=datetime(2026, 6, 1, tzinfo=UTC),
+                resume_owner="nested_driver_resume",
+            )
+            if minted is not None:
+                minted.append(sentinel)
+            return sentinel
         return arguments["n"]
 
     bind_fake_app(FakeTools(run_tool=run_tool))
@@ -89,11 +97,17 @@ def _bind_parking_app(bind_fake_app) -> None:
 def test_a_single_parked_body_propagates_the_sentinel(bind_fake_app, execution_mode):
     # One body parked: the batch parks AS A WHOLE, re-surfacing the sentinel verbatim so the
     # caller's park recognition fires — not a partial result list burying a hidden pause.
-    _bind_parking_app(bind_fake_app)
+    minted: list[SuspendedInteraction] = []
+    _bind_parking_app(bind_fake_app, minted)
     params = [{"n": 1}, {"park": "i-batch"}, {"n": 3}]
     result = asyncio.run(execute_batch("tool", params, execution_mode=execution_mode))
     assert isinstance(result, SuspendedInteraction)
     assert result.interaction_id == "i-batch"
+    # Propagated WHOLE: the SAME sentinel object survives (byte-identical), so its resume owner
+    # rides through and the park stays claimable downstream.
+    assert len(minted) == 1
+    assert result is minted[0]
+    assert result.resume_owner == "nested_driver_resume"
 
 
 @pytest.mark.parametrize("execution_mode", ["sequential", "parallel"])
