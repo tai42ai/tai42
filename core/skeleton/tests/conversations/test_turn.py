@@ -229,7 +229,11 @@ async def _settle(timeout: float = 2.0) -> None:
         tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
         if not tasks:
             await asyncio.sleep(0)
-            if not any(not t.done() for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS)):
+            # Recompute after the yield: a task can appear between the two checks, so wait on
+            # the fresh list (asyncio.wait raises on an empty set), and return only when it
+            # is still empty.
+            tasks = [t for t in (*turn_module._TURN_TASKS, *delivery_module._DELIVERY_TASKS) if not t.done()]
+            if not tasks:
                 return
         await asyncio.wait(tasks, timeout=0.05)
 
@@ -494,7 +498,21 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
     assert len(channel.sends) == sends_before
 
 
-async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch):
+_TURN_LOGGER = "tai42_skeleton.conversations.turn"
+
+
+def _completion_warnings(caplog, completion_id: str) -> list[str]:
+    """Every delivery-tool WARNING naming ``completion_id``. A non-success fire still returns a
+    delivered record, so this log is the ONLY signal that a resumer/delivery version skew is
+    degrading outcomes into error notices."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == _TURN_LOGGER and completion_id in record.getMessage()
+    ]
+
+
+async def test_deliver_tool_completion_non_success_delivers_error_notice(env, monkeypatch, caplog):
     # A non-success terminal (the route carries no error mapping) delivers the uniform
     # client-safe notice — the DELIVERY route's ``error_reply_text`` when set, never the raw
     # internal detail, never a silent drop. The guest-facing notice resolves through the
@@ -508,13 +526,14 @@ async def test_deliver_tool_completion_non_success_delivers_error_notice(env, mo
     origin = _tool_channel_route(route_name="tool-origin", reply_expr=".x", error_reply_text=other)
     _wire(monkeypatch, FakeManager(route, origin), channel)
 
-    out = await turn_module.deliver_tool_completion(
-        delivery_thread_id="bridge:tool-line:+15550002222",
-        completion_id="e1",
-        result={"detail": "internal"},
-        status=PARK_COMPLETION_FAILED,
-        route_name="tool-origin",
-    )
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="e1",
+            result={"detail": "internal"},
+            status=PARK_COMPLETION_FAILED,
+            route_name="tool-origin",
+        )
     await _settle()
     assert out == {"message_id": "e1"}
     rec = await _store().get_record("e1")
@@ -522,6 +541,11 @@ async def test_deliver_tool_completion_non_success_delivers_error_notice(env, mo
     # The delivery route's custom text wins over the originating route's.
     assert rec.answer == spanish
     assert [n.message for n in channel.sends] == [spanish]
+    # An EXPLICIT failure is announced: this record is indistinguishable from a degraded one,
+    # so a fleet whose resumes are all failing must still be visible in the log.
+    warnings = _completion_warnings(caplog, "e1")
+    assert len(warnings) == 1
+    assert "'failed'" in warnings[0]
 
 
 async def test_deliver_tool_completion_unmappable_success_delivers_error_notice(env, monkeypatch):
@@ -568,7 +592,8 @@ async def test_deliver_tool_completion_silent_reply_delivers_nothing(env, monkey
 
 async def test_deliver_tool_completion_unresolvable_thread_raises(env, monkeypatch):
     # An unresolvable delivery address raises loudly so the resumer's at-least-once seam
-    # retains and retries rather than dropping the outcome.
+    # retains and retries rather than dropping the outcome. PRESENT but unresolvable is the
+    # retriable case — a route can be restored — unlike an ABSENT address, which is dropped.
     _wire(monkeypatch, FakeManager(_tool_channel_route()))
     with pytest.raises(turn_module.CompletionDeliveryError):
         await turn_module.deliver_tool_completion(
@@ -576,24 +601,159 @@ async def test_deliver_tool_completion_unresolvable_thread_raises(env, monkeypat
         )
 
 
-async def test_deliver_tool_completion_defaults_to_the_failed_fail_safe(env, monkeypatch):
-    # FAIL-SAFE: an unstamped fire (no status) defaults to FAILED, so it delivers the client-safe
-    # notice and NEVER pushes an unmapped payload through reply_expr as if it had succeeded.
+async def test_deliver_tool_completion_without_a_completion_id_raises(env, monkeypatch):
+    # The idempotency id is the exactly-once key. A key-less fire must not deliver under a
+    # guessed id: a blank id would key EVERY key-less terminal onto ONE record, so the second
+    # such fire — from an unrelated park — would read the first as already delivered and vanish.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+
+    with pytest.raises(ValueError, match="completion_id"):
+        await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id=None,
+            result={"result": {"reply": "hi"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    with pytest.raises(ValueError, match="completion_id"):
+        await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="",
+            result={"result": {"reply": "hi"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    await _settle()
+    assert channel.sends == []
+
+
+async def test_deliver_tool_completion_without_an_address_is_a_logged_no_op(env, monkeypatch, caplog):
+    # A fire whose completion binding carried NO address: nothing reverses a completion id to a
+    # thread, so it is a LOGGED drop — never the retriable CompletionDeliveryError, which would
+    # buy an unending retry storm against a fire no attempt can ever land.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
+
+    with caplog.at_level(logging.ERROR, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id=None,
+            completion_id="orphan-1",
+            result={"result": {"reply": "the orphaned outcome"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+        blank = await turn_module.deliver_tool_completion(
+            delivery_thread_id="",
+            completion_id="orphan-2",
+            result={"result": {"reply": "also orphaned"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    await _settle()
+
+    assert out == {"message_id": None}
+    assert blank == {"message_id": None}
+    assert await _store().get_record("orphan-1") is None
+    assert await _store().get_record("orphan-2") is None
+    assert channel.sends == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and r.name == _TURN_LOGGER]
+    assert any("orphan-1" in message for message in errors)
+    assert any("orphan-2" in message for message in errors)
+
+
+async def test_deliver_tool_completion_omitted_status_delivers_notice_and_warns(env, monkeypatch, caplog):
+    # FAIL-SAFE: an omitted status takes this tool's PUBLISHED default (FAILED), so it delivers
+    # the client-safe notice and NEVER pushes an unmapped payload through reply_expr as if it had
+    # succeeded. The fire still returns a delivered record, so pairing a new skeleton with an old
+    # resumer degrades EVERY outcome to a notice — the WARNING is the only detection there is.
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".result.reply // null")
     _wire(monkeypatch, FakeManager(route), channel)
 
-    out = await turn_module.deliver_tool_completion(
-        delivery_thread_id="bridge:tool-line:+15550002222",
-        completion_id="d1",
-        result={"result": {"reply": "would-map-if-success"}},
-    )
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="d1",
+            result={"result": {"reply": "would-map-if-success"}},
+        )
     await _settle()
     assert out == {"message_id": "d1"}
     rec = await _store().get_record("d1")
     assert rec is not None
     # Delivered the notice, NOT the reply_expr-mapped success text.
     assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+    warnings = _completion_warnings(caplog, "d1")
+    assert len(warnings) == 1
+    assert "'failed'" in warnings[0]
+
+
+async def test_deliver_tool_completion_explicit_none_status_warns_as_unstamped(env, monkeypatch, caplog):
+    # A resumer that puts ``status: None`` ON THE WIRE is an unstamped fire, and is reported as
+    # one — the shape is distinguishable from a terminal that genuinely failed, which is what
+    # makes the log usable for telling a version skew apart from a failing fleet.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="n1",
+            result={"result": {"reply": "would-map-if-success"}},
+            status=None,
+        )
+    await _settle()
+    assert out == {"message_id": "n1"}
+    rec = await _store().get_record("n1")
+    assert rec is not None
+    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+    warnings = _completion_warnings(caplog, "n1")
+    assert len(warnings) == 1
+    assert "NO status" in warnings[0]
+
+
+async def test_deliver_tool_completion_unrecognized_status_delivers_notice_and_warns(env, monkeypatch, caplog):
+    # A status outside the contract vocabulary is non-success, exactly like the unstamped fire:
+    # a value this tool cannot read must never be mapped as though it were the success terminal.
+    # Same invisible version skew, so it warns and names the value that arrived.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="w1",
+            result={"result": {"reply": "would-map-if-success"}},
+            status="weird",
+        )
+    await _settle()
+    assert out == {"message_id": "w1"}
+    rec = await _store().get_record("w1")
+    assert rec is not None
+    assert rec.answer == turn_module._ERROR_ANSWER_TEXT
+    warnings = _completion_warnings(caplog, "w1")
+    assert len(warnings) == 1
+    assert "'weird'" in warnings[0]
+
+
+async def test_deliver_tool_completion_success_maps_the_reply_and_warns_nothing(env, monkeypatch, caplog):
+    # The counterpart pin: the ONE recognized success status maps through reply_expr and is
+    # silent, so the warnings above discriminate a degraded fire from a healthy one.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):
+        out = await turn_module.deliver_tool_completion(
+            delivery_thread_id="bridge:tool-line:+15550002222",
+            completion_id="ok1",
+            result={"result": {"reply": "the deferred answer"}},
+            status=PARK_COMPLETION_SUCCEEDED,
+        )
+    await _settle()
+    assert out == {"message_id": "ok1"}
+    rec = await _store().get_record("ok1")
+    assert rec is not None
+    assert rec.answer == "the deferred answer"
+    assert _completion_warnings(caplog, "ok1") == []
 
 
 async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env, monkeypatch):
@@ -645,6 +805,60 @@ async def test_deliver_tool_completion_raises_on_vanished_originating_route(env,
             status=PARK_COMPLETION_SUCCEEDED,
             route_name="tool-gone",
         )
+
+
+async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, monkeypatch):
+    # The AGENT-kind mirror of the tool-route leg: a route whose AGENT async-parks binds the
+    # completion naming THIS thread in the OPAQUE context, keyed by the delivery tool's own
+    # routing parameter. A resuming driver fires the generic contract payload
+    # ``{**context, result, completion_id, status}``, so a context-less binding would fire a
+    # payload the delivery tool cannot accept and nothing would be delivered.
+    from tai42_contract.agent.events import SuspendedFinal
+    from tai42_contract.interactions import get_park_completion
+
+    bound: list = []
+
+    class ParkingAgent(Agent):
+        tool_name = "echo"
+        ToolInput = _EchoInput
+
+        async def run(self, **kwargs):
+            raise AssertionError("the turn drives astream")
+
+        async def astream(self, **kwargs):
+            bound.append(get_park_completion())
+            yield SuspendedFinal(interaction_ids=["i-async"], thread_id=kwargs["thread_id"])
+
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": ParkingAgent()})
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    # The turn parked silently — no reply now; the resumed answer arrives out of band.
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+
+    assert len(bound) == 1
+    tool_name, context = bound[0]
+    assert tool_name == turn_module.COMPLETION_TOOL_NAME
+    assert context is not None
+    assert dict(context) == {"thread_id": "bridge:line:+15550002222"}
+
+    # The contract payload a resuming driver fires — the bound context merged with the terminal
+    # outcome — is exactly what the bound tool accepts, and it delivers the answer back.
+    out = await turn_module.deliver_agent_completion(
+        **context, result="the deferred answer", completion_id="ac1", status=PARK_COMPLETION_SUCCEEDED
+    )
+    await _settle()
+    assert out == {"message_id": "ac1"}
+    delivered = await _store().get_record("ac1")
+    assert delivered is not None
+    assert delivered.answer == "the deferred answer"
+    assert [n.message for n in channel.sends] == ["the deferred answer"]
 
 
 async def test_tool_target_wrong_typed_result_is_an_error(env, monkeypatch):

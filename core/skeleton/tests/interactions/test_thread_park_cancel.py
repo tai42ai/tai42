@@ -268,10 +268,13 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypat
     tool_token = set_resume_continuation_tool("resume_tool")
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
     # An AGENT route target runs inside the bridge turn context AND co-sets a park completion
-    # with NO context (exactly as _run_agent_turn does — set_park_completion(COMPLETION_TOOL_NAME)
-    # carries no delivery_thread_id). So the thread must come from the bridge, and this pins that
-    # a stray/empty agent completion context never shadows it.
-    park_token = set_park_completion("agent_completion")
+    # whose context is keyed by ITS delivery tool's own routing parameter (``thread_id``), never
+    # ``delivery_thread_id`` (exactly as _run_agent_turn binds it). So the thread must come from
+    # the bridge, and this pins that a foreign-keyed completion context never shadows it.
+    # The completion context names a DIFFERENT thread than the bridge on purpose: only a
+    # DISCRIMINATING value can tell "read the bridge" apart from "read whatever ``thread_id``
+    # key is in the opaque context" — with both naming the same thread either read passes.
+    park_token = set_park_completion("agent_completion", {"thread_id": _OTHER_THREAD})
     bridge = BridgeTurnContext(
         thread_id=_THREAD, route_name="chat", channel="twilio", our_identity="+1", client_address="+15550001111"
     )
@@ -286,6 +289,8 @@ async def test_ask_user_captures_thread_from_agent_bridge_turn_context(monkeypat
     assert isinstance(result, SuspendedInteraction)
     store = InteractionStore("interactions:")
     assert await fake_redis.smembers(store.thread_parks_key(_THREAD)) == {result.interaction_id}
+    # Nothing was indexed under the completion context's thread — it never shadowed the bridge.
+    assert await fake_redis.smembers(store.thread_parks_key(_OTHER_THREAD)) == set()
 
 
 async def test_ask_user_with_no_bound_thread_indexes_nothing(monkeypatch, fake_redis, fake_client_ctx):
