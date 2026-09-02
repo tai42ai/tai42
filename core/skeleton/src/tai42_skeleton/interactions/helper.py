@@ -868,7 +868,10 @@ async def ask_user(
     # sentinel now; a later answer (either door) or the expiry reaper resumes work
     # by running the stored generic continuation as the stored identity.
     if mode == "async":
-        return SuspendedInteraction(interaction_id=interaction_id, expiry_at=expiry_at)
+        # The sentinel names the resume continuation this park was stamped with, so a caller
+        # that would adopt the park as its OWN suspended state can check it owns it
+        # (``assert_park_adoptable``) instead of parking behind a resume fired elsewhere.
+        return SuspendedInteraction(interaction_id=interaction_id, expiry_at=expiry_at, resume_owner=continuation_tool)
 
     # The answer wait gets what is LEFT of the budget after delivery — the same
     # deadline the delivery attempts ran against — so the whole ask stays inside

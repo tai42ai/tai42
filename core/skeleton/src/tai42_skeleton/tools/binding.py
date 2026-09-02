@@ -27,7 +27,12 @@ from makefun import create_function
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 from tai42_contract.errors import ErrorKind
 from tai42_contract.extensions import ExtensionKind
-from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
+from tai42_contract.interactions import (
+    NestedParkOwnershipError,
+    SuspendedInteraction,
+    assert_park_adoptable,
+    suspended_interaction_marker,
+)
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 from tai42_contract.secrets import SecretValue, contains_secrets, mask_secrets, unwrap_secrets
 from tai42_contract.tools import (
@@ -908,29 +913,49 @@ class ToolBinding:
                     execution_identity, tool_obj.name, _named_call_arguments(target_sig, args, kwargs)
                 )
             with bridge_context(self._app.fastmcp):
-                # Only the tool body's own failure becomes a model-visible tool error;
-                # the machinery above (identity gate, live re-resolution, bridge setup)
-                # stays a raw abort. CancelledError/BaseException pass through untouched.
+                # Only the tool BODY's own failure becomes a model-visible tool error; the
+                # machinery above (identity gate, live re-resolution, bridge setup) AND the
+                # park-adoption/masking below stay a raw abort. So the broad catch wraps the body
+                # invocation ALONE — a bug in the adoption check, marker build, or secret masking
+                # is not mislabeled as a tool that failed. CancelledError/BaseException pass
+                # through untouched.
                 try:
                     result = target(*args, **kwargs)
                     if inspect.isawaitable(result):
                         result = await result
-                    if isinstance(result, SuspendedInteraction):
-                        # An async ask_user parked the caller and returned this
-                        # sentinel. Inside a graph the tool task must COMPLETE (so
-                        # ask_user runs exactly once, never replayed on resume), so
-                        # convert the sentinel to the reserved contract marker: the
-                        # ToolMessage commits carrying it, and the in-graph park
-                        # middleware recognizes the park by this RESULT shape (never a
-                        # tool name) and interrupts once for the whole super-step.
-                        return suspended_interaction_marker(result.interaction_id, result.expiry_at)
-                    # The model never sees a secret value: this adapter feeds the
-                    # langchain layer (the model, the checkpoint, the callback trace),
-                    # so a wrapped secret is masked before it leaves here.
-                    return mask_secrets(result)
                 except Exception as exc:
                     logger.warning("in-process tool %r failed: %s", tool_obj.name, exc, exc_info=exc)
                     raise ToolException(f"Error calling tool {tool_obj.name!r}: {exc}") from exc
+                if isinstance(result, SuspendedInteraction):
+                    # An async ask_user parked the caller and returned this sentinel. Inside a
+                    # graph the tool task must COMPLETE (so ask_user runs exactly once, never
+                    # replayed on resume), so convert the sentinel to the reserved contract
+                    # marker: the ToolMessage commits carrying it, and the in-graph park
+                    # middleware recognizes the park by this RESULT shape (never a tool name) and
+                    # interrupts once for the whole super-step.
+                    #
+                    # Only a park this run OWNS may become this run's park: a nested run that
+                    # parked (a driver tool, an agent run at its tool face) is resumed on its own
+                    # path and would never resume this one, so its sentinel is refused here as a
+                    # model-visible tool error rather than suspending this run forever.
+                    try:
+                        assert_park_adoptable(
+                            result.resume_owner, interaction_id=result.interaction_id, tool_name=tool_obj.name
+                        )
+                    except NestedParkOwnershipError as exc:
+                        # A DELIBERATE refusal, not a tool that failed: it is already worded for
+                        # the model and already names the tool, so it is re-raised as its own
+                        # message — no second "Error calling tool" prefix, and no traceback-bearing
+                        # WARNING for a decision this seam made on purpose.
+                        logger.info("in-process tool %r returned a park this run does not own: %s", tool_obj.name, exc)
+                        raise ToolException(str(exc)) from exc
+                    # The owner rides the WIRE form too: the driver that later claims this park
+                    # reads it off the serialized ToolMessage, never off the sentinel.
+                    return suspended_interaction_marker(result.interaction_id, result.expiry_at, result.resume_owner)
+                # The model never sees a secret value: this adapter feeds the langchain layer (the
+                # model, the checkpoint, the callback trace), so a wrapped secret is masked before
+                # it leaves here.
+                return mask_secrets(result)
 
         runnable.__name__ = resolved.__name__
         # langchain reads the runnable's docstring for the client tool's

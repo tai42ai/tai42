@@ -162,7 +162,10 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
     from tai42_contract.interactions import (
         SUSPENDED_INTERACTION_MARKER_KEY,
         SuspendedInteraction,
+        get_resume_continuation_tool,
         read_suspended_interaction_marker,
+        reset_resume_continuation_tool,
+        set_resume_continuation_tool,
     )
 
     deadline = datetime(2030, 1, 1, tzinfo=UTC)
@@ -173,15 +176,28 @@ def test_suspended_interaction_becomes_the_reserved_park_marker():
             @app.tools.tool(force=True)
             async def parks(q: str):
                 """A tool that async-parks and returns the suspension sentinel."""
-                return SuspendedInteraction(interaction_id="i1", expiry_at=deadline)
+                # Faithful to ``ask_user(mode="async")``: the park names the continuation
+                # bound around this run as its owner, so this run may adopt it.
+                return SuspendedInteraction(
+                    interaction_id="i1", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
+                )
 
             tool_obj = await app.tools.get_tool("parks")
             runnable = app._tool_binding._client_runnable(tool_obj)
 
-            result = await runnable(q="x")
+            token = set_resume_continuation_tool("agent_resume")
+            try:
+                result = await runnable(q="x")
+            finally:
+                reset_resume_continuation_tool(token)
             assert isinstance(result, dict)
             assert SUSPENDED_INTERACTION_MARKER_KEY in result
             marker = read_suspended_interaction_marker(result)
-            assert marker == {"interaction_id": "i1", "expiry_at": deadline.isoformat()}
+            assert marker == {
+                "interaction_id": "i1",
+                "expiry_at": deadline.isoformat(),
+                # The owner rides the wire form the claim point reads.
+                "resume_owner": "agent_resume",
+            }
 
     asyncio.run(run())
