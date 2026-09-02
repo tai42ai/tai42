@@ -51,6 +51,8 @@ def _fake_target(monkeypatch: pytest.MonkeyPatch) -> None:
         return []
 
     monkeypatch.setattr(db, "all_migration_entries", _entries)
+    monkeypatch.setattr(db, "installed_plugin_entries", _entries)
+    monkeypatch.setattr(db, "skeleton_entry", lambda: SimpleNamespace(component="skeleton", settings=_TARGET))
 
 
 # --- migrate --------------------------------------------------------------
@@ -67,6 +69,30 @@ def test_migrate_applies_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
     assert "Applied skeleton 0001_baseline" in result.output
     assert "Applied 1 migration(s)." in result.output
+
+
+def test_migrate_applies_skeleton_before_plugin_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Plugin discovery reads skeleton-owned tables, so migrate must land the
+    # skeleton chain BEFORE it enumerates plugin chains — the order is observable
+    # as apply(skeleton), then discovery, then apply(plugins).
+    calls: list[str] = []
+
+    async def _apply(entries: object) -> list[AppliedMigration]:
+        components = ",".join(entry.component for entry in cast("list", entries))
+        calls.append(f"apply:{components}")
+        return []
+
+    async def _plugin_entries() -> list:
+        calls.append("discover-plugins")
+        return [SimpleNamespace(component="tai42-widget", settings=_TARGET)]
+
+    monkeypatch.setattr(db, "apply_migrations", _apply)
+    monkeypatch.setattr(db, "installed_plugin_entries", _plugin_entries)
+
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["apply:skeleton", "discover-plugins", "apply:tai42-widget"]
 
 
 def test_migrate_json_reports_applied(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,11 +181,13 @@ def test_migrate_clean_on_unconfigured_connection(monkeypatch: pytest.MonkeyPatc
 
 def _use_real_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     # Undo the autouse chain-discovery stub so the real registry runs: a half-set
-    # admin identity is raised EAGERLY from ``all_migration_entries`` (through the
-    # skeleton entry's migrator-settings resolve), before any status/apply fake.
-    from tai42_skeleton.db import all_migration_entries
+    # admin identity is raised EAGERLY from discovery (through the skeleton entry's
+    # migrator-settings resolve), before any status/apply fake.
+    from tai42_skeleton.db import all_migration_entries, installed_plugin_entries, skeleton_entry
 
     monkeypatch.setattr(db, "all_migration_entries", all_migration_entries)
+    monkeypatch.setattr(db, "installed_plugin_entries", installed_plugin_entries)
+    monkeypatch.setattr(db, "skeleton_entry", skeleton_entry)
     monkeypatch.delenv("TAI_DB_BINDING_SKELETON", raising=False)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_USER", "migrator")
