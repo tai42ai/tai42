@@ -679,6 +679,65 @@ def _interrupt_result_detail(result: object) -> str | None:
     )
 
 
+#: The failure-path structural diagnostic lists at most this many key names per level, so a
+#: wide envelope cannot bloat the log line.
+_RESULT_SHAPE_KEY_CAP = 40
+
+
+def _shape_key_names(mapping: dict[Any, Any]) -> list[str]:
+    """The mapping's string keys, sorted and capped — NAMES only. An envelope key, a
+    ``result`` key, or a ``return_result`` surface id is a protocol/authoring identifier, never
+    guest content, so its NAME is client-safe to log; its VALUE is not and never reaches here."""
+    return sorted(key for key in mapping if isinstance(key, str))[:_RESULT_SHAPE_KEY_CAP]
+
+
+def _shape_surface_sizes(outputs: dict[Any, Any]) -> dict[str, int]:
+    """Each ``result.outputs`` surface's NAME mapped to the approximate serialized SIZE of its
+    value — never the value itself. The size is the one datum that separates an ABSENT surface
+    (not here at all) from a PRESENT-BUT-EMPTY one (a size of ~2, an empty list/object), decided
+    without a guest byte reaching the log. An unserializable value records ``-1`` rather than
+    rendering it."""
+    sizes: dict[str, int] = {}
+    for name in _shape_key_names(outputs):
+        try:
+            sizes[name] = len(json.dumps(outputs[name], default=str))
+        except Exception:
+            sizes[name] = -1
+    return sizes
+
+
+def _result_shape(result: object) -> str:
+    """A VALUE-FREE structural descriptor of a tool result, logged when the reply mapping faults
+    so the next live failure yields the envelope's SHAPE as ground truth — which flagged surface
+    is ABSENT vs PRESENT-BUT-EMPTY — instead of an inference from the guard's error text.
+
+    Client-safe by construction: it emits only STRUCTURE — the type, the envelope's own key NAMES
+    (protocol/authoring identifiers, never guest content), the ``status`` token, the
+    ``return_result`` surface NAMES present under ``result.outputs`` with their approximate
+    serialized SIZES, and the ``missing_results`` surface NAMES the run reported unproduced. A
+    guest's message text lives in the VALUES under those surfaces, which this NEVER renders — only
+    names, counts, and sizes cross into the log."""
+    if not isinstance(result, dict):
+        length = len(result) if isinstance(result, (str, bytes, list, tuple, dict, set)) else None
+        return f"type={type(result).__name__}" + (f" len={length}" if length is not None else "")
+    parts = [f"type=dict keys={_shape_key_names(result)}"]
+    status = result.get("status")
+    if isinstance(status, str):
+        parts.append(f"status={status!r}")
+    inner = result.get("result")
+    if isinstance(inner, dict):
+        parts.append(f"result_keys={_shape_key_names(inner)}")
+        outputs = inner.get("outputs")
+        if isinstance(outputs, dict):
+            parts.append(f"outputs_surface_sizes={_shape_surface_sizes(outputs)}")
+    missing = result.get("missing_results")
+    if isinstance(missing, list):
+        parts.append(
+            f"missing_results={sorted(name for name in missing if isinstance(name, str))[:_RESULT_SHAPE_KEY_CAP]}"
+        )
+    return "; ".join(parts)
+
+
 async def _run_tool_turn(
     route: ConversationRoute,
     text: str,
@@ -807,6 +866,17 @@ async def _run_tool_turn(
         reply = await _tool_reply(route, result)
     except Exception as exc:
         logger.error("conversations: mapping the tool result for route %r failed", route.route_name, exc_info=exc)
+        # VALUE-FREE ground truth: the mapped envelope's SHAPE — never its guest-content values —
+        # so a mapping fault is diagnosed from the structure the run actually returned (which
+        # flagged surface is absent vs present-but-empty) instead of inferred from the guard text.
+        try:
+            logger.error(
+                "conversations: the tool result that failed to map for route %r had shape: %s",
+                route.route_name,
+                _result_shape(result),
+            )
+        except Exception:
+            logger.exception("conversations: result-shape diagnostic failed")
         return _tool_error(f"reply_expr error: {exc}", route)
     parts = _reply_parts(reply)
     if parts is None:
