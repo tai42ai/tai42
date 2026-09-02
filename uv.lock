@@ -5585,7 +5585,7 @@ dev = [
 
 [[package]]
 name = "tai42-contract"
-version = "6.0.1"
+version = "6.0.2"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -6142,7 +6142,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.11.1"
+version = "9.11.2"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
