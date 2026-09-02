@@ -748,8 +748,9 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
 
 def _paused_envelope(status: str, *, with_missing: bool) -> dict:
     """A paused run-outcome envelope the engine hands a step/resume caller. ``with_missing``
-    rides ``missing_results`` (flows 0.35.0+); without it is the 0.34.0 shape. Neither carries a
-    ``result`` — the flagged reply surface is still downstream of the pause."""
+    rides ``missing_results`` (a producer that carries them); without it is the older shape that
+    does not. Neither carries a ``result`` — the flagged reply surface is still downstream of the
+    pause."""
     envelope: dict = {"status": status, "session_id": "run-sierra"}
     if status == "interrupt":
         envelope["tool_calls"] = [{"tool": "compose_messages", "tool_kwargs": {}}]
@@ -763,17 +764,17 @@ def _paused_envelope(status: str, *, with_missing: bool) -> dict:
     return envelope
 
 
-@pytest.mark.parametrize("status", ["suspended", "interrupt"])
 @pytest.mark.parametrize("with_missing", [True, False])
-async def test_tool_target_paused_envelope_ends_the_turn_silently(env, monkeypatch, status, with_missing):
-    # A paused (non-terminal) run envelope is NEITHER a success nor a failure: the turn ends
+async def test_tool_target_suspended_envelope_ends_the_turn_silently(env, monkeypatch, with_missing):
+    # A SUSPENDED (async re-park) envelope is NEITHER a success nor a failure, and it HAS a
+    # delivery leg (the completion continuation bound around the dispatch): the turn ends
     # silently exactly as the SuspendedInteraction marker path does — no reply, no error reply —
     # and the record NOTES the pending state (never delivered). Both producer versions handled:
-    # flows 0.35.0+ rides `missing_results`, 0.34.0 does not.
+    # one rides `missing_results`, the older one does not.
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".result.reply // null")
     _wire(monkeypatch, FakeManager(route), channel)
-    _wire_tool(monkeypatch, lambda kw: _paused_envelope(status, with_missing=with_missing))
+    _wire_tool(monkeypatch, lambda kw: _paused_envelope("suspended", with_missing=with_missing))
 
     message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
     await _settle()
@@ -788,9 +789,38 @@ async def test_tool_target_paused_envelope_ends_the_turn_silently(env, monkeypat
     # The record notes the pending state (diagnostic only, never delivered): it names the paused
     # status, and — when the producer rides it — the pending flagged surface.
     assert record.error is not None
-    assert status in record.error
+    assert "suspended" in record.error
     if with_missing:
         assert "compose_messages" in record.error
+
+
+@pytest.mark.parametrize("with_missing", [True, False])
+async def test_tool_target_interrupt_envelope_fails_the_turn_loudly(env, monkeypatch, with_missing):
+    # An INTERRUPT (step-mode tool-call pause) reaching a conversation turn is a permanent route
+    # misconfiguration: a step-mode run cannot be driven by a conversation turn, so the pause has
+    # NO delivery leg and the reply would never arrive. Silencing it would convert a noticed
+    # failure into quiet data loss, so it takes the LOUD error path — the same client-safe error
+    # reply a failed run gets — and the record's error names the misconfiguration.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: _paused_envelope("interrupt", with_missing=with_missing))
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    # LOUD — the error path, not the silent one.
+    assert record.delivery_status is not DeliveryStatus.SILENT
+    assert record.answer_status == "error"
+    # The guest gets the route's client-safe error reply, never silence.
+    assert record.answer == turn_module._ERROR_ANSWER_TEXT
+    assert [n.message for n in channel.sends] == [turn_module._ERROR_ANSWER_TEXT]
+    # The record's error names the real cause — the misconfiguration — and the paused status.
+    assert record.error is not None
+    assert "interrupt" in record.error
+    assert "misconfiguration" in record.error
 
 
 async def test_tool_target_paused_envelope_never_maps_the_authored_reply_guard(env, monkeypatch):
@@ -910,16 +940,38 @@ async def test_tool_target_paused_envelope_over_the_api_door_delivers_a_silent_m
     assert record.delivery_status is DeliveryStatus.DELIVERED
 
 
-def test_paused_result_note_names_the_status_and_pending_surfaces():
-    # Unit: the note names the paused status, and rides missing_results when the producer carries
-    # it (0.35.0+) — omitting it cleanly when it does not (0.34.0).
-    with_missing = turn_module._paused_result_note({"status": "suspended", "missing_results": ["compose_messages"]})
+def test_suspended_result_note_names_the_status_and_pending_surfaces():
+    # Unit: the silent-arm note names the suspended status, and rides missing_results when the
+    # producer carries it — omitting it cleanly when it does not.
+    with_missing = turn_module._suspended_result_note({"status": "suspended", "missing_results": ["compose_messages"]})
     assert with_missing is not None
     assert "suspended" in with_missing
     assert "compose_messages" in with_missing
-    without = turn_module._paused_result_note({"status": "interrupt"})
+    without = turn_module._suspended_result_note({"status": "suspended"})
+    assert without is not None
+    assert "suspended" in without
+    assert "compose_messages" not in without
+    # An interrupt is NOT a suspend — the silent arm never claims it.
+    assert turn_module._suspended_result_note({"status": "interrupt"}) is None
+
+
+def test_interrupt_result_detail_names_the_misconfiguration():
+    # Unit: the loud-arm detail names the step-mode interrupt as a route misconfiguration, and
+    # rides missing_results when the producer carries it.
+    with_missing = turn_module._interrupt_result_detail(
+        {"status": "interrupt", "missing_results": ["compose_messages"]}
+    )
+    assert with_missing is not None
+    assert "interrupt" in with_missing
+    assert "misconfiguration" in with_missing
+    assert "compose_messages" in with_missing
+    without = turn_module._interrupt_result_detail({"status": "interrupt"})
     assert without is not None
     assert "interrupt" in without
+    assert "misconfiguration" in without
+    assert "compose_messages" not in without
+    # A suspend is NOT an interrupt — the loud arm never claims it.
+    assert turn_module._interrupt_result_detail({"status": "suspended"}) is None
 
 
 @pytest.mark.parametrize(
@@ -930,14 +982,16 @@ def test_paused_result_note_names_the_status_and_pending_surfaces():
         # A tool's OWN vocabulary that merely reads paused-adjacent stays on the reply path.
         {"status": "queued", "result": {"reply": "done"}},
         {"status": "Suspended", "result": {"reply": "done"}},
+        {"status": "Interrupt", "result": {"reply": "done"}},
         # A non-string / non-dict names no paused status.
         {"status": None, "result": {"reply": "done"}},
         {"status": ["suspended"], "result": {"reply": "done"}},
         "a bare string result",
     ],
 )
-def test_paused_result_note_ignores_non_paused_results(result):
-    assert turn_module._paused_result_note(result) is None
+def test_paused_helpers_ignore_non_paused_results(result):
+    assert turn_module._suspended_result_note(result) is None
+    assert turn_module._interrupt_result_detail(result) is None
 
 
 _TURN_LOGGER = "tai42_skeleton.conversations.turn"
