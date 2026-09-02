@@ -85,10 +85,14 @@ def test_park_identity_carries_no_langgraph_facts() -> None:
         "bind",
         "completion_context",
         "completion_tool",
+        "execution_fingerprint",
+        "execution_identity",
         "rebuild_kwargs",
         "retention_bound",
         "thread_id",
     }
+    # The execution identity is a park-record fact (the authority a later out-of-band fire binds),
+    # not a LangGraph engine fact — those stay out of the provider-free identity.
     assert not hasattr(identity, "checkpoint_provider")
     assert not hasattr(identity, "recursion_limit")
 

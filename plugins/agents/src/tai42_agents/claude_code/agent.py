@@ -46,6 +46,7 @@ from tai42_contract.interactions import (
     NestedParkOwnershipError,
     SuspendedInteraction,
     assert_park_adoptable,
+    current_execution_identity,
     get_park_completion,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
@@ -573,6 +574,7 @@ class ClaudeCodeAgent(Agent):
                     assert thread_id is not None
                     horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
                     completion_tool, completion_context = get_park_completion()
+                    execution_identity, execution_fingerprint = current_execution_identity()
                     identity = ParkIdentity(
                         agent_name=AGENT_NAME,
                         thread_id=thread_id,
@@ -581,6 +583,8 @@ class ClaudeCodeAgent(Agent):
                         completion_tool=completion_tool,
                         completion_context=completion_context,
                         retention_bound=horizon,
+                        execution_identity=execution_identity,
+                        execution_fingerprint=execution_fingerprint,
                     )
                     assert_park_capable(identity, durable=True, retention_bound=horizon)
                     async for event in self._park_on_interaction(
@@ -661,6 +665,7 @@ class ClaudeCodeAgent(Agent):
     ) -> AsyncIterator[StreamEvent]:
         horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
         completion_tool, completion_context = get_park_completion()
+        execution_identity, execution_fingerprint = current_execution_identity()
         identity = ParkIdentity(
             agent_name=AGENT_NAME,
             thread_id=thread_id,
@@ -669,6 +674,8 @@ class ClaudeCodeAgent(Agent):
             completion_tool=completion_tool,
             completion_context=completion_context,
             retention_bound=horizon,
+            execution_identity=execution_identity,
+            execution_fingerprint=execution_fingerprint,
         )
         assert_park_capable(identity, durable=True, retention_bound=horizon)
         suspended = await tai42_app.interactions.ask_user(

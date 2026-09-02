@@ -27,8 +27,13 @@ import logging
 from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.interactions import register_continuation_abandonment_handler
 
-from tai42_agents._internal.park.driver import AGENT_RESUME_TOOL_NAME, agent_resume
+from tai42_agents._internal.park.driver import (
+    AGENT_RESUME_TOOL_NAME,
+    agent_resume,
+    fire_park_failed_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,15 @@ def register_agent_resume_tool() -> None:
     process-lifetime flag (that would starve every post-boot reload epoch of its binding,
     since the module is import-cached and not re-imported on reload). Any OTHER error
     propagates loudly so a genuine registration bug is never swallowed."""
+    # The abandonment counterpart of the resume continuation: when the platform PERMANENTLY gives
+    # up redelivering a park's resume, this handler fires the FAILED terminal so the bound caller is
+    # not left waiting. Registered here alongside the resume tool (idempotent by handler identity,
+    # so the several parking agents that call this — and every reload epoch — leave exactly one).
+    # The seam is IN-PROCESS: the reaper worker fires only the handlers registered in ITS process,
+    # so a deployment that runs the redelivery reaper in a worker kind without the agents plugin in
+    # its manifest would silently no-op the abandonment (today every worker kind that runs the
+    # reaper also loads the agents plugin, so the handler is present wherever the reaper fires).
+    register_continuation_abandonment_handler(fire_park_failed_completion)
     try:
         tai42_app.tools.tool(
             name=AGENT_RESUME_TOOL_NAME,

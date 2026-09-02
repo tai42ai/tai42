@@ -39,6 +39,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     get_resume_continuation_tool,
     reset_park_completion,
@@ -239,6 +240,371 @@ def test_completion_fires_on_terminal_drive(
         assert idx.is_resolved_tombstone(entry)
 
     asyncio.run(go())
+
+
+def _expected_failed_delivery(thread_id: str, interaction_ids: list[str]) -> dict[str, Any]:
+    """The exact kwargs the abandonment fire dispatches: the bound opaque context, a ``None``
+    result (nothing was produced), the SAME stable completion id a clean terminal would use, and
+    the FAILED terminal status."""
+    completion_id = drv._completion_id(thread_id, idx.compute_superstep_id(interaction_ids))
+    return {
+        **_completion_context(thread_id),
+        "result": None,
+        "completion_id": completion_id,
+        "status": PARK_COMPLETION_FAILED,
+    }
+
+
+def test_failed_completion_fires_once_on_permanent_abandonment(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A park whose resume the platform PERMANENTLY gave up on (never drove cleanly) is closed by
+    # the abandonment fire: the bound completion tool fires once with the FAILED terminal, under
+    # the same stable completion id a success would have used, so the bound caller is told the
+    # answer is never coming instead of waiting to its own deadline.
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1"])
+    model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    agent = _agent()
+
+    async def go() -> None:
+        await _park_via_astream(agent, "bridge:acme:alice")
+        # The park exists and was never driven — no completion has fired yet.
+        assert delivered == []
+
+        await drv.fire_park_failed_completion("i1")
+        assert delivered == [_expected_failed_delivery("bridge:acme:alice", ["i1"])]
+
+        # A second abandonment fire (e.g. a sibling's redelivery, or a re-run reaper pass) re-fires
+        # under the SAME completion id, so a delivery ledger keyed on that id collapses it to one
+        # record — the driver does not tombstone; the id is the exactly-once authority.
+        await drv.fire_park_failed_completion("i1")
+        assert [d["completion_id"] for d in delivered] == [
+            drv._completion_id("bridge:acme:alice", idx.compute_superstep_id(["i1"])),
+            drv._completion_id("bridge:acme:alice", idx.compute_superstep_id(["i1"])),
+        ]
+        assert all(d["status"] == PARK_COMPLETION_FAILED for d in delivered)
+
+    asyncio.run(go())
+
+
+def test_abandonment_after_a_clean_success_never_overrides_it(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The critical safety pin: a super-step that drove cleanly (a delivered SUCCESS, resolved
+    # tombstone) must NEVER have a FAILED terminal fired over it by a late abandonment. The
+    # tombstone guard makes the abandonment fire a no-op.
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1"])
+    model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    agent = _agent()
+
+    async def go() -> None:
+        await _park_via_astream(agent, "bridge:acme:alice")
+        assert await agent_resume("i1", "the answer") == "all done"
+        assert delivered == [_expected_delivery("bridge:acme:alice", ["i1"], "all done")]
+        assert idx.is_resolved_tombstone(await idx.read_park_entry("i1") or {})
+
+        # The resume already delivered SUCCESS; a permanent-give-up notice arriving afterward is a
+        # no-op — the FAILED terminal is never delivered over the success.
+        await drv.fire_park_failed_completion("i1")
+        assert delivered == [_expected_delivery("bridge:acme:alice", ["i1"], "all done")]
+
+    asyncio.run(go())
+
+
+def test_abandonment_of_an_absent_park_is_a_silent_noop(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A park whose own entry TTL has lapsed (nothing left to deliver against) yields a clean
+    # no-op, never a raise — the abandonment fire is best-effort at the terminus.
+    saver = InMemorySaver()
+    _wire(monkeypatch, ScriptedChatModel([]), saver)
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    async def go() -> None:
+        await drv.fire_park_failed_completion("nonexistent")
+        assert delivered == []
+
+    asyncio.run(go())
+
+
+def test_abandonment_of_a_chained_park_delivers_the_failed_terminal_to_the_chain(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The chained-park tail-drop closes at the SAME exhaustion point: a NESTED run parks with its
+    # completion tool bound to ``deliver_chained_park`` (nested_dispatch binds it), so when the
+    # nested run's resume is permanently abandoned, the abandonment fire delivers the FAILED
+    # terminal into the chained delivery tool — the outer run waiting on the CALL learns the call
+    # came back empty instead of waiting to its own deadline.
+    from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
+
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[CHAINED_PARK_DELIVERY_TOOL_NAME] = lambda **kwargs: delivered.append(kwargs)
+
+    thread_id = "bridge:acme:alice"
+    chain_token = "tai42:chained-park:abc"
+    # A live nested park entry (never driven), shaped as persist_park writes it, whose completion
+    # tool is the chained delivery tool and whose context carries the chain token the outer run
+    # parked on.
+    entry = {
+        "agent_name": "tools_agent",
+        "thread_id": thread_id,
+        "superstep_id": idx.compute_superstep_id(["nested-i1"]),
+        "interrupt_id": "irq-1",
+        "rebuild_kwargs": {},
+        "completion_tool": CHAINED_PARK_DELIVERY_TOOL_NAME,
+        "completion_context": {"chain_token": chain_token},
+        "retention_bound": None,
+        "execution_identity": None,
+        "execution_fingerprint": "",
+    }
+
+    async def go() -> None:
+        await fake_park_redis.set(idx._park_key("nested-i1"), json.dumps(entry))
+        await drv.fire_park_failed_completion("nested-i1")
+        assert delivered == [
+            {
+                "chain_token": chain_token,
+                "result": None,
+                "completion_id": drv._completion_id(thread_id, idx.compute_superstep_id(["nested-i1"])),
+                "status": PARK_COMPLETION_FAILED,
+            }
+        ]
+
+    asyncio.run(go())
+
+
+def test_abandonment_binds_the_parks_recorded_execution_identity(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # PROPER-AUTHZ: the park records the execution identity its run is authorized as, and the
+    # abandonment fire binds it (via the contract's host-registered binder) so the completion
+    # dispatches UNDER that identity rather than fail-open. Proven end to end: a fake accessor is
+    # what build_park_identity captures at park time, and a fake binder records the bind + whether
+    # the fire ran inside it.
+    from tai42_contract.interactions import continuation as cont
+
+    monkeypatch.setattr(cont, "_execution_identity_accessor", lambda: ("user-x", "fp-x"))
+    bound: list[tuple[str | None, str]] = []
+    active = {"in": False}
+
+    @contextlib.asynccontextmanager
+    async def _fake_binder(key: str, fingerprint: str) -> Any:
+        bound.append((key, fingerprint))
+        active["in"] = True
+        try:
+            yield
+        finally:
+            active["in"] = False
+
+    monkeypatch.setattr(cont, "_execution_identity_binder", _fake_binder)
+
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1"])
+    model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    fired_bound: list[bool] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: fired_bound.append(active["in"])
+
+    agent = _agent()
+
+    async def go() -> None:
+        await _park_via_astream(agent, "bridge:acme:alice")
+        # The identity was captured onto the durable entry at park time.
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        assert entry["execution_identity"] == "user-x"
+        assert entry["execution_fingerprint"] == "fp-x"
+
+        await drv.fire_park_failed_completion("i1")
+        # The fire bound the recorded identity, and the completion ran WHILE it was bound.
+        assert bound == [("user-x", "fp-x")]
+        assert fired_bound == [True]
+
+    asyncio.run(go())
+
+
+def test_abandonment_of_a_chained_park_binds_identity_around_the_chain_drive(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The chained path binds identity too: a nested run's abandonment fires deliver_chained_park
+    # (which drives the outer agent_resume) UNDER the recorded identity, never fail-open.
+    from tai42_contract.interactions import continuation as cont
+
+    from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
+
+    bound: list[tuple[str | None, str]] = []
+    active = {"in": False}
+
+    @contextlib.asynccontextmanager
+    async def _fake_binder(key: str, fingerprint: str) -> Any:
+        bound.append((key, fingerprint))
+        active["in"] = True
+        try:
+            yield
+        finally:
+            active["in"] = False
+
+    monkeypatch.setattr(cont, "_execution_identity_binder", _fake_binder)
+
+    fired_bound: list[bool] = []
+    app_tools.tool_runners[CHAINED_PARK_DELIVERY_TOOL_NAME] = lambda **kwargs: fired_bound.append(active["in"])
+
+    entry = {
+        "agent_name": "tools_agent",
+        "thread_id": "bridge:acme:alice",
+        "superstep_id": idx.compute_superstep_id(["nested-i1"]),
+        "interrupt_id": "irq-1",
+        "rebuild_kwargs": {},
+        "completion_tool": CHAINED_PARK_DELIVERY_TOOL_NAME,
+        "completion_context": {"chain_token": "tai42:chained-park:abc"},
+        "retention_bound": None,
+        "execution_identity": "user-outer",
+        "execution_fingerprint": "fp-outer",
+    }
+
+    async def go() -> None:
+        await fake_park_redis.set(idx._park_key("nested-i1"), json.dumps(entry))
+        await drv.fire_park_failed_completion("nested-i1")
+        assert bound == [("user-outer", "fp-outer")]
+        assert fired_bound == [True]
+
+    asyncio.run(go())
+
+
+def test_legacy_entry_without_identity_fires_unbound_with_a_warning(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any, caplog: Any
+) -> None:
+    # Back-compat: a park persisted before the identity was recorded carries no field. The fire
+    # runs UNBOUND (the binder is never entered) with a warning naming the limitation — never a
+    # crash, and never a silent drop of the answer.
+    from tai42_contract.interactions import continuation as cont
+
+    bound: list[tuple[str | None, str]] = []
+
+    @contextlib.asynccontextmanager
+    async def _fake_binder(key: str, fingerprint: str) -> Any:
+        bound.append((key, fingerprint))
+        yield
+
+    monkeypatch.setattr(cont, "_execution_identity_binder", _fake_binder)
+
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    # A pre-upgrade entry: every current field EXCEPT the identity pair.
+    entry = {
+        "agent_name": "tools_agent",
+        "thread_id": "bridge:acme:alice",
+        "superstep_id": idx.compute_superstep_id(["i1"]),
+        "interrupt_id": "irq-1",
+        "rebuild_kwargs": {},
+        "completion_tool": _COMPLETION_TOOL,
+        "completion_context": _completion_context("bridge:acme:alice"),
+        "retention_bound": None,
+    }
+
+    async def go() -> None:
+        await fake_park_redis.set(idx._park_key("i1"), json.dumps(entry))
+        with caplog.at_level("WARNING"):
+            await drv.fire_park_failed_completion("i1")
+        # Unbound: the binder was never entered, yet the completion still fired.
+        assert bound == []
+        assert delivered == [_expected_failed_delivery("bridge:acme:alice", ["i1"])]
+        assert any("predates the recorded execution identity" in rec.message for rec in caplog.records)
+
+    asyncio.run(go())
+
+
+def test_abandonment_skipped_while_a_live_drive_holds_the_lease(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A live drive holding the super-step lease may still deliver SUCCESS, so the abandonment fire
+    # must NOT race it: with the claim held the FAILED fire is skipped; once released (and the park
+    # still unresolved) it fires.
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1"])
+    model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    agent = _agent()
+
+    async def go() -> None:
+        await _park_via_astream(agent, "bridge:acme:alice")
+        superstep_id = idx.compute_superstep_id(["i1"])
+
+        # A concurrent drive holds the lease: abandonment skips the FAILED fire.
+        assert await idx.try_claim_drive("bridge:acme:alice", superstep_id, "other-drive")
+        await drv.fire_park_failed_completion("i1")
+        assert delivered == []
+
+        # The drive released without resolving (its own error path): abandonment now fires.
+        await idx.release_claim("bridge:acme:alice", superstep_id, "other-drive")
+        await drv.fire_park_failed_completion("i1")
+        assert delivered == [_expected_failed_delivery("bridge:acme:alice", ["i1"])]
+
+    asyncio.run(go())
+
+
+def test_abandonment_of_a_run_face_park_with_no_completion_tool_is_a_noop(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # A run-face park records no completion tool (its caller receives the resumed result directly),
+    # so there is no out-of-band delivery path — the abandonment fire is a clean no-op.
+    fired: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: fired.append(kwargs)
+
+    entry = {
+        "agent_name": "tools_agent",
+        "thread_id": "bridge:acme:alice",
+        "superstep_id": idx.compute_superstep_id(["i1"]),
+        "interrupt_id": "irq-1",
+        "rebuild_kwargs": {},
+        "completion_tool": None,
+        "completion_context": None,
+        "retention_bound": None,
+        "execution_identity": None,
+        "execution_fingerprint": "",
+    }
+
+    async def go() -> None:
+        await fake_park_redis.set(idx._park_key("i1"), json.dumps(entry))
+        await drv.fire_park_failed_completion("i1")
+        assert fired == []
+        # The claim guard must not have leaked a lease on the no-op path.
+        assert not await fake_park_redis.exists(idx._claim_key("bridge:acme:alice", idx.compute_superstep_id(["i1"])))
+
+    asyncio.run(go())
+
+
+def test_abandonment_handler_is_registered_with_the_resume_tool() -> None:
+    # The abandonment handler is registered alongside the resume continuation, so the platform's
+    # give-up notice reaches the driver. Idempotent by identity: re-registering is a no-op.
+    from tai42_contract.interactions import continuation as cont
+
+    from tai42_agents._internal.park.resume_tool import register_agent_resume_tool
+
+    register_agent_resume_tool()
+    before = list(cont._continuation_abandonment_handlers)
+    assert drv.fire_park_failed_completion in before
+    register_agent_resume_tool()
+    assert list(cont._continuation_abandonment_handlers) == before
 
 
 def test_completion_carried_forward_on_repark(
