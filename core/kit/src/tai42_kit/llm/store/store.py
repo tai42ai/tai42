@@ -106,8 +106,30 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
                 raise ValueError(not_configured_message("the Redis store", "REDIS_URL", "TAI_DEFAULT_REDIS_URL"))
 
             from langgraph.store.redis import AsyncRedisStore
+            from redis.asyncio import Redis as AsyncRedis
 
-            store = AsyncRedisStore(redis_url=conn_string, **store_kwargs)
+            # The client is injected, never left to the store: the kit resolved the
+            # URL, so the kit owns the connection. The checkpoint saver needs that
+            # rule for correctness — a saver that owns its client clears the redisvl
+            # search indexes' client reference on teardown, and a later index call
+            # then re-resolves from a BARE ``REDIS_URL`` env var. The store's teardown
+            # clears no such reference, so here the rule is uniformity across the two
+            # langgraph-redis backends (and insurance against an open-ended version
+            # floor), not a live defect. ``connection_args`` is deliberately not
+            # passed: the store consults it only while building a client of its own.
+            client = AsyncRedis.from_url(conn_string)
+            store = AsyncRedisStore(redis_client=client, **store_kwargs)
+
+            async def close_redis():
+                # Ownership is explicit and one-way: the kit built the client, so the
+                # kit closes it. The store's teardown runs first — it cancels the
+                # batched-writer task and never touches an injected client, so there
+                # is no double-close — and the client closes even if it raises.
+                try:
+                    await store.__aexit__(None, None, None)
+                finally:
+                    await client.aclose()
+
             try:
                 try:
                     await store.setup()
@@ -118,17 +140,11 @@ async def create_store_resource(provider: str, conn_string: str | None = None, *
                         raise
                     logger.debug("Redis store setup already applied; ignoring: %s", e)
             except BaseException:
-                # setup failed (or was cancelled): close the store we just opened
-                # (it owns a redis pool + background task) so it is not leaked. No
-                # cleanup fn is returned on this path.
-                await store.__aexit__(None, None, None)
+                # setup failed (or was cancelled): run the same cleanup path so the
+                # store's background task and the client are not leaked. No cleanup
+                # fn is returned here.
+                await close_redis()
                 raise
-
-            async def close_redis():
-                # The store owns the redis client (built from redis_url): its
-                # __aexit__ cancels the batched-writer task and disconnects the
-                # connection pool, matching the postgres/sqlite close paths.
-                await store.__aexit__(None, None, None)
 
             return store, close_redis
 

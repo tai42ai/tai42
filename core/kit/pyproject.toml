@@ -69,6 +69,10 @@ llm = [
     "langgraph>=1.1,<2",
     "langgraph-checkpoint>=4.2.0",
     "langgraph-checkpoint-redis>=0.5",
+    # Imported directly by llm/checkpoint/checkpoint.py and llm/store/store.py:
+    # the redis client for the checkpoint saver / store is built here and injected,
+    # never left for the saver to build from a URL.
+    "redis>=5",
 ]
 
 # jq expression compilation (utils/data/jq_util.py) — a C extension, opt-in.
