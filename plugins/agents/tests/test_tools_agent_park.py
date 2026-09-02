@@ -47,7 +47,9 @@ from tai42_contract.interactions import (
     get_park_completion,
     get_resume_continuation_tool,
     is_chained_park_key,
+    reset_park_completion,
     reset_resume_continuation_tool,
+    set_park_completion,
     set_resume_continuation_tool,
     suspended_interaction_marker,
 )
@@ -255,6 +257,73 @@ def test_tools_agent_park_then_answer_exactly_once(
         entry = await idx.read_park_entry("i1")
         assert entry is not None
         assert idx.is_resolved_tombstone(entry)
+
+    asyncio.run(go())
+
+
+def test_tools_agent_run_park_captures_the_ambient_completion(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The run face is a JSON tool-face a flow node / conversation agent turn dispatches. When
+    # that door bound a park completion around the dispatch (the deferred-answer DELIVERY leg),
+    # a park raised inside the run must CAPTURE it — in parity with the astream face — so the
+    # resumed run's final answer has a path back to the door. On origin/main the run face binds
+    # the park with completion_tool=None (no delivery leg), so agent_resume drives the answer to
+    # NOWHERE and the guest is orphaned; this pins the capture that makes the park deliverable.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+    completion_tool = "conversation_deliver"
+    completion_context = {"thread_id": "bridge:acme:alice"}
+
+    async def go() -> None:
+        # Stand in for the door that owns delivery binding its completion around the dispatch.
+        token = set_park_completion(completion_tool, completion_context)
+        try:
+            receipt = await agent.run(
+                tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-run-completion"
+            )
+        finally:
+            reset_park_completion(token)
+        assert receipt["status"] == "suspended"
+
+        # The park entry carries the door's delivery leg verbatim, so a resumed clean terminal
+        # fires the completion back to the address the door bound (never delivered nowhere).
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        assert entry["completion_tool"] == completion_tool
+        assert entry["completion_context"] == completion_context
+
+    asyncio.run(go())
+
+
+def test_tools_agent_run_park_without_a_completion_binds_none(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # Absent an ambient completion the run face still binds the park (the async ask is resumable
+    # by agent_resume regardless), with completion_tool=None — byte-identical to the pre-capture
+    # behavior. This pins that the capture never fabricates a delivery leg a door did not bind.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+
+    agent = _agent()
+
+    async def go() -> None:
+        receipt = await agent.run(
+            tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="t-run-nocompletion"
+        )
+        assert receipt["status"] == "suspended"
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        assert entry["completion_tool"] is None
+        assert entry["completion_context"] is None
 
     asyncio.run(go())
 
