@@ -515,38 +515,55 @@ async def e2e_async_multipark_resume(interaction_id: str, answer: object) -> dic
 
 # The AGENT async-park leg. Unlike the flow-driver probes above, the AGENT is the
 # consumer: its own park machinery binds the ``agent_resume`` continuation around the
-# drive, so these tools bind NO continuation. ``e2e_agent_async_ask`` binds only the
-# synthetic execution identity ``ask_user`` needs (a PROBE STAND-IN for the authed caller
-# identity a real deployment carries; the auth-off stack has none) and returns the
-# ``SuspendedInteraction`` the in-process tool seam stamps into the park marker the agent's
-# park middleware interrupts on.
+# drive, so these tools bind NO continuation. ``e2e_agent_async_ask`` supplies only the
+# execution identity ``ask_user`` needs, and only when the stack has not already bound one
+# (see its docstring), then returns the ``SuspendedInteraction`` the in-process tool seam
+# stamps into the park marker the agent's park middleware interrupts on.
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_agent_async_ask(question: str, expiry_seconds: float) -> object:
     """Async ``ask_user`` an agent tool call reaches, parking the agent run.
 
-    Runs under the synthetic park identity so ``ask_user`` records it as the parked
-    interaction's ``continuation_identity``, then RPUSHes ``{pid}`` onto
-    ``e2e:rec:agent_async_ask:{interaction_id}`` so a spec reads that the ask ran EXACTLY
-    ONCE (a resume substitutes the answer, never re-runs this tool). Returns the
-    ``SuspendedInteraction`` so the tool seam converts it to the reserved park marker."""
+    INHERIT OR BIND. ``ask_user`` stores the CURRENTLY bound execution identity as the
+    parked interaction's ``continuation_identity``, and the resolution door rebinds exactly
+    that identity to fire the resume. So this probe binds its synthetic stand-in
+    (:data:`_ASYNC_PARK_IDENTITY`) ONLY when nothing is bound — the auth-off stacks, which
+    carry no caller identity and where ``ask_user`` would otherwise refuse the ask. Where the
+    stack HAS bound one (an access-controlled profile running the turn as a conversation
+    route's execution key), that real key is inherited untouched: it is the only identity
+    that still carries authority at resume time, and overriding it with a policy-less
+    synthetic would make the rebind refuse and the resume never run.
+
+    RPUSHes ``{pid}`` onto ``e2e:rec:agent_async_ask:{interaction_id}`` so a spec reads that
+    the ask ran EXACTLY ONCE (a resume substitutes the answer, never re-runs this tool).
+    Returns the ``SuspendedInteraction`` so the tool seam converts it to the reserved park
+    marker."""
     from collections.abc import Awaitable
     from datetime import UTC, datetime, timedelta
     from typing import cast
 
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
-    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+    from tai42_skeleton.authz.execution_identity import (
+        get_execution_identity,
+        reset_execution_identity,
+        set_execution_identity,
+    )
     from tai42_skeleton.authz.identity import CallerIdentity
     from tai42_skeleton.interactions import ask_user
 
-    identity_token = set_execution_identity(
-        CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-agent-fp")
+    identity_token = (
+        None
+        if get_execution_identity() is not None
+        else set_execution_identity(
+            CallerIdentity(user_id=_ASYNC_PARK_IDENTITY, execution_key_fingerprint="e2e-agent-fp")
+        )
     )
     try:
         expiry_at = datetime.now(UTC) + timedelta(seconds=expiry_seconds)
         suspended = await ask_user(question, mode="async", expiry_at=expiry_at)
     finally:
-        reset_execution_identity(identity_token)
+        if identity_token is not None:
+            reset_execution_identity(identity_token)
     record = json.dumps({"pid": os.getpid()})
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         await cast(Awaitable[int], client.rpush(f"e2e:rec:agent_async_ask:{suspended.interaction_id}", record))

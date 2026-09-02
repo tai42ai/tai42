@@ -33,6 +33,7 @@ from tai42_e2e.manifests import (
     POSTGRES_MCP_PROBE_TABLE,
     build_accounts_stack,
     build_agent_async_park_stack,
+    build_agent_route_park_stack,
     build_agents_redis_stack,
     build_agents_stack,
     build_api_router_stack,
@@ -464,6 +465,40 @@ def agent_async_park_stack(
         resource_kwargs=resource_kwargs,
         allocate_checkpoint_db=True,
     )
+
+
+@pytest.fixture(scope="module")
+def agent_route_park_stack(
+    infra: Infra,
+    tmp_path_factory: pytest.TempPathFactory,
+    llm_stub: LlmStub,
+) -> Iterator[tuple[TaiStack, str]]:
+    """The bridge profile on DURABLE agent state, yielding ``(stack, root_token)`` — a
+    conversation AGENT route whose target async-parks and delivers its resumed answer back
+    through ``conversation_deliver``.
+
+    Seeded before boot exactly like ``bridge_stack`` (access control is ON here too), and gated
+    on the module-capable checkpoint Redis like ``agent_async_park_stack``: an agent run is
+    park-capable only on a durable checkpoint provider."""
+    if infra.checkpoint_redis is None:
+        pytest.skip(
+            "checkpoint Redis not configured; set TAI_E2E_CHECKPOINT_REDIS_URL and start "
+            "`docker compose --profile agents-redis up -d`"
+        )
+    resource_kwargs = {"llm_base_url": llm_stub.base_url}
+    root = tmp_path_factory.mktemp("agent-route-park")
+    resources, config = _allocate_and_build(infra, root, build_agent_route_park_stack, resource_kwargs, True)
+    stack = TaiStack(config, infra, resources, root)
+    try:
+        root_token = seed_bridge_authz(infra, resources)
+    except BaseException:
+        stack.teardown()
+        raise
+    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
+    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    stack.auth_token = root_token
+    with stack, diagnostics.track(stack):
+        yield stack, root_token
 
 
 @pytest.fixture(scope="module")

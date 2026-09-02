@@ -1607,6 +1607,88 @@ def build_agents_redis_stack(res: StackResources, variants: Variants) -> StackCo
     )
 
 
+def build_agent_route_park_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The bridge profile on a DURABLE agent state — a conversation AGENT route whose target
+    async-parks and delivers its resumed answer back through ``conversation_deliver``.
+
+    The AGENT-direction mirror of the tool-target leg ``build_bridge_stack`` already carries.
+    Two things differ from that profile and both are load-bearing:
+
+    * the langgraph checkpoint + store move to the production ``redis`` provider on the
+      module-capable checkpoint Redis, and the agents plugin's own durable park index is wired
+      (``TAI_AGENTS_REDIS_URL``). An agent run is park-capable ONLY on a durable checkpoint, so
+      the memory-provider bridge profile can never reach this path at all;
+    * ``e2e_park_agent`` is registered — a ``tools_agent`` carrying the async-ask probe tools
+      baked in. A conversation agent target is invoked as ``astream(user_message, thread_id)``,
+      so a bare ``tools_agent`` route reaches no parking tool; the baked registration is what
+      makes the route able to park. The park/resume/deliver machinery is the production one.
+
+    Only the ``web`` channel is carried: its public chat page + SSE stream ARE the medium the
+    delivered reply is read back on, and twilio/whatsapp add nothing to this leg. Access control
+    stays ON, as on the bridge profile, so the turn runs AS the route's bound execution key.
+
+    NO backend worker and NO metrics process, unlike the bridge profile this is otherwise shaped
+    after. Every moving part of this leg is in-process: the conversations package holds no backend
+    reference at all (the turn engine and the delivery machine are plain ``asyncio`` tasks), the
+    web channel's chat doors are the medium, the agents park index and its resume drive ride Redis
+    plus the expiry reaper, and the probe tools are entered with no backend branches. So the
+    module is honestly ``backendless`` — running it under every backend variant would buy
+    nothing — and the profile spawns two processes fewer per boot."""
+    if res.checkpoint_redis_url is None:
+        raise RuntimeError(
+            "build_agent_route_park_stack requires resources.checkpoint_redis_url; allocate_resources must run "
+            "with allocate_checkpoint_db=True (and TAI_E2E_CHECKPOINT_REDIS_URL must be set)"
+        )
+    manifest = {
+        "default_routers": "none",
+        "lifecycle_modules": [variants.identity.lifecycle_module],
+        "channel_modules": ["tai42_channel_web.register"],
+        "routers_modules": [
+            *_CORE_ROUTERS,
+            "tai42_skeleton.routers.conversations",
+            "tai42_skeleton.routers.api_keys",
+            "tai42_skeleton.routers.agents",
+        ],
+        "extensions_modules": _EXTENSION_MODULES,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "agents": [
+            {"title": "tai-agents-tools", "module": "tai42_agents.tools_agent", "include": ["tools_agent"]},
+            # The baked park-capable target the conversation route points at. It resolves its
+            # ``tools_agent`` delegate per call, so both entries are needed but their order is not.
+            {"title": "e2e-park-agent", "module": "tai42_e2e_fixtures.park_agent", "include": ["e2e_park_agent"]},
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask_user", "reload_config"],
+    }
+    env = _base_env(res, variants)
+    env["ACCESS_CONTROL_ENABLE"] = "true"
+    env.update(variants.identity.auth_provider_env())
+    env["CONVERSATIONS_REDIS_URL"] = res.redis_url
+    env.update(_redis_agent_state_env(res))
+    env.update(_llm_env(res))
+    env.update(_web_channel_env(res))
+    # The agents plugin's durable park index (reverses a parked interaction id to its parked
+    # run) rides the plain feature Redis; the async ask refuses loudly without it.
+    env["TAI_AGENTS_REDIS_URL"] = res.redis_url
+    # Small delivery ceiling + backoff so an undeliverable answer reaches terminal fast.
+    env["CONVERSATIONS_DELIVERY_MAX_ATTEMPTS"] = "2"
+    env["CONVERSATIONS_DELIVERY_BACKOFF_BASE_SECONDS"] = "1"
+    env["CONVERSATIONS_DELIVERY_BACKOFF_MAX_SECONDS"] = "1"
+    return StackConfig(
+        name="agent-route-park",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=env,
+        run_backend=False,
+        run_metrics=False,
+        auth=True,
+        replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+    )
+
+
 def build_agent_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS + redis checkpoint, no backend — the AGENT async ``ask_user`` park lifecycle.
 
