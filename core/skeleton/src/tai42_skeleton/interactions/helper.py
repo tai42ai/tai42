@@ -32,6 +32,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import Channel, ChannelDelivery, ChannelDeliveryError
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
+    PARK_COMPLETION_THREAD_KEY,
     AnswerFormat,
     InteractionRequest,
     MediaItem,
@@ -39,6 +40,7 @@ from tai42_contract.interactions import (
     check_ask_timing,
     get_park_completion,
     get_resume_continuation_tool,
+    repark_notice,
 )
 from tai42_contract.secrets import SecretValue
 from tai42_kit.clients import client_ctx
@@ -231,9 +233,11 @@ async def _emit_delivery_failed(*, channel: str, interaction_id: str, recipient:
 
 
 # The park-completion context key a tool/flow route target binds the delivery thread under
-# (see ``conversations.turn._run_tool_turn``'s ``set_park_completion``). Kept as a named
-# constant so the read here and the turn-layer write name the same field.
-_PARK_COMPLETION_THREAD_KEY = "delivery_thread_id"
+# (see ``conversations.turn._run_tool_turn``'s ``set_park_completion``). The CONTRACT names it:
+# it is the one reserved field inside an otherwise-opaque completion context, so the read here,
+# the turn-layer write, and any party that composes a context over another (a chained dispatch
+# carries it up to the new top level) all agree on the field.
+_PARK_COMPLETION_THREAD_KEY = PARK_COMPLETION_THREAD_KEY
 
 
 def _bound_park_thread_id() -> str | None:
@@ -264,10 +268,12 @@ def _bound_park_thread_id() -> str | None:
       delivery tool's parameter, which this module deliberately does not read, and there is no
       bridge turn context out of band. The asymmetry follows from the opacity rule above rather
       than from any judgement that one deserves indexing more.
-    * a nested park inside an AGENT running as a TOOL route's target. The agent scopes the tools
-      it dispatches so no nested driver can capture its delivery address, which also clears the
-      completion context this function reads; a tool turn establishes no bridge turn context, so
-      such a park is unindexed. Delivery of the agent's own answer is unaffected.
+    * a nested park inside an AGENT running as a TOOL route's target. The agent binds its own
+      address over every tool it dispatches, so no nested driver can capture the address the
+      agent's answer is owed to; a tool turn establishes no bridge turn context. Whether such a
+      park is indexed follows from what the agent bound: a CHAINED dispatch composes a context
+      that carries this reserved field up from the one it wrapped, so the nested park is indexed
+      to the same thread; an unchained one clears the binding, and the park is unindexed.
 
     Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
     binding in their own right, left to a follow-up."""
@@ -284,6 +290,32 @@ def _bound_park_thread_id() -> str | None:
     if bridge is not None:
         return bridge.thread_id
     return None
+
+
+async def _notify_repark(expiry_at: datetime | None, *, interaction_id: str) -> None:
+    """Tell a CHAINED completion binding that the run it addresses just parked on a new ask,
+    so a caller whose own suspension horizon was inherited from that run can refresh it.
+
+    Fired only when :func:`repark_notice` reports a chained binding — every other completion
+    binding (and no binding at all) is silent, so no delivery tool ever sees a fire it has no
+    horizon to answer. BEST-EFFORT by construction: the notice refreshes a horizon, it never
+    carries an answer, so a failing notifier is logged and swallowed rather than turning a
+    successfully persisted park into a failed ``ask_user``. The cost of a lost notice is a
+    caller whose horizon stays at the previous ask's deadline."""
+    notice = repark_notice(expiry_at)
+    if notice is None:
+        return
+    tool, payload = notice
+    try:
+        await tai42_app.tools.run_tool(tool, payload)
+    except Exception:
+        logger.warning(
+            "ask_user: the re-park horizon notice to %r failed for interaction %s; the chained caller "
+            "keeps its previous horizon",
+            tool,
+            interaction_id,
+            exc_info=True,
+        )
 
 
 async def cancel_parks_for_thread(thread_id: str) -> list[str]:
@@ -868,9 +900,15 @@ async def ask_user(
     # sentinel now; a later answer (either door) or the expiry reaper resumes work
     # by running the stored generic continuation as the stored identity.
     if mode == "async":
+        # A CHAINED caller waiting on this run inherited ITS horizon from the run's previous
+        # ask, so tell it this park's deadline — the run re-parked, its caller's own suspension
+        # has to move with it. Fired only under a chained binding (never at a plain delivery
+        # tool) and only once the park is persisted, so the notice can never describe a park
+        # that does not exist.
+        await _notify_repark(expiry_at, interaction_id=interaction_id)
         # The sentinel names the resume continuation this park was stamped with, so a caller
         # that would adopt the park as its OWN suspended state can check it owns it
-        # (``assert_park_adoptable``) instead of parking behind a resume fired elsewhere.
+        # (``resolve_park_adoption``) instead of parking behind a resume fired elsewhere.
         return SuspendedInteraction(interaction_id=interaction_id, expiry_at=expiry_at, resume_owner=continuation_tool)
 
     # The answer wait gets what is LEFT of the budget after delivery — the same

@@ -30,7 +30,7 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions import (
     NestedParkOwnershipError,
     SuspendedInteraction,
-    assert_park_adoptable,
+    resolve_park_adoption,
     suspended_interaction_marker,
 )
 from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
@@ -934,12 +934,20 @@ class ToolBinding:
                     # middleware recognizes the park by this RESULT shape (never a tool name) and
                     # interrupts once for the whole super-step.
                     #
-                    # Only a park this run OWNS may become this run's park: a nested run that
-                    # parked (a driver tool, an agent run at its tool face) is resumed on its own
-                    # path and would never resume this one, so its sentinel is refused here as a
-                    # model-visible tool error rather than suspending this run forever.
+                    # WHICH park this run records is the ownership question: its own
+                    # interaction when the ask was raised under this run's binding, or —
+                    # when the caller CHAINED this dispatch — the chained key naming the
+                    # CALL, owned by this run's own resume continuation, so the nested run
+                    # keeps its park while its terminal re-enters this run through the
+                    # chain's delivery tool. A nested run's park is never ADOPTED:
+                    # unchained, the sentinel is refused here as a model-visible tool
+                    # error rather than suspending this run behind a resume fired only at
+                    # the nested run.
+                    #
+                    # The park deadline rides through unchanged, so a chained park
+                    # INHERITS the horizon of the ask it is waiting on.
                     try:
-                        assert_park_adoptable(
+                        park_key, park_owner = resolve_park_adoption(
                             result.resume_owner, interaction_id=result.interaction_id, tool_name=tool_obj.name
                         )
                     except NestedParkOwnershipError as exc:
@@ -951,7 +959,7 @@ class ToolBinding:
                         raise ToolException(str(exc)) from exc
                     # The owner rides the WIRE form too: the driver that later claims this park
                     # reads it off the serialized ToolMessage, never off the sentinel.
-                    return suspended_interaction_marker(result.interaction_id, result.expiry_at, result.resume_owner)
+                    return suspended_interaction_marker(park_key, result.expiry_at, park_owner)
                 # The model never sees a secret value: this adapter feeds the langchain layer (the
                 # model, the checkpoint, the callback trace), so a wrapped secret is masked before
                 # it leaves here.
