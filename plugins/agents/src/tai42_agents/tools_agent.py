@@ -295,11 +295,17 @@ class ToolsAgent(Agent):
         (answering a prior async-ask park with ``Command(resume=...)``). A run that
         parks on an async ``ask_user`` returns a suspended RECEIPT
         (``{"status": "suspended", ...}``) instead of an answer and resumes out of
-        band. This face binds no completion tool, so a resumed run's final text is
-        delivered nowhere — its side effects are the product; a caller needing the
-        answer must invoke through a completion-bound door. A run carrying live
-        ``tools``, a non-durable checkpoint, or an unconfigured park index is not
-        park-capable and its async ask refuses loudly pre-persist.
+        band. This face captures the AMBIENT park completion (in parity with
+        :meth:`astream`): when a door bound one around the dispatch (a conversation
+        agent turn, a flow node chaining a continuation), the park carries that
+        delivery leg, so the resumed run's final answer fires it out of band to
+        whatever bound it. With none bound the park's ``completion_tool`` stays
+        ``None`` and the resumed run's final text is delivered nowhere — its side
+        effects are the product. Unlike :meth:`astream`, this face binds the park
+        regardless (the async ask is resumable by ``agent_resume`` whether or not a
+        completion is bound). A run carrying live ``tools``, a non-durable
+        checkpoint, or an unconfigured park index is not park-capable and its async
+        ask refuses loudly pre-persist.
         """
         reject_unhonored(
             "tools_agent.run",
@@ -340,6 +346,17 @@ class ToolsAgent(Agent):
         # the resumed result), so it binds the resume continuation. The park identity is
         # built against the FINAL thread-id-resolved config (deferred through the
         # builder), so a keyless run's minted thread id is captured.
+        #
+        # Capture the AMBIENT park completion the same way the ``astream`` face does — read
+        # HERE, in the caller's context, before any tool dispatch clears the binding. When a
+        # door bound one (a conversation agent turn, a flow node chaining a continuation), the
+        # run-face park carries the delivery leg, so a resumed run's final answer fires it out
+        # of band to whatever bound it. Unlike ``astream`` this face still binds the park when
+        # NONE is bound (``completion_tool`` stays ``None``): the run's async ask is resumable
+        # by ``agent_resume`` regardless, and with no completion the resumed answer is delivered
+        # nowhere — byte-identical to the pre-capture behavior.
+        completion_tool, completion_context = get_park_completion()
+
         def build_park(final_config: dict[str, Any]) -> ParkIdentity | None:
             return build_park_identity(
                 agent_name=self.tool_name,
@@ -357,6 +374,8 @@ class ToolsAgent(Agent):
                     langgraph_config=langgraph_config,
                 ),
                 recursion_limit=recursion_limit,
+                completion_tool=completion_tool,
+                completion_context=completion_context,
                 bind=True,
             )
 
