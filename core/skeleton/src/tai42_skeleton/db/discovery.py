@@ -3,10 +3,14 @@
 The skeleton's own chain lives at a fixed packaged path and is registered
 directly. A table-owning plugin declares its chain OPT-IN via the contract's
 ``migrations`` field (a package-relative directory); its component identity is its
-pip distribution name. This module turns those declarations into
-:class:`~tai42_kit.db.MigrationEntry` values the runner consumes — resolving a
-plugin's packaged directory through ``importlib.resources`` and failing loudly when
-a declared directory is absent from the installed package.
+pip distribution name. Installed plugins are discovered from BOTH install sources:
+the marketplace install-attribution store, and the plugins prefix scanned for
+distributions shipping a packaged ``tai-plugin.yml`` (a plugin pre-installed into
+the prefix by pip has no store row but its declared chain must still run). This
+module turns those declarations into :class:`~tai42_kit.db.MigrationEntry` values
+the runner consumes — resolving a plugin's packaged directory through
+``importlib.resources`` (or directly against its prefix install) and failing loudly
+when a declared directory is absent from the installed package.
 
 Each entry's connection is the migrator (DDL-privileged) identity of the database
 its component is bound to, resolved through the central registry
@@ -21,7 +25,9 @@ import logging
 import re
 from dataclasses import dataclass
 from importlib.resources.abc import Traversable
+from pathlib import Path
 
+from pydantic import ValidationError
 from tai42_contract.plugins import PluginSpec
 from tai42_kit.db import (
     MigrationDiscoveryError,
@@ -29,6 +35,7 @@ from tai42_kit.db import (
     component_binding_declared,
     component_migrator_settings,
 )
+from tai42_kit.plugins import PLUGIN_SPEC_FILENAME, PluginSpecLoadError, parse_plugin_spec
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +120,7 @@ def _log_chain_skip(skip: _ChainSkip) -> None:
     )
 
 
-def _plugin_chain(spec: PluginSpec) -> MigrationEntry | _ChainSkip | None:
+def _plugin_chain(spec: PluginSpec, *, package_root: Traversable | None = None) -> MigrationEntry | _ChainSkip | None:
     """Resolve a plugin's declared chain to one of THREE distinct outcomes: an entry
     to run, a :class:`_ChainSkip` (an override whose component binding is unset —
     surfaced, never a silent ``None``), or ``None`` when the plugin declares no chain.
@@ -125,6 +132,12 @@ def _plugin_chain(spec: PluginSpec) -> MigrationEntry | _ChainSkip | None:
     binding is EXPLICITLY declared; unset, the chain is skipped rather than run under
     the default-database fallback. With no override the component is the distribution
     name, byte-identical to prior behavior.
+
+    ``package_root`` (when given) is the plugin's import-package root; the
+    package-relative ``migrations`` path resolves against it directly. The
+    prefix-scan source passes it because a prefix-installed distribution need not be
+    importable from this process's ``sys.path``. ``None`` resolves the root from
+    installed-package metadata, as a store-attributed environment install is.
     """
     if spec.migrations is None:
         return None
@@ -139,8 +152,10 @@ def _plugin_chain(spec: PluginSpec) -> MigrationEntry | _ChainSkip | None:
     component = spec.migrations_component or spec.package
     if spec.migrations_component is not None and component_binding_declared(component) is None:
         return _ChainSkip(component=component)
-    package = _import_package_for_distribution(spec.package)
-    migrations_dir = importlib.resources.files(package).joinpath(*spec.migrations.split("/"))
+    if package_root is None:
+        package = _import_package_for_distribution(spec.package)
+        package_root = importlib.resources.files(package)
+    migrations_dir = package_root.joinpath(*spec.migrations.split("/"))
     return MigrationEntry(
         component=component,
         migrations_dir=migrations_dir,
@@ -166,25 +181,99 @@ def plugin_migration_entry(spec: PluginSpec) -> MigrationEntry | None:
     return outcome
 
 
-async def installed_plugin_entries() -> list[MigrationEntry]:
-    """Runner entries for every marketplace-installed plugin that declares a chain.
+def _prefix_plugin_spec_paths() -> dict[str, Path]:
+    """The packaged ``tai-plugin.yml`` path of every distribution installed in the
+    plugins prefix, keyed by normalized distribution name.
 
-    Reads the marketplace install-attribution store (the local record of every
-    installed plugin and the exact ``PluginSpec`` it shipped). Empty when the
-    skeleton database is not configured — a deployment with no store has no plugin
-    chains to migrate. Each plugin chain runs under its own component's bound
-    migrator identity.
+    Scans the prefix's OWN site directories (never the running environment), so a
+    plugin pre-installed into the prefix by pip is discovered without a marketplace
+    install record and without the prefix being activated on ``sys.path`` — a CLI
+    process never activates it. Empty when no prefix is configured, the prefix is
+    empty, or no installed distribution ships a spec; a dependency distribution
+    (no packaged spec) is skipped. A distribution shipping several spec files is
+    malformed — a loud discovery failure, never a guess between them.
     """
+    from tai42_skeleton.marketplace.prefix import configured_prefix, prefix_site_dirs
+
+    prefix = configured_prefix()
+    if prefix is None:
+        return {}
+    site_dirs = [site for site in prefix_site_dirs(prefix) if Path(site).is_dir()]
+    if not site_dirs:
+        return {}
+    found: dict[str, Path] = {}
+    for dist in importlib.metadata.distributions(path=site_dirs):
+        specs = [file for file in dist.files or [] if file.name == PLUGIN_SPEC_FILENAME]
+        if not specs:
+            continue
+        if len(specs) > 1:
+            raise MigrationDiscoveryError(
+                f"distribution {dist.name!r} in the plugins prefix ships several {PLUGIN_SPEC_FILENAME} files: "
+                f"{sorted(str(file) for file in specs)}"
+            )
+        found[_normalize_dist(dist.name)] = Path(str(dist.locate_file(specs[0])))
+    return found
+
+
+async def installed_plugin_entries() -> list[MigrationEntry]:
+    """Runner entries for every installed plugin that declares a chain, from BOTH
+    install sources, one entry per distribution:
+
+    - the marketplace install-attribution store (the local record of every
+      marketplace-installed plugin and the exact ``PluginSpec`` it shipped);
+    - the plugins prefix, scanned for installed distributions shipping a packaged
+      ``tai-plugin.yml`` — a plugin pre-installed into the prefix by pip has no
+      store row, but its declared chain must still run.
+
+    A plugin present in both sources (a marketplace install into a configured
+    prefix) is the same installed artifact and yields ONE entry; the prefix copy
+    resolves the chain directly from the prefix filesystem, which needs no
+    ``sys.path`` activation in a CLI process. A missing ``marketplace_installs``
+    table (a database not yet migrated to the skeleton baseline that creates it)
+    means no store rows, never a discovery crash. Empty when the skeleton database
+    is not configured — with no database there is nowhere to migrate. Each plugin
+    chain runs under its own component's bound migrator identity.
+    """
+    from psycopg.errors import UndefinedTable
     from tai42_kit.db import component_store_configured
 
     from tai42_skeleton.marketplace.store import MarketplaceInstallStore
 
     if not component_store_configured(SKELETON_COMPONENT):
         return []
+    try:
+        records = await MarketplaceInstallStore().list_installed()
+    except UndefinedTable:
+        # The skeleton baseline creates the table; before it, there are no
+        # marketplace-attributed installs to read.
+        records = []
+    # One slot per source hit, store rows first. A prefix hit for a distribution a
+    # store row also names is the SAME installed artifact: the store slot is dropped
+    # and the distribution yields one entry, resolved from the prefix filesystem.
+    sources: dict[str, tuple[PluginSpec, Path | None]] = {}
+    for index, record in enumerate(records):
+        try:
+            spec = PluginSpec.model_validate(record.spec)
+        except ValidationError as exc:
+            package = record.spec.get("package") if isinstance(record.spec, dict) else None
+            raise MigrationDiscoveryError(
+                f"invalid plugin spec in the marketplace install store for distribution {package!r}: {exc}"
+            ) from exc
+        sources[f"store:{index}"] = (spec, None)
+    for dist_name, spec_path in _prefix_plugin_spec_paths().items():
+        for key, (stored, _) in list(sources.items()):
+            if stored.package is not None and _normalize_dist(stored.package) == dist_name:
+                del sources[key]
+        try:
+            spec = parse_plugin_spec(spec_path.read_bytes(), source=str(spec_path))
+        except (OSError, PluginSpecLoadError, ValidationError) as exc:
+            raise MigrationDiscoveryError(
+                f"invalid plugin spec at {spec_path} (distribution {dist_name!r} in the plugins prefix): {exc}"
+            ) from exc
+        sources[f"prefix:{dist_name}"] = (spec, spec_path.parent)
     entries: list[MigrationEntry] = []
-    for record in await MarketplaceInstallStore().list_installed():
-        spec = PluginSpec.model_validate(record.spec)
-        outcome = _plugin_chain(spec)
+    for spec, package_root in sources.values():
+        outcome = _plugin_chain(spec, package_root=package_root)
         if isinstance(outcome, _ChainSkip):
             # DISTINCT from the ``None`` no-migrations outcome: surface the skip and
             # omit the chain, so ``tai db migrate`` reports WHICH declared chain did
