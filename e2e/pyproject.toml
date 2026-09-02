@@ -30,12 +30,12 @@ dependencies = [
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
     "tai42-contract>=6.0,<7",
     "tai42-kit[llm,jq,uvicorn,redis,postgres,curl]>=3.8,<4",
-    "tai42-skeleton[toolbox,files]>=9.11,<10",
+    "tai42-skeleton[toolbox,files]>=9.12,<10",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy]>=2.0,<3",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
     "tai42-tools-stripe>=1.0,<2",
-    "tai42-agents>=5.1,<6",
+    "tai42-agents>=5.2,<6",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.

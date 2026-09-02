@@ -5063,7 +5063,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "5.1.1"
+version = "5.2.0"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5816,7 +5816,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "3.8.1"
+version = "3.8.2"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6152,7 +6152,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "9.11.2"
+version = "9.12.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "async-lru" },
