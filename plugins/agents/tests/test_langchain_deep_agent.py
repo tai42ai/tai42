@@ -23,7 +23,7 @@ import contextlib
 import inspect
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 from fakeredis import aioredis
@@ -892,6 +892,17 @@ def test_run_config_mints_fresh_thread_when_keyless() -> None:
 # ===========================================================================
 
 
+class _CompiledGraphLike(Protocol):
+    """The compiled-graph surface the deep agent drives: ``astream`` replays the
+    scripted ``(mode, chunk)`` pairs and ``aget_state`` reports a run's interrupts.
+    Both ``_FakeCompiledGraph`` and ``_ClaimingGraph`` are scripted stand-ins that
+    satisfy it, so the install helper accepts either."""
+
+    def astream(self, agent_input: Any, config: Any, stream_mode: Any = ...) -> AsyncIterator[Any]: ...
+
+    async def aget_state(self, config: Any, subgraphs: bool = ...) -> Any: ...
+
+
 class _FakeCompiledGraph:
     """A scripted compiled graph: ``astream`` replays fixed ``(mode, chunk)``
     pairs and ``aget_state`` reports the interrupts a paused run waits on."""
@@ -902,7 +913,7 @@ class _FakeCompiledGraph:
         self.received_input: Any = None
         self.received_config: Any = None
 
-    async def astream(self, agent_input: Any, config: Any, stream_mode: Any = None) -> Any:
+    async def astream(self, agent_input: Any, config: Any, stream_mode: Any = None) -> AsyncIterator[tuple[str, Any]]:
         self.received_input = agent_input
         self.received_config = config
         for chunk in self._chunks:
@@ -934,8 +945,8 @@ def _scripted_chunks() -> list[tuple[str, Any]]:
     ]
 
 
-def _install_fake_graph(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _FakeCompiledGraph) -> None:
-    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any]]:
+def _install_fake_graph(monkeypatch: pytest.MonkeyPatch, agent: DeepAgent, graph: _CompiledGraphLike) -> None:
+    async def fake_build_agent(**kwargs: Any) -> tuple[_CompiledGraphLike, dict[str, Any]]:
         return graph, {"configurable": {"thread_id": "t"}}
 
     monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
@@ -1194,7 +1205,7 @@ class _ClaimingGraph:
         self.chain_key = chain_key
         self.received_input: Any = None
 
-    async def astream(self, agent_input: Any, config: Any, stream_mode: Any = None) -> Any:
+    async def astream(self, agent_input: Any, config: Any, stream_mode: Any = None) -> AsyncIterator[tuple[str, Any]]:
         self.received_input = agent_input
         # Early step: a dispatched tool drove a nested run that parked, so the caller CHAINS the
         # call — recording the key in whatever claims ledger the streaming face bound for THIS

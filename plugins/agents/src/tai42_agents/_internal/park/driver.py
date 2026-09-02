@@ -25,7 +25,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -314,7 +314,7 @@ async def detach_dead_chains(claims: set[str]) -> None:
 async def bind_resume_per_step[StreamItemT](
     binding: Callable[[], AbstractContextManager[Any]],
     events: AsyncIterator[StreamItemT],
-) -> AsyncIterator[StreamItemT]:
+) -> AsyncGenerator[StreamItemT]:
     """Yield from ``events`` with a resume-continuation ``binding`` re-entered around each step,
     so the continuation is bound WHILE a step is computed but never leaks across a yield.
 
