@@ -35,6 +35,7 @@ from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.config_util import init_langgraph_config
+from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.reject import reject_unhonored, reject_untitled_response_format
 from tai42_agents._internal.render import render_message
@@ -375,7 +376,11 @@ class RefineAgent(Agent):
         # Wrap the schema ONCE and bind that same strategy into both the structured
         # final pass and the projection, so the synthetic tool names match by identity.
         strategy = as_tool_strategy(response_format)
-        resolved_tools = await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
+        # Delivery-scoped: a tool this loop dispatches must not capture the completion binding
+        # addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
+        resolved_tools = scope_nested_dispatch_all(
+            await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
+        )
         final_agent, final_input, final_config = await _run_refine_loop(
             tools=resolved_tools,
             evaluator_message=evaluator_message,

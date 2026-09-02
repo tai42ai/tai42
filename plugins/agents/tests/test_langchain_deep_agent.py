@@ -42,6 +42,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.app import tai42_app
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents.langchain_deep_agent import agent as agent_mod
@@ -611,6 +612,61 @@ def test_run_honors_live_tools(monkeypatch: pytest.MonkeyPatch, app_tools: Any, 
 
     asyncio.run(agent.run(tools=[live], tool_names=["calc"], user_message="go"))
     assert [tool.name for tool in captured["tools"]] == ["live", "calc"]
+
+
+def test_run_dispatched_tools_are_delivery_scoped(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    """A tool this agent dispatches is a STEP of its turn, never a second answerer of it: it
+    must not read the completion binding addressing the agent's own deferred answer off the
+    contextvar. The deep agent assembles its tool list at its own seam, not through
+    ``resolve_tools``, so the rule is pinned here too."""
+    probe, seen = probe_tool("calc")
+    app_tools.client_tools["calc"] = probe
+
+    captured: dict[str, Any] = {}
+
+    async def fake_resolve_and_build(**kwargs: Any) -> _FakeCompiledGraph:
+        captured.update(kwargs)
+        return _FakeCompiledGraph(_scripted_chunks(), interrupts=[])
+
+    agent: Any = DeepAgent()
+    monkeypatch.setattr(agent, "_resolve_and_build", fake_resolve_and_build)
+
+    asyncio.run(agent.run(tool_names=["calc"], user_message="go"))
+    assert_delivery_scoped(captured["tools"][0], seen)
+
+
+def test_astream_dispatched_tools_are_delivery_scoped(monkeypatch: pytest.MonkeyPatch, app_tools: Any) -> None:
+    """The astream seam carries the SAME rule as ``run`` above."""
+    probe, seen = probe_tool("calc")
+    app_tools.client_tools["calc"] = probe
+
+    captured: dict[str, Any] = {}
+
+    async def fake_build_agent(**kwargs: Any) -> tuple[_FakeCompiledGraph, dict[str, Any]]:
+        captured.update(kwargs)
+        return _FakeCompiledGraph([], interrupts=[]), {"configurable": {"thread_id": "t"}}
+
+    agent: Any = DeepAgent()
+    monkeypatch.setattr(agent, "_build_agent", fake_build_agent)
+
+    async def collect() -> list[Any]:
+        return [event async for event in agent.astream(user_message="go", tool_names=["calc"])]
+
+    asyncio.run(collect())
+    assert_delivery_scoped(captured["tools"][0], seen)
+
+
+def test_subagent_spec_tools_are_delivery_scoped(app_tools: Any) -> None:
+    """A SUBAGENT's tool is dispatched inside the parent's turn, so it carries the rule too."""
+    probe, seen = probe_tool("calc")
+    app_tools.client_tools["calc"] = probe
+
+    resolved = asyncio.run(
+        resolve_subagent_specs([DeepSubAgentSpec(name="sub", description="d", system_prompt="s", tools=["calc"])])
+    )
+    assert_delivery_scoped(resolved[0].tools[0], seen)
 
 
 def test_run_rejects_presets() -> None:

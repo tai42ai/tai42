@@ -778,8 +778,13 @@ def test_astream_emits_the_full_event_taxonomy(monkeypatch: pytest.MonkeyPatch) 
     assert call.call_id == result.call_id == "c1"
     assert events[5] == MessageFinal(text="Hello")
 
-    # live tools passed through, and the resume checkpoint threaded into config.
-    assert captured["tools"] == [live_tool]
+    # Live tools passed through — by SURFACE, not by object identity: resolution hands the
+    # graph a delivery-scoped copy of every tool (its body runs with the park-completion
+    # binding cleared), so the model-facing name/description/schema is what carries through.
+    assert [(tool.name, tool.description, tool.args) for tool in captured["tools"]] == [
+        (live_tool.name, live_tool.description, live_tool.args)
+    ]
+    # and the resume checkpoint threaded into config.
     assert captured["user_message"] == ["hi"]
     assert captured["config"] == {"configurable": {"thread_id": "th-1", "checkpoint_id": "ck-9"}}
 

@@ -26,6 +26,7 @@ from tai42_contract.app import tai42_app
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
+from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.stream_events import astream_tools_agent_events
@@ -272,10 +273,12 @@ class VotingAgent(Agent):
         ``system_content_kwargs`` — the system prompts are internal fixed), is
         rejected loudly here in parity with :meth:`run`."""
         _reject_unhonored("voting_agent.astream", response_format, kwargs)
-        resolved_judge_tools: list[StructuredTool] = (
+        # Delivery-scoped: a tool a judge or voter dispatches must not capture the completion
+        # binding addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
+        resolved_judge_tools: list[StructuredTool] = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(judge_tools) if judge_tools else []
         )
-        resolved_voter_tools: list[StructuredTool] = (
+        resolved_voter_tools: list[StructuredTool] = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(voter_tools) if voter_tools else []
         )
 

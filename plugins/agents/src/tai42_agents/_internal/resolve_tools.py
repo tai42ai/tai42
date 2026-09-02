@@ -8,6 +8,12 @@ A preset becomes a ``StructuredTool`` whose LLM-visible arguments are the base
 tool's arguments minus the fixed ones (so the agent cannot override a fixed
 value); its bound callable invokes the base tool via ``app_tools.run_tool`` with
 the fixed kwargs merged under the caller's runtime kwargs.
+
+Every resolved tool is scoped through
+:func:`~tai42_agents._internal.nested_dispatch.scope_nested_dispatch_all`: this is the
+one list an agent dispatches from, so it is where the ownership rule is enforced —
+a tool called INSIDE an agent turn cannot capture the completion binding that
+addresses the agent's own deferred answer.
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from tai42_contract.agent.base import PresetSpec
 from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
 from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools
+
+from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 
 
 def _assert_unique_names(tools: list[StructuredTool]) -> None:
@@ -117,11 +125,17 @@ async def resolve_tools(
 ) -> list[StructuredTool]:
     """Resolve ``tools`` + ``tool_names`` + ``presets`` into one deduplicated
     ``StructuredTool`` list (live tools first, then resolved names, then
-    presets). ``app_tools`` is the app's tool facet (``tai42_app.tools``)."""
+    presets). ``app_tools`` is the app's tool facet (``tai42_app.tools``).
+
+    Every tool comes back delivery-scoped: its body runs with the park-completion
+    binding CLEARED, so a parking driver reached THROUGH the agent cannot claim the
+    agent's own deferred-answer address (see
+    :mod:`~tai42_agents._internal.nested_dispatch`). The agent's own park, raised
+    outside any tool body, is unaffected."""
     out: list[StructuredTool] = list(tools or [])
     if tool_names:
         out += await app_tools.get_client_tools(list(tool_names))
     for preset in presets or []:
         out.append(await _as_structured_tool(app_tools, preset))
     _assert_unique_names(out)
-    return out
+    return scope_nested_dispatch_all(out)

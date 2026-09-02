@@ -83,6 +83,7 @@ def test_park_identity_carries_no_langgraph_facts() -> None:
     assert set(drv.ParkIdentity.__slots__) == {
         "agent_name",
         "bind",
+        "completion_context",
         "completion_tool",
         "rebuild_kwargs",
         "retention_bound",

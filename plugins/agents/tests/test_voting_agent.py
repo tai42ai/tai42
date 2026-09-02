@@ -33,6 +33,7 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 from tai42_contract.app import tai42_app
+from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 from tai42_agents._internal.reject import reject_unhonored
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage
@@ -249,6 +250,37 @@ def test_default_voter_uses_judge_provider(monkeypatch, app_tools, resource_mana
     final = events[-1]
     assert isinstance(final, StructuredFinal)
     assert final.data.voters == [VoteInfo(provider="jp", model=None, verdict="voter-jp")]
+
+
+def test_judge_and_voter_tools_are_delivery_scoped(monkeypatch, app_tools, resource_manager) -> None:
+    """A tool a judge or a voter dispatches is a STEP of the voting turn, never a second
+    answerer of it: it must not read the completion binding addressing the agent's own
+    deferred answer off the contextvar."""
+    judge_probe, judge_seen = probe_tool("jt")
+    voter_probe, voter_seen = probe_tool("vt")
+    app_tools.client_tools["jt"] = judge_probe
+    app_tools.client_tools["vt"] = voter_probe
+
+    voter_calls: list[dict[str, Any]] = []
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(agent_module, "ainvoke_tools_agent", _fake_voter_invoke(voter_calls))
+    monkeypatch.setattr(agent_module, "astream_tools_agent_events", _fake_full_judge_stream(captured))
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    asyncio.run(
+        _collect(
+            agent.astream(
+                judge_tools=["jt"],
+                voter_tools=["vt"],
+                judge_message="decide",
+                voter_message="answer",
+                voters=[VoterSpec(provider="p1", model="m1")],
+            )
+        )
+    )
+
+    assert_delivery_scoped(captured["judge_tools"][0], judge_seen)
+    assert_delivery_scoped(voter_calls[0]["tools"][0], voter_seen)
 
 
 def test_multiple_judge_tools_flow_through_as_a_list(monkeypatch, app_tools, resource_manager) -> None:
