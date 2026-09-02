@@ -746,6 +746,78 @@ async def test_redelivery_pass_logs_loud_terminal_drop(wired, caplog):
     assert await wired.store.due_continuations(wired.fake, now + timedelta(hours=1)) == []
 
 
+async def test_redelivery_drop_fires_the_continuation_abandonment_handler(wired, monkeypatch):
+    # The terminal give-up is not just LOGGED — it notifies every registered
+    # continuation-abandonment handler by interaction id, so a resuming driver can close the
+    # tail (fire its own non-success completion) instead of leaving the bound caller waiting to
+    # its own deadline. Fired exactly once, after the drop is reconciled.
+    from tai42_contract.interactions import continuation as contract_cont
+
+    seen: list[str] = []
+
+    async def _handler(interaction_id: str) -> None:
+        seen.append(interaction_id)
+
+    monkeypatch.setattr(contract_cont, "_continuation_abandonment_handlers", [_handler])
+
+    now = datetime.now(UTC)
+    now_ms = int(now.timestamp() * 1000)
+    # An orphan index member whose record hash has TTL-expired: the retry claim reports the
+    # permanent drop, and the reaper fires the abandonment notice for it.
+    await wired.fake.zadd(wired.store.continuation_due_index_key, {"ghost": now_ms - 1000})
+    assert await reaper_module.redeliver_due_continuations_once() == 0
+    assert seen == ["ghost"]
+
+
+async def test_redelivery_drop_survives_a_raising_abandonment_handler(wired, monkeypatch, caplog):
+    # A handler that raises must never abort the reaper pass or the drop reconciliation: it is
+    # logged and swallowed, the healthy handler still fires, and the pass completes.
+    from tai42_contract.interactions import continuation as contract_cont
+
+    seen: list[str] = []
+
+    async def _poison(interaction_id: str) -> None:
+        raise RuntimeError("handler boom")
+
+    async def _healthy(interaction_id: str) -> None:
+        seen.append(interaction_id)
+
+    monkeypatch.setattr(contract_cont, "_continuation_abandonment_handlers", [_poison, _healthy])
+
+    now = datetime.now(UTC)
+    now_ms = int(now.timestamp() * 1000)
+    await wired.fake.zadd(wired.store.continuation_due_index_key, {"ghost": now_ms - 1000})
+    caplog.set_level(logging.WARNING)
+    assert await reaper_module.redeliver_due_continuations_once() == 0
+    assert seen == ["ghost"]
+    assert any("abandonment handler raised" in rec.message for rec in caplog.records)
+
+
+def test_execution_identity_bridge_reflects_the_bound_skeleton_identity():
+    # Importing the skeleton continuation module wires skeleton's execution identity into the
+    # contract park bridge: the accessor reads the CURRENTLY bound identity as (key, fingerprint)
+    # — what a park records — and the binder is registered for the out-of-band abandonment fire.
+    from tai42_contract.interactions import continuation as contract_cont
+    from tai42_contract.interactions import current_execution_identity
+
+    from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+    from tai42_skeleton.authz.identity import CallerIdentity
+
+    assert contract_cont._execution_identity_accessor is not None
+    assert contract_cont._execution_identity_binder is not None
+
+    # No identity bound: the accessor yields none, so a park under no identity records none.
+    assert current_execution_identity() == (None, "")
+
+    token = set_execution_identity(CallerIdentity(user_id="user-x", execution_key_fingerprint="fp-x"))
+    try:
+        # The same two values the durable continuation record captures (user_id + fingerprint).
+        assert current_execution_identity() == ("user-x", "fp-x")
+    finally:
+        reset_execution_identity(token)
+    assert current_execution_identity() == (None, "")
+
+
 async def test_redelivery_pass_survives_a_poison_member(wired, monkeypatch, caplog):
     # One member whose claim deterministically raises must not abort the whole pass and
     # starve the healthy members: the poison member is logged loudly and skipped, and a

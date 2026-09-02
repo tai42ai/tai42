@@ -35,7 +35,12 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import EXPIRY_ANSWER, InteractionRequest
+from tai42_contract.interactions import (
+    EXPIRY_ANSWER,
+    InteractionRequest,
+    register_execution_identity_accessor,
+    register_execution_identity_binder,
+)
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -202,3 +207,31 @@ async def fire_continuation_after_claim(
         return
     fingerprint = await store.continuation_fingerprint(r, request.interaction_id)
     dispatch_continuation(store, request, fingerprint, answer)
+
+
+def _current_execution_identity_for_park() -> tuple[str | None, str]:
+    """Read the current execution identity as ``(user id, fingerprint)`` for a park to record,
+    or ``(None, "")`` when none is bound — the same two values this module captures onto the
+    durable resume-continuation record (``continuation_identity`` + fingerprint). Imported
+    function-locally to keep an ``authz`` module-load edge (its ``access_control.backend`` chain)
+    out of this module's import."""
+    from tai42_skeleton.authz.execution_identity import get_execution_identity
+
+    identity = get_execution_identity()
+    if identity is None or identity.user_id is None:
+        return None, ""
+    return identity.user_id, identity.execution_key_fingerprint or ""
+
+
+def _bind_execution_identity_for_park_fire(execution_key: str, fingerprint: str) -> Any:
+    """Bind ``execution_key`` (under ``fingerprint``) as the execution identity for an
+    out-of-band park completion fire — the SAME bind ``_run_continuation`` uses for a resume."""
+    return bind_execution_identity(execution_key, bound_fingerprint=fingerprint)
+
+
+# Wire the skeleton's execution identity into the contract's park bridge at import, so a park
+# records the identity its run is authorized as and its later out-of-band completion fire (the
+# abandonment fire) runs under it rather than fail-open. Both the capture worker and the reaper
+# worker import this module at boot, so both halves are registered where they are needed.
+register_execution_identity_accessor(_current_execution_identity_for_park)
+register_execution_identity_binder(_bind_execution_identity_for_park_fire)
