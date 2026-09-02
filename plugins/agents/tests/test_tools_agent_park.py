@@ -1169,7 +1169,7 @@ def test_bind_resume_per_step_scopes_the_binding_to_the_step_not_the_consumer() 
     park = _park()
     seen_in_step: list[str | None] = []
 
-    async def inner() -> Any:
+    async def inner() -> AsyncIterator[int]:
         for i in range(3):
             # Inside __anext__ (the step): the binding is active, so the tool dispatch sees it.
             seen_in_step.append(get_resume_continuation_tool())
@@ -1197,7 +1197,7 @@ def test_bind_resume_per_step_abandoned_midstream_leaves_a_clean_context() -> No
     park = _park()
     closed = False
 
-    async def inner() -> Any:
+    async def inner() -> AsyncIterator[int]:
         nonlocal closed
         try:
             i = 0
@@ -1227,7 +1227,7 @@ def test_binding_inside_a_generator_body_leaks_into_the_consumer() -> None:
     # yield. This pins the leak so the fix is not silently reverted to the in-generator form.
     park = _park()
 
-    async def leaky() -> Any:
+    async def leaky() -> AsyncIterator[int]:
         with drv.park_continuation(park):
             for i in range(2):
                 yield i
