@@ -9,8 +9,11 @@ serialized ToolMessage, not the sentinel.
 
 A park a NESTED run owns — a driver tool that bound its own resume continuation, or an
 agent run parked at its tool face — is resumed on that run's own path and would never
-resume this one, so it is refused as a model-visible ``ToolException`` instead of
-suspending the caller behind a resume that never comes.
+resume this one, so it is never adopted. What happens instead depends on the caller: a
+CHAINED dispatch parks on the chained KEY (the call), so the nested run keeps its park and
+its terminal re-enters the caller through the chain's delivery tool; an unchained one is
+refused as a model-visible ``ToolException`` instead of suspending the caller behind a
+resume that never comes.
 """
 
 from __future__ import annotations
@@ -23,8 +26,11 @@ import pytest
 from langchain_core.tools import ToolException
 from tai42_contract.interactions import (
     SuspendedInteraction,
+    chained_park_context,
     read_suspended_interaction_marker,
+    reset_park_completion,
     reset_resume_continuation_tool,
+    set_park_completion,
     set_resume_continuation_tool,
 )
 
@@ -44,22 +50,32 @@ def _clean_server():
     asyncio.run(_clear())
 
 
-async def _run_parking_tool(resume_owner: str | None, *, bound: str | None):
+async def _run_parking_tool(
+    resume_owner: str | None, *, bound: str | None, chained: str | None = None, expiry_at: datetime | None = None
+):
     """Invoke a client tool that returns a park sentinel owned by ``resume_owner``, with
-    ``bound`` as this run's resume continuation."""
+    ``bound`` as this run's resume continuation and (optionally) ``chained`` as the chained
+    key its caller bound around the dispatch."""
     async with app.app_context(Manifest.model_validate({})):
 
         @app.tools.tool(force=True)
         async def parks(q: str) -> SuspendedInteraction:
             """A tool whose call async-parked its caller."""
-            return SuspendedInteraction(interaction_id="i1", resume_owner=resume_owner)
+            return SuspendedInteraction(interaction_id="i1", resume_owner=resume_owner, expiry_at=expiry_at)
 
         tool_obj = await app.tools.get_tool("parks")
         runnable = app._tool_binding._client_runnable(tool_obj)
         token = set_resume_continuation_tool(bound)
+        completion = (
+            set_park_completion("deliver_chained_park", chained_park_context(chained, (None, None)))
+            if chained is not None
+            else None
+        )
         try:
             return await runnable(q="x")
         finally:
+            if completion is not None:
+                reset_park_completion(completion)
             reset_resume_continuation_tool(token)
 
 
@@ -207,3 +223,41 @@ def _with_interactions_store(run: Any) -> Any:
     finally:
         helper_module.client_ctx = real_ctx  # type: ignore[assignment]
         helper_module.interactions_settings = real_settings  # type: ignore[assignment]
+
+
+def test_a_chained_dispatch_parks_on_the_call_not_the_nested_interaction():
+    # The caller bound a chained completion around this dispatch, so the nested run's park is
+    # not adopted and not refused: this run parks on the chained KEY, and the nested run's
+    # terminal re-enters it through that binding's delivery tool.
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    result = asyncio.run(
+        _run_parking_tool("flow_resume", bound="agent_resume", chained="tai42:chained-park:k1", expiry_at=deadline)
+    )
+    marker = read_suspended_interaction_marker(result)
+    assert marker is not None
+    assert marker["interaction_id"] == "tai42:chained-park:k1"
+    # Owned by THIS run's continuation: the chained park is genuinely this run's — it waits on
+    # the CALL — so the claim point downstream reaches the same verdict.
+    assert marker["resume_owner"] == "agent_resume"
+    # The chained park INHERITS the nested ask's horizon: the deadline rides through unchanged.
+    assert marker["expiry_at"] == deadline.isoformat()
+
+
+def test_a_chained_dispatch_still_adopts_this_runs_own_park():
+    # An ask raised under THIS run's binding inside a chained dispatch is still the run's own
+    # park — the chained key names the CALL, and nothing about it is this ask.
+    result = asyncio.run(_run_parking_tool("agent_resume", bound="agent_resume", chained="tai42:chained-park:k1"))
+    marker = read_suspended_interaction_marker(result)
+    assert marker is not None
+    assert marker["interaction_id"] == "i1"
+    assert marker["resume_owner"] == "agent_resume"
+
+
+def test_a_chained_dispatch_chains_an_ownerless_nested_park_too():
+    # A nested RUN parked at its tool face names no adoptable owner; chaining never adopts its
+    # park, it waits on the run's terminal, so the ownerless receipt chains like any other.
+    result = asyncio.run(_run_parking_tool(None, bound="agent_resume", chained="tai42:chained-park:k1"))
+    marker = read_suspended_interaction_marker(result)
+    assert marker is not None
+    assert marker["interaction_id"] == "tai42:chained-park:k1"
+    assert marker["resume_owner"] == "agent_resume"

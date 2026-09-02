@@ -3,19 +3,26 @@
 stamps the generic continuation (tool + identity + fingerprint + expiry) onto the
 persisted question, and refuses an async ask with no resuming driver, no execution identity, no
 ``expiry_at``, or an ``expiry_at`` on a sync ask. Plus the per-interaction expiry
-index the reaper keys on — populated for an async park, empty for a sync question.
+index the reaper keys on — populated for an async park, empty for a sync question, and
+the re-park horizon notice a CHAINED completion binding (and only a chained one) receives
+so a caller suspended on this run can move its inherited deadline with it.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from tai42_contract.interactions import (
+    PARK_COMPLETION_REPARKED,
     AnswerFormat,
     InteractionRequest,
     SuspendedInteraction,
+    chained_park_context,
+    reset_park_completion,
     reset_resume_continuation_tool,
+    set_park_completion,
     set_resume_continuation_tool,
 )
 
@@ -23,6 +30,7 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import InteractionStore, ask_user
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions.helper import InteractionTimeoutError
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
 
@@ -170,3 +178,99 @@ async def test_async_park_past_expiry_is_not_sync_pruned_in_pending(fake_redis):
     assert state is not None
     assert state.status == "pending"  # not pruned
     assert await store.due_expiries(fake_redis, datetime.now(UTC)) == ["ap1"]
+
+
+# --- the chained caller's re-park horizon notice -------------------------------------------
+
+
+@pytest.fixture
+def repark_fires(monkeypatch):
+    """Capture every tool the async-park path fires, faking ONLY the tool-registry seam."""
+    fired: list[tuple[str, dict]] = []
+
+    async def _fake_run_tool(tool, arguments):
+        fired.append((tool, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool)))
+    return fired
+
+
+async def test_a_park_under_a_chained_binding_notifies_the_new_horizon(
+    monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires
+):
+    _wire(monkeypatch, fake_client_ctx)
+    expiry = datetime.now(UTC) + timedelta(hours=3)
+    completion = set_park_completion(
+        "deliver_chained_park",
+        chained_park_context(
+            "tai42:chained-park:k1", ("deliver_tool_completion", {"delivery_thread_id": "bridge:r:a"})
+        ),
+    )
+    try:
+        result = await ask_user("proceed?", mode="async", expiry_at=expiry)
+    finally:
+        reset_park_completion(completion)
+    assert isinstance(result, SuspendedInteraction)
+    # A run that re-parks moves its chained caller's inherited horizon with it: one notice,
+    # carrying the chained key, the NEW deadline, and the non-terminal status.
+    assert len(repark_fires) == 1
+    tool, payload = repark_fires[0]
+    assert tool == "deliver_chained_park"
+    assert payload["chain_token"] == "tai42:chained-park:k1"
+    assert payload["expiry_at"] == expiry.isoformat()
+    assert payload["status"] == PARK_COMPLETION_REPARKED
+    # The park itself is persisted exactly as any other — the notice is beside it, never
+    # instead of it.
+    store = InteractionStore("interactions:")
+    assert await store.get_state(fake_redis, result.interaction_id) is not None
+
+
+async def test_a_park_under_a_plain_delivery_binding_notifies_nothing(
+    monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires
+):
+    _wire(monkeypatch, fake_client_ctx)
+    # The conversation door's own binding is not a chain: its delivery tool has no horizon to
+    # refresh, so it is never fired with a notice it cannot answer.
+    completion = set_park_completion("deliver_agent_completion", {"thread_id": "bridge:r:a"})
+    try:
+        await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset_park_completion(completion)
+    assert repark_fires == []
+
+
+async def test_a_sync_ask_notifies_nothing(monkeypatch, fake_redis, fake_client_ctx, driver, repark_fires):
+    settings = _wire(monkeypatch, fake_client_ctx)
+    # Only a PARK moves a chained caller's horizon; a sync question never parks at all.
+    completion = set_park_completion(
+        "deliver_chained_park", chained_park_context("tai42:chained-park:k1", (None, None))
+    )
+    try:
+        with pytest.raises(InteractionTimeoutError):
+            await ask_user("proceed?", timeout=0.01)
+    finally:
+        reset_park_completion(completion)
+    assert settings is not None
+    assert repark_fires == []
+
+
+async def test_a_failing_notice_never_fails_the_park(monkeypatch, fake_redis, fake_client_ctx, driver, caplog):
+    _wire(monkeypatch, fake_client_ctx)
+
+    async def _boom(tool, arguments):
+        raise RuntimeError("delivery tool is down")
+
+    monkeypatch.setattr(helper_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_boom)))
+    completion = set_park_completion(
+        "deliver_chained_park", chained_park_context("tai42:chained-park:k1", (None, None))
+    )
+    try:
+        # The notice refreshes a horizon, it never carries an answer: a persisted park must not
+        # be turned into a failed ask by a notifier that is down. The caller simply keeps the
+        # horizon it already had, and the failure is announced.
+        result = await ask_user("proceed?", mode="async", expiry_at=datetime.now(UTC) + timedelta(hours=1))
+    finally:
+        reset_park_completion(completion)
+    assert isinstance(result, SuspendedInteraction)
+    assert "re-park horizon notice" in caplog.text
