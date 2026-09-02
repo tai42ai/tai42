@@ -6,24 +6,37 @@ models, the ``SuspendedInteraction`` sentinel an async ask returns, the
 models a question may carry; ``asker`` holds the ``AskUser`` callable Protocol
 the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
 ``continuation`` holds the generic driver-continuation context an async ask reads,
-plus the single-owner guard a caller adopting a returned park sentinel applies.
+plus the adopt-or-chain guard a caller applies to a returned park sentinel and the
+chained-park vocabulary a caller that parks on a nested CALL composes its binding from.
 """
 
 from __future__ import annotations
 
 from tai42_contract.interactions.asker import AskUser, check_ask_timing
 from tai42_contract.interactions.continuation import (
+    CHAINED_PARK_CONTEXT_KEY,
+    CHAINED_PARK_KEY_PREFIX,
+    CHAINED_PARK_TOKEN_KEY,
     EXPIRY_ANSWER,
     PARK_COMPLETION_FAILED,
+    PARK_COMPLETION_REPARKED,
     PARK_COMPLETION_SUCCEEDED,
+    PARK_COMPLETION_THREAD_KEY,
     SUSPENDED_INTERACTION_MARKER_KEY,
     NestedParkOwnershipError,
     assert_park_adoptable,
+    attach_chained_park,
+    chained_park_claims,
+    chained_park_context,
     get_park_completion,
     get_resume_continuation_tool,
+    is_chained_park_key,
+    new_chained_park_key,
     read_suspended_interaction_marker,
+    repark_notice,
     reset_park_completion,
     reset_resume_continuation_tool,
+    resolve_park_adoption,
     set_park_completion,
     set_resume_continuation_tool,
     suspended_interaction_marker,
@@ -47,6 +60,9 @@ from tai42_contract.interactions.models import (
 )
 
 __all__ = [
+    "CHAINED_PARK_CONTEXT_KEY",
+    "CHAINED_PARK_KEY_PREFIX",
+    "CHAINED_PARK_TOKEN_KEY",
     "EXPIRY_ANSWER",
     "MEDIA_CAPTION_MAX_CHARS",
     "MEDIA_DATA_URI_MAX_CHARS",
@@ -55,7 +71,9 @@ __all__ = [
     "MEDIA_TOTAL_URI_CHARS",
     "MEDIA_URL_MAX_CHARS",
     "PARK_COMPLETION_FAILED",
+    "PARK_COMPLETION_REPARKED",
     "PARK_COMPLETION_SUCCEEDED",
+    "PARK_COMPLETION_THREAD_KEY",
     "SUSPENDED_INTERACTION_MARKER_KEY",
     "AnswerFormat",
     "AskUser",
@@ -67,13 +85,20 @@ __all__ = [
     "NestedParkOwnershipError",
     "SuspendedInteraction",
     "assert_park_adoptable",
+    "attach_chained_park",
+    "chained_park_claims",
+    "chained_park_context",
     "check_ask_timing",
     "check_media_list",
     "get_park_completion",
     "get_resume_continuation_tool",
+    "is_chained_park_key",
+    "new_chained_park_key",
     "read_suspended_interaction_marker",
+    "repark_notice",
     "reset_park_completion",
     "reset_resume_continuation_tool",
+    "resolve_park_adoption",
     "served_media_id",
     "set_park_completion",
     "set_resume_continuation_tool",
