@@ -139,11 +139,16 @@ def test_a_parked_first_stage_propagates_without_touching_jq_or_the_next_tool(bi
     from tai42_contract.interactions import SuspendedInteraction
 
     calls: list[str] = []
+    # The park's resume owner (stamped when the ask parked) rides ON the sentinel, so a downstream
+    # claimer still checks it owns it. The chain must re-surface this exact object, not re-mint one.
+    parked = SuspendedInteraction(
+        interaction_id="i-chain", expiry_at=datetime(2026, 6, 1, tzinfo=UTC), resume_owner="nested_driver_resume"
+    )
 
     async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
         calls.append(key)
         if key == "source":
-            return SuspendedInteraction(interaction_id="i-chain", expiry_at=datetime(2026, 6, 1, tzinfo=UTC))
+            return parked
         raise AssertionError(f"the next tool must not run on a parked first stage; got {key}")
 
     bind_fake_app(FakeTools(run_tool=run_tool))
@@ -160,6 +165,10 @@ def test_a_parked_first_stage_propagates_without_touching_jq_or_the_next_tool(bi
 
     assert isinstance(result, SuspendedInteraction)
     assert result.interaction_id == "i-chain"
+    # Propagated WHOLE: the SAME sentinel object survives (byte-identical), so its resume owner
+    # rides through and the park stays claimable downstream.
+    assert result is parked
+    assert result.resume_owner == "nested_driver_resume"
     # Only the first stage ran; jq and the second tool were skipped.
     assert calls == ["source"]
 

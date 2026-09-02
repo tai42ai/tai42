@@ -129,6 +129,8 @@ async def execute_batch(
     if len(suspended) > 1:
         raise BatchMultiParkUnsupported(tool_name, [s.interaction_id for s in suspended])
     if suspended:
+        # Propagated WHOLE — the park's resume owner rides with the sentinel, so whoever
+        # claims it downstream still checks it owns it. Re-minting one here would drop that.
         return suspended[0]
     # Reachable only with zero sentinels, so every element is an ordinary body result.
     return cast("list[Any]", results)
