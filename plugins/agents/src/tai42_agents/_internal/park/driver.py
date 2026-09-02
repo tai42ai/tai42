@@ -34,9 +34,12 @@ from langgraph.types import StateSnapshot
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     attach_chained_park,
+    bound_execution_identity_for_fire,
     chained_park_claims,
+    current_execution_identity,
     is_chained_park_key,
     reset_park_completion,
     reset_resume_continuation_tool,
@@ -113,6 +116,8 @@ class ParkIdentity:
         "bind",
         "completion_context",
         "completion_tool",
+        "execution_fingerprint",
+        "execution_identity",
         "rebuild_kwargs",
         "retention_bound",
         "thread_id",
@@ -128,6 +133,8 @@ class ParkIdentity:
         completion_tool: str | None = None,
         completion_context: Mapping[str, Any] | None = None,
         retention_bound: datetime | None = None,
+        execution_identity: str | None = None,
+        execution_fingerprint: str = "",
     ) -> None:
         self.agent_name = agent_name
         self.thread_id = thread_id
@@ -144,6 +151,12 @@ class ParkIdentity:
         # The latest wall-time every store backing this park is guaranteed to still hold it;
         # ``None`` = keep-forever. Gated against each ask deadline at persist time.
         self.retention_bound = retention_bound
+        # The execution identity this run is authorized as — its ``(key, fingerprint)`` — so an
+        # OUT-OF-BAND completion fired for the park later (the abandonment fire) runs under the same
+        # identity a normal resume would, never fail-open. ``None`` key = no identity was bound (or
+        # the host has no identity system); the fire then runs unbound.
+        self.execution_identity = execution_identity
+        self.execution_fingerprint = execution_fingerprint
 
 
 def _thread_id(config: dict[str, Any]) -> str | None:
@@ -217,6 +230,10 @@ def build_park_identity(
     # identity carries neither; the engine's ``aresume_park`` reads them back out.
     pinned = {**rebuild_kwargs, "checkpoint_provider": resolved_provider, "recursion_limit": recursion_limit}
     retention_bound = _min_horizon(_checkpoint_retention_horizon(resolved_provider), extra_retention_horizon)
+    # Capture the identity this run is authorized as, so a later out-of-band completion fire runs
+    # under it. On a resume this helper is re-entered under the continuation's bound identity, so a
+    # re-park re-captures the same one — carried forward exactly like the completion tool.
+    execution_identity, execution_fingerprint = current_execution_identity()
     return ParkIdentity(
         agent_name=agent_name,
         thread_id=thread_id,
@@ -225,6 +242,8 @@ def build_park_identity(
         completion_tool=completion_tool,
         completion_context=completion_context,
         retention_bound=retention_bound,
+        execution_identity=execution_identity,
+        execution_fingerprint=execution_fingerprint,
     )
 
 
@@ -601,6 +620,12 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
             # (a chained park whose nested run re-parked further out) re-clamps against the
             # same bound the persist used instead of guessing one. ``None`` = keep-forever.
             "retention_bound": identity.retention_bound.isoformat() if identity.retention_bound else None,
+            # The execution identity this run is authorized as, carried forward onto every entry so
+            # the out-of-band abandonment fire binds it and never runs fail-open. ``None`` key = no
+            # identity was bound; the fire runs unbound. Present on every entry this code writes —
+            # an entry LACKING the key is one persisted before parks recorded it.
+            "execution_identity": identity.execution_identity,
+            "execution_fingerprint": identity.execution_fingerprint,
         }
 
     expected = dict(union)
@@ -685,16 +710,17 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     continuation's durable retry ticket for the reaper to redeliver until the live drive
     completes or its lease expires.
 
-    An ERRORED drive is RETRIED, never converted into a completion fire, and that is deliberate.
-    Firing the non-success terminal on the first error would commit a delivery record under this
-    super-step's STABLE completion id; the redelivery that then drove the same super-step to a
-    clean success would find that id already committed and dedupe its real answer away — the
-    person would be told the run failed while it in fact succeeded. So the completion fires from
-    the clean-terminal branch alone, and an error leaves the index LIVE for the platform's
-    at-least-once redelivery. The cost is the tail: a super-step that never drives cleanly is
-    dropped at the interaction group's give-up with nothing delivered. Announcing THAT terminal
-    (a non-success fire at retry exhaustion, where no later success can be deduped away) is a
-    separate piece of work, not something this branch of the drive can do safely."""
+    An ERRORED drive is RETRIED, never converted into a completion fire from this branch, and
+    that is deliberate. Firing the non-success terminal on the first error would commit a delivery
+    record under this super-step's STABLE completion id; the redelivery that then drove the same
+    super-step to a clean success would find that id already committed and dedupe its real answer
+    away — the person would be told the run failed while it in fact succeeded. So the completion
+    fires from the clean-terminal branch alone, and an error leaves the index LIVE for the
+    platform's at-least-once redelivery. The tail — a super-step that never drives cleanly — is
+    closed at the platform's PERMANENT give-up instead: when the continuation-due record is dropped
+    for good, :func:`fire_park_failed_completion` fires the non-success terminal ONCE, at the one
+    point where no later success can be deduped away (the record is gone and nothing can re-drive
+    the run)."""
     entry = await read_park_entry(interaction_id)
     if entry is None:
         raise AgentResumeParkEntryNotFoundError(interaction_id)
@@ -747,6 +773,90 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     # its own super-step id, so finalizing this super-step never touches the new one.
     await finalize_resolved_superstep(thread_id, superstep_id, list(expected))
     return result
+
+
+async def fire_park_failed_completion(interaction_id: str) -> None:
+    """Fire the bound completion with the FAILED terminal for a park whose resume the platform
+    has PERMANENTLY abandoned — the tail :func:`agent_resume` cannot close from its error branch.
+
+    Registered (:func:`~tai42_agents._internal.park.resume_tool.register_agent_resume_tool`) as the
+    continuation-abandonment handler the platform's redelivery reaper fires by interaction id when a
+    park's durable continuation-due record is dropped for good. A park that never drove cleanly
+    would otherwise leave the bound caller (a conversation turn, a chained park) waiting to its own
+    deadline; this delivers the non-success terminal so it learns the answer is never coming.
+
+    Delivery here is AT-MOST-ONCE, unlike the at-least-once success path: it is a fire-and-forget
+    once the durable record is gone, so a transient failure of THIS fire loses the notice with no
+    retry behind it — strictly better than the silent tail-drop it replaces, and named so a reader
+    does not expect the success path's durability.
+
+    This does NOT drive: the record is gone and no answer will ever arrive, so there is nothing to
+    resume. It reads the park entry, and:
+
+    * a MISSING entry (its own TTL lapsed) has nothing left to deliver against — a no-op;
+    * a RESOLVED tombstone means the super-step already drove to a clean terminal — a no-op, so a
+      FAILED fire never overrides a delivered SUCCESS;
+    * a run-face park (``completion_tool is None``) has no out-of-band delivery path — a no-op;
+    * a LIVE drive still holding the super-step's lease may yet deliver SUCCESS — the drive-claim
+      attempt below fails, so the FAILED fire is skipped rather than racing it. A clean drive drops
+      that lease and writes its tombstone in ONE atomic finalize, so a released lease always implies
+      the tombstone above: the claim guard and the tombstone guard between them leave no window
+      where a SUCCESS is still coming. The stable completion id is the final backstop under the
+      consumer's dedupe for any interleaving beyond those — a property this terminus accepts.
+
+    When it fires, it holds the drive lease for the span and binds the park's recorded execution
+    identity (:func:`~tai42_contract.interactions.bound_execution_identity_for_fire`), so the
+    completion — and, for a chained park, the outer ``agent_resume`` drive it triggers — runs
+    AUTHORIZED as the run did, never fail-open. A park persisted before the identity was recorded
+    carries no key: the fire runs UNBOUND with a warning naming the limitation, the pre-upgrade
+    behavior, never a crash. The fire uses the generic contract payload under
+    :data:`~tai42_contract.interactions.PARK_COMPLETION_FAILED`, keyed by the SAME stable
+    ``completion_id`` a clean terminal would use, so the delivery ledger deduping on that id
+    collapses a redundant sibling fire to one record. It does not tombstone; the park entries
+    expire on their own once abandoned, and repeated abandonment is idempotent through that
+    completion-id dedupe.
+
+    Subscript, not ``get``, for the always-written fields (``completion_tool``/``thread_id``/
+    ``superstep_id``): every persisted park entry writes them, so an entry missing one is a corrupt
+    index and belongs raised (the caller's abandonment fire is guarded and logs it), not silently
+    read as 'nothing to deliver'. The identity fields use ``get`` — their ABSENCE is the legitimate
+    pre-upgrade case, distinct from a corrupt entry."""
+    entry = await read_park_entry(interaction_id)
+    if entry is None or is_resolved_tombstone(entry):
+        return
+    completion_tool = entry["completion_tool"]
+    if completion_tool is None:
+        return
+    thread_id = entry["thread_id"]
+    superstep_id = entry["superstep_id"]
+
+    # Take the super-step's drive lease: a live drive holding it may still deliver SUCCESS, so
+    # failing to claim means skip the FAILED fire rather than race it. Held across the fire so no
+    # drive can start under us, released after so nothing leaks (there is no retry to reclaim for).
+    token = str(uuid.uuid4())
+    if not await try_claim_drive(thread_id, superstep_id, token):
+        return
+    try:
+        if "execution_identity" not in entry:
+            logger.warning(
+                "park entry %s predates the recorded execution identity; its abandonment completion "
+                "fires UNBOUND (authz skipped). Re-created parks carry the identity and bind it.",
+                interaction_id,
+            )
+        async with bound_execution_identity_for_fire(
+            entry.get("execution_identity"), entry.get("execution_fingerprint") or ""
+        ):
+            await tai42_app.tools.run_tool(
+                completion_tool,
+                {
+                    **(_completion_context(entry, thread_id) or {}),
+                    "result": None,
+                    "completion_id": _completion_id(thread_id, superstep_id),
+                    "status": PARK_COMPLETION_FAILED,
+                },
+            )
+    finally:
+        await release_claim(thread_id, superstep_id, token)
 
 
 async def _drive_completed_barrier(
