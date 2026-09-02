@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-toolbox"
-version = "2.0.1"
+version = "2.0.2"
 description = "Reference contrib package for the TAI ecosystem: opt-in, manifest-loaded generic tools and tool extensions (a tool extension extends a single tool)."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract these tools and tool extensions register through
     # — the tai42_app handle, ExtensionKind, and the tool/extension facets.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.0,<7",
+    "tai42-contract>=6.1,<7",
     # Leaf helpers: settings machinery, the curl client, the jq compiler, and the
     # llm/embedding factories the extra-gated modules wire to.
     "tai42-kit>=3.8,<4",

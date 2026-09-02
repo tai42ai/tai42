@@ -27,7 +27,7 @@ dependencies = [
     # CallbackSchema, Manifest, ExtensionKind, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.0,<7",
+    "tai42-contract>=6.1,<7",
     # TaiBaseSettings + settings cache, pooled Redis client, schedule
     # normalization, signature helpers, and the jq compiler (callback conditions).
     # The floor names the first release carrying `tai42_kit.backend`
