@@ -468,6 +468,12 @@ class SuspendedInteraction(BaseModel):
 
     interaction_id: str
     expiry_at: datetime | None = None
+    # The resume continuation this park was raised UNDER — the one driver entitled to ADOPT
+    # it as its own park (see ``assert_park_adoptable``). A park has exactly one resume owner,
+    # so a caller that turns a returned sentinel into its own park state must be that owner.
+    # An ask that parks always stamps it, so ``None`` means the sentinel was NOT minted by an
+    # ask: a nested RUN's park surfaced at its tool face, which no caller may adopt.
+    resume_owner: str | None = None
 
     @field_validator("expiry_at")
     @classmethod

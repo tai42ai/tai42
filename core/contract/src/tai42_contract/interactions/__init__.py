@@ -5,7 +5,8 @@ models, the ``SuspendedInteraction`` sentinel an async ask returns, the
 ``AnswerFormat`` enum, and the display-only ``MediaItem``/``MediaKind`` media
 models a question may carry; ``asker`` holds the ``AskUser`` callable Protocol
 the engine-agnostic helper satisfies and the ``check_ask_timing`` guard;
-``continuation`` holds the generic driver-continuation context an async ask reads.
+``continuation`` holds the generic driver-continuation context an async ask reads,
+plus the single-owner guard a caller adopting a returned park sentinel applies.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from tai42_contract.interactions.continuation import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     SUSPENDED_INTERACTION_MARKER_KEY,
+    NestedParkOwnershipError,
+    assert_park_adoptable,
     get_park_completion,
     get_resume_continuation_tool,
     read_suspended_interaction_marker,
@@ -61,7 +64,9 @@ __all__ = [
     "InteractionState",
     "MediaItem",
     "MediaKind",
+    "NestedParkOwnershipError",
     "SuspendedInteraction",
+    "assert_park_adoptable",
     "check_ask_timing",
     "check_media_list",
     "get_park_completion",
