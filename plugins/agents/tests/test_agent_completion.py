@@ -110,7 +110,7 @@ class _SequentialAsk:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
             interaction_id = self._ids[self.calls]
             self.calls += 1
-            return suspended_interaction_marker(interaction_id, self._expiry_at)
+            return suspended_interaction_marker(interaction_id, self._expiry_at, get_resume_continuation_tool())
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 

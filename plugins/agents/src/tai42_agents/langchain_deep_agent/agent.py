@@ -42,6 +42,7 @@ from tai42_agents._internal.config_util import build_run_config, init_langgraph_
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.park import (
     ParkIdentity,
+    bind_resume_per_step,
     build_park_identity,
     finalize_drive,
     park_continuation,
@@ -621,8 +622,13 @@ class DeepAgent(Agent):
                         extra_retention_horizon=drive.workspace_retention_horizon,
                     )
 
-                with park_continuation(park):
-                    async for event in self._astream_built(
+                # Bind the resume continuation around each drive step, NOT in this generator's
+                # body: a ``with park_continuation(...)`` wrapping the ``yield`` would leak the
+                # binding into the consumer's task (PEP 568 is unimplemented) and strand it on an
+                # abandoned stream.
+                async for event in bind_resume_per_step(
+                    lambda: park_continuation(park),
+                    self._astream_built(
                         agent,
                         agent_input,
                         config,
@@ -630,14 +636,15 @@ class DeepAgent(Agent):
                         response_format=response_format,
                         structured_strategy=strategy,
                         park=park,
-                    ):
-                        if isinstance(event, StructuredFinal):
-                            saw_structured = True
-                        elif isinstance(event, InterruptFinal):
-                            saw_interrupt = True
-                        elif isinstance(event, SuspendedFinal):
-                            saw_suspended = True
-                        yield event
+                    ),
+                ):
+                    if isinstance(event, StructuredFinal):
+                        saw_structured = True
+                    elif isinstance(event, InterruptFinal):
+                        saw_interrupt = True
+                    elif isinstance(event, SuspendedFinal):
+                        saw_suspended = True
+                    yield event
                 # A requested response_format that produced no StructuredFinal fails loudly.
                 # A pending interrupt OR an async park means the run paused rather than finished,
                 # so (as in _drain) the pause takes precedence and the raise is skipped.

@@ -166,7 +166,7 @@ class _ParkingAsk:
         def ask() -> dict[str, Any]:
             if get_resume_continuation_tool() is None:
                 raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at)
+            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 

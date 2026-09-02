@@ -1,8 +1,10 @@
 """Tests for ``resolve_tools`` — the shared tool-input resolver.
 
 Covers name resolution, preset binding (base tool + fixed kwargs, with fixed
-keys hidden from the exposed schema), and the duplicate-name guard. A fake tool
-facet (mirroring ``tai42_app.tools``) stands in for a live app — no LLM.
+keys hidden from the exposed schema), the duplicate-name guard, and the bound
+callable's park contract: a park sentinel becomes the reserved marker, and a nested
+run's is refused. A fake tool facet (mirroring
+``tai42_app.tools``) stands in for a live app — no LLM.
 """
 
 import asyncio
@@ -98,20 +100,34 @@ def test_preset_over_a_parking_tool_stamps_the_park_marker():
     # returns the SuspendedInteraction sentinel through run_tool; the preset adapter (a plain
     # langchain tool) converts it to the reserved contract park marker, so the in-graph park
     # middleware recognizes the park by RESULT shape — exactly as the direct client-tool adapter.
-    from tai42_contract.interactions import SuspendedInteraction, read_suspended_interaction_marker
+    from tai42_contract.interactions import (
+        SuspendedInteraction,
+        get_resume_continuation_tool,
+        read_suspended_interaction_marker,
+        reset_resume_continuation_tool,
+        set_resume_continuation_tool,
+    )
 
     class _ParkingTools(FakeTools):
         async def run_tool(self, key, arguments):
             self.run_tool_calls.append((key, arguments))
-            return SuspendedInteraction(interaction_id="i-preset")
+            # Faithful to ``ask_user(mode="async")``: the park names the continuation bound
+            # around this drive as its owner, so this run may adopt it.
+            return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
 
     app = _ParkingTools()
     preset = PresetSpec(name="my_preset", base_tool="example_tool", fixed_kwargs={"example_config": {"nodes": []}})
     (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
-    result = asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+    token = set_resume_continuation_tool("agent_resume")
+    try:
+        result = asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+    finally:
+        reset_resume_continuation_tool(token)
     marker = read_suspended_interaction_marker(result)
     assert marker is not None
     assert marker["interaction_id"] == "i-preset"
+    # The owner rides the wire form the claim point later reads.
+    assert marker["resume_owner"] == "agent_resume"
 
 
 class _SecretReturningTools:
@@ -350,3 +366,65 @@ def test_preset_accepts_a_tuple_required():
     (tool,) = asyncio.run(resolve_tools(app, [], [], [_named_preset()]))
     assert isinstance(tool.args_schema, dict)
     assert tool.args_schema["required"] == ["keep"]
+
+
+def test_preset_park_refusal_keeps_its_own_typed_message():
+    # The park-ownership refusal is the ADAPTER's own guard, not the base tool's failure: it
+    # raises its own typed ToolException and is not re-wrapped by the body's error handler.
+    from langchain_core.tools import ToolException
+    from tai42_contract.interactions import SuspendedInteraction
+
+    class _NestedParkTools(FakeTools):
+        async def run_tool(self, key, arguments):
+            self.run_tool_calls.append((key, arguments))
+            return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
+
+    app = _NestedParkTools()
+    preset = PresetSpec(name="my_preset", description="run a preset", base_tool="example_tool", fixed_kwargs={})
+    (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
+
+    with pytest.raises(ToolException) as caught:
+        asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+    message = str(caught.value)
+    assert message.startswith("Tool 'my_preset' cannot be used inside this run")
+    assert "different run's resume binding" in message
+    # The refusal names no owner value (the bound continuation is a public claim string).
+    assert "'nested_driver_resume'" not in message
+    # Its own typed message, not the body-failure wrap: no second "Error calling tool" prefix.
+    assert "Error calling tool" not in message
+
+
+def test_preset_park_refusal_fires_on_the_delivery_scoped_copy():
+    # The two ownership rules compose on the ONE object the model is given: resolution hands
+    # back a delivery-scoped copy (its body runs with the park-completion binding cleared), and
+    # the park-adoption refusal is inside that body — so a nested driver reached through a
+    # preset can neither claim the agent's deferred-answer ADDRESS nor hand the agent a park it
+    # would never be resumed for. The caller's own binding survives the dispatch untouched.
+    from langchain_core.tools import ToolException
+    from tai42_contract.interactions import (
+        SuspendedInteraction,
+        get_park_completion,
+        reset_park_completion,
+        set_park_completion,
+    )
+
+    seen = []
+
+    class _NestedParkTools(FakeTools):
+        async def run_tool(self, key, arguments):
+            seen.append(get_park_completion())
+            return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
+
+    bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
+    preset = PresetSpec(name="my_preset", description="run a preset", base_tool="example_tool", fixed_kwargs={})
+    (tool,) = asyncio.run(resolve_tools(_app_tools(_NestedParkTools()), [], [], [preset]))
+
+    token = set_park_completion(*bound)
+    try:
+        with pytest.raises(ToolException, match=r"different run's resume binding"):
+            asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+        assert get_park_completion() == bound
+    finally:
+        reset_park_completion(token)
+    # The base tool ran with NO completion bound (delivery scope), and the refusal still fired.
+    assert seen == [(None, None)]
