@@ -401,7 +401,7 @@ def test_abandonment_binds_the_parks_recorded_execution_identity(
     active = {"in": False}
 
     @contextlib.asynccontextmanager
-    async def _fake_binder(key: str, fingerprint: str) -> Any:
+    async def _fake_binder(key: str, fingerprint: str) -> AsyncIterator[None]:
         bound.append((key, fingerprint))
         active["in"] = True
         try:
@@ -450,7 +450,7 @@ def test_abandonment_of_a_chained_park_binds_identity_around_the_chain_drive(
     active = {"in": False}
 
     @contextlib.asynccontextmanager
-    async def _fake_binder(key: str, fingerprint: str) -> Any:
+    async def _fake_binder(key: str, fingerprint: str) -> AsyncIterator[None]:
         bound.append((key, fingerprint))
         active["in"] = True
         try:
@@ -496,7 +496,7 @@ def test_legacy_entry_without_identity_fires_unbound_with_a_warning(
     bound: list[tuple[str | None, str]] = []
 
     @contextlib.asynccontextmanager
-    async def _fake_binder(key: str, fingerprint: str) -> Any:
+    async def _fake_binder(key: str, fingerprint: str) -> AsyncIterator[None]:
         bound.append((key, fingerprint))
         yield
 

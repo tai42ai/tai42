@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 
 import pytest
@@ -59,7 +60,7 @@ def test_set_get_reset_round_trip():
     assert get_resume_continuation_tool() is None
 
 
-def test_abandonment_handlers_fire_with_the_interaction_id(monkeypatch):
+def test_abandonment_handlers_fire_with_the_interaction_id(monkeypatch: pytest.MonkeyPatch):
     # The abandonment seam invokes every registered handler with the abandoned interaction id.
     from tai42_contract.interactions import continuation as cont
 
@@ -77,14 +78,14 @@ def test_abandonment_handlers_fire_with_the_interaction_id(monkeypatch):
     register_continuation_abandonment_handler(_b)
     # Idempotent by identity: re-registering the SAME callable adds no duplicate.
     register_continuation_abandonment_handler(_a)
-    assert cont._continuation_abandonment_handlers == [_a, _b]
+    assert vars(cont)["_continuation_abandonment_handlers"] == [_a, _b]
 
     asyncio.run(fire_continuation_abandoned("i1"))
     assert seen_a == ["i1"]
     assert seen_b == ["i1"]
 
 
-def test_abandonment_fire_is_best_effort_per_handler(monkeypatch):
+def test_abandonment_fire_is_best_effort_per_handler(monkeypatch: pytest.MonkeyPatch):
     # One handler that raises is logged and swallowed, so it never starves the others or aborts
     # the fire.
     from tai42_contract.interactions import continuation as cont
@@ -104,14 +105,14 @@ def test_abandonment_fire_is_best_effort_per_handler(monkeypatch):
     assert seen == ["i1"]
 
 
-def test_abandonment_fire_with_no_handlers_is_a_noop(monkeypatch):
+def test_abandonment_fire_with_no_handlers_is_a_noop(monkeypatch: pytest.MonkeyPatch):
     from tai42_contract.interactions import continuation as cont
 
     monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
     asyncio.run(fire_continuation_abandoned("i1"))  # no handlers registered — no error
 
 
-def test_execution_identity_bridge_capture_and_bind(monkeypatch):
+def test_execution_identity_bridge_capture_and_bind(monkeypatch: pytest.MonkeyPatch):
     # The bridge is two host-filled slots: an accessor a park reads to capture the current identity,
     # and a binder the out-of-band fire uses to run under it. With a host accessor/binder registered,
     # capture returns the host value and the binder wraps the fire; with neither, capture is
@@ -144,7 +145,7 @@ def test_execution_identity_bridge_capture_and_bind(monkeypatch):
     bound: list[tuple[str, str]] = []
 
     @_contextlib.asynccontextmanager
-    async def _binder(key, fingerprint):
+    async def _binder(key: str, fingerprint: str) -> AsyncGenerator[None]:
         bound.append((key, fingerprint))
         yield
 
@@ -325,7 +326,7 @@ def test_the_wire_marker_carries_the_park_owner():
     ],
     ids=["empty-payload", "bare-string", "owner-only", "non-str-id", "json-no-id"],
 )
-def test_a_malformed_marker_reads_as_no_park(content):
+def test_a_malformed_marker_reads_as_no_park(content: object):
     # The reserved key is present but the payload is not a well-formed marker — content a model
     # shaped, or a corrupt wire form. The reader shape-checks the payload and returns None rather
     # than a dict a caller would KeyError on and abort the run over.
@@ -338,6 +339,7 @@ def test_a_legacy_two_key_marker_still_reads():
     legacy = {SUSPENDED_INTERACTION_MARKER_KEY: {"interaction_id": "i1", "expiry_at": None}}
     marker = read_suspended_interaction_marker(json.dumps(legacy))
     assert marker == {"interaction_id": "i1", "expiry_at": None}
+    assert marker is not None
     assert marker.get("resume_owner") is None
 
 
