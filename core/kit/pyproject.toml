@@ -27,7 +27,7 @@ dependencies = [
     # Tracks the contract 5.x major (unified park protocol); this floor is what
     # a published kit must carry so downstream resolvers see a contract-5 kit.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.1,<7",
+    "tai42-contract>=6.2,<7",
     "pydantic>=2.12",
     "pydantic-settings>=2.11",
     "python-dotenv>=1.0",

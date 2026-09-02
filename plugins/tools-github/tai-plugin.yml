@@ -11,7 +11,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/tools-github
-contract: '>=6.1,<7'
+contract: '>=6.2,<7'
 categories:
   - provisioning
   - utilities
