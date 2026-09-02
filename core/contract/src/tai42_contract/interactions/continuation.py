@@ -48,13 +48,17 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import uuid
-from collections.abc import Generator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any, Final, cast
 
 from tai42_contract.errors import ErrorKind
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CHAINED_PARK_CONTEXT_KEY",
@@ -69,13 +73,19 @@ __all__ = [
     "NestedParkOwnershipError",
     "assert_park_adoptable",
     "attach_chained_park",
+    "bound_execution_identity_for_fire",
     "chained_park_claims",
     "chained_park_context",
+    "current_execution_identity",
+    "fire_continuation_abandoned",
     "get_park_completion",
     "get_resume_continuation_tool",
     "is_chained_park_key",
     "new_chained_park_key",
     "read_suspended_interaction_marker",
+    "register_continuation_abandonment_handler",
+    "register_execution_identity_accessor",
+    "register_execution_identity_binder",
     "repark_notice",
     "reset_park_completion",
     "reset_resume_continuation_tool",
@@ -93,6 +103,113 @@ _resume_continuation_tool: ContextVar[str | None] = ContextVar("tai42_resume_con
 _ParkCompletion = tuple[str | None, Mapping[str, Any] | None]
 
 _park_completion: ContextVar[_ParkCompletion] = ContextVar("tai42_park_completion", default=(None, None))
+
+
+# --- the continuation-abandonment seam ---------------------------------------------------
+#
+# An async park's resume is delivered AT-LEAST-ONCE: a resuming driver whose resume raises leaves
+# the durable continuation-due record for the platform to redeliver. That redelivery is not
+# unbounded — a record whose retention horizon lapses is dropped for good, a PERMANENT give-up
+# after which no redelivery will ever fire the resume again. The bound caller waiting on that run
+# (a conversation turn, a chained park) would otherwise learn nothing until its OWN deadline.
+#
+# This is the seam a resuming driver registers a handler on to be told of THAT terminus by
+# interaction id, so it can fire its own non-success completion (the FAILED terminal) exactly
+# once — at the one point where no later success can be deduped away, since the record is gone and
+# nothing can re-drive the run. Generic and flow-blind: the platform names the abandoned
+# interaction; the driver owns what an abandoned park means and how to close it.
+_ContinuationAbandonmentHandler = Callable[[str], Awaitable[None]]
+
+_continuation_abandonment_handlers: list[_ContinuationAbandonmentHandler] = []
+
+
+def register_continuation_abandonment_handler(handler: _ContinuationAbandonmentHandler) -> None:
+    """Register ``handler`` to be invoked with the interaction id when a park's resume is
+    PERMANENTLY abandoned (its durable continuation-due record dropped past its retention horizon,
+    so no redelivery will ever fire it again).
+
+    Idempotent by handler identity: a resuming driver's registration site may run per reload epoch
+    and from several agents, so re-registering the SAME callable is a no-op rather than a duplicate
+    fire."""
+    if handler not in _continuation_abandonment_handlers:
+        _continuation_abandonment_handlers.append(handler)
+
+
+async def fire_continuation_abandoned(interaction_id: str) -> None:
+    """Notify every registered handler that ``interaction_id``'s resume is permanently abandoned.
+
+    Best-effort per handler: one that raises is logged and swallowed, so a single driver's failure
+    never starves the other handlers or aborts the reaper pass that fired them. A process with no
+    resuming driver loaded holds no handlers and this is a no-op."""
+    for handler in _continuation_abandonment_handlers:
+        try:
+            await handler(interaction_id)
+        except Exception:
+            logger.warning(
+                "a continuation-abandonment handler raised for interaction %s; suppressed so it cannot "
+                "abort the abandonment fire or starve the other handlers",
+                interaction_id,
+                exc_info=True,
+            )
+
+
+# --- the execution-identity bridge -------------------------------------------------------
+#
+# A park records the execution identity its run is authorized as, so an OUT-OF-BAND completion
+# fired for it later (the abandonment fire) runs under that same identity — never fail-open. The
+# identity machinery is a HOST concern (it reads live stored grants), so this contract holds only
+# a pair of registration slots a host fills: an ACCESSOR to read the current identity as
+# ``(execution key, fingerprint)`` when a park records it, and a BINDER to bind that identity
+# around the out-of-band fire. A resume driver captures and binds through these without importing
+# the host, and a host with no identity system leaves them unset — capture yields no identity and
+# the fire runs unbound (the pre-registration behavior). ``(execution key, fingerprint)`` are the
+# same two strings the durable resume-continuation record stores, so both paths agree.
+_ExecutionIdentityAccessor = Callable[[], tuple[str | None, str]]
+_ExecutionIdentityBinder = Callable[[str, str], AbstractAsyncContextManager[Any]]
+
+_execution_identity_accessor: _ExecutionIdentityAccessor | None = None
+_execution_identity_binder: _ExecutionIdentityBinder | None = None
+
+
+def register_execution_identity_accessor(accessor: _ExecutionIdentityAccessor) -> None:
+    """Register the host accessor that reads the CURRENT execution identity as
+    ``(execution key, fingerprint)`` — used to capture the identity onto a park at park time.
+    Last registration wins; a host with none leaves capture yielding ``(None, "")``."""
+    global _execution_identity_accessor
+    _execution_identity_accessor = accessor
+
+
+def register_execution_identity_binder(binder: _ExecutionIdentityBinder) -> None:
+    """Register the host binder that binds ``(execution key, fingerprint)`` as the execution
+    identity for the span of an out-of-band fire. Last registration wins; a host with none leaves
+    :func:`bound_execution_identity_for_fire` a no-op (the fire runs unbound)."""
+    global _execution_identity_binder
+    _execution_identity_binder = binder
+
+
+def current_execution_identity() -> tuple[str | None, str]:
+    """The current execution identity as ``(execution key, fingerprint)`` for a park to record, or
+    ``(None, "")`` when no identity is bound or no host registered an accessor (so a park under no
+    identity, or on a host without one, records none and its later out-of-band fire runs unbound)."""
+    if _execution_identity_accessor is None:
+        return None, ""
+    return _execution_identity_accessor()
+
+
+@contextlib.asynccontextmanager
+async def bound_execution_identity_for_fire(execution_key: str | None, fingerprint: str) -> AsyncGenerator[None]:
+    """Bind ``execution_key`` as the execution identity for the span of an out-of-band fire, via
+    the host-registered binder.
+
+    A no-op that binds NOTHING — the fire runs unbound — when ``execution_key`` is ``None`` (the
+    park recorded no identity: taken under none, or persisted before parks recorded it) or no host
+    registered a binder. The binder may raise if the key can no longer carry authority; that
+    propagates to the fire's own best-effort guard."""
+    if execution_key is None or _execution_identity_binder is None:
+        yield
+        return
+    async with _execution_identity_binder(execution_key, fingerprint):
+        yield
 
 
 # The answer value a continuation receives when its interaction expired unanswered — the
