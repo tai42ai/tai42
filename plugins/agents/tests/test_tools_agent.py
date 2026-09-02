@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, ValidationError
 from tai42_contract.agent import (
     Agent,
@@ -260,14 +260,21 @@ def test_run_resolves_tools_and_returns_final_text(
 def test_preset_tool_invocation_raises_on_unknown_base_tool(app_tools: Any) -> None:
     """A preset whose base tool is a registered client tool (so binding succeeds)
     but is absent from ``tool_runners`` surfaces the recording facet's
-    unknown-base-tool ``RuntimeError`` when the bound tool is invoked: binding does
-    not pre-check the runner map, so the failure lands at call time and propagates
-    out of the bound tool rather than being swallowed into a result."""
+    unknown-base-tool failure when the bound tool is invoked: binding does not
+    pre-check the runner map, so the failure lands at call time and comes out of the
+    bound tool rather than being swallowed into a result.
+
+    It comes out as the adapter's typed ``ToolException``: ``AppTools.run_tool`` is one
+    opaque call declaring no exception type, so this adapter cannot tell a base tool
+    that VANISHED from one that FAILED — the dispatch is the tool's body here, and
+    everything it raises is the tool's failure. The original error is not lost: it is
+    the exception's ``__cause__`` and is logged with its traceback."""
     app_tools.client_tools["example_tool"] = make_tool("example_tool", {"q": {"type": "string"}})
     preset = PresetSpec(name="my_preset", base_tool="example_tool")
     (preset_tool,) = asyncio.run(resolve_tools(tai42_app.tools, [], [], [preset]))
-    with pytest.raises(RuntimeError, match="unknown base tool"):
+    with pytest.raises(ToolException, match=r"Error calling tool 'my_preset': unknown base tool") as caught:
         asyncio.run(preset_tool.arun({"q": "x"}))
+    assert isinstance(caught.value.__cause__, RuntimeError)
 
 
 def test_run_treats_unset_message_slots_as_not_provided(

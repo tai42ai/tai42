@@ -7,7 +7,9 @@ resolve here.
 A preset becomes a ``StructuredTool`` whose LLM-visible arguments are the base
 tool's arguments minus the fixed ones (so the agent cannot override a fixed
 value); its bound callable invokes the base tool via ``app_tools.run_tool`` with
-the fixed kwargs merged under the caller's runtime kwargs.
+the fixed kwargs merged under the caller's runtime kwargs. A base tool that fails
+surfaces as a ``ToolException`` naming the preset — the model-visible tool-error
+contract every directly-bound tool already has.
 
 Every resolved tool is scoped through
 :func:`~tai42_agents._internal.nested_dispatch.scope_nested_dispatch_all`: this is the
@@ -18,6 +20,7 @@ addresses the agent's own deferred answer.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.tools import StructuredTool, ToolException
@@ -33,6 +36,8 @@ from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools
 
 from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
+
+logger = logging.getLogger(__name__)
 
 
 def _assert_unique_names(tools: list[StructuredTool]) -> None:
@@ -61,7 +66,19 @@ async def _as_structured_tool(
         # A plain-dict args_schema does not strip out-of-schema keys, so drop the
         # fixed keys here to keep the bound values immutable on the merge below.
         runtime = {key: value for key, value in runtime.items() if key not in preset.fixed_kwargs}
-        result = await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        # The BASE TOOL's own failure is this tool's failure, so it becomes a model-visible
+        # tool error exactly as the direct client-tool adapter makes one for its body: a
+        # ``ToolException`` the loop's error middleware turns into an error ``ToolMessage``,
+        # so the model reads it and answers around it instead of the run aborting on a
+        # checkpointed dangling tool_call. The message names THIS preset (the name the model
+        # called), carrying the base tool's error text. ``CancelledError`` and every other
+        # BaseException pass through untouched, and everything after the dispatch is this
+        # adapter's own machinery — which raises its own typed refusal — not the tool body.
+        try:
+            result = await app_tools.run_tool(preset.base_tool, {**preset.fixed_kwargs, **runtime})
+        except Exception as exc:
+            logger.warning("preset tool %r (base tool %r) failed: %s", preset.name, preset.base_tool, exc, exc_info=exc)
+            raise ToolException(f"Error calling tool {preset.name!r}: {exc}") from exc
         if isinstance(result, SuspendedInteraction):
             # The base tool async-parked and returned this sentinel through the direct-run
             # seam (preserved by type, never flattened). This coroutine is a plain langchain
