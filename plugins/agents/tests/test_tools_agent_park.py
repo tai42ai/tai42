@@ -127,11 +127,11 @@ class _NestedDriverStandIn:
         return SuspendedInteraction(interaction_id=self._interaction_id, resume_owner=self._resume_owner)
 
     def base_tool(self) -> StructuredTool:
-        def flow(marker: str = "") -> str:
-            """Run the nested flow."""
+        def nested_driver(marker: str = "") -> str:
+            """Run the nested driver."""
             return marker
 
-        return StructuredTool.from_function(flow, name="flow", description="Run the nested flow.")
+        return StructuredTool.from_function(nested_driver, name="nested_driver", description="Run the nested driver.")
 
 
 @pytest.fixture
@@ -346,7 +346,7 @@ def test_tools_agent_park_has_no_interrupt_on_collision(
 
 
 def _preset_call(call_id: str = "c1") -> AIMessage:
-    return AIMessage(content="", tool_calls=[{"id": call_id, "name": "flow_preset", "args": {}}])
+    return AIMessage(content="", tool_calls=[{"id": call_id, "name": "driver_preset", "args": {}}])
 
 
 def _tool_messages(prompt: list[Any]) -> list[Any]:
@@ -376,18 +376,18 @@ def test_tools_agent_refuses_to_adopt_a_nested_runs_park(
     # no park state at all.
     saver = InMemorySaver()
     nested = _NestedDriverStandIn("i-nested", resume_owner)
-    model = ScriptedChatModel([_preset_call(), AIMessage(content="that flow needs its own route")])
+    model = ScriptedChatModel([_preset_call(), AIMessage(content="that call needs its own route")])
     _wire_tools_build(monkeypatch, model, saver)
-    app_tools.client_tools["flow"] = nested.base_tool()
-    app_tools.tool_runners["flow"] = nested.run
+    app_tools.client_tools["nested_driver"] = nested.base_tool()
+    app_tools.tool_runners["nested_driver"] = nested.run
 
     agent = _agent()
-    preset = PresetSpec(name="flow_preset", base_tool="flow", description="Run the nested flow.", fixed_kwargs={})
+    preset = PresetSpec(name="driver_preset", base_tool="nested_driver", description="Run the nested driver.", fixed_kwargs={})
 
     async def go() -> None:
         result = await agent.run(presets=[preset], checkpoint_provider="redis", user_message="go", thread_id="t-nested")
         # The turn COMPLETED on the refusal — not a park receipt, not a raised run.
-        assert result == "that flow needs its own route"
+        assert result == "that call needs its own route"
         assert nested.calls == 1
         # The refusal is model-visible: the second prompt carries it as the tool's result, so
         # the model can answer around it in this turn.
