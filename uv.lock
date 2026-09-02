@@ -5842,6 +5842,7 @@ anthropic = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 curl = [
     { name = "curl-cffi" },
@@ -5862,6 +5863,7 @@ google = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 huggingface = [
     { name = "langchain" },
@@ -5871,6 +5873,7 @@ huggingface = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
     { name = "sentence-transformers" },
 ]
 jq = [
@@ -5888,6 +5891,7 @@ langgraph-checkpoint-postgres = [
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-checkpoint-redis" },
     { name = "psycopg", extra = ["pool"] },
+    { name = "redis" },
 ]
 langgraph-checkpoint-sqlite = [
     { name = "aiosqlite" },
@@ -5898,6 +5902,7 @@ langgraph-checkpoint-sqlite = [
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "redis" },
 ]
 llm = [
     { name = "langchain" },
@@ -5906,6 +5911,7 @@ llm = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 mistral = [
     { name = "langchain" },
@@ -5915,6 +5921,7 @@ mistral = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 ollama = [
     { name = "langchain" },
@@ -5924,6 +5931,7 @@ ollama = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 postgres = [
     { name = "psycopg", extra = ["binary", "pool"] },
@@ -5942,6 +5950,7 @@ xai = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-redis" },
+    { name = "redis" },
 ]
 
 [package.metadata]
@@ -5981,6 +5990,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "redis", marker = "extra == 'llm'", specifier = ">=5" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },

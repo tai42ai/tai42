@@ -195,6 +195,7 @@ async def create_checkpoint_resource(
                 raise ValueError(REDIS_CHECKPOINT_NOT_CONFIGURED_MESSAGE)
 
             from langgraph.checkpoint.redis import AsyncRedisSaver
+            from redis.asyncio import Redis as AsyncRedis
 
             from tai42_kit.llm.settings import llm_provider_settings
 
@@ -202,7 +203,29 @@ async def create_checkpoint_resource(
             ttl_minutes = llm_provider_settings().checkpoint_ttl_minutes
             ttl_config = {"default_ttl": ttl_minutes, "refresh_on_read": True} if ttl_minutes is not None else None
 
-            saver = AsyncRedisSaver(redis_url=conn_string, ttl=ttl_config)
+            # The client is injected, never left to the saver: handed a URL, the
+            # saver builds its own client, marks itself the owner, and its teardown
+            # then clears the redisvl search indexes' client reference — after which
+            # those indexes re-resolve a connection from the BARE ``REDIS_URL``
+            # environment variable, blind to the URL resolved above (which may have
+            # come from TAI_DEFAULT_REDIS_URL or the conn-string setting). Injecting
+            # the client keeps the saver a non-owner, so that env fallback is
+            # unreachable. ``connection_args`` is deliberately not passed: the saver
+            # consults it only while building a client of its own.
+            client = AsyncRedis.from_url(conn_string)
+            saver = AsyncRedisSaver(redis_client=client, ttl=ttl_config)
+
+            async def close_redis():
+                # Ownership is explicit and one-way: the kit built the client, so the
+                # kit closes it. The saver's teardown runs first — for a non-owner
+                # that call is inert (the whole body is ownership-gated), kept so a
+                # version that does release state still gets it, and so there is no
+                # double-close — and the client closes even if that teardown raises.
+                try:
+                    await saver.__aexit__(None, None, None)
+                finally:
+                    await client.aclose()
+
             try:
                 try:
                     await saver.asetup()
@@ -213,17 +236,10 @@ async def create_checkpoint_resource(
                         raise
                     logger.debug("Redis checkpoint setup already applied; ignoring: %s", e)
             except BaseException:
-                # setup failed (or was cancelled): close the saver we just opened
-                # (it owns a redis pool) so it is not leaked. No cleanup fn is
-                # returned on this path.
-                await saver.__aexit__(None, None, None)
+                # setup failed (or was cancelled): run the same cleanup path so the
+                # saver and the client are not leaked. No cleanup fn is returned here.
+                await close_redis()
                 raise
-
-            async def close_redis():
-                # The saver owns the redis client (built from redis_url): its
-                # __aexit__ disconnects the connection pool, matching the
-                # postgres/sqlite close paths.
-                await saver.__aexit__(None, None, None)
 
             return saver, close_redis
 

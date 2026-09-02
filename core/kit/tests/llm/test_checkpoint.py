@@ -8,6 +8,7 @@ on the real module. No real Redis/Postgres/SQLite connection is opened.
 """
 
 import asyncio
+import os
 import sys
 import types
 from typing import Any
@@ -18,6 +19,8 @@ pytest.importorskip("langgraph")
 
 from tai42_kit.llm.checkpoint import checkpoint as cp
 from tai42_kit.llm.checkpoint.checkpoint_registry import CheckpointRegistry
+
+from .conftest import client_target, install_spy_client
 
 
 # --------------------------------------------------------------------------- #
@@ -70,17 +73,21 @@ async def test_redis_none_conn_string_raises_named_error_without_url(monkeypatch
 
 
 async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
-    # None + redis + a TAI_DEFAULT_REDIS_URL resolves the checkpoint end-to-end
-    # from the shared namespace: the saver is built from that resolved URL.
+    # None + redis + a TAI_DEFAULT_REDIS_URL (and NO bare REDIS_URL — the autouse
+    # env fixture clears it) resolves the checkpoint end-to-end from the shared
+    # namespace: the client the saver is handed is pointed at that resolved URL.
     monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6379/0")
+    assert "REDIS_URL" not in os.environ
     setups = []
 
     class _FakeSaver:
-        def __init__(self, redis_url, ttl=None):
-            self.redis_url = redis_url
+        # Keyword-only ``redis_client``, no ``redis_url``: a kit that went back to
+        # handing over a URL would not construct.
+        def __init__(self, *, redis_client, ttl=None):
+            self.redis_client = redis_client
 
         async def asetup(self):
-            setups.append(self.redis_url)
+            setups.append(client_target(self.redis_client))
 
         async def __aexit__(self, *exc):
             pass
@@ -90,8 +97,8 @@ async def test_redis_none_conn_string_resolves_from_tai_default(monkeypatch):
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
 
     resource, closer = await cp.create_checkpoint_resource("redis", None)
-    assert resource.redis_url == "redis://shared:6379/0"
-    assert setups == ["redis://shared:6379/0"]
+    assert client_target(resource.redis_client) == "shared:6379/0"
+    assert setups == ["shared:6379/0"]
     await closer()
 
 
@@ -149,13 +156,13 @@ async def test_redis_resource_setup_called(monkeypatch):
     setups = []
 
     class _FakeSaver:
-        def __init__(self, redis_url, ttl=None):
-            self.redis_url = redis_url
+        def __init__(self, *, redis_client, ttl=None):
+            self.redis_client = redis_client
             self.ttl = ttl
             self.closed = False
 
         async def asetup(self):
-            setups.append(self.redis_url)
+            setups.append(client_target(self.redis_client))
 
         async def __aexit__(self, *exc):
             self.closed = True
@@ -166,15 +173,15 @@ async def test_redis_resource_setup_called(monkeypatch):
 
     resource, closer = await cp.create_checkpoint_resource("redis", "redis://h:6379/0")
     assert isinstance(resource, _FakeSaver)
-    assert setups == ["redis://h:6379/0"]
+    assert setups == ["h:6379/0"]
     await closer()
-    # The closer tears the saver down (disconnects the redis pool), not a no-op.
+    # The closer tears the saver down (releasing its indexes), not a no-op.
     assert resource.closed is True
 
 
 async def test_redis_setup_ignores_already_exists(monkeypatch):
     class _FakeSaver:
-        def __init__(self, redis_url, ttl=None):
+        def __init__(self, *, redis_client, ttl=None):
             pass
 
         async def asetup(self):
@@ -192,7 +199,7 @@ async def test_redis_setup_reraises_other_errors(monkeypatch):
     closed = []
 
     class _FakeSaver:
-        def __init__(self, redis_url, ttl=None):
+        def __init__(self, *, redis_client, ttl=None):
             pass
 
         async def asetup(self):
@@ -211,12 +218,153 @@ async def test_redis_setup_reraises_other_errors(monkeypatch):
     assert closed == [True]
 
 
+# --------------------------------------------------------------------------- #
+# redis client injection + ownership
+# --------------------------------------------------------------------------- #
+async def test_redis_saver_is_handed_a_client_built_from_the_resolved_url(monkeypatch):
+    # The kit resolves the URL and injects the CLIENT. Nothing downstream is left
+    # to re-resolve a connection from the bare ``REDIS_URL`` env var, which is
+    # absent here — only the conn string names the target.
+    captured: dict[str, Any] = {}
+
+    class _FakeSaver:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def asetup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            pass
+
+    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
+    fake_mod.AsyncRedisSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+
+    assert "REDIS_URL" not in os.environ
+    await cp.create_checkpoint_resource("redis", "rediss://user:pw@vault:6380/3")
+
+    # A client, never a URL — and no ``connection_args``, which the saver reads
+    # only while building a client of its own.
+    assert set(captured) == {"redis_client", "ttl"}
+    from redis.asyncio import Redis as AsyncRedis
+    from redis.asyncio.connection import SSLConnection
+
+    client = captured["redis_client"]
+    assert isinstance(client, AsyncRedis)
+    assert client_target(client) == "vault:6380/3"
+    # The WHOLE url survives the hand-off, not just the endpoint: ``rediss://``
+    # selects the TLS connection class (identity, not isinstance — the plain
+    # ``Connection`` is its base) and the credentials ride along with it.
+    pool = client.connection_pool
+    assert pool.connection_class is SSLConnection
+    assert pool.connection_kwargs["username"] == "user"
+    assert pool.connection_kwargs["password"] == "pw"
+
+
+async def test_real_redis_saver_never_closes_an_injected_client():
+    # The upstream contract the kit's ownership rests on: handed a client, the
+    # saver is not its owner and its teardown leaves it open — so the kit must
+    # close it, and closing it is not a double-close. Construction and teardown
+    # of a non-owning saver do no I/O, so no live Redis is needed.
+    saver_mod = pytest.importorskip("langgraph.checkpoint.redis")
+    from redis.asyncio import Redis as AsyncRedis
+
+    closes = []
+    client = AsyncRedis.from_url("redis://127.0.0.1:6379/0")
+
+    async def _spy_aclose(*args: Any, **kwargs: Any) -> None:
+        closes.append(True)
+
+    client.aclose = _spy_aclose  # type: ignore[method-assign]
+
+    saver = saver_mod.AsyncRedisSaver(redis_client=client, ttl=None)
+    await saver.__aexit__(None, None, None)
+    assert closes == []
+
+
+async def test_redis_closer_closes_the_injected_client_exactly_once(monkeypatch):
+    built = install_spy_client(monkeypatch)
+    exits = []
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None):
+            pass
+
+        async def asetup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            exits.append(True)
+
+    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
+    fake_mod.AsyncRedisSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+
+    _resource, closer = await cp.create_checkpoint_resource("redis", "redis://h/0")
+    assert len(built) == 1
+    assert built[0].closes == 0  # nothing closes the live resource
+
+    await closer()
+    # One cleanup path: the saver's teardown runs, then the kit closes the client
+    # it built — once, never twice.
+    assert exits == [True]
+    assert built[0].closes == 1
+
+
+async def test_redis_setup_failure_closes_the_injected_client(monkeypatch):
+    built = install_spy_client(monkeypatch)
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None):
+            pass
+
+        async def asetup(self):
+            raise RuntimeError("connection refused")
+
+        async def __aexit__(self, *exc):
+            pass
+
+    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
+    fake_mod.AsyncRedisSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        await cp.create_checkpoint_resource("redis", "redis://h/0")
+    # No cleanup fn is returned on this path, so the client the kit built must be
+    # closed here or it leaks.
+    assert built[0].closes == 1
+
+
+async def test_redis_client_closes_even_when_saver_teardown_raises(monkeypatch):
+    built = install_spy_client(monkeypatch)
+
+    class _FakeSaver:
+        def __init__(self, *, redis_client, ttl=None):
+            pass
+
+        async def asetup(self):
+            pass
+
+        async def __aexit__(self, *exc):
+            raise RuntimeError("teardown blew up")
+
+    fake_mod: Any = types.ModuleType("langgraph.checkpoint.redis")
+    fake_mod.AsyncRedisSaver = _FakeSaver
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.redis", fake_mod)
+
+    _resource, closer = await cp.create_checkpoint_resource("redis", "redis://h/0")
+    with pytest.raises(RuntimeError, match="teardown blew up"):
+        await closer()
+    assert built[0].closes == 1
+
+
 def _install_fake_redis_saver(monkeypatch) -> dict[str, Any]:
     """Install a fake ``AsyncRedisSaver`` that records the ``ttl`` it was built with."""
     captured: dict[str, Any] = {}
 
     class _FakeSaver:
-        def __init__(self, redis_url, ttl=None):
+        def __init__(self, *, redis_client, ttl=None):
             captured["ttl"] = ttl
 
         async def asetup(self):
