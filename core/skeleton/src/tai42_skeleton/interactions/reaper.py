@@ -17,7 +17,7 @@ import logging
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
-from tai42_contract.interactions import InteractionRequest, InteractionResponse
+from tai42_contract.interactions import InteractionRequest, InteractionResponse, fire_continuation_abandoned
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
@@ -185,6 +185,13 @@ async def redeliver_due_continuations_once() -> int:
                         "its retention horizon; its continuation will never fire",
                         interaction_id,
                     )
+                    # Notify any resuming driver of the terminus by interaction id, so the caller
+                    # bound to the parked run (a conversation turn, a chained park) is told the
+                    # answer will never come rather than waiting to its own deadline. The record is
+                    # gone and nothing can re-drive the run, so a driver's non-success completion
+                    # fires here with no later success to dedupe it away. Best-effort inside; never
+                    # perturbs the pass.
+                    await fire_continuation_abandoned(interaction_id)
                     continue
                 redeliver_continuation(store, due)
                 redelivered += 1
