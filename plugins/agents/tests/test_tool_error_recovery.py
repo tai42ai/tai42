@@ -25,9 +25,11 @@ from langchain_core.tools import StructuredTool, ToolException
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.constants import START
 from pydantic import BaseModel, PrivateAttr, ValidationError
+from tai42_contract.agent.base import PresetSpec
 
 from tai42_agents._internal import base_tool_agent as bta
 from tai42_agents._internal import recovery as rec
+from tai42_agents._internal.resolve_tools import resolve_tools
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 
 _RECOVERY_LOGGER = "tai42_agents._internal.recovery"
@@ -203,6 +205,36 @@ class TestToolErrorMiddleware:
         assert result.name == "failing"
         assert str(exc) in result.content
         assert any("failing" in r.getMessage() and "call_v" in r.getMessage() for r in caplog.records)
+
+    def test_preset_base_tool_failure_becomes_error_message_and_run_continues(
+        self, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+    ) -> None:
+        # A PRESET is a tool like any other from the model's side, so its base tool failing
+        # must reach the model as an error ToolMessage and let the turn finish — the same
+        # contract a directly-bound tool has: an untyped exception out of the adapter would
+        # abort the run and leave the thread holding a checkpointed dangling tool_call.
+        saver = InMemorySaver()
+        model = ScriptedChatModel([_tool_call("my_preset", "call_1"), AIMessage(content="recovered")])
+        _seams(monkeypatch, model, saver)
+        app_tools.client_tools["base"] = _raising_tool(RuntimeError("unused"), name="base")
+
+        def boom(**_kwargs: Any) -> Any:
+            raise ValueError("base tool down")
+
+        app_tools.tool_runners["base"] = boom
+        preset = PresetSpec(name="my_preset", description="run a preset", base_tool="base", fixed_kwargs={})
+        (preset_tool,) = asyncio.run(resolve_tools(app_tools, [], [], [preset]))
+
+        result = asyncio.run(bta.ainvoke_tools_agent("sys", ["do it"], [preset_tool], config=_config("t-preset-fail")))
+
+        # The loop continued past the base tool's failure and the model produced an answer.
+        assert result.output == "recovered"
+        messages = asyncio.run(_state_messages(saver, model, "t-preset-fail"))
+        errors = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
+        assert len(errors) == 1
+        assert errors[0].tool_call_id == "call_1"
+        # Named for the tool the MODEL called (the preset), carrying the base tool's text.
+        assert "Error calling tool 'my_preset': base tool down" in errors[0].content
 
     def test_runtime_error_propagates_and_aborts_the_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A non-tool-logic failure is NOT masked: it propagates and aborts the run.

@@ -2,12 +2,14 @@
 
 Covers name resolution, preset binding (base tool + fixed kwargs, with fixed
 keys hidden from the exposed schema), the duplicate-name guard, and the bound
-callable's park contract: a park sentinel becomes the reserved marker, and a nested
-run's is refused. A fake tool facet (mirroring
+callable's result/error contract: a park sentinel becomes the reserved marker (a
+nested run's is refused), and a base-tool failure becomes a model-visible
+``ToolException`` while cancellation passes through. A fake tool facet (mirroring
 ``tai42_app.tools``) stands in for a live app — no LLM.
 """
 
 import asyncio
+import logging
 from typing import cast
 
 import pytest
@@ -366,6 +368,51 @@ def test_preset_accepts_a_tuple_required():
     (tool,) = asyncio.run(resolve_tools(app, [], [], [_named_preset()]))
     assert isinstance(tool.args_schema, dict)
     assert tool.args_schema["required"] == ["keep"]
+
+
+def _failing_preset(exc: BaseException) -> tuple[FakeTools, PresetSpec]:
+    """A preset whose BASE TOOL raises ``exc`` on every dispatch."""
+
+    class _FailingTools(FakeTools):
+        async def run_tool(self, key, arguments):
+            self.run_tool_calls.append((key, arguments))
+            raise exc
+
+    preset = PresetSpec(name="my_preset", description="run a preset", base_tool="example_tool", fixed_kwargs={})
+    return _FailingTools(), preset
+
+
+def test_preset_base_tool_failure_becomes_a_model_visible_tool_exception(caplog):
+    # A base tool that fails while doing its job is THIS tool's failure: the adapter raises
+    # the ToolException the agent loop's error middleware turns into a model-visible error
+    # ToolMessage, so the run continues instead of aborting on a dangling tool_call. The
+    # message names the preset the model called and carries the base tool's error text.
+    from langchain_core.tools import ToolException
+
+    app, preset = _failing_preset(ValueError("base tool down"))
+    (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tai42_agents._internal.resolve_tools"),
+        pytest.raises(ToolException, match=r"Error calling tool 'my_preset': base tool down"),
+    ):
+        asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
+
+    # Never silent server-side: the warning names the preset, its base tool, and the error.
+    assert any(
+        "my_preset" in r.getMessage() and "example_tool" in r.getMessage() and "base tool down" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_preset_base_tool_cancellation_passes_through_untouched():
+    # Cancellation is not a tool-logic failure: a BaseException propagates unchanged, never
+    # masked into a model-visible tool error.
+    app, preset = _failing_preset(asyncio.CancelledError())
+    (tool,) = asyncio.run(resolve_tools(_app_tools(app), [], [], [preset]))
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(tool.arun({"example_config_kwargs": {"x": 1}}))
 
 
 def test_preset_park_refusal_keeps_its_own_typed_message():
