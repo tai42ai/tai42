@@ -246,14 +246,31 @@ def _bound_park_thread_id() -> str | None:
       ``delivery_thread_id`` (``conversations.turn._run_tool_turn``), read here off
       :func:`get_park_completion`;
     * an AGENT route target runs inside the bridge turn context that carries the thread
-      (``conversations.turn._run_agent_turn``), read here off ``current_bridge_turn``.
+      (``conversations.turn._run_agent_turn``), read here off ``current_bridge_turn``. Its own
+      park-completion context is keyed by ITS delivery tool's routing parameter, not this one,
+      and is deliberately not read here — a completion context is opaque, so only the ONE key
+      this module owns is ever looked up in it.
 
-    Never fabricates a thread id — an unbound park indexes nothing. Both bindings are set only
-    on a LIVE turn; a park raised OUTSIDE one — a background tool run, or a re-park during an
-    out-of-band resume drive (which delivers via ``deliver_*_completion`` without re-wrapping
-    the turn) — is unbound and so is not thread-indexed / not cascade-cancellable. A known,
-    non-regressing boundary (nothing was indexed before this index existed); closing it would
-    mean the resume drive re-establishing the thread binding, left to a follow-up."""
+    Never fabricates a thread id — an unbound park indexes nothing. A park raised where neither
+    binding is set is therefore not thread-indexed and not cascade-cancellable. Three cases sit on
+    that boundary, and they do NOT all behave alike:
+
+    * a background tool run (no turn at all) — unbound, unindexed. Nothing was indexed before this
+      index existed, so this is a floor, not a regression.
+    * a RE-PARK during an out-of-band resume drive, which delivers via ``deliver_*_completion``
+      without re-wrapping the turn. A resuming driver rebinds the stored completion around the
+      drive, so a TOOL-route re-park is indexed (its rebound context carries
+      ``delivery_thread_id``) while an AGENT-route re-park is NOT: its context is keyed by ITS
+      delivery tool's parameter, which this module deliberately does not read, and there is no
+      bridge turn context out of band. The asymmetry follows from the opacity rule above rather
+      than from any judgement that one deserves indexing more.
+    * a nested park inside an AGENT running as a TOOL route's target. The agent scopes the tools
+      it dispatches so no nested driver can capture its delivery address, which also clears the
+      completion context this function reads; a tool turn establishes no bridge turn context, so
+      such a park is unindexed. Delivery of the agent's own answer is unaffected.
+
+    Closing the open cases means the resume drive (and the tool-turn door) establishing the thread
+    binding in their own right, left to a follow-up."""
     _completion_tool, completion_ctx = get_park_completion()
     if completion_ctx is not None:
         candidate = completion_ctx.get(_PARK_COMPLETION_THREAD_KEY)

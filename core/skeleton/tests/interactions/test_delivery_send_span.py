@@ -70,13 +70,17 @@ def backend():
 
 @pytest.fixture
 def register_channel():
+    # Bind the app for the test's duration: registration goes through the ``tai42_app`` handle,
+    # so this module cannot lean on some EARLIER module's import-time bind — that only holds
+    # when the whole member suite runs, and leaves this test failing on its own.
     app._channel_registry.reset()
 
     def _register(name, channel):
         tai42_app.channels.register(name, channel)
         return channel
 
-    yield _register
+    with tai42_app.bound(app):
+        yield _register
     app._channel_registry.reset()
 
 
