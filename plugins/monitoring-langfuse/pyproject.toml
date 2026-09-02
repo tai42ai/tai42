@@ -27,7 +27,7 @@ dependencies = [
     # protocols, the neutral data models, and the tai42_app handle.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.0,<7",
+    "tai42-contract>=6.1,<7",
     # TaiBaseSettings + the settings cache registry.
     "tai42-kit>=3.8,<4",
     # The Langfuse SDK. Pinned to a minor: sdk_internals.py reaches into private

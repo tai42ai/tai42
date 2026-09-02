@@ -28,7 +28,7 @@ dependencies = [
     # and the tai42_app.sandboxes facet.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.0,<7",
+    "tai42-contract>=6.1,<7",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
     # importable conformance suite. The floor names the first release carrying
