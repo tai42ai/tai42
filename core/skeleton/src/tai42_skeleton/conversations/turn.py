@@ -479,7 +479,15 @@ async def _refresh_thread_mode_ttl(thread_id: str) -> None:
 class _SilentOutcome:
     """A tool turn that produced no reply — a designed no-reply, never an error. On the
     channel door nothing is ever sent (terminal ``silent``); on the api door an explicit
-    silent marker is delivered through the durable machine."""
+    silent marker is delivered through the durable machine.
+
+    ``note`` is an OPTIONAL internal detail (recorded, never delivered) that names WHY the
+    turn is silent when that is worth keeping — set for a turn that went silent because the
+    run PAUSED with its reply still pending, so the record reads as not-yet-answered rather
+    than a plain designed no-reply. ``None`` for an ordinary silent outcome, which records no
+    detail (byte-identical to before)."""
+
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -592,6 +600,51 @@ def _failed_result_detail(result: object) -> str | None:
     return f"tool result status {status!r}{reason_text}"
 
 
+#: The NON-TERMINAL status vocabulary a run envelope reports when it handed control back
+#: MID-RUN instead of finishing: an async park (``"suspended"``) whose envelope did not cross a
+#: tool-face — the engine's own ``flow_resume`` / ``flow_step`` callers keep the run-outcome dict
+#: rather than the :class:`SuspendedInteraction` sentinel the ``flow`` auto-pilot tool-face
+#: emits — or a step-mode tool-call pause (``"interrupt"``). A paused run is NEITHER a success
+#: NOR a failure: its flagged reply surface is still DOWNSTREAM of the pause (unproduced), so
+#: mapping its envelope through ``reply_expr`` reads an empty/not-ready surface as though it were
+#: the produced reply — either faulting an authored completeness guard or delivering a blank. The
+#: turn ends silently, exactly as the :class:`SuspendedInteraction` marker path does, and the real
+#: reply delivers out of band when the resume drives past the pause (through the completion
+#: continuation bound around the dispatch).
+#:
+#: POSITIVE discrimination on a CLOSED, exact, case-sensitive set — never "anything not success" —
+#: for the same reason :data:`_FAILED_RESULT_STATUSES` is closed: a ``status`` from a tool's OWN
+#: vocabulary is an ordinary payload field that must keep mapping. Kept DISJOINT from the failed
+#: set on purpose: a pause is not a failure, so it must deliver NO error reply to the guest.
+#: ``missing_results`` is deliberately NOT the discriminator — it rides EVERY non-error envelope
+#: the engine returns, a SUCCESS terminal included (as an empty list), so its presence names no
+#: pause; the status does. It is read only to ENRICH the recorded note when the producer carries
+#: it (flows 0.35.0+), and simply absent on the older producer (flows 0.34.0).
+_PAUSED_RESULT_STATUSES: frozenset[str] = frozenset({"suspended", "interrupt"})
+
+
+def _paused_result_note(result: object) -> str | None:
+    """The internal note for a tool result that NAMES a non-terminal PAUSED run
+    (:data:`_PAUSED_RESULT_STATUSES`), or ``None`` when it names none.
+
+    A paused envelope is the run handing control back mid-run — an engine-caller async park or a
+    step-mode tool-call pause — with its flagged reply surface still downstream of the pause, so
+    it must never be mapped as a reply. The note names the paused status and, when the producer
+    rides it (flows 0.35.0+), the ``missing_results`` surfaces the run has not produced YET, so
+    the record can say WHY the turn produced no reply. flows 0.34.0 rides no ``missing_results``
+    and the note simply omits it. Recorded and logged, never delivered — the paused-run sibling of
+    :func:`_failed_result_detail`."""
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    if not isinstance(status, str) or status not in _PAUSED_RESULT_STATUSES:
+        return None
+    missing = result.get("missing_results")
+    if isinstance(missing, list) and missing:
+        return f"tool run paused (status {status!r}); reply pending, missing_results={_capped_repr(missing)}"
+    return f"tool run paused (status {status!r}); reply pending"
+
+
 async def _run_tool_turn(
     route: ConversationRoute,
     text: str,
@@ -681,9 +734,26 @@ async def _run_tool_turn(
     if isinstance(result, SuspendedInteraction):
         # The tool parked the caller on an async ask (a generic contract sentinel —
         # the turn learns nothing of the driver's resume state): produce no reply and
-        # end the turn silently. No completion tool is bound — per the module docstring's
-        # park-delivery paths, a tool target's resuming consumer owns delivery-back.
+        # end the turn silently. The completion continuation bound around this dispatch
+        # is what delivers the reply back into the thread when the parked run resumes.
         return _SilentOutcome()
+    paused_note = _paused_result_note(result)
+    if paused_note is not None:
+        # The run handed back a NON-TERMINAL PAUSED envelope, NOT the SuspendedInteraction marker:
+        # an engine-caller async re-park (``"suspended"``) or a step-mode tool-call pause
+        # (``"interrupt"``) that no tool-face converted to a sentinel. Its flagged reply surface is
+        # still DOWNSTREAM of the pause, so mapping it through reply_expr would answer a not-ready
+        # reply as a produced one (faulting an authored completeness guard, or delivering a blank).
+        # A pause is NEITHER success nor failure — so it takes NEITHER the reply path NOR the error
+        # path: end the turn silently exactly as the marker branch above does, and the real reply
+        # delivers out of band through the completion continuation bound around this dispatch when
+        # the resume drives past the pause. The note rides the silent record so it reads as
+        # PENDING, not lost. Known limitation: only the ``"suspended"`` re-park captures a
+        # completion engine-side; a step-mode ``"interrupt"`` reaching a conversation route (a
+        # hidden looping tool no route sensibly targets — convention, not validation) stays
+        # silent with no delivery leg.
+        logger.info("conversations: tool turn for route %r paused: %s", route.route_name, paused_note)
+        return _SilentOutcome(note=paused_note)
     failure_detail = _failed_result_detail(result)
     if failure_detail is not None:
         # The tool RETURNED a non-success terminal instead of raising: the run was aborted,
@@ -890,33 +960,37 @@ def _with_outcome(
     )
 
 
-def _with_channel_silent(intake: ConversationRecord) -> ConversationRecord:
+def _with_channel_silent(intake: ConversationRecord, note: str | None = None) -> ConversationRecord:
     """``intake`` moved to terminal ``silent`` — a CHANNEL-door tool turn that produced no
     reply, so nothing is ever sent. Carries no answer_status, matching
-    :data:`ANSWERLESS_STATUSES`."""
+    :data:`ANSWERLESS_STATUSES`. ``note`` is an optional internal detail (never sent) — the
+    paused-run pending reason — recorded so a silent-because-pending turn is diagnosable;
+    ``None`` records no detail, exactly as an ordinary silent turn does."""
     return ConversationRecord.model_validate(
         intake.model_dump()
         | {
             "answer_status": None,
             "answer": None,
-            "error": None,
+            "error": note,
             "delivery_status": DeliveryStatus.SILENT,
             "updated_at": time.time(),
         }
     )
 
 
-def _with_api_silent(intake: ConversationRecord) -> ConversationRecord:
+def _with_api_silent(intake: ConversationRecord, note: str | None = None) -> ConversationRecord:
     """``intake`` moved to ``pending_delivery`` carrying a ``silent`` outcome — an API-door
     tool turn that produced no reply. The api door answered ``202`` promising a callback, so
     the silent outcome is delivered through the same durable machine an answer takes; it
-    carries no answer text."""
+    carries no answer text. ``note`` is an optional internal detail (never sent — the silent
+    marker delivered to the caller carries no answer or error) — the paused-run pending reason —
+    recorded so a silent-because-pending turn is diagnosable; ``None`` records no detail."""
     return ConversationRecord.model_validate(
         intake.model_dump()
         | {
             "answer_status": "silent",
             "answer": None,
-            "error": None,
+            "error": note,
             "delivery_status": DeliveryStatus.PENDING_DELIVERY,
             "updated_at": time.time(),
         }
@@ -1020,7 +1094,9 @@ def _outcome_record(intake: ConversationRecord, outcome: _ToolOutcome) -> Conver
     ``pending_delivery``; a silent outcome is terminal ``silent`` on the channel door and a
     deliverable ``silent`` marker on the api door."""
     if isinstance(outcome, _SilentOutcome):
-        return _with_channel_silent(intake) if intake.door == "channel" else _with_api_silent(intake)
+        if intake.door == "channel":
+            return _with_channel_silent(intake, outcome.note)
+        return _with_api_silent(intake, outcome.note)
     return _with_outcome(intake, outcome.answer_status, outcome.parts, outcome.error)
 
 

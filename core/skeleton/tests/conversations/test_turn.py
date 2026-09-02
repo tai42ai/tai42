@@ -736,6 +736,210 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
     assert len(channel.sends) == sends_before
 
 
+# -- a PAUSED (non-terminal) run envelope reaching the tool turn --------------------------------
+#
+# A conversation route whose tool target is a flow does NOT always get the `SuspendedInteraction`
+# marker: the `flow` auto-pilot tool-face converts a park to that marker, but the engine's own
+# `flow_resume`/`flow_step` callers keep the RAW run-outcome dict. When such a run pauses with its
+# flagged reply surface still DOWNSTREAM of the pause, the turn receives a paused envelope
+# (`status` "suspended" or "interrupt"), NOT a terminal — mapping it through reply_expr would read
+# an empty/not-ready surface as though it were the produced reply.
+
+
+def _paused_envelope(status: str, *, with_missing: bool) -> dict:
+    """A paused run-outcome envelope the engine hands a step/resume caller. ``with_missing``
+    rides ``missing_results`` (flows 0.35.0+); without it is the 0.34.0 shape. Neither carries a
+    ``result`` — the flagged reply surface is still downstream of the pause."""
+    envelope: dict = {"status": status, "session_id": "run-sierra"}
+    if status == "interrupt":
+        envelope["tool_calls"] = [{"tool": "compose_messages", "tool_kwargs": {}}]
+    else:
+        envelope["interaction_ids"] = ["i-async"]
+        envelope["interrupts"] = {"item-1": "i-async"}
+        envelope["parks"] = [{"interaction_id": "i-async", "expiry_at": None}]
+        envelope["expiry_at"] = None
+    if with_missing:
+        envelope["missing_results"] = ["compose_messages"]
+    return envelope
+
+
+@pytest.mark.parametrize("status", ["suspended", "interrupt"])
+@pytest.mark.parametrize("with_missing", [True, False])
+async def test_tool_target_paused_envelope_ends_the_turn_silently(env, monkeypatch, status, with_missing):
+    # A paused (non-terminal) run envelope is NEITHER a success nor a failure: the turn ends
+    # silently exactly as the SuspendedInteraction marker path does — no reply, no error reply —
+    # and the record NOTES the pending state (never delivered). Both producer versions handled:
+    # flows 0.35.0+ rides `missing_results`, 0.34.0 does not.
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: _paused_envelope(status, with_missing=with_missing))
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    # Silent — the marker path's outcome, not an error outcome.
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert record.answer is None
+    assert record.answer_status is None
+    assert channel.sends == []
+    # The record notes the pending state (diagnostic only, never delivered): it names the paused
+    # status, and — when the producer rides it — the pending flagged surface.
+    assert record.error is not None
+    assert status in record.error
+    if with_missing:
+        assert "compose_messages" in record.error
+
+
+async def test_tool_target_paused_envelope_never_maps_the_authored_reply_guard(env, monkeypatch):
+    # The LIVE shape: the flow's reply chain guards its flagged surface (compose_messages) and
+    # RAISES when it is empty. On the paused envelope that surface is not present yet. Were the
+    # paused envelope mapped as a terminal, reply_expr would run this guard and the turn would
+    # FAULT (mapping-failure error path) — the guest getting a "something went wrong" notice for a
+    # reply that simply has not committed. The turn must divert BEFORE the mapping and stay silent.
+    guard = (
+        ".result.outputs.compose_messages as $c "
+        '| if ($c // "") == "" '
+        'then error("the turn finished without a reply payload (outputs.compose_messages is empty)") '
+        "else $c end"
+    )
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=guard)
+    _wire(monkeypatch, FakeManager(route), channel)
+    _wire_tool(monkeypatch, lambda kw: _paused_envelope("suspended", with_missing=True))
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+    # The guard never ran: the record carries no reply_expr fault and no guest-facing error.
+    assert record.answer_status is None
+    assert record.error is not None
+    assert "reply_expr" not in record.error
+    assert "compose_messages is empty" not in record.error
+    # It IS a success terminal, mapped through the SAME guard, that produces the real reply.
+    success = {"status": "success", "result": {"outputs": {"compose_messages": "your quote is ready"}}}
+    _wire_tool(monkeypatch, lambda kw: success)
+    m2 = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi again", "PID2")
+    await _settle()
+    r2 = await _store().get_record(m2)
+    assert r2 is not None
+    assert r2.answer == "your quote is ready"
+    assert "your quote is ready" in [n.message for n in channel.sends]
+
+
+async def test_tool_target_paused_envelope_binds_completion_and_delivers_on_resume(env, monkeypatch):
+    # End-to-end: a paused envelope reaches the turn (the engine `flow_resume` caller kept the raw
+    # dict), the turn ends silently, and the generic tool-route completion is bound around the
+    # dispatch naming THIS thread — so when the resume drives past the pause to the flagged
+    # terminal and fires deliver_tool_completion, the route's reply_expr maps the final result and
+    # it is delivered back into the thread. The delivery leg for THIS shape is the same one the
+    # SuspendedInteraction park uses (proven adjacent).
+    from tai42_contract.interactions import get_park_completion
+
+    channel = FakeChannel()
+    route = _tool_channel_route(reply_expr=".result.outputs.compose_messages")
+    _wire(monkeypatch, FakeManager(route), channel)
+
+    bound: list = []
+
+    def _pause(kw):
+        bound.append(get_park_completion())
+        return _paused_envelope("suspended", with_missing=True)
+
+    _wire_tool(monkeypatch, _pause)
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+    # The completion was bound around the paused dispatch, naming this thread + originating route.
+    assert len(bound) == 1
+    tool_name, context = bound[0]
+    assert tool_name == turn_module.DELIVER_TOOL_COMPLETION_NAME
+    thread_id = context["delivery_thread_id"]
+    assert thread_id == "bridge:tool-line:+15550002222"
+    assert context["route_name"] == "tool-line"
+
+    # The resume drives past the pause to compose_messages and fires the completion; reply_expr
+    # maps the now-committed reply and it delivers back into the thread.
+    out = await turn_module.deliver_tool_completion(
+        delivery_thread_id=thread_id,
+        completion_id="c-resume",
+        result={"result": {"outputs": {"compose_messages": "your quote is ready"}}},
+        status=PARK_COMPLETION_SUCCEEDED,
+    )
+    await _settle()
+    assert out == {"message_id": "c-resume"}
+    delivered = await _store().get_record("c-resume")
+    assert delivered is not None
+    assert delivered.answer == "your quote is ready"
+    assert delivered.delivery_status is DeliveryStatus.DELIVERED
+    assert "your quote is ready" in [n.message for n in channel.sends]
+
+
+async def test_tool_target_paused_envelope_over_the_api_door_delivers_a_silent_marker(env, monkeypatch):
+    # Parity with the SuspendedInteraction api-door path: an api-door tool turn that pauses
+    # returns the explicit silent marker through the durable machine (the door promised a
+    # callback), never an error notice.
+    route = _tool_api_route(reply_expr=".result.reply // null")
+    _wire(monkeypatch, FakeManager(route))
+    _wire_tool(monkeypatch, lambda kw: _paused_envelope("suspended", with_missing=True))
+
+    async def _post(url, body, signature, timeout_seconds):
+        return 200
+
+    monkeypatch.setattr(delivery_module, "_post_callback", _post)
+
+    result = await turn_module.submit_api_message("tool-api", "user-7", "hi", "alice", wait_seconds=5)
+    await _settle()
+
+    assert result.answer is not None
+    assert result.answer.status == "silent"
+    assert result.answer.answer is None
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+def test_paused_result_note_names_the_status_and_pending_surfaces():
+    # Unit: the note names the paused status, and rides missing_results when the producer carries
+    # it (0.35.0+) — omitting it cleanly when it does not (0.34.0).
+    with_missing = turn_module._paused_result_note({"status": "suspended", "missing_results": ["compose_messages"]})
+    assert with_missing is not None
+    assert "suspended" in with_missing
+    assert "compose_messages" in with_missing
+    without = turn_module._paused_result_note({"status": "interrupt"})
+    assert without is not None
+    assert "interrupt" in without
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        # A terminal success is not paused — it maps.
+        {"status": "success", "result": {"reply": "done"}, "missing_results": []},
+        # A tool's OWN vocabulary that merely reads paused-adjacent stays on the reply path.
+        {"status": "queued", "result": {"reply": "done"}},
+        {"status": "Suspended", "result": {"reply": "done"}},
+        # A non-string / non-dict names no paused status.
+        {"status": None, "result": {"reply": "done"}},
+        {"status": ["suspended"], "result": {"reply": "done"}},
+        "a bare string result",
+    ],
+)
+def test_paused_result_note_ignores_non_paused_results(result):
+    assert turn_module._paused_result_note(result) is None
+
+
 _TURN_LOGGER = "tai42_skeleton.conversations.turn"
 
 

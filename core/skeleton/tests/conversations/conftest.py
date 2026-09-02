@@ -23,9 +23,16 @@ def _clear_interactions_settings_cache():
     value cached by an earlier test would make a delete op here reach for a real Redis. Clearing
     that one cache before each conversations test makes each start from the unconfigured
     interactions store its own env implies (cancel then no-ops); a test that wants the
-    interactions store wired does so explicitly through the helper's ``client_ctx`` seam."""
+    interactions store wired does so explicitly through the helper's ``client_ctx`` seam.
+
+    Cleared on BOTH sides: a conversations delete op re-populates the cache with THIS suite's
+    *unconfigured* value, so clearing on teardown too keeps that value from leaking FORWARD into
+    a sibling suite whose autouse env sets ``INTERACTIONS_REDIS_URL`` but whose read would still
+    see the stale cached singleton (the symmetric hazard this fixture guards against inbound)."""
     from tai42_skeleton.interactions.settings import interactions_settings
 
+    interactions_settings.cache_clear()
+    yield
     interactions_settings.cache_clear()
 
 
