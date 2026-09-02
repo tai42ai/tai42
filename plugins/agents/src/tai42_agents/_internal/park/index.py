@@ -3,7 +3,8 @@
 When an async ``ask_user`` parks a park-capable agent run, the flow-blind platform keeps only
 the interaction id — never any agent, thread, or graph state. This index is how the
 agents plugin reverses that id back to the parked run: at park it records
-``interaction_id -> {agent_name, thread_id, superstep_id, interrupt_id, rebuild_kwargs, completion_tool}``
+``interaction_id -> {agent_name, thread_id, superstep_id, interrupt_id, rebuild_kwargs,
+completion_tool, completion_context}``
 (any engine fact — a LangGraph checkpoint provider / recursion limit — rides INSIDE
 ``rebuild_kwargs``, never a top-level field, so the index stays provider-free);
 when the platform later fires the continuation with ``{interaction_id, answer}`` the

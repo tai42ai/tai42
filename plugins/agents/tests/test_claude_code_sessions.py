@@ -19,7 +19,13 @@ from tai42_contract.access_control.context import reset_request_user_id, set_req
 from tai42_contract.agent.events import MessageFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
-from tai42_contract.interactions import SuspendedInteraction, get_resume_continuation_tool
+from tai42_contract.interactions import (
+    SuspendedInteraction,
+    get_park_completion,
+    get_resume_continuation_tool,
+    reset_park_completion,
+    set_park_completion,
+)
 from tai42_contract.sandbox import ExecResult, SandboxError, SandboxPolicy
 from tests._claude_app import LocalApp, build_local_app
 from tests._claude_stubs import (
@@ -30,6 +36,7 @@ from tests._claude_stubs import (
     REDACT_TRANSCRIPT,
     RESUME_ONCE,
     RESUME_REDRIVE,
+    TOOL_CALL,
     TOOL_CALL_PARK,
     payload_for,
 )
@@ -249,6 +256,35 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
     assert entry is not None
     assert entry["agent_name"] == "claude_code"
     assert entry["thread_id"] == "t1"
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # THIS agent owns the interaction and its deferred answer: a parking driver reached through
+    # a proxied tool must not read the completion binding addressing that answer off the
+    # contextvar (``_internal.nested_dispatch``). The binding is restored around the dispatch.
+    _settings(monkeypatch)
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+    bound = ("conversation_deliver", {"thread_id": "bridge:acme:alice"})
+    seen: list[tuple[str | None, Any]] = []
+
+    def peeking_tool(**_kwargs: Any) -> str:
+        seen.append(get_park_completion())
+        return "peeked"
+
+    app = build_local_app(tool_runners={"peektool": peeking_tool})
+
+    completion_token = set_park_completion(*bound)
+    # A proxied tool call needs a bound execution identity (the door's entitlement gate).
+    user_token = set_request_user_id("user-1")
+    try:
+        _run(app, user_message="deploy it", thread_id="t1", tool_names=["peektool"])
+        assert get_park_completion() == bound
+    finally:
+        reset_request_user_id(user_token)
+        reset_park_completion(completion_token)
+
+    assert seen == [(None, None)]
 
 
 @pytest.mark.usefixtures("fake_redis")

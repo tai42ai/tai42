@@ -56,6 +56,7 @@ from tai42_contract.sandbox import (
     SandboxStreamExit,
 )
 
+from tai42_agents._internal.nested_dispatch import nested_tool_dispatch
 from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
     ParkIdentity,
@@ -562,12 +563,14 @@ class ClaudeCodeAgent(Agent):
                     # to the model inside _on_tool_call).
                     assert thread_id is not None
                     horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
+                    completion_tool, completion_context = get_park_completion()
                     identity = ParkIdentity(
                         agent_name=AGENT_NAME,
                         thread_id=thread_id,
                         rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
                         bind=True,
-                        completion_tool=get_park_completion()[0],
+                        completion_tool=completion_tool,
+                        completion_context=completion_context,
                         retention_bound=horizon,
                     )
                     assert_park_capable(identity, durable=True, retention_bound=horizon)
@@ -648,12 +651,14 @@ class ClaudeCodeAgent(Agent):
         options_snapshot: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
         horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
+        completion_tool, completion_context = get_park_completion()
         identity = ParkIdentity(
             agent_name=AGENT_NAME,
             thread_id=thread_id,
             rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
             bind=True,
-            completion_tool=get_park_completion()[0],
+            completion_tool=completion_tool,
+            completion_context=completion_context,
             retention_bound=horizon,
         )
         assert_park_capable(identity, durable=True, retention_bound=horizon)
@@ -707,14 +712,20 @@ class ClaudeCodeAgent(Agent):
         threaded run it is surfaced UP as a park, exactly as the agent's own async ask is; on a
         thread-less (ephemeral) run it can never be resumed, so it is refused loudly to the
         model as a tool error, mirroring the ephemeral async-ask refusal — never a silent
-        unresumable park."""
+        unresumable park.
+
+        The dispatch runs delivery-scoped: THIS agent owns the interaction and its deferred
+        answer, so a parking driver reached through the tool must not capture the completion
+        binding addressing that answer (see :mod:`~tai42_agents._internal.nested_dispatch`). The
+        park surfaced up here is the agent's own, raised outside the scoped call."""
         if frame.tool_name not in allowlist:
             # A compromised session cannot widen its declared tool set — a loud protocol error.
             raise ProtocolError(
                 f"runner requested tool {frame.tool_name!r} outside the granted allowlist {sorted(allowlist)}"
             )
         try:
-            result = await tai42_app.tools.run_tool(frame.tool_name, frame.arguments)
+            with nested_tool_dispatch():
+                result = await tai42_app.tools.run_tool(frame.tool_name, frame.arguments)
         except Exception as exc:
             await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True)))
             return None

@@ -38,6 +38,7 @@ from tai42_contract.agent import (
 from tai42_contract.app import tai42_app
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+from tests._delivery_scope import assert_delivery_scoped, probe_tool
 
 import tai42_agents.refine_agent.agent as agent_mod
 from tai42_agents._internal.reject import reject_unhonored
@@ -228,7 +229,32 @@ def test_tools_are_resolved_by_name_and_passed_to_both_agents(
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     _collect(agent, evaluator_message="write it", critic_message="review it", tool_names=["t1"])
 
-    assert recorder.tools_per_call == [[tool], [tool]]  # evaluator, then critic
+    # Both agents got the tool — by SURFACE, not object identity: resolution hands each pass a
+    # delivery-scoped copy (its body runs with the park-completion binding cleared). Name alone
+    # would not catch a copy that lost its schema, so the whole model-facing triple is pinned.
+    expected = [(tool.name, tool.description, tool.args)]
+    assert [[(t.name, t.description, t.args) for t in call] for call in recorder.tools_per_call] == [
+        expected,
+        expected,
+    ]
+
+
+def test_dispatched_tools_are_delivery_scoped(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+) -> None:
+    # A tool this loop dispatches is a STEP of the refine turn, never a second answerer of it:
+    # a parking driver reached through it must not read the completion binding that addresses
+    # the agent's own deferred answer off the contextvar.
+    probe, seen = probe_tool("t1")
+    app_tools.client_tools["t1"] = probe
+    evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
+    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    recorder = _patch_loop(monkeypatch, [evaluator, critic])
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    _collect(agent, evaluator_message="write it", critic_message="review it", tool_names=["t1"])
+
+    assert_delivery_scoped(recorder.tools_per_call[0][0], seen)
 
 
 def test_unknown_tool_name_raises(monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any) -> None:
@@ -642,7 +668,13 @@ def test_tool_names_honored_on_run_face(monkeypatch: pytest.MonkeyPatch, app_too
     agent = tai42_app.agents.get_agent(AGENT_NAME)
     asyncio.run(agent.run(evaluator_message="write it", critic_message="review it", tool_names=["t1"]))
 
-    assert recorder.tools_per_call == [[tool], [tool]]  # evaluator, then critic
+    # Both compiled with the live tool — by SURFACE, not object identity (each pass gets a
+    # delivery-scoped copy), so this is parity with the astream face, not a silent drop.
+    expected = [(tool.name, tool.description, tool.args)]
+    assert [[(t.name, t.description, t.args) for t in call] for call in recorder.tools_per_call] == [
+        expected,
+        expected,
+    ]
 
 
 # Each unhonored contract parameter with a MEANINGFUL value — a truthy collection or

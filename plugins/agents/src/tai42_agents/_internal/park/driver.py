@@ -23,7 +23,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
@@ -31,6 +31,7 @@ from langgraph.types import StateSnapshot
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_SUCCEEDED,
     reset_park_completion,
     reset_resume_continuation_tool,
     set_park_completion,
@@ -102,6 +103,7 @@ class ParkIdentity:
     __slots__ = (
         "agent_name",
         "bind",
+        "completion_context",
         "completion_tool",
         "rebuild_kwargs",
         "retention_bound",
@@ -116,6 +118,7 @@ class ParkIdentity:
         rebuild_kwargs: dict[str, Any],
         bind: bool,
         completion_tool: str | None = None,
+        completion_context: Mapping[str, Any] | None = None,
         retention_bound: datetime | None = None,
     ) -> None:
         self.agent_name = agent_name
@@ -126,6 +129,10 @@ class ParkIdentity:
         # deferred response is delivered out of band. ``None`` = the driver's caller
         # receives the resumed result directly (the run face), no completion fire.
         self.completion_tool = completion_tool
+        # The OPAQUE context the binder paired with that tool — the address the delivery tool
+        # reads to route the answer. Carried verbatim (never interpreted here) and merged into
+        # the completion fire, so this driver names no delivery tool's routing arguments.
+        self.completion_context = completion_context
         # The latest wall-time every store backing this park is guaranteed to still hold it;
         # ``None`` = keep-forever. Gated against each ask deadline at persist time.
         self.retention_bound = retention_bound
@@ -155,6 +162,7 @@ def build_park_identity(
     recursion_limit: int | None,
     bind: bool,
     completion_tool: str | None = None,
+    completion_context: Mapping[str, Any] | None = None,
     extra_retention_horizon: datetime | None = None,
 ) -> ParkIdentity | None:
     """Capture the park identity for a LangGraph run, or ``None`` when it cannot be parked.
@@ -207,6 +215,7 @@ def build_park_identity(
         rebuild_kwargs=pinned,
         bind=bind,
         completion_tool=completion_tool,
+        completion_context=completion_context,
         retention_bound=retention_bound,
     )
 
@@ -427,6 +436,9 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
             # forward onto every entry so a re-park keeps delivering. ``None`` = no completion
             # (the run face's caller receives the resumed result directly).
             "completion_tool": identity.completion_tool,
+            # Its opaque routing context, carried forward the same way (JSON-serializable by
+            # contract, so it round-trips this durable entry unchanged).
+            "completion_context": dict(identity.completion_context) if identity.completion_context else None,
         }
 
     expected = dict(union)
@@ -444,6 +456,29 @@ def _is_suspended_receipt(result: Any) -> bool:
     clean terminal answer — the discriminator for whether a completion fires now or is
     carried forward to the new park entry."""
     return isinstance(result, dict) and result.get("status") == "suspended"
+
+
+def _completion_context(entry: dict[str, Any], thread_id: str) -> Mapping[str, Any] | None:
+    """The opaque routing context a stored park entry's completion fire carries — and the
+    binding a re-park rebinds.
+
+    The FIELD is authoritative wherever it is present (every entry this driver writes carries
+    it): its value is used verbatim, an explicit ``None`` meaning the binder wired no routing
+    context at all. Presence is what is tested, not truth, so an explicit ``None`` is never
+    mistaken for an entry that predates the field.
+
+    An entry carrying NO such field is a park persisted before this driver learned to store the
+    context. The fallback is ``{"thread_id": ...}`` — the one address such an entry can be given,
+    because it is the only one derivable from what the entry DOES carry. That rescues the case
+    the address fits: an AGENT-route park, whose delivery tool routes by ``thread_id``. It is
+    deliberately no wider. A field-less park taken under the TOOL-route completion binding stays
+    undeliverable: that tool keys its address differently (``delivery_thread_id`` + the pinned
+    route), and this driver knows no delivery tool's parameters, so nothing here can reconstruct
+    an address the entry never recorded."""
+    if "completion_context" in entry:
+        context: Mapping[str, Any] | None = entry["completion_context"]
+        return context
+    return {"thread_id": thread_id}
 
 
 def _completion_id(thread_id: str, superstep_id: str) -> str:
@@ -481,7 +516,18 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     missing barrier, or — when the barrier is complete but another live worker holds the
     drive lease — :class:`AgentResumeDriveInProgressError`, so the platform keeps this
     continuation's durable retry ticket for the reaper to redeliver until the live drive
-    completes or its lease expires."""
+    completes or its lease expires.
+
+    An ERRORED drive is RETRIED, never converted into a completion fire, and that is deliberate.
+    Firing the non-success terminal on the first error would commit a delivery record under this
+    super-step's STABLE completion id; the redelivery that then drove the same super-step to a
+    clean success would find that id already committed and dedupe its real answer away — the
+    person would be told the run failed while it in fact succeeded. So the completion fires from
+    the clean-terminal branch alone, and an error leaves the index LIVE for the platform's
+    at-least-once redelivery. The cost is the tail: a super-step that never drives cleanly is
+    dropped at the interaction group's give-up with nothing delivered. Announcing THAT terminal
+    (a non-success fire at retry exhaustion, where no later success can be deduped away) is a
+    separate piece of work, not something this branch of the drive can do safely."""
     entry = await read_park_entry(interaction_id)
     if entry is None:
         raise AgentResumeParkEntryNotFoundError(interaction_id)
@@ -510,11 +556,24 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     # stable completion id, so a crash before it leaves the index LIVE for an idempotent
     # redelivery to re-drive and re-reach the handoff, and a crash after it lands on the
     # tombstone. A re-park carried the tool forward onto the new entry, so it is NOT fired here.
-    completion_tool = entry.get("completion_tool")
+    # Subscript, not ``get``: every persisted park entry writes this field, so an entry without
+    # it is a corrupt index and belongs raised, not silently read as "no completion wired". The
+    # rebind below reads it the same way.
+    completion_tool = entry["completion_tool"]
     if completion_tool is not None and not _is_suspended_receipt(result):
         await tai42_app.tools.run_tool(
             completion_tool,
-            {"thread_id": thread_id, "result": result, "completion_id": _completion_id(thread_id, superstep_id)},
+            {
+                # The generic completion-fire payload: the binder's OPAQUE context merged with
+                # this terminal's outcome. The context carries whatever the delivery tool needs
+                # to route the answer, so no delivery tool's parameters are named here.
+                **(_completion_context(entry, thread_id) or {}),
+                "result": result,
+                "completion_id": _completion_id(thread_id, superstep_id),
+                # Reaching here IS the clean-terminal branch: a failed drive raised and a re-park
+                # is excluded above, so the outcome is a success.
+                "status": PARK_COMPLETION_SUCCEEDED,
+            },
         )
     # Tombstone the M park entries and drop the barrier + lease in ONE atomic step, so a crash
     # can never leave a partial tombstone set. A re-park wrote a fresh barrier + entries under
@@ -571,12 +630,19 @@ async def _drive_completed_barrier(
                 raise AgentResumeParkEntryNotFoundError(interaction_id)
             resume_map.setdefault(parked["interrupt_id"], {})[interaction_id] = outputs[interaction_id]
 
-        # Bind the stored completion tool for the drive's duration so a re-park re-persists
-        # a fresh index carrying it forward — the deferred-response delivery survives every
-        # re-park. An agent delivers through the bridge thread it runs under, so it carries no
-        # opaque completion context. ``None`` (the run face) binds nothing. The entry always
-        # carries the ``completion_tool`` field (written on every persisted park entry).
-        completion_token = set_park_completion(entry["completion_tool"])
+        # Bind the stored completion tool AND its opaque context for the drive's duration so a
+        # re-park re-persists a fresh index carrying both forward — the deferred-response
+        # delivery survives every re-park with its routing address intact. The entry always
+        # carries the ``completion_tool`` field (written on every persisted park entry). The
+        # context reads through the SAME field-less fallback the fire uses, so an entry written
+        # before the field existed re-parks with its address rather than rebinding an empty one
+        # and dropping the answer a re-park later. No tool (the run face, whose caller receives
+        # the resumed result directly) binds NOTHING: a context with no tool to fire addresses
+        # a delivery that will never happen, and the binding is one atomic pair.
+        completion_tool = entry["completion_tool"]
+        completion_token = set_park_completion(
+            completion_tool, _completion_context(entry, thread_id) if completion_tool is not None else None
+        )
         try:
             result = await resume_park(
                 rebuild_kwargs=entry["rebuild_kwargs"],

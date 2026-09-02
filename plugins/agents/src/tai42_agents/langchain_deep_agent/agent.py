@@ -39,6 +39,7 @@ from tai42_kit.llm.store.store_registry import store_registry
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import build_run_config, init_langgraph_config
+from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.park import (
     ParkIdentity,
     build_park_identity,
@@ -300,7 +301,9 @@ class DeepAgent(Agent):
         rendered_system = await render_message(system_message, system_message_id, system_message_kwargs)
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
-        resolved_tools = [*tools, *client_tools]
+        # Delivery-scoped: a tool this agent dispatches must not capture the completion binding
+        # addressing the agent's OWN deferred answer (see ``_internal.nested_dispatch``).
+        resolved_tools = scope_nested_dispatch_all([*tools, *client_tools])
         internal_subagents = await resolve_subagent_specs(subagents)
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
 
@@ -535,6 +538,8 @@ class DeepAgent(Agent):
             )
 
         client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
+        # Delivery-scoped, as in ``run`` above.
+        scoped_tools = scope_nested_dispatch_all([*tools, *client_tools])
         internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
         coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
         # Wrap the schema ONCE and bind that same strategy into both the graph and the
@@ -552,7 +557,7 @@ class DeepAgent(Agent):
             saw_suspended = False
             try:
                 agent, config = await self._build_agent(
-                    tools=[*tools, *client_tools],
+                    tools=scoped_tools,
                     subagents=internal_subagents,
                     skills=skills,
                     inline_skills=coerced_inline_skills or None,
@@ -583,9 +588,10 @@ class DeepAgent(Agent):
                 # with the final answer on a clean terminal drive. A run carrying live tools or
                 # neutral (live) subagents is not rebuildable, so it never parks; with no
                 # completion bound, an async ask refuses loudly pre-persist. The retention bound is
-                # min(checkpoint, workspace) (§B3.1). An agent delivers through the bridge thread it
-                # runs under, so it keeps only the tool name and ignores the opaque context.
-                completion_tool = get_park_completion()[0]
+                # min(checkpoint, workspace) (§B3.1). The binding's opaque context is stored beside
+                # the tool name and merged into the completion fire, so the delivery tool receives
+                # the address it routes by.
+                completion_tool, completion_context = get_park_completion()
                 park: ParkIdentity | None = None
                 park_rebuildable = not tools and all(isinstance(s, DeepSubAgentSpec) for s in (subagents or []))
                 if completion_tool is not None and park_rebuildable:
@@ -610,6 +616,7 @@ class DeepAgent(Agent):
                         ),
                         recursion_limit=recursion_limit,
                         completion_tool=completion_tool,
+                        completion_context=completion_context,
                         bind=True,
                         extra_retention_horizon=drive.workspace_retention_horizon,
                     )
@@ -848,7 +855,7 @@ class DeepAgent(Agent):
         interrupt_on = validated.interrupt_on
         strategy = as_tool_strategy(response_format)
 
-        client_tools = (
+        client_tools = scope_nested_dispatch_all(
             await tai42_app.tools.get_client_tools(list(validated.tool_names)) if validated.tool_names else []
         )
         internal_subagents = await resolve_subagent_specs(validated.subagents)
@@ -900,6 +907,7 @@ class DeepAgent(Agent):
                 # through the agent's own bound entrypoint); the completion tool the driver
                 # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
                 # park-capable by construction. The retention bound is min(checkpoint, workspace).
+                completion_tool, completion_context = get_park_completion()
                 park = build_park_identity(
                     agent_name=self.tool_name,
                     config=config,
@@ -907,7 +915,8 @@ class DeepAgent(Agent):
                     has_live_tools=False,
                     rebuild_kwargs=rebuild_kwargs,
                     recursion_limit=recursion_limit,
-                    completion_tool=get_park_completion()[0],
+                    completion_tool=completion_tool,
+                    completion_context=completion_context,
                     bind=True,
                     extra_retention_horizon=drive.workspace_retention_horizon,
                 )

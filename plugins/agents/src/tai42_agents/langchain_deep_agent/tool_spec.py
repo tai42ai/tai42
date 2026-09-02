@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from tai42_contract.app import tai42_app
 
+from tai42_agents._internal.nested_dispatch import scope_nested_dispatch_all
 from tai42_agents._internal.reject import reject_untitled_response_format
 from tai42_agents.langchain_deep_agent.spec import InlineSkill, ResolvedSubAgentSpec
 
@@ -88,7 +89,9 @@ async def _resolve_subagent_spec(spec: DeepSubAgentSpec) -> ResolvedSubAgentSpec
     through to the core spec unchanged.
     """
     reject_untitled_response_format(f"subagent {spec.name!r}", spec.response_format)
-    tools = await tai42_app.tools.get_client_tools(spec.tools) if spec.tools else []
+    # Delivery-scoped: a subagent's tool is dispatched INSIDE the parent's turn, so it must
+    # not capture the completion binding addressing the parent's own deferred answer.
+    tools = scope_nested_dispatch_all(await tai42_app.tools.get_client_tools(spec.tools) if spec.tools else [])
     subagents = [await _resolve_subagent_spec(child) for child in spec.subagents]
     return ResolvedSubAgentSpec(
         name=spec.name,

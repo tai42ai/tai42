@@ -1,20 +1,28 @@
 """The completion-continuation: a resumed run's FINAL answer delivered out of band.
 
-When a completion tool is bound around a park-capable ``astream`` run, the park entry stores
-it and a CLEAN TERMINAL drive AWAITS ``run_tool(completion_tool, {thread_id, result,
-completion_id})`` with the final answer BEFORE finalizing the index, so the durable delivery
-commit precedes the tombstone. A re-park carries the completion tool forward to the new entry
-(fired only when the run finally terminates). A handoff failure raises loudly and leaves the
-index LIVE, so the platform redelivers and re-drives — the completion is never dropped.
+When a completion tool and its opaque routing context are bound around a park-capable
+``astream`` run, the park entry stores both and a CLEAN TERMINAL drive AWAITS
+``run_tool(completion_tool, {**context, result, completion_id, status})`` — the generic
+completion-fire payload the contract pins — with the final answer BEFORE finalizing the index,
+so the durable delivery commit precedes the tombstone. A re-park carries the completion binding
+forward to the new entry (fired only when the run finally terminates). A handoff failure raises
+loudly and leaves the index LIVE, so the platform redelivers and re-drives — the completion is
+never dropped.
 
 Driven over a real ``tools_agent`` / ``langchain_deep_agent`` graph with a scripted model + shared
 in-memory checkpointer and the fakeredis-backed park index (same wiring as the park tests).
+
+The fired payload's agreement with the skeleton delivery tool that receives it is a CROSS-package
+contract neither side's suite can see on its own; it is pinned end to end by the e2e bridge spec
+``test_agent_target_park_deliver`` (this package may not import tai42_skeleton outside the one
+exempted boot test, so the pair can only meet in a spec that runs both).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -31,6 +39,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    PARK_COMPLETION_SUCCEEDED,
     get_resume_continuation_tool,
     reset_park_completion,
     set_park_completion,
@@ -45,6 +54,13 @@ from tai42_agents._internal.park import index as idx
 from tai42_agents.langchain_deep_agent import agent as agent_mod
 
 _COMPLETION_TOOL = "conversation_deliver"
+
+
+def _completion_context(thread_id: str) -> dict[str, Any]:
+    """The opaque routing context a completion binder pairs with the tool — the delivery address
+    the tool reads, keyed by ITS own parameter. Mirrors what the conversation door binds around
+    an agent turn; the driver carries it verbatim and never interprets it."""
+    return {"thread_id": thread_id}
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -167,7 +183,7 @@ def _agent() -> tools_mod.ToolsAgent:
 async def _park_via_astream(agent: tools_mod.ToolsAgent, thread_id: str) -> None:
     """Drive a fresh turn through the astream face with the completion tool bound, so the
     run parks with a completion delivery path recorded on its park entry."""
-    token = set_park_completion(_COMPLETION_TOOL)
+    token = set_park_completion(_COMPLETION_TOOL, _completion_context(thread_id))
     try:
         async for _event in agent.astream(
             tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id
@@ -178,11 +194,16 @@ async def _park_via_astream(agent: tools_mod.ToolsAgent, thread_id: str) -> None
 
 
 def _expected_delivery(thread_id: str, interaction_ids: list[str], result: Any) -> dict[str, Any]:
-    """The exact kwargs a clean-terminal completion handoff fires: the parked thread, the final
-    answer, and the stable completion id derived from (thread_id, super-step of the resolved
-    interactions)."""
+    """The exact kwargs a clean-terminal completion handoff fires: the bound opaque context, the
+    final answer, the stable completion id derived from (thread_id, super-step of the resolved
+    interactions), and the succeeded terminal status."""
     completion_id = drv._completion_id(thread_id, idx.compute_superstep_id(interaction_ids))
-    return {"thread_id": thread_id, "result": result, "completion_id": completion_id}
+    return {
+        **_completion_context(thread_id),
+        "result": result,
+        "completion_id": completion_id,
+        "status": PARK_COMPLETION_SUCCEEDED,
+    }
 
 
 def test_completion_fires_on_terminal_drive(
@@ -203,11 +224,14 @@ def test_completion_fires_on_terminal_drive(
         entry = await idx.read_park_entry("i1")
         assert entry is not None
         assert entry["completion_tool"] == _COMPLETION_TOOL
+        # The binder's OPAQUE context rides the durable entry beside the tool name, so the fire
+        # can address the delivery tool by ITS own routing parameter.
+        assert entry["completion_context"] == _completion_context("bridge:acme:alice")
 
         result = await agent_resume("i1", "the answer")
         assert result == "all done"
-        # The completion tool fired ONCE, awaited, with the parked thread, the final answer, and
-        # the stable completion id.
+        # The completion tool fired ONCE, awaited, with the generic contract payload: the bound
+        # context, the final answer, the stable completion id, and the succeeded status.
         assert delivered == [_expected_delivery("bridge:acme:alice", ["i1"], "all done")]
         # A clean drive finalizes the entry to a resolved tombstone AFTER the completion handoff.
         entry = await idx.read_park_entry("i1")
@@ -233,8 +257,8 @@ def test_completion_carried_forward_on_repark(
     async def go() -> None:
         await _park_via_astream(agent, "bridge:acme:alice")
 
-        # First resume RE-PARKS on the second ask; the completion tool is carried forward to
-        # the new entry, and is NOT fired on a re-park.
+        # First resume RE-PARKS on the second ask; the completion binding (tool AND context) is
+        # carried forward to the new entry, and is NOT fired on a re-park.
         receipt = await agent_resume("i1", "a1")
         assert receipt["status"] == "suspended"
         assert receipt["interaction_ids"] == ["i2"]
@@ -242,11 +266,105 @@ def test_completion_carried_forward_on_repark(
         new_entry = await idx.read_park_entry("i2")
         assert new_entry is not None
         assert new_entry["completion_tool"] == _COMPLETION_TOOL
+        assert new_entry["completion_context"] == _completion_context("bridge:acme:alice")
 
         # Second resume terminates; the completion fires once with the final answer, keyed by the
         # SECOND super-step (the one that resolved).
         result = await agent_resume("i2", "a2")
         assert result == "all done"
+        assert delivered == [_expected_delivery("bridge:acme:alice", ["i2"], "all done")]
+
+    asyncio.run(go())
+
+
+def test_completion_fire_carries_only_the_bound_context(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # GENERIC: the driver never fabricates a routing argument. A binder that wires a completion
+    # tool with NO context gets a fire carrying the terminal outcome alone — the delivery tool's
+    # parameters are the BINDER's business, never this driver's.
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1"])
+    model = ScriptedChatModel([_ask_call("c1"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    agent = _agent()
+
+    async def go() -> None:
+        token = set_park_completion(_COMPLETION_TOOL)
+        try:
+            async for _event in agent.astream(
+                tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id="bridge:acme:alice"
+            ):
+                pass
+        finally:
+            reset_park_completion(token)
+        entry = await idx.read_park_entry("i1")
+        assert entry is not None
+        assert entry["completion_context"] is None
+
+        assert await agent_resume("i1", "the answer") == "all done"
+        completion_id = drv._completion_id("bridge:acme:alice", idx.compute_superstep_id(["i1"]))
+        assert delivered == [
+            {"result": "all done", "completion_id": completion_id, "status": PARK_COMPLETION_SUCCEEDED}
+        ]
+
+    asyncio.run(go())
+
+
+def test_completion_context_falls_back_to_the_parked_thread_on_a_fieldless_entry() -> None:
+    # A stored entry predating the field carries no ``completion_context`` at all: the fallback
+    # reproduces exactly what the old driver injected, so an in-flight AGENT-route park keeps its
+    # address instead of dropping its answer.
+    assert drv._completion_context({"thread_id": "bridge:acme:alice"}, "bridge:acme:alice") == {
+        "thread_id": "bridge:acme:alice"
+    }
+    # PRESENCE is what is tested, so a field that IS present is authoritative — including an
+    # explicit ``None`` (the binder wired no routing context), which never resurrects the
+    # thread fallback.
+    assert drv._completion_context({"completion_context": {"delivery_thread_id": "t"}}, "th") == {
+        "delivery_thread_id": "t"
+    }
+    assert drv._completion_context({"completion_context": None}, "th") is None
+
+
+def test_pre_upgrade_entry_keeps_its_address_across_a_repark(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # THROUGH the re-park path: an in-flight park persisted BEFORE the context field existed is
+    # answered, re-parks on a second ask, and only then terminates. The rebind around the resume
+    # drive must read the SAME pre-upgrade fallback the fire does — a rebind that read the absent
+    # field as "no context" would re-persist an address-less entry and the terminal fire, one
+    # re-park later, would carry no thread_id at all and the answer would be dropped.
+    saver = InMemorySaver()
+    ask = _SequentialAsk(["i1", "i2"])
+    model = ScriptedChatModel([_ask_call("c1"), _ask_call("c2"), AIMessage(content="all done")])
+    _wire(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    delivered: list[dict[str, Any]] = []
+    app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
+
+    agent = _agent()
+
+    async def go() -> None:
+        await _park_via_astream(agent, "bridge:acme:alice")
+
+        # Age the stored entry back to its pre-upgrade shape: the field is not None, it is ABSENT.
+        key = idx._park_key("i1")
+        entry = json.loads(await fake_park_redis.get(key))
+        entry.pop("completion_context")
+        await fake_park_redis.set(key, json.dumps(entry))
+
+        receipt = await agent_resume("i1", "a1")
+        assert receipt["status"] == "suspended"
+        assert delivered == []
+
+        result = await agent_resume("i2", "a2")
+        assert result == "all done"
+        # The fire still carries the parked thread as its delivery address.
         assert delivered == [_expected_delivery("bridge:acme:alice", ["i2"], "all done")]
 
     asyncio.run(go())
@@ -273,7 +391,7 @@ def _wire_deep(
 async def _park_via_astream_deep(agent: Any, thread_id: str) -> None:
     """Drive a fresh langchain_deep_agent turn through the astream face with the completion tool bound,
     so the run parks with a completion delivery path recorded on its park entry."""
-    token = set_park_completion(_COMPLETION_TOOL)
+    token = set_park_completion(_COMPLETION_TOOL, _completion_context(thread_id))
     try:
         async for _event in agent.astream(
             tool_names=["ask"], checkpoint_provider="redis", user_message="go", thread_id=thread_id

@@ -604,9 +604,9 @@ class ToolsAgent(Agent):
         clean terminal drive. With none bound, this returns ``None`` so an async ask
         refuses loudly pre-persist.
 
-        An agent delivers through the bridge thread it runs under, so it keeps only the
-        completion tool name and ignores the opaque completion context."""
-        completion_tool, _ = get_park_completion()
+        The binding's opaque context is stored beside the tool name and merged into the
+        completion fire verbatim, so the delivery tool receives the address it routes by."""
+        completion_tool, completion_context = get_park_completion()
         if completion_tool is None:
             return None
 
@@ -628,6 +628,7 @@ class ToolsAgent(Agent):
                 ),
                 recursion_limit=recursion_limit,
                 completion_tool=completion_tool,
+                completion_context=completion_context,
                 bind=True,
             )
 
@@ -694,7 +695,7 @@ class ToolsAgent(Agent):
         # through the agent's own bound entrypoint); the completion tool the driver
         # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
         # park-capable by construction.
-        completion_tool, _ = get_park_completion()
+        completion_tool, completion_context = get_park_completion()
         park = build_park_identity(
             agent_name=self.tool_name,
             config=config,
@@ -703,6 +704,7 @@ class ToolsAgent(Agent):
             rebuild_kwargs=rebuild_kwargs,
             recursion_limit=recursion_limit,
             completion_tool=completion_tool,
+            completion_context=completion_context,
             bind=True,
         )
         with park_continuation(park):
