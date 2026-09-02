@@ -43,7 +43,9 @@ from tai42_contract.agent.events import (
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
+    NestedParkOwnershipError,
     SuspendedInteraction,
+    assert_park_adoptable,
     get_park_completion,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
@@ -61,6 +63,7 @@ from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
     ParkIdentity,
     assert_park_capable,
+    bind_resume_per_step,
     persist_park,
     register_agent_resume_tool,
     workspace_lease,
@@ -144,13 +147,14 @@ def _resume_continuation(threaded: bool) -> Iterator[None]:
     OR one a proxied tool this drive runs raises — reads the bound continuation to stamp
     ``continuation_tool`` onto the parked interaction, so a later ``agent_resume`` re-enters
     this agent. Without it, the async ask refuses loudly ("async ask requires a resuming
-    driver") and no park is produced. Bound ONLY when the run is threaded: an ephemeral uuid4
-    workspace reaps and can never resume, so its async ask must refuse pre-persist rather than
-    bind an unresumable continuation. Mirrors the LangGraph driver's ``park_continuation``."""
-    if not threaded:
-        yield
-        return
-    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    driver") and no park is produced. The resume tool name is bound ONLY when the run is
+    threaded; otherwise ``None`` is bound — NOT a no-op. An ephemeral uuid4 workspace reaps and
+    can never resume, so binding ``None`` SHADOWS any ambient resume continuation a park-capable
+    caller left bound, so a non-threaded run nested under one cannot inherit it and mint a park
+    it can never resume: its async ask refuses pre-persist. Mirrors the LangGraph driver's
+    ``park_continuation``."""
+    name = AGENT_RESUME_TOOL_NAME if threaded else None
+    token = set_resume_continuation_tool(name)
     try:
         yield
     finally:
@@ -489,9 +493,13 @@ class ClaudeCodeAgent(Agent):
             # Bind the resume continuation for the drive so a threaded run's async ask — the
             # agent's OWN (_park_async_ask) or a proxied tool's — can actually park+resume
             # (mirror the LangGraph driver's park_continuation). Threaded-only: an ephemeral run
-            # cannot resume, so its async ask refuses loudly rather than binding.
-            with _resume_continuation(threaded):
-                async for event, is_park in self._drive_runner(
+            # cannot resume, so its async ask refuses loudly rather than binding. Bound around each
+            # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield`` would
+            # leak the binding into the consumer's task (PEP 568) and strand it on an abandoned
+            # stream.
+            async for event, is_park in bind_resume_per_step(
+                lambda: _resume_continuation(threaded),
+                self._drive_runner(
                     handle=handle,
                     session=session,
                     settings=settings,
@@ -500,10 +508,11 @@ class ClaudeCodeAgent(Agent):
                     tool_names=options_snapshot["tool_names"],
                     options_snapshot=options_snapshot,
                     terminal_key=terminal_key,
-                ):
-                    if is_park:
-                        park_suspended = True
-                    yield event
+                ),
+            ):
+                if is_park:
+                    park_suspended = True
+                yield event
         finally:
             # (i) kill the exec and AWAIT the runner's death before any volume-mutating cleanup.
             if handle is not None:
@@ -714,10 +723,18 @@ class ClaudeCodeAgent(Agent):
         model as a tool error, mirroring the ephemeral async-ask refusal — never a silent
         unresumable park.
 
+        A park this run does not OWN is refused the same way: a tool that drove a nested run
+        (a flow, another agent) surfaces a park resumed on THAT run's path, so parking this
+        session on it would suspend the session with nothing to resume it
+        (:func:`assert_park_adoptable`). This seam claims a park from the SENTINEL only — it
+        never reads a wire-form marker off a tool result — so the check here is the whole
+        claim check for this agent; there is no second, content-shaped path into its index.
+
         The dispatch runs delivery-scoped: THIS agent owns the interaction and its deferred
         answer, so a parking driver reached through the tool must not capture the completion
         binding addressing that answer (see :mod:`~tai42_agents._internal.nested_dispatch`). The
-        park surfaced up here is the agent's own, raised outside the scoped call."""
+        park surfaced up here is therefore the agent's own — raised outside the scoped call, and
+        the ownership check above is what keeps that true."""
         if frame.tool_name not in allowlist:
             # A compromised session cannot widen its declared tool set — a loud protocol error.
             raise ProtocolError(
@@ -730,6 +747,18 @@ class ClaudeCodeAgent(Agent):
             await handle.write_stdin(dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True)))
             return None
         if isinstance(result, SuspendedInteraction):
+            # Ownership first: a park this session could never claim is refused for THAT
+            # reason on a thread-less run too, rather than being reported as a thread-less
+            # limitation the operator might try to fix by giving the run a thread.
+            try:
+                assert_park_adoptable(
+                    result.resume_owner, interaction_id=result.interaction_id, tool_name=frame.tool_name
+                )
+            except NestedParkOwnershipError as exc:
+                await handle.write_stdin(
+                    dump_frame(ToolResultFrame(call_id=frame.call_id, result=str(exc), is_error=True))
+                )
+                return None
             if thread_id is None:
                 await handle.write_stdin(
                     dump_frame(

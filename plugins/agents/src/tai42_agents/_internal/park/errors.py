@@ -59,6 +59,20 @@ class AgentParkMarkerError(RuntimeError):
     resume never silently substitutes a partial or wrong answer."""
 
 
+class AgentParkNotHostableError(RuntimeError):
+    """A drive stopped on an async-park interrupt the run cannot host: no park identity is
+    bound, so there is nowhere to record the durable index the resume would read.
+
+    Raised rather than returned as a terminal, because returning would silently corrupt the
+    caller's result: the run face would hand back the park marker's JSON as if it were the
+    answer (the exact shape a nested non-hostable run produced when it inherited a caller's
+    ambient resume binding), and the streaming face would end with no terminal event at all.
+    A non-hostable run binds ``None`` as its resume continuation, so its own async ask is
+    refused at ask-time before any marker is minted, and the park hook refuses an unclaimable
+    park to the model before it can interrupt — so reaching this backstop means a park interrupt
+    was raised by something other than this run's own hostable ask."""
+
+
 class WorkspaceLeaseHeldError(RuntimeError):
     """Another worker holds the per-workspace drive lease for a threaded run.
 

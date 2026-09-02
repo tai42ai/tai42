@@ -16,7 +16,7 @@ import pytest
 from fakeredis import aioredis
 from pydantic import SecretStr
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
-from tai42_contract.agent.events import MessageFinal, SuspendedFinal
+from tai42_contract.agent.events import MessageDelta, MessageFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.interactions import (
@@ -233,7 +233,11 @@ def test_proxied_tool_that_parks_suspends_the_run(monkeypatch: pytest.MonkeyPatc
     deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     def parking_tool(**_kwargs: Any) -> SuspendedInteraction:
-        return SuspendedInteraction(interaction_id="i-tool", expiry_at=deadline)
+        # Faithful to ``ask_user(mode="async")``: the park it mints names the resume
+        # continuation bound around this drive as its owner, so the drive may adopt it.
+        return SuspendedInteraction(
+            interaction_id="i-tool", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
+        )
 
     app = build_local_app(tool_runners={"parkingtool": parking_tool})
 
@@ -288,12 +292,56 @@ def test_proxied_tool_dispatch_is_delivery_scoped(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.usefixtures("fake_redis")
+def test_proxied_tool_park_this_session_does_not_own_is_refused_to_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A proxied tool that drove a NESTED run which parked hands back a park resumed on that
+    # run's own path — ``agent_resume`` is never fired for this session. Parking on it would
+    # suspend the session forever, so it is refused to the MODEL as a tool error (the same
+    # door the thread-less refusal takes) and the turn runs on to its own terminal, with
+    # nothing of this session's parked.
+    _settings(monkeypatch)
+    monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(TOOL_CALL))
+
+    def nested_driver_tool(**_kwargs: Any) -> SuspendedInteraction:
+        return SuspendedInteraction(interaction_id="i-nested", resume_owner="nested_driver_resume")
+
+    app = build_local_app(tool_runners={"parkingtool": nested_driver_tool})
+
+    async def _drive() -> tuple[list[Any], Any]:
+        events = await _astream(app, user_message="deploy it", thread_id="t1", tool_names=["parkingtool"])
+        return events, await idx.read_park_entry("i-nested")
+
+    token = set_request_user_id("user-1")
+    try:
+        events, entry = asyncio.run(_drive())
+    finally:
+        reset_request_user_id(token)
+    assert not [e for e in events if isinstance(e, SuspendedFinal)]
+    # The stub echoes the result frame back: the error flag is set and the refusal explains the
+    # park was raised under a different run's resume binding — without naming either owner (the
+    # bound continuation is a public name and echoing it would hand a model the claim string).
+    echoed = [e for e in events if isinstance(e, MessageDelta) and "err=True" in e.text]
+    assert len(echoed) == 1
+    assert "different run's resume binding" in echoed[0].text
+    assert "'nested_driver_resume'" not in echoed[0].text
+    assert "agent_resume" not in echoed[0].text
+    assert entry is None
+
+
+@pytest.mark.usefixtures("fake_redis")
 def test_async_ask_on_threaded_run_parks(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, creds=[_bearer_cred()])
     monkeypatch.setattr(agent_module, "runner_payload_files", payload_for(ASYNC_ASK))
 
     async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
-        return SuspendedInteraction(interaction_id="int-1", expiry_at=expiry_at or datetime.now(UTC))
+        # Stamp the resume owner the real platform ask does — the continuation bound by the
+        # threaded drive — so the sentinel is faithful to what the ask actually mints.
+        return SuspendedInteraction(
+            interaction_id="int-1",
+            expiry_at=expiry_at or datetime.now(UTC),
+            resume_owner=get_resume_continuation_tool(),
+        )
 
     app = build_local_app(
         ask_user=ask_user, resolver=lambda *_a: ResolvedConnectionAuth(access_token=SecretStr("tok1"))
@@ -329,7 +377,10 @@ def test_real_async_ask_parks_then_agent_resume_drives_to_completion(monkeypatch
         assert mode == "async"
         if get_resume_continuation_tool() is None:
             raise RuntimeError("async ask requires a resuming driver (no resume_continuation_tool is bound)")
-        return SuspendedInteraction(interaction_id="int-e2e", expiry_at=expiry_at or deadline)
+        # Stamp the bound continuation as the resume owner, exactly as the platform helper does.
+        return SuspendedInteraction(
+            interaction_id="int-e2e", expiry_at=expiry_at or deadline, resume_owner=get_resume_continuation_tool()
+        )
 
     agent = ClaudeCodeAgent()
     app = build_local_app(
@@ -373,7 +424,10 @@ def test_park_persists_a_resumable_index_entry(monkeypatch: pytest.MonkeyPatch, 
 
     async def ask_user(_question: str, *, expiry_at: datetime | None = None, **_: Any) -> Any:
         deadline = expiry_at or datetime.now(UTC) + timedelta(hours=1)
-        return SuspendedInteraction(interaction_id="int-9", expiry_at=deadline)
+        # Faithful to the platform ask: stamp the resume owner the threaded drive bound.
+        return SuspendedInteraction(
+            interaction_id="int-9", expiry_at=deadline, resume_owner=get_resume_continuation_tool()
+        )
 
     async def _park_then_read() -> Any:
         await _astream(build_local_app(ask_user=ask_user), user_message="deploy", thread_id="t9")

@@ -20,10 +20,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel
 from tai42_contract.agent.base import PresetSpec
-from tai42_contract.interactions import SuspendedInteraction, suspended_interaction_marker
+from tai42_contract.interactions import (
+    NestedParkOwnershipError,
+    SuspendedInteraction,
+    assert_park_adoptable,
+    suspended_interaction_marker,
+)
 from tai42_contract.secrets import mask_secrets
 from tai42_contract.tools import AppTools
 
@@ -64,7 +69,21 @@ async def _as_structured_tool(
             # sentinel to the reserved contract park marker: the ToolMessage commits carrying
             # it and the in-graph park middleware recognizes the park by RESULT shape (never a
             # tool name), so a preset over ANY parking tool parks the agent. GENERIC.
-            return suspended_interaction_marker(result.interaction_id, result.expiry_at)
+            #
+            # Adopting the park is what suspends THIS run, so it is refused unless this run
+            # owns the park: a preset over a base that drives a nested run (a flow, another
+            # agent) surfaces a park resumed on that run's own path, which would never resume
+            # this one. Re-raised as a ``ToolException`` — the ONE exception class the loop's
+            # error middleware turns into a model-visible error ``ToolMessage`` — so the model
+            # reads the refusal and finishes the turn around it, instead of the turn aborting
+            # (or hanging on a park nothing will resume).
+            try:
+                assert_park_adoptable(result.resume_owner, interaction_id=result.interaction_id, tool_name=preset.name)
+            except NestedParkOwnershipError as exc:
+                raise ToolException(str(exc)) from exc
+            # The owner rides the WIRE form too: the claim point reads it off the serialized
+            # ToolMessage, never off the sentinel this seam holds.
+            return suspended_interaction_marker(result.interaction_id, result.expiry_at, result.resume_owner)
         # This coroutine is the tool adapter this plugin registers with langchain:
         # langchain turns whatever it returns into the model-visible ToolMessage
         # (checkpoint and callback trace included). Mask here so the model never

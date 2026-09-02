@@ -53,7 +53,7 @@ from tai42_contract.agent.events import (
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
-from tai42_agents._internal.park import finalize_drive, park_continuation
+from tai42_agents._internal.park import bind_resume_per_step, finalize_drive, park_continuation
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
@@ -174,13 +174,20 @@ async def astream_tools_agent_events(
     )
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
-    with park_continuation(park):
+
+    async def _drive() -> AsyncIterator[StreamEvent]:
         async for event in aproject_agent_events(
             agent, agent_input, config, response_format=response_format, structured_strategy=strategy
         ):
             yield event
         for event in await finalize_drive(agent, config, None, park):
             yield event
+
+    # Bind the resume continuation around each drive step, NOT in this generator's body: a
+    # ``with park_continuation(...)`` wrapping the ``yield`` would leak the binding into the
+    # consumer's task (PEP 568 is unimplemented) and strand it on an abandoned stream.
+    async for event in bind_resume_per_step(lambda: park_continuation(park), _drive()):
+        yield event
 
 
 async def aproject_agent_events(

@@ -23,7 +23,8 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
@@ -40,6 +41,7 @@ from tai42_contract.interactions import (
 from tai42_kit.llm.settings import llm_provider_settings
 
 from tai42_agents._internal.park.errors import (
+    AgentParkNotHostableError,
     AgentResumeBarrierNotFoundError,
     AgentResumeDriveInProgressError,
     AgentResumeInterruptNotPendingError,
@@ -59,7 +61,7 @@ from tai42_agents._internal.park.index import (
     release_claim,
     try_claim_drive,
 )
-from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY
+from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY, resuming_park_interaction_ids
 from tai42_agents.settings import agents_park_redis_settings
 
 logger = logging.getLogger(__name__)
@@ -226,18 +228,50 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
 
     A flow-blind platform ``ask_user(async)`` raised by a tool this run drives reads the
     bound continuation to stamp ``continuation_tool`` onto the parked interaction, so a
-    later answer re-enters through ``agent_resume``. Bound only when the run is
-    park-capable AND its face delivers the resume (``bind``); a no-op otherwise, so a
-    non-park-capable or streaming run's async ask refuses loudly pre-persist. The
-    continuation is set and reset around each drive."""
-    if park is None or not park.bind:
-        yield
-        return
-    token = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    later answer re-enters through ``agent_resume``. The resume tool name is bound only when
+    the run is park-capable AND its face delivers the resume (``bind``); otherwise ``None`` is
+    bound — NOT a no-op. Binding ``None`` SHADOWS any ambient resume continuation the caller
+    left bound, so a non-park-capable (or streaming) run nested under a park-capable one cannot
+    inherit that binding and mint a park it has no way to resume: its async ask sees no bound
+    continuation and refuses loudly pre-persist. The continuation is set and reset around each
+    drive."""
+    name = AGENT_RESUME_TOOL_NAME if park is not None and park.bind else None
+    token = set_resume_continuation_tool(name)
     try:
         yield
     finally:
         reset_resume_continuation_tool(token)
+
+
+async def bind_resume_per_step[StreamItemT](
+    binding: Callable[[], AbstractContextManager[Any]],
+    events: AsyncIterator[StreamItemT],
+) -> AsyncIterator[StreamItemT]:
+    """Yield from ``events`` with a resume-continuation ``binding`` re-entered around each step,
+    so the continuation is bound WHILE a step is computed but never leaks across a yield.
+
+    The binding cannot live in the yielding generator's own ``with`` body: PEP 568 (per-send
+    context isolation for async generators) is unimplemented, so a ``ContextVar`` set there lands
+    in the CONSUMER's task and persists across every yield — leaking the binding into the consumer,
+    and on an abandoned stream stranding it bound forever (its ``Token`` then resets from a foreign
+    context, raising on ``aclose``). Entering ``binding`` around each ``__anext__`` scopes the
+    contextvar to the step that drives the tool dispatch and resets it before the value is handed
+    to the consumer, so the consumer never observes it and a mid-stream ``aclose`` unwinds cleanly.
+    ``binding`` is a zero-arg factory (a fresh context manager per step), e.g.
+    ``lambda: park_continuation(park)``."""
+    step = events.__aiter__()
+    try:
+        while True:
+            with binding():
+                try:
+                    item = await step.__anext__()
+                except StopAsyncIteration:
+                    break
+            yield item
+    finally:
+        aclose = getattr(step, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 def _collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:
@@ -286,6 +320,11 @@ async def finalize_drive(
     its own answers in one langgraph resume map. A park interrupt with no park identity to
     record it against raises loudly rather than stranding the park."""
     if not interrupt_on and (park is None or not park.bind):
+        # Skipping the read cannot swallow a park: the park hook interrupts only for a marker
+        # whose resume owner is the continuation bound here, and nothing binds one unless the
+        # run is park-capable AND delivers the resume — exactly the case excluded here. A run
+        # that cannot host a park gets the hook's model-visible refusal instead of an
+        # interrupt, so there is no pending park interrupt to classify.
         return []
 
     snapshot = await agent.aget_state(config, subgraphs=True)
@@ -300,7 +339,7 @@ async def finalize_drive(
     events: list[StreamEvent] = []
     if parks:
         if park is None or not park.bind:
-            raise RuntimeError(
+            raise AgentParkNotHostableError(
                 "a run produced an async-park interrupt with no park identity bound — "
                 "an async ask parked without a durable resume path"
             )
@@ -643,12 +682,16 @@ async def _drive_completed_barrier(
         completion_token = set_park_completion(
             completion_tool, _completion_context(entry, thread_id) if completion_tool is not None else None
         )
+        # Name the interactions being resumed so the graph's claim check adopts an in-flight park
+        # whose wire marker predates the resume_owner field (a released predecessor's park) — a
+        # resume is fired only for a park this run owns, so its answer is never dropped.
         try:
-            result = await resume_park(
-                rebuild_kwargs=entry["rebuild_kwargs"],
-                thread_id=thread_id,
-                resume_map=resume_map,
-            )
+            with resuming_park_interaction_ids(frozenset(expected)):
+                result = await resume_park(
+                    rebuild_kwargs=entry["rebuild_kwargs"],
+                    thread_id=thread_id,
+                    resume_map=resume_map,
+                )
         except BaseException:
             await release_claim(thread_id, superstep_id, token)
             raise

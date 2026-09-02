@@ -29,12 +29,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import suspended_interaction_marker
+from tai42_contract.interactions import get_resume_continuation_tool, suspended_interaction_marker
 
 from tai42_agents._internal.park import agent_resume, build_park_identity
 from tai42_agents._internal.park import driver as drv
 from tai42_agents._internal.park import index as idx
 from tai42_agents._internal.park.errors import (
+    AgentParkNotHostableError,
     AgentResumeDriveInProgressError,
     AgentResumeInterruptNotPendingError,
     AgentResumeParkEntryNotFoundError,
@@ -85,7 +86,7 @@ class _CountingAsk:
     def tool(self) -> StructuredTool:
         def ask() -> dict[str, Any]:
             self.calls += 1
-            return suspended_interaction_marker(self._interaction_id, self._expiry_at)
+            return suspended_interaction_marker(self._interaction_id, self._expiry_at, get_resume_continuation_tool())
 
         return StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
@@ -464,7 +465,7 @@ def test_finalize_drive_raises_on_a_park_with_no_identity_bound(fake_park_redis:
     async def go() -> None:
         # A park interrupt surfaced but no park identity is bound (interrupt_on forces the state
         # read): the run parked with no durable resume path, so finalize raises loudly.
-        with pytest.raises(RuntimeError, match="no park identity bound"):
+        with pytest.raises(AgentParkNotHostableError, match="no park identity bound"):
             await finalize_drive(agent, {}, {"approve": True}, None)
 
     asyncio.run(go())
@@ -802,7 +803,7 @@ def _two_parallel_subagent_park_setup(
 
     def ask(who: str) -> dict[str, Any]:
         ask_calls["n"] += 1
-        return suspended_interaction_marker(id_for_who[who], _WITHIN_HORIZON)
+        return suspended_interaction_marker(id_for_who[who], _WITHIN_HORIZON, get_resume_continuation_tool())
 
     app_tools.client_tools["ask"] = StructuredTool.from_function(ask, name="ask", description="Ask the user and park.")
 
