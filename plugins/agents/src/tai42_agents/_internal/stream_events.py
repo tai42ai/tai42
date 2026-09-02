@@ -53,7 +53,7 @@ from tai42_contract.agent.events import (
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
-from tai42_agents._internal.park import bind_resume_per_step, finalize_drive, park_continuation
+from tai42_agents._internal.park import bind_resume_per_step, detach_dead_chains, finalize_drive, park_step_binding
 from tai42_agents._internal.structured import as_tool_strategy
 from tai42_agents._internal.text import text_of
 from tai42_agents._internal.usage import usage_event
@@ -183,11 +183,17 @@ async def astream_tools_agent_events(
         for event in await finalize_drive(agent, config, None, park):
             yield event
 
-    # Bind the resume continuation around each drive step, NOT in this generator's body: a
-    # ``with park_continuation(...)`` wrapping the ``yield`` would leak the binding into the
-    # consumer's task (PEP 568 is unimplemented) and strand it on an abandoned stream.
-    async for event in bind_resume_per_step(lambda: park_continuation(park), _drive()):
-        yield event
+    # Bind the resume continuation and the chained-park claims ledger around each drive step,
+    # NOT in this generator's body: a ``with`` wrapping the ``yield`` would leak the bindings
+    # into the consumer's task (PEP 568 is unimplemented) and strand them on an abandoned
+    # stream. The claims set is owned here for the whole drive — each step re-binds it — and the
+    # dead chains it holds when the drive stops are detached, whether it drained or was abandoned.
+    claims: set[str] = set()
+    try:
+        async for event in bind_resume_per_step(lambda: park_step_binding(park, claims), _drive()):
+            yield event
+    finally:
+        await detach_dead_chains(claims)
 
 
 async def aproject_agent_events(

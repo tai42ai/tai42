@@ -730,11 +730,15 @@ class ClaudeCodeAgent(Agent):
         never reads a wire-form marker off a tool result — so the check here is the whole
         claim check for this agent; there is no second, content-shaped path into its index.
 
-        The dispatch runs delivery-scoped: THIS agent owns the interaction and its deferred
-        answer, so a parking driver reached through the tool must not capture the completion
-        binding addressing that answer (see :mod:`~tai42_agents._internal.nested_dispatch`). The
-        park surfaced up here is therefore the agent's own — raised outside the scoped call, and
-        the ownership check above is what keeps that true."""
+        The dispatch runs delivery-scoped and UNCHAINED: THIS agent owns the interaction and its
+        deferred answer, so a parking driver reached through the tool must not capture the
+        completion binding addressing that answer (see
+        :mod:`~tai42_agents._internal.nested_dispatch`). It is not chained because this session
+        resumes by feeding the runner the answer to the interaction its pending tool call is
+        waiting on — a park on the CALL is not a shape its protocol can resume — so a nested
+        run's park is refused here rather than waited on. The park surfaced up here is therefore
+        the agent's own — raised outside the scoped call, and the ownership check above is what
+        keeps that true."""
         if frame.tool_name not in allowlist:
             # A compromised session cannot widen its declared tool set — a loud protocol error.
             raise ProtocolError(

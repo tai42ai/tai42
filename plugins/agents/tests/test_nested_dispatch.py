@@ -6,12 +6,18 @@ conversation door is waiting on, and it rides a contextvar. Without scoping, a p
 reached through a tool — a flow preset invoked as a tool, say — reads that address as its own,
 posts its raw envelope into the guest thread, and orphans the agent's real answer.
 
-The owner of the interaction owns delivery: every tool an agent dispatches runs with the binding
-CLEARED, while the agent's own park (raised by the graph, outside any tool body) still captures
-the binding the door set for it. Both halves are pinned here over real graphs — the fresh
-``tools_agent`` turn and the ``langchain_deep_agent`` RESUME drive, where the driver rebinds the
-stored completion so a re-park keeps delivering. The per-agent tool-list seams each carry their
-own pin beside their own suite (see ``tests/_delivery_scope.py``).
+The owner of the interaction owns delivery: a tool an agent dispatches never runs under the
+door's binding, while the agent's own park (raised by the graph, outside any tool body) still
+captures the binding the door set for it. What the dispatch binds INSTEAD depends on whether
+this run can park: a park-capable run binds a CHAINED completion addressing the CALL (so a
+nested run that parks is waited on rather than orphaned), and a run that cannot park binds
+nothing at all. Either way the door's address is unreachable from inside the tool — the chained
+context EMBEDS it rather than exposing it.
+
+Both halves are pinned here over real graphs — the fresh ``tools_agent`` turn and the
+``langchain_deep_agent`` RESUME drive, where the driver rebinds the stored completion so a
+re-park keeps delivering. The per-agent tool-list seams each carry their own pin beside their
+own suite (see ``tests/_delivery_scope.py``).
 """
 
 from __future__ import annotations
@@ -35,17 +41,23 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
+    CHAINED_PARK_CONTEXT_KEY,
+    CHAINED_PARK_TOKEN_KEY,
+    PARK_COMPLETION_THREAD_KEY,
     get_park_completion,
     get_resume_continuation_tool,
+    is_chained_park_key,
     reset_park_completion,
+    reset_resume_continuation_tool,
     set_park_completion,
+    set_resume_continuation_tool,
     suspended_interaction_marker,
 )
 
 from tai42_agents import tools_agent as tools_mod
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.nested_dispatch import nested_tool_dispatch, scope_nested_dispatch
-from tai42_agents._internal.park import agent_resume
+from tai42_agents._internal.park import AGENT_RESUME_TOOL_NAME, CHAINED_PARK_DELIVERY_TOOL_NAME, agent_resume
 from tai42_agents._internal.park import driver as drv
 from tai42_agents._internal.park import index as idx
 from tai42_agents.langchain_deep_agent import agent as deep_mod
@@ -175,6 +187,22 @@ def _call(call_id: str, name: str) -> AIMessage:
     return AIMessage(content="", tool_calls=[{"id": call_id, "name": name, "args": {}}])
 
 
+def _assert_chained_over(seen: tuple[str | None, Any], wrapped: tuple[str | None, Any]) -> str:
+    """Assert a nested dispatch saw a CHAINED binding wrapping ``wrapped``, and return its key.
+
+    The chained binding is what a nested parking driver reads: it addresses the chain's delivery
+    tool (which re-enters the waiting agent), never the door's — the door's binding survives
+    EMBEDDED, so nothing is lost and nothing is reachable."""
+    tool, context = seen
+    assert tool == CHAINED_PARK_DELIVERY_TOOL_NAME
+    assert context is not None
+    key = context[CHAINED_PARK_TOKEN_KEY]
+    assert is_chained_park_key(key)
+    wrapped_tool, wrapped_context = wrapped
+    assert context[CHAINED_PARK_CONTEXT_KEY] == {"tool": wrapped_tool, "context": wrapped_context}
+    return key
+
+
 def test_nested_tool_sees_no_binding_while_the_agent_park_still_captures(
     fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
@@ -197,9 +225,11 @@ def test_nested_tool_sees_no_binding_while_the_agent_park_still_captures(
         finally:
             reset_park_completion(token)
 
-        # The nested driver ran under NO binding: it can neither fire the conversation door's
-        # delivery tool nor read the guest thread it addresses.
-        assert nested.seen == [(None, None)]
+        # The nested driver ran under the CHAINED binding: it can neither fire the conversation
+        # door's delivery tool nor read the guest thread it addresses — that binding survives
+        # only embedded inside the chain's context — and what it CAN fire re-enters this agent.
+        assert len(nested.seen) == 1
+        _assert_chained_over(nested.seen[0], (_COMPLETION_TOOL, _CONTEXT))
 
         # The agent's own park, raised outside any tool body, captured the binding normally, so
         # its resumed answer still has its delivery path.
@@ -250,9 +280,10 @@ def test_nested_tool_sees_no_binding_on_the_deep_agent_resume_drive(
             reset_park_completion(token)
 
         assert await agent_resume("i1", "the answer") == "all done"
-        # The tool dispatched DURING the resume drive saw no binding, though the drive had the
-        # stored completion rebound around it for the re-park path.
-        assert nested.seen == [(None, None)]
+        # The tool dispatched DURING the resume drive saw the chained binding, not the stored
+        # completion the drive rebound around it for the re-park path.
+        assert len(nested.seen) == 1
+        _assert_chained_over(nested.seen[0], (_COMPLETION_TOOL, _CONTEXT))
 
     asyncio.run(go())
 
@@ -268,6 +299,55 @@ def test_the_binding_is_restored_after_a_nested_dispatch() -> None:
         assert get_park_completion() == (_COMPLETION_TOOL, _CONTEXT)
     finally:
         reset_park_completion(token)
+
+
+def test_a_chained_dispatch_needs_a_run_that_can_park() -> None:
+    # The chain is honored only where this run could actually park on the call. With no resume
+    # continuation bound — a run that cannot park — a chain would address a key nothing will
+    # ever park on, so the dispatch clears instead and the nested park is refused downstream.
+    token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
+    try:
+        with nested_tool_dispatch(chain=True):
+            assert get_park_completion() == (None, None)
+    finally:
+        reset_park_completion(token)
+
+
+def test_a_chained_dispatch_binds_a_fresh_key_per_call_over_the_caller_binding() -> None:
+    # One chained key addresses one CALL, so two dispatches are two keys: the terminals of two
+    # nested runs can never converge on one park.
+    resume = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    token = set_park_completion(_COMPLETION_TOOL, _CONTEXT)
+    try:
+        keys = []
+        for _ in range(2):
+            with nested_tool_dispatch(chain=True):
+                keys.append(_assert_chained_over(get_park_completion(), (_COMPLETION_TOOL, _CONTEXT)))
+        assert keys[0] != keys[1]
+        assert get_park_completion() == (_COMPLETION_TOOL, _CONTEXT)
+    finally:
+        reset_park_completion(token)
+        reset_resume_continuation_tool(resume)
+
+
+def test_a_chained_dispatch_carries_the_thread_index_field_up() -> None:
+    # The platform's park-by-thread index reads ONE reserved field off whatever context is
+    # bound. A chained dispatch replaces the caller's context, so it carries that field up —
+    # a nested park under it stays cascade-cancellable with its thread.
+    wrapped_context = {PARK_COMPLETION_THREAD_KEY: _THREAD, "route_name": "acme"}
+    resume = set_resume_continuation_tool(AGENT_RESUME_TOOL_NAME)
+    token = set_park_completion("deliver_tool_completion", wrapped_context)
+    try:
+        with nested_tool_dispatch(chain=True):
+            _tool, context = get_park_completion()
+            assert context is not None
+            assert context[PARK_COMPLETION_THREAD_KEY] == _THREAD
+            # Only that field. Everything else stays opaque, embedded rather than hoisted.
+            assert "route_name" not in context
+            assert context[CHAINED_PARK_CONTEXT_KEY]["context"]["route_name"] == "acme"
+    finally:
+        reset_park_completion(token)
+        reset_resume_continuation_tool(resume)
 
 
 def test_scoping_preserves_the_model_facing_tool_surface() -> None:

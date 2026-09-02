@@ -6,10 +6,12 @@ entry per interaction, a per-super-step barrier, a single-winner drive lease):
 * :func:`build_park_identity` — decide whether a run can be parked (durable checkpoint
   provider AND a fully JSON-serializable rebuild identity AND a configured park Redis)
   and, if so, capture the rebuild identity.
-* :func:`park_continuation` + :func:`finalize_drive` — the drive wrapper: bind the resume
-  continuation for the run's duration (run face only), then after the drive stops
-  classify the pending interrupt — a park (persist the durable index, surface a suspended
-  outcome) or a plain HITL interrupt (today's behavior).
+* :func:`park_continuation` / :func:`park_step_binding` + :func:`detach_dead_chains` +
+  :func:`finalize_drive` — the drive wrapper: bind the resume continuation for the run's
+  duration (per drive-step for a streaming face, alongside the chained-call claims ledger),
+  detach the claims the drive never parked on, then after the drive stops classify the pending
+  interrupt — a park (persist the durable index, surface a suspended outcome) or a plain HITL
+  interrupt (today's behavior).
 * :func:`agent_resume` + :func:`_drive_completed_barrier` — the continuation the
   flow-blind platform fires with ``{interaction_id, answer}``: buffer into the super-step
   barrier, win the single drive lease, rebuild the same compiled graph on the same thread,
@@ -33,6 +35,9 @@ from tai42_contract.agent.events import InterruptFinal, StreamEvent, SuspendedFi
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     PARK_COMPLETION_SUCCEEDED,
+    attach_chained_park,
+    chained_park_claims,
+    is_chained_park_key,
     reset_park_completion,
     reset_resume_continuation_tool,
     set_park_completion,
@@ -52,6 +57,7 @@ from tai42_agents._internal.park.index import (
     barrier_ttl_seconds,
     buffer_answer,
     compute_superstep_id,
+    detach_chained_parks,
     finalize_resolved_superstep,
     heartbeat_drive_claim,
     is_resolved_tombstone,
@@ -62,7 +68,7 @@ from tai42_agents._internal.park.index import (
     try_claim_drive,
 )
 from tai42_agents._internal.park.middleware import AGENT_PARK_PAYLOAD_KEY, resuming_park_interaction_ids
-from tai42_agents.settings import agents_park_redis_settings
+from tai42_agents.settings import agents_limits_settings, agents_park_redis_settings
 
 logger = logging.getLogger(__name__)
 
@@ -234,13 +240,75 @@ def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
     left bound, so a non-park-capable (or streaming) run nested under a park-capable one cannot
     inherit that binding and mint a park it has no way to resume: its async ask sees no bound
     continuation and refuses loudly pre-persist. The continuation is set and reset around each
-    drive."""
+    drive.
+
+    This is a SYNC context manager binding ONE contextvar and never awaiting, so it can be
+    re-entered per drive-step by :func:`bind_resume_per_step` (the binding cannot span a
+    generator's yields). The chained-park claims ledger a park-capable drive also needs is a
+    WHOLE-DRIVE resource — it accumulates across steps and is reconciled once the drive stops —
+    so it is bound alongside this, not folded in: :func:`park_step_binding` composes both for a
+    streaming drive, and a coroutine drive binds :func:`~tai42_contract.interactions.chained_park_claims`
+    directly around its ``await``."""
     name = AGENT_RESUME_TOOL_NAME if park is not None and park.bind else None
     token = set_resume_continuation_tool(name)
     try:
         yield
     finally:
         reset_resume_continuation_tool(token)
+
+
+@contextlib.contextmanager
+def park_step_binding(park: ParkIdentity | None, claims: set[str]) -> Iterator[None]:
+    """Per-drive-step binding for a STREAMING drive: the resume continuation AND the chained-park
+    claims ledger, both re-entered around each ``__anext__`` by :func:`bind_resume_per_step` and
+    both released before the step's value is yielded, so neither leaks into the consumer.
+
+    The two bindings differ in what they own. The resume continuation is per-step by nature —
+    nothing carries across steps. The claims ledger is WHOLE-DRIVE: every step re-binds the ONE
+    ``claims`` set the face owns, so a chained key claimed in an early step survives to the
+    reconcile the face runs — :func:`detach_dead_chains` over that same set — when the drive
+    stops. A non-park-capable run binds ``None`` and claims nothing; its set stays empty."""
+    with park_continuation(park), chained_park_claims(claims):
+        yield
+
+
+@contextlib.asynccontextmanager
+async def park_drive(park: ParkIdentity | None) -> AsyncIterator[None]:
+    """Whole-drive park binding for a COROUTINE drive — a run face that awaits the drive to a
+    result, never yielding to an external consumer.
+
+    Binds the resume continuation and the chained-park claims ledger for the drive's duration,
+    and detaches the dead chains when it stops (whether it returned or raised). Safe to hold
+    across the drive's ``await`` points: a coroutine stays in one task, so unlike a streaming
+    generator nothing leaks past a yield — a streaming face binds per step via
+    :func:`park_step_binding` and detaches around its own loop instead."""
+    claims: set[str] = set()
+    with park_continuation(park), chained_park_claims(claims):
+        try:
+            yield
+        finally:
+            await detach_dead_chains(claims)
+
+
+async def detach_dead_chains(claims: set[str]) -> None:
+    """Tombstone the chained keys this drive claimed but never parked on, so a later terminal
+    lands benignly instead of hunting a park that will never exist.
+
+    Failures are logged and swallowed: the drive already has its result (or its exception), and
+    a detach that could not run must not replace either — the undetached chain falls back to the
+    delivery tool's own at-least-once retry tail. ``CancelledError`` propagates: a drive being
+    torn down has no time to write, and swallowing it would fight the cancellation."""
+    if not claims:
+        return
+    try:
+        await detach_chained_parks(sorted(claims))
+    except Exception:
+        logger.warning(
+            "Agent drive left %d chained call(s) unparked and could not detach them; a later terminal will "
+            "retry against an absent park entry until the platform gives up",
+            len(claims),
+            exc_info=True,
+        )
 
 
 async def bind_resume_per_step[StreamItemT](
@@ -258,7 +326,8 @@ async def bind_resume_per_step[StreamItemT](
     contextvar to the step that drives the tool dispatch and resets it before the value is handed
     to the consumer, so the consumer never observes it and a mid-stream ``aclose`` unwinds cleanly.
     ``binding`` is a zero-arg factory (a fresh context manager per step), e.g.
-    ``lambda: park_continuation(park)``."""
+    ``lambda: park_step_binding(park, claims)`` for a park-capable LangGraph drive or
+    ``lambda: _resume_continuation(threaded)`` for the ``claude_code`` engine."""
     step = events.__aiter__()
     try:
         while True:
@@ -343,10 +412,10 @@ async def finalize_drive(
                 "a run produced an async-park interrupt with no park identity bound — "
                 "an async ask parked without a durable resume path"
             )
-        await persist_park(park, parks)
-        union: dict[str, Any] = {}
-        for _interrupt_id, interactions in parks:
-            union.update(interactions)
+        # The receipt reports the deadlines the index actually holds — a chained key's
+        # inherited horizon is clamped at persist, and a caller reading the receipt must see
+        # the same date the park will really be kept to.
+        union = await persist_park(park, parks)
         events.append(
             SuspendedFinal(
                 interaction_ids=sorted(union),
@@ -386,6 +455,38 @@ def _checkpoint_retention_horizon(provider: str) -> datetime | None:
             return None
         return datetime.now(UTC) + timedelta(minutes=ttl_minutes)
     raise RuntimeError(f"unexpected checkpoint provider {provider!r} at park-persist time")
+
+
+def chained_park_horizon(inherited: str | None, retention_bound: datetime | None) -> str:
+    """The deadline a CHAINED park is recorded under: the nearest of the horizon it INHERITED
+    from the ask its nested run is parked on, the configured cap, and this run's retention bound.
+
+    Inheritance is the rule — the caller's suspension should last exactly as long as the thing
+    it waits on — but a chained park has no ask of its own and no reaper firing at its deadline,
+    so an inherited horizon is CLAMPED rather than trusted: the cap bounds how far a nested run
+    can pin a suspended caller open, and the retention bound keeps the park inside the window its
+    own state is guaranteed to survive. A nested run that carried no deadline at all takes the
+    cap, so a chained park is never unbounded.
+
+    Clamped, never refused: unlike an ask deadline (whose gate refuses a park that could not be
+    resumed at all), a shortened chained horizon costs nothing — nothing fires AT it, and it only
+    sizes how long the index holds the park. A re-park moves it out again."""
+    now = datetime.now(UTC)
+    horizon = now + timedelta(hours=agents_limits_settings().chained_park_horizon_cap_hours)
+    if inherited is not None:
+        inherited_dt = datetime.fromisoformat(inherited)
+        if inherited_dt.tzinfo is None:
+            # The inherited deadline crosses the delivery boundary (``deliver_chained_park``'s
+            # ``expiry_at``) as an ISO string. Internal producers stamp UTC, but a malformed
+            # external fire could omit the offset, and a naive value raises against the tz-aware
+            # clamp. Read it as UTC rather than refusing: this horizon only sizes how long the
+            # index holds the park (nothing fires AT it), so the "clamped, never refused" rule
+            # holds and a cosmetically-off deadline never becomes an endless re-park redelivery.
+            inherited_dt = inherited_dt.replace(tzinfo=UTC)
+        horizon = min(horizon, inherited_dt)
+    if retention_bound is not None:
+        horizon = min(horizon, retention_bound)
+    return horizon.isoformat()
 
 
 def _gate_expiry_within_retention(retention_bound: datetime | None, interactions: dict[str, Any]) -> None:
@@ -432,7 +533,7 @@ def assert_park_capable(identity: ParkIdentity, *, durable: bool, retention_boun
     _ = retention_bound
 
 
-async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, Any]]]) -> None:
+async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     """Write the durable park index for a suspended super-step: one park entry per suspended
     interaction plus the super-step barrier all the answers converge on. The provider-free,
     engine-neutral persist seam BOTH the LangGraph engines and ``claude_code`` share.
@@ -452,12 +553,30 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
 
     Gated up front by :func:`_gate_expiry_within_retention` against ``identity.retention_bound``:
     one ask whose deadline outlives the retention (or lacks one under a bounded retention) fails
-    the whole park with zero index state written."""
+    the whole park with zero index state written. A CHAINED key's INHERITED deadline is clamped
+    into that bound first (:func:`chained_park_horizon`) rather than failing the park — nothing
+    fires at a chained deadline, so a shortened one costs nothing.
+
+    Every key persisted here is marked ATTACHED in the drive's chained-park claims ledger — only
+    once the write LANDED, so a failed persist leaves the claim dead and detachable. What remains
+    in the ledger when the drive ends is exactly the chains it claimed and never parked on.
+
+    Returns the ``{key: deadline}`` map actually written, so a caller reporting the park (the
+    suspended receipt) names the deadlines the index holds rather than the ones proposed."""
     interrupt_by_interaction: dict[str, str] = {}
     union: dict[str, Any] = {}
     for interrupt_id, interactions in parks:
         for interaction_id, expiry in interactions.items():
-            union[interaction_id] = expiry
+            # A CHAINED key waits on a nested CALL, not on an ask of this run's: its deadline is
+            # inherited from what that call is parked on, clamped here (cap + retention) before
+            # anything is sized to it. An interaction id keeps its own ask deadline untouched and
+            # meets the retention gate below unchanged — a real ask beyond retention still fails
+            # the whole park loudly, because nothing could resume it.
+            union[interaction_id] = (
+                chained_park_horizon(expiry, identity.retention_bound)
+                if is_chained_park_key(interaction_id)
+                else expiry
+            )
             interrupt_by_interaction[interaction_id] = interrupt_id
     _gate_expiry_within_retention(identity.retention_bound, union)
     superstep_id = compute_superstep_id(union.keys())
@@ -478,6 +597,10 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
             # Its opaque routing context, carried forward the same way (JSON-serializable by
             # contract, so it round-trips this durable entry unchanged).
             "completion_context": dict(identity.completion_context) if identity.completion_context else None,
+            # The retention horizon this park was gated against, so a later horizon EXTENSION
+            # (a chained park whose nested run re-parked further out) re-clamps against the
+            # same bound the persist used instead of guessing one. ``None`` = keep-forever.
+            "retention_bound": identity.retention_bound.isoformat() if identity.retention_bound else None,
         }
 
     expected = dict(union)
@@ -488,6 +611,11 @@ async def persist_park(identity: ParkIdentity, parks: list[tuple[str, dict[str, 
     await persist_superstep(
         entries, identity.thread_id, superstep_id, expected, expiries, barrier_ttl_seconds(expiries.values())
     )
+    for interaction_id in union:
+        # Parked on now, so no longer a dead chain the drive must detach. A key the ledger never
+        # held (every interaction id, and every park taken with no ledger open) is untouched.
+        attach_chained_park(interaction_id)
+    return union
 
 
 def _is_suspended_receipt(result: Any) -> bool:

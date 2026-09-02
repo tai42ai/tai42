@@ -44,9 +44,12 @@ from tai42_agents._internal.park import (
     ParkIdentity,
     bind_resume_per_step,
     build_park_identity,
+    detach_dead_chains,
     finalize_drive,
-    park_continuation,
+    park_drive,
+    park_step_binding,
     register_agent_resume_tool,
+    register_chained_park_tool,
 )
 from tai42_agents._internal.park.driver import _collect_pending_interrupts, _is_suspended_receipt
 from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
@@ -198,6 +201,9 @@ async def _neutral_to_internal(spec: NeutralSubAgentSpec) -> ResolvedSubAgentSpe
 # the park package no longer binds it as a module-import side effect. Per-epoch idempotent, so
 # a box loading several parking agents binds it exactly once.
 register_agent_resume_tool()
+# ...and the completion tool that closes a CHAINED park, for the same reason: this loop's
+# dispatches bind it as their delivery address.
+register_chained_park_tool()
 
 
 # The §B4 ``crash_resume`` setting is DECLARED to the skeleton at registration as
@@ -376,7 +382,7 @@ class DeepAgent(Agent):
                     bind=True,
                     extra_retention_horizon=drive.workspace_retention_horizon,
                 )
-                with park_continuation(park):
+                async with park_drive(park):
                     result = await self._drain(
                         self._astream_built(
                             agent,
@@ -622,29 +628,34 @@ class DeepAgent(Agent):
                         extra_retention_horizon=drive.workspace_retention_horizon,
                     )
 
-                # Bind the resume continuation around each drive step, NOT in this generator's
-                # body: a ``with park_continuation(...)`` wrapping the ``yield`` would leak the
-                # binding into the consumer's task (PEP 568 is unimplemented) and strand it on an
-                # abandoned stream.
-                async for event in bind_resume_per_step(
-                    lambda: park_continuation(park),
-                    self._astream_built(
-                        agent,
-                        agent_input,
-                        config,
-                        interrupt_on,
-                        response_format=response_format,
-                        structured_strategy=strategy,
-                        park=park,
-                    ),
-                ):
-                    if isinstance(event, StructuredFinal):
-                        saw_structured = True
-                    elif isinstance(event, InterruptFinal):
-                        saw_interrupt = True
-                    elif isinstance(event, SuspendedFinal):
-                        saw_suspended = True
-                    yield event
+                # Bind the resume continuation and the chained-park claims ledger around each
+                # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield``
+                # would leak the bindings into the consumer's task (PEP 568 is unimplemented) and
+                # strand them on an abandoned stream. The claims set is owned here for the whole
+                # drive — each step re-binds it — and its dead chains are detached on the way out.
+                claims: set[str] = set()
+                try:
+                    async for event in bind_resume_per_step(
+                        lambda: park_step_binding(park, claims),
+                        self._astream_built(
+                            agent,
+                            agent_input,
+                            config,
+                            interrupt_on,
+                            response_format=response_format,
+                            structured_strategy=strategy,
+                            park=park,
+                        ),
+                    ):
+                        if isinstance(event, StructuredFinal):
+                            saw_structured = True
+                        elif isinstance(event, InterruptFinal):
+                            saw_interrupt = True
+                        elif isinstance(event, SuspendedFinal):
+                            saw_suspended = True
+                        yield event
+                finally:
+                    await detach_dead_chains(claims)
                 # A requested response_format that produced no StructuredFinal fails loudly.
                 # A pending interrupt OR an async park means the run paused rather than finished,
                 # so (as in _drain) the pause takes precedence and the raise is skipped.
@@ -927,7 +938,7 @@ class DeepAgent(Agent):
                     bind=True,
                     extra_retention_horizon=drive.workspace_retention_horizon,
                 )
-                with park_continuation(park):
+                async with park_drive(park):
                     result = await self._drain(
                         self._astream_built(
                             agent,

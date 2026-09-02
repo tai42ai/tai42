@@ -10,25 +10,38 @@ thread while the agent's answer is orphaned, both fires racing for one delivery 
 THE OWNER OF THE INTERACTION OWNS DELIVERY. An agent that dispatches a tool is that owner: the
 tool call is a STEP of the agent's turn, never a second answerer of it — whatever the tool
 resolves to belongs to the agent, which folds it into the answer it alone delivers. So a tool an
-agent dispatches runs under a CLEARED binding, while the agent's OWN park still captures the
-binding the door set for it.
+agent dispatches never runs under the door's binding, while the agent's OWN park still captures
+the binding the door set for it.
 
-What clearing achieves is bounded, and the bound is worth stating. It stops the HIJACK: no nested
+What that achieves is bounded, and the bound is worth stating. It stops the HIJACK: no nested
 driver can address the guest thread this agent's answer is owed to. It does NOT make the nested
 park the agent's. A nested driver that binds its own resume continuation — a flow preset is the
 live example — owns that park end to end: it resumes on its own continuation and hands the
-outcome wherever its own face delivers, which is not necessarily back into this agent's turn.
+outcome wherever its own face delivers.
 
-So an agent does not ADOPT a park raised beneath it: the seams that would turn a returned park
-sentinel into this run's own suspended state check the park's owner first
-(``tai42_contract.interactions.assert_park_adoptable``) and refuse a nested run's to the model,
-rather than suspending this run behind a resume that would never fire at it. That rule is the
-sentinel's and the seams', not this module's — clearing the delivery address and refusing the
-adoption are separate halves of the one ownership question, and this half is the address.
+Which leaves the question of what the dispatch binds INSTEAD, and there are two answers.
 
-Clearing is the whole mechanism — a nested driver decides for itself what an unwired completion
-means (park refused loudly, or a park delivered through its own resume face). This module names
-no driver and no delivery tool.
+CHAINED — the dispatch of a run that can park. The binding becomes a chained completion
+(``chained_park_context``) addressing THIS call: a fresh key naming the dispatch, wrapping
+whatever the caller had bound. A nested driver that parks under it captures that address, so
+when it reaches its terminal it fires the chain's delivery tool, which re-enters this loop with
+that terminal as the tool's result. The agent parks on the CALL — a park of its own, owned by
+its own resume continuation — while the nested run keeps its park and its resume. This is what
+lets an agent wait on a flow (or another agent) that has to ask a human.
+
+CLEARED — the dispatch of a run that cannot park. Nothing here could wait on a nested terminal,
+so nothing addresses one: the binding is cleared, and a nested run's park is refused to the
+model by the ownership guard, loudly, rather than suspending a run with no way back.
+
+The two are the same rule under different capabilities, and the capability is read off the ONE
+fact that decides it: whether a resume continuation is bound for this run. Nothing else here
+knows about parking.
+
+One chained key addresses one CALL, so a single dispatch that reaches two parking runs can only
+be waited on for the first: the second claims the same key and would be delivered to the same
+park. The seams this plugin owns cannot produce that shape — a tool body that parks returns its
+park as its result, ending the dispatch — and a composite assembled elsewhere is the boundary
+below.
 
 The reach is this plugin's own dispatch seams, and there is a boundary beyond them. A composite
 toolbox tool an agent calls is covered, because the agent dispatches the composite and the whole
@@ -37,7 +50,7 @@ assembled OUTSIDE an agent (a toolbox chain wired straight onto a conversation r
 same hazard class under a different owner and out of this plugin's reach — the scope has to be
 applied by whoever dispatches the step.
 
-The binding is cleared for the DISPATCH ONLY, so the agent's own park — raised by the graph
+The binding is replaced for the DISPATCH ONLY, so the agent's own park — raised by the graph
 outside any tool body — still captures the completion the door bound for it, unchanged.
 """
 
@@ -50,27 +63,53 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 from langchain_core.tools import BaseTool
-from tai42_contract.interactions import reset_park_completion, set_park_completion
+from tai42_contract.interactions import (
+    chained_park_context,
+    get_park_completion,
+    get_resume_continuation_tool,
+    new_chained_park_key,
+    reset_park_completion,
+    set_park_completion,
+)
 
+from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
+from tai42_agents._internal.park.driver import AGENT_RESUME_TOOL_NAME
 from tai42_agents._internal.park.middleware import resuming_park_interaction_ids
 
 logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
-def nested_tool_dispatch() -> Iterator[None]:
-    """Run a nested tool dispatch with NO park-completion bound and NO resuming-park ids inherited.
+def nested_tool_dispatch(*, chain: bool = False) -> Iterator[None]:
+    """Run a nested tool dispatch, rebinding the parent run's claim points for the tool body.
 
     Wraps the exact call that hands control to a foreign tool body, and restores the caller's
     own bindings in a ``finally`` — the agent's park, raised outside this scope, still sees the
     completion the door bound for it.
 
-    Every claim-point binding the parent run set is cleared at this seam, not only the completion
-    ADDRESS. The resuming-park interaction ids name what the PARENT run is resuming; a nested run
-    dispatched inside the tool body must not inherit them, or its claim point would adopt an
-    ownerless marker that merely carries one of the parent's resuming ids. (Any future claim-point
-    binding — e.g. a chained-park chain key — must be cleared here too, for the same reason.)"""
-    token = set_park_completion()
+    Two claim points the parent run set are rebound here, not only the completion ADDRESS. The
+    resuming-park interaction ids name what the PARENT run is resuming; a nested run dispatched
+    inside the tool body must not inherit them, or its claim point would adopt an ownerless
+    marker that merely carries one of the parent's resuming ids — so they are cleared to
+    ``frozenset()`` for the whole dispatch, unconditionally. Every claim-point binding the parent
+    set is cleared at this seam unless this dispatch deliberately passes it down.
+
+    ``chain`` asks for the CHAINED completion binding: a fresh chained key addressing this one
+    call, wrapping the caller's binding, so a nested run that parks re-enters this loop with its
+    terminal instead of stranding it. It is honored only when a resume continuation is bound
+    for this run (``agent_resume``) — that is exactly the condition under which this run can
+    park at all, and a chain nothing can park on would leave the nested run firing at a key
+    that never existed. That chained key is the ONE claim-point binding this seam passes into the
+    nested scope on purpose; when the chain declines itself the key is never set, so the
+    clear-when-unchained rule still holds for it. Otherwise, and by default, the completion
+    binding is CLEARED: no nested driver can address this agent's answer, and its park is refused
+    to the model."""
+    if chain and get_resume_continuation_tool() == AGENT_RESUME_TOOL_NAME:
+        token = set_park_completion(
+            CHAINED_PARK_DELIVERY_TOOL_NAME, chained_park_context(new_chained_park_key(), get_park_completion())
+        )
+    else:
+        token = set_park_completion()
     with resuming_park_interaction_ids(frozenset()):
         try:
             yield
@@ -79,11 +118,14 @@ def nested_tool_dispatch() -> Iterator[None]:
 
 
 def scope_nested_dispatch[ToolT: BaseTool](tool: ToolT) -> ToolT:
-    """``tool`` with its body wrapped in :func:`nested_tool_dispatch`.
+    """``tool`` with its body wrapped in a CHAINED :func:`nested_tool_dispatch`.
 
     Applied to every tool an agent is given, whatever it was resolved from (a live object, a
     registered name, or a preset), so the ownership rule holds for the whole tool list rather
-    than the one resolution path that happens to reach a parking driver today.
+    than the one resolution path that happens to reach a parking driver today. Chained because
+    this is the LangGraph loops' tool list: their park hook can host a park on the CALL, so a
+    nested run that parks is waited on rather than refused. A run of theirs that cannot park
+    binds no resume continuation, and the chain declines itself.
 
     Typed over any :class:`~langchain_core.tools.BaseTool` and returning the caller's OWN tool
     type: an agent whose list is ``list[StructuredTool]`` gets one back, while a bodyless subclass
@@ -133,7 +175,9 @@ def scope_nested_dispatch_all[ToolT: BaseTool](tools: Iterable[ToolT]) -> list[T
 def _scoped_sync(func: Any) -> Any:
     @functools.wraps(func)
     def scoped(*args: Any, **kwargs: Any) -> Any:
-        with nested_tool_dispatch():
+        # A fresh chained key per INVOCATION, not per wrap: two tool calls in one super-step
+        # are two calls, each waited on separately.
+        with nested_tool_dispatch(chain=True):
             return func(*args, **kwargs)
 
     return scoped
@@ -142,7 +186,7 @@ def _scoped_sync(func: Any) -> Any:
 def _scoped_async(coroutine: Any) -> Any:
     @functools.wraps(coroutine)
     async def scoped(*args: Any, **kwargs: Any) -> Any:
-        with nested_tool_dispatch():
+        with nested_tool_dispatch(chain=True):
             return await coroutine(*args, **kwargs)
 
     return scoped

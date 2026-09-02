@@ -28,7 +28,7 @@ from tai42_kit.logging.settings import logging_settings
 
 from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.config_util import init_langgraph_config
-from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_continuation
+from tai42_agents._internal.park import ParkIdentity, finalize_drive, park_drive
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.structured import as_tool_strategy
@@ -224,10 +224,12 @@ async def ainvoke_tools_agent(
     )
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = Command(resume=resume) if resume is not None else messages
-    # The resume continuation is bound for the drive's duration so an async ``ask_user``
-    # a tool raises stamps its resume path onto the parked interaction (a no-op when the
-    # run is not park-capable / does not bind).
-    with park_continuation(park):
+    # The resume continuation and the chained-park claims ledger are bound for the drive's
+    # duration so an async ``ask_user`` a tool raises stamps its resume path onto the parked
+    # interaction (``None`` bound when the run does not bind), and a chained call this run does
+    # not park on is detached when the drive stops. Safe whole-drive here: a run face awaits the
+    # drive to a result in one task, never yielding to an external consumer.
+    async with park_drive(park):
         state = await agent.ainvoke(agent_input, config)
         park_events = await finalize_drive(agent, config, None, park)
     for event in park_events:

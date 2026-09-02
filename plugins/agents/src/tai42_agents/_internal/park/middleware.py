@@ -19,6 +19,11 @@ model shaped to name the bound continuation. What this hook does defend is shape
 returns ``None``) — and this before-model hook holds no interactions-store handle, so
 store-authoritative existence checks are not applied here.
 
+On resume, an answer may itself say the awaited outcome FAILED (a chained call whose nested
+run ended without a result): that answer shape is defined here and substituted as the same
+model-visible error ToolMessage a refused park takes, never as a value the model would read
+as the tool's answer.
+
 Side-effect-free is load-bearing: ``interrupt`` re-executes the whole node on resume, so
 the scan-and-substitute must be safe to run twice. It is — the scan is pure, and the
 substitution is an idempotent replace-by-id through the messages reducer.
@@ -53,6 +58,30 @@ from tai42_agents._internal.park.errors import AgentParkMarkerError
 # park interrupt by its value shape (never a name). Internal to the agents plugin — the
 # platform contract knows only the generic ToolMessage marker, not this interrupt payload.
 AGENT_PARK_PAYLOAD_KEY: Final[str] = "tai42:agent_park"
+
+# The reserved shape a resumed park's ANSWER may carry instead of a value, to say the awaited
+# outcome did not arrive. A chained park waits on a nested run's terminal, and that terminal can
+# be a failure, so the resume has to be able to say so — an answer is otherwise substituted
+# verbatim as the tool's result, which would hand the model a failure dressed as an answer (or,
+# for an empty one, silence). Internal to the agents plugin: the delivery tool that maps a
+# non-success terminal builds it, and the substitution below turns it back into a model-visible
+# error ToolMessage.
+PARK_ANSWER_ERROR_KEY: Final[str] = "tai42:agent_park_error"
+
+
+def park_error_answer(detail: str) -> dict[str, str]:
+    """The answer value that resumes a park with a FAILURE: ``detail`` is what the model reads
+    as the tool's error."""
+    return {PARK_ANSWER_ERROR_KEY: detail}
+
+
+def read_park_error_answer(answer: Any) -> str | None:
+    """The failure detail an answer carries, or ``None`` for an ordinary answer (every value a
+    human or an expiry marker delivers)."""
+    if isinstance(answer, dict) and PARK_ANSWER_ERROR_KEY in answer:
+        detail = answer[PARK_ANSWER_ERROR_KEY]
+        return detail if isinstance(detail, str) else str(detail)
+    return None
 
 
 # The interaction ids the driver is resuming into THIS graph right now. The resume driver binds
@@ -130,8 +159,9 @@ def _scan_parks(messages: list[AnyMessage]) -> list[dict[str, Any]]:
     return parks
 
 
-def _refusal_message(park: dict[str, Any], reason: str) -> ToolMessage:
-    """The model-visible error ToolMessage a park this run may not claim is replaced by.
+def _error_message(park: dict[str, Any], reason: str) -> ToolMessage:
+    """The model-visible error ToolMessage a parked tool result is replaced by — a park this
+    run may not claim, or one whose awaited outcome came back a failure.
 
     An error RESULT, never a dropped marker: leaving the marker in place would hand the model
     the raw park JSON as if it were the tool's answer, and dropping the message would strand
@@ -172,7 +202,7 @@ def _partition_claimable(parks: list[dict[str, Any]]) -> tuple[list[dict[str, An
                 park["resume_owner"], interaction_id=park["interaction_id"], tool_name=park["name"] or "<unnamed>"
             )
         except NestedParkOwnershipError as exc:
-            refusals.append(_refusal_message(park, str(exc)))
+            refusals.append(_error_message(park, str(exc)))
         else:
             claimable.append(park)
     return claimable, refusals
@@ -232,10 +262,19 @@ def _park_or_resume(messages: list[AnyMessage]) -> dict[str, Any] | None:
         interaction_id = park["interaction_id"]
         if interaction_id not in answers:
             raise AgentParkMarkerError(f"agent park resume is missing the answer for interaction {interaction_id!r}")
+        answer = answers[interaction_id]
+        failure = read_park_error_answer(answer)
+        if failure is not None:
+            # The awaited outcome did not arrive (a chained call whose nested run ended without
+            # a result). It takes the SAME model-visible error ToolMessage a refused park does —
+            # never a silent empty result, and never the failure serialized as if it were the
+            # answer.
+            rewritten.append(_error_message(park, failure))
+            continue
         rewritten.append(
             ToolMessage(
                 id=park["message_id"],
-                content=cast("str | list[str | dict[Any, Any]]", msg_content_output(answers[interaction_id])),
+                content=cast("str | list[str | dict[Any, Any]]", msg_content_output(answer)),
                 tool_call_id=park["tool_call_id"],
                 name=park["name"],
             )

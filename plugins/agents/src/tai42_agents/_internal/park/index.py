@@ -4,7 +4,7 @@ When an async ``ask_user`` parks a park-capable agent run, the flow-blind platfo
 the interaction id — never any agent, thread, or graph state. This index is how the
 agents plugin reverses that id back to the parked run: at park it records
 ``interaction_id -> {agent_name, thread_id, superstep_id, interrupt_id, rebuild_kwargs,
-completion_tool, completion_context}``
+completion_tool, completion_context, retention_bound}``
 (any engine fact — a LangGraph checkpoint provider / recursion limit — rides INSIDE
 ``rebuild_kwargs``, never a top-level field, so the index stays provider-free);
 when the platform later fires the continuation with ``{interaction_id, answer}`` the
@@ -13,6 +13,10 @@ targets, and the rebuild kwargs needed to recompile the same graph. Once the
 super-step completes, each entry is replaced with a short-TTL resolved tombstone —
 never deleted — so a redelivered answer resolves benignly instead of raising on an
 absent key.
+
+The key space is RESUME KEYS, not only interaction ids: a run that parks on a nested CALL it
+chained records that chained key here the same way, and the same reversal drives it. Nothing
+in this module reads a key's meaning — the driver decides which policy a key kind gets.
 
 It lives in the agents plugin's OWN Redis (``agents_park_redis_settings`` /
 ``TAI_AGENTS_REDIS_URL``, falling back to ``TAI_DEFAULT_REDIS_URL``), independent of the
@@ -248,6 +252,67 @@ async def persist_superstep(
         pipe.hset(barrier, mapping={"expected": json.dumps(expected)})
         pipe.expire(barrier, barrier_ttl_seconds)
         await pipe.execute()
+
+
+async def detach_chained_parks(keys: Iterable[str]) -> None:
+    """Write a resolved tombstone for each chained key a drive CLAIMED but never parked on.
+
+    A chained key names a call whose nested run will still fire its terminal at it. When the
+    claiming drive ends without recording a park — it errored, or it moved on without pausing —
+    that fire would otherwise hunt an entry that never existed and be retried until the
+    platform's delivery horizon gives up. The tombstone gives it the benign already-resolved
+    landing instead, on the same key and with the same short TTL a cleanly-driven super-step
+    leaves behind.
+
+    Written ``NX``, so it can never overwrite live state: a key that DOES hold a park entry (a
+    concurrent re-drive that reached the persist first) or an existing tombstone is left exactly
+    as it is. Called with the drive's leftover claims, so a drive that parked on everything it
+    claimed writes nothing."""
+    tombstone = json.dumps({_RESOLVED_TOMBSTONE_FIELD: True})
+    async with _park_client() as client, client.pipeline(transaction=True) as pipe:
+        for key in keys:
+            pipe.set(_park_key(key), tombstone, ex=_RESOLVED_TOMBSTONE_TTL_SECONDS, nx=True)
+        await pipe.execute()
+
+
+# Extend a park's keys to a LATER horizon in one round trip, and never shorten one. A park
+# entry and its barrier are sized to a deadline; when that deadline moves out (a chained park
+# whose nested run re-parked on a further ask) both must outlive the new one. A key with no
+# expiry (-1) is already unbounded and left alone; a missing key (-2) has nothing to extend.
+_EXTEND_HORIZON_SCRIPT: Final[str] = """
+-- agent:park-horizon-extend
+local extended = 0
+for i = 1, #KEYS do
+    local current = redis.call('ttl', KEYS[i])
+    local wanted = tonumber(ARGV[i])
+    if current >= 0 and current < wanted then
+        redis.call('expire', KEYS[i], wanted)
+        extended = extended + 1
+    end
+end
+return extended
+"""
+
+
+async def extend_park_horizon(interaction_id: str, thread_id: str, superstep_id: str, expiry: datetime) -> bool:
+    """Extend a park entry AND its super-step barrier to outlive ``expiry``, never shortening
+    either. Returns whether anything was extended.
+
+    Sized by the SAME :func:`park_entry_ttl_seconds` / :func:`barrier_ttl_seconds` the persist
+    uses, so an extended park is indistinguishable from one persisted at the new deadline. The
+    barrier is sized to the same deadline as the entry, keeping the invariant that it outlives
+    every entry it coordinates."""
+    async with _park_client() as client:
+        extended = await _eval(
+            client,
+            _EXTEND_HORIZON_SCRIPT,
+            2,
+            _park_key(interaction_id),
+            _barrier_key(thread_id, superstep_id),
+            str(park_entry_ttl_seconds(expiry)),
+            str(barrier_ttl_seconds([expiry])),
+        )
+    return bool(extended)
 
 
 def is_resolved_tombstone(entry: dict[str, Any]) -> bool:

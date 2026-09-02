@@ -275,6 +275,104 @@ def test_park_persist_allows_any_expiry_under_keep_forever_redis(fake_park_redis
     asyncio.run(go())
 
 
+# ---- chained parks: the inherited horizon, and dead chains --------------------------------
+
+
+_CHAIN = "tai42:chained-park:k1"
+
+
+def test_a_chained_key_clamps_its_inherited_horizon_into_retention(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        # A chained key waits on a nested CALL: its deadline is INHERITED, not its own ask's, so
+        # one beyond the retention bound is CLAMPED into it rather than failing the park —
+        # nothing fires at a chained deadline, so a shortened one costs nothing, and the park
+        # stays inside the window its own state survives.
+        bound = _bound_in(60)
+        written = await drv.persist_park(_park_identity(bound), [("int1", {_CHAIN: _iso_in(9999)})])
+        assert datetime.fromisoformat(written[_CHAIN]) == bound
+        assert await idx.read_park_entry(_CHAIN) is not None
+
+    asyncio.run(go())
+
+
+def test_a_chained_key_with_no_inherited_deadline_takes_the_cap(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def go() -> None:
+        # Never unbounded: a nested run that carried no deadline at all still leaves the waiting
+        # caller with a bounded park — an interaction id in the same position would be refused
+        # under a bounded retention, because nothing could resume it.
+        monkeypatch.setattr(drv, "agents_limits_settings", lambda: SimpleNamespace(chained_park_horizon_cap_hours=2))
+        written = await drv.persist_park(_park_identity(None), [("int1", {_CHAIN: None})])
+        capped = datetime.fromisoformat(written[_CHAIN])
+        assert capped <= datetime.now(UTC) + timedelta(hours=2)
+        entry = await idx.read_park_entry(_CHAIN)
+        assert entry is not None
+        # The bound the persist gated against rides the entry, so a later extension re-clamps
+        # against the same one instead of guessing.
+        assert entry["retention_bound"] is None
+
+    asyncio.run(go())
+
+
+def test_an_interaction_id_keeps_its_own_ask_deadline(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        # Only chained keys are clamped: a real ask's deadline is its own and rides through
+        # untouched, still meeting the retention gate on its own terms.
+        deadline = _iso_in(30)
+        written = await drv.persist_park(_park_identity(_bound_in(60)), [("int1", {"i1": deadline})])
+        assert written == {"i1": deadline}
+
+    asyncio.run(go())
+
+
+def test_extending_a_park_horizon_never_shortens_it(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        await drv.persist_park(_park_identity(None), [("int1", {_CHAIN: _iso_in(60)})])
+        entry = await idx.read_park_entry(_CHAIN)
+        assert entry is not None
+        before = await fake_park_redis.ttl(f"agent:park:{_CHAIN}")
+        # A NEARER deadline than the park already holds: an extension is not a re-sizing, so it
+        # leaves both keys alone rather than cutting a park short.
+        assert await idx.extend_park_horizon(_CHAIN, "t-gate", entry["superstep_id"], _bound_in(1)) is False
+        assert await fake_park_redis.ttl(f"agent:park:{_CHAIN}") == before
+        # A LATER one moves both the entry and the barrier out.
+        assert (
+            await idx.extend_park_horizon(
+                _CHAIN, "t-gate", entry["superstep_id"], datetime.now(UTC) + timedelta(days=90)
+            )
+            is True
+        )
+        assert await fake_park_redis.ttl(f"agent:park:{_CHAIN}") > before
+        assert await fake_park_redis.ttl(f"agent:park:step:t-gate:{entry['superstep_id']}") > before
+
+    asyncio.run(go())
+
+
+def test_detaching_a_dead_chain_leaves_a_benign_tombstone(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        await idx.detach_chained_parks([_CHAIN])
+        entry = await idx.read_park_entry(_CHAIN)
+        assert entry is not None
+        assert idx.is_resolved_tombstone(entry)
+
+    asyncio.run(go())
+
+
+def test_detaching_never_overwrites_a_live_park(fake_park_redis: Any) -> None:
+    async def go() -> None:
+        # A key that DOES hold a park (a concurrent re-drive that reached the persist first) is
+        # left exactly as it is — the detach is written NX, so it can only fill an empty slot.
+        await drv.persist_park(_park_identity(None), [("int1", {_CHAIN: None})])
+        await idx.detach_chained_parks([_CHAIN])
+        entry = await idx.read_park_entry(_CHAIN)
+        assert entry is not None
+        assert not idx.is_resolved_tombstone(entry)
+        assert entry["agent_name"] == "langchain_deep_agent"
+
+    asyncio.run(go())
+
+
 def test_park_persist_records_multiple_parks_as_one_superstep(fake_park_redis: Any) -> None:
     async def go() -> None:
         # Two distinct park interrupts (parallel subagent parks) persist into ONE super-step:

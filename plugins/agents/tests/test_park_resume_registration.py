@@ -1,7 +1,8 @@
-"""The hidden ``agent_resume`` continuation registers from the SHARED park machinery.
+"""The hidden park continuations register from the SHARED park machinery.
 
-The park is unresumable unless the tool the platform fires (``agent_resume``) is
-registered wherever a park-capable agent can park. That registration must therefore hold
+The park is unresumable unless the tools the platform and a nested driver fire —
+``agent_resume`` for an answered ask, ``deliver_chained_park`` for a chained call's terminal —
+are registered wherever a park-capable agent can park. That registration must therefore hold
 for EVERY park-capable agent module on its own — not just the one whose import used to
 carry it — because a deployment may load only one.
 
@@ -67,9 +68,11 @@ tai42_app.bind(_StubApp())
 for module_name in sys.argv[1:]:
     importlib.import_module(module_name)
 
+from tai42_agents._internal.park.chain import CHAINED_PARK_DELIVERY_TOOL_NAME
 from tai42_agents._internal.park.driver import AGENT_RESUME_TOOL_NAME
 
 print("AGENT_RESUME_COUNT=" + str(_REGISTERED.count(AGENT_RESUME_TOOL_NAME)))
+print("CHAINED_PARK_COUNT=" + str(_REGISTERED.count(CHAINED_PARK_DELIVERY_TOOL_NAME)))
 """
 
 
@@ -81,13 +84,21 @@ def _import_in_fresh_interpreter(*modules: str) -> subprocess.CompletedProcess[s
     )
 
 
-def _resume_registrations(result: subprocess.CompletedProcess[str]) -> int:
+def _registrations(result: subprocess.CompletedProcess[str], prefix: str) -> int:
     assert result.returncode == 0, (
         f"importing the agent module(s) failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    lines = [line for line in result.stdout.splitlines() if line.startswith("AGENT_RESUME_COUNT=")]
+    lines = [line for line in result.stdout.splitlines() if line.startswith(prefix)]
     assert len(lines) == 1, f"expected one count line, got: {result.stdout!r}"
-    return int(lines[0].removeprefix("AGENT_RESUME_COUNT="))
+    return int(lines[0].removeprefix(prefix))
+
+
+def _resume_registrations(result: subprocess.CompletedProcess[str]) -> int:
+    return _registrations(result, "AGENT_RESUME_COUNT=")
+
+
+def _chained_registrations(result: subprocess.CompletedProcess[str]) -> int:
+    return _registrations(result, "CHAINED_PARK_COUNT=")
 
 
 def test_importing_tools_agent_alone_registers_agent_resume() -> None:
@@ -103,3 +114,29 @@ def test_importing_langchain_deep_agent_alone_registers_agent_resume() -> None:
 def test_importing_both_park_capable_agents_registers_agent_resume_exactly_once() -> None:
     result = _import_in_fresh_interpreter("tai42_agents.tools_agent", "tai42_agents.langchain_deep_agent")
     assert _resume_registrations(result) == 1
+
+
+def test_importing_tools_agent_alone_registers_the_chained_park_delivery() -> None:
+    # A chaining loop's dispatches bind that tool as their delivery address, so a box loading
+    # only this agent must still have it registered for the nested driver to fire.
+    result = _import_in_fresh_interpreter("tai42_agents.tools_agent")
+    assert _chained_registrations(result) == 1
+
+
+def test_importing_langchain_deep_agent_alone_registers_the_chained_park_delivery() -> None:
+    result = _import_in_fresh_interpreter("tai42_agents.langchain_deep_agent")
+    assert _chained_registrations(result) == 1
+
+
+def test_importing_both_chaining_agents_registers_the_chained_park_delivery_exactly_once() -> None:
+    result = _import_in_fresh_interpreter("tai42_agents.tools_agent", "tai42_agents.langchain_deep_agent")
+    assert _chained_registrations(result) == 1
+
+
+def test_importing_claude_code_alone_registers_no_chained_park_delivery() -> None:
+    # ``claude_code`` resumes by feeding its runner the answer to the interaction its pending
+    # tool call waits on, so a park on the CALL is not a shape it can resume: it does not chain,
+    # and it binds no delivery address for one.
+    result = _import_in_fresh_interpreter("tai42_agents.claude_code")
+    assert _resume_registrations(result) == 1
+    assert _chained_registrations(result) == 0
