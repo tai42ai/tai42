@@ -600,49 +600,83 @@ def _failed_result_detail(result: object) -> str | None:
     return f"tool result status {status!r}{reason_text}"
 
 
-#: The NON-TERMINAL status vocabulary a run envelope reports when it handed control back
-#: MID-RUN instead of finishing: an async park (``"suspended"``) whose envelope did not cross a
-#: tool-face — the engine's own ``flow_resume`` / ``flow_step`` callers keep the run-outcome dict
-#: rather than the :class:`SuspendedInteraction` sentinel the ``flow`` auto-pilot tool-face
-#: emits — or a step-mode tool-call pause (``"interrupt"``). A paused run is NEITHER a success
-#: NOR a failure: its flagged reply surface is still DOWNSTREAM of the pause (unproduced), so
-#: mapping its envelope through ``reply_expr`` reads an empty/not-ready surface as though it were
-#: the produced reply — either faulting an authored completeness guard or delivering a blank. The
-#: turn ends silently, exactly as the :class:`SuspendedInteraction` marker path does, and the real
-#: reply delivers out of band when the resume drives past the pause (through the completion
-#: continuation bound around the dispatch).
+#: A run envelope can hand control back MID-RUN instead of finishing, reporting a NON-TERMINAL
+#: PAUSED status rather than a success or a failure: its flagged reply surface is still
+#: DOWNSTREAM of the pause (unproduced), so mapping the envelope through ``reply_expr`` would read
+#: an empty/not-ready surface as though it were the produced reply — faulting an authored
+#: completeness guard or delivering a blank. Two paused statuses reach here, and they take
+#: DIFFERENT dispositions because they differ in one fact: whether the paused reply has a
+#: DELIVERY LEG back to this turn.
 #:
-#: POSITIVE discrimination on a CLOSED, exact, case-sensitive set — never "anything not success" —
+#: ``"suspended"`` is an async re-park whose envelope did not cross a tool-face — the engine's own
+#: ``flow_resume`` / ``flow_step`` callers keep the run-outcome dict rather than the
+#: :class:`SuspendedInteraction` sentinel the ``flow`` auto-pilot tool-face emits. It HAS a
+#: delivery leg: the completion continuation bound around the dispatch carries this thread, so the
+#: resumed answer arrives out of band when the resume drives past the pause. The turn ends
+#: SILENTLY, exactly as the :class:`SuspendedInteraction` marker path does, and the recorded note
+#: reads as pending — not lost.
+#:
+#: ``"interrupt"`` is a step-mode tool-call pause. A step-mode run cannot be driven by a
+#: conversation turn, so an interrupt reaching one has NO delivery leg — the reply would never
+#: arrive. That is a permanent route misconfiguration (a hidden looping tool no route sensibly
+#: targets), and the standard disposition for a permanent misconfiguration is LOUD: it takes the
+#: ERROR path (the same client-safe error reply a failed run gets), so the failure is noticed
+#: rather than converted into silent data loss.
+#:
+#: POSITIVE discrimination on CLOSED, exact, case-sensitive sets — never "anything not success" —
 #: for the same reason :data:`_FAILED_RESULT_STATUSES` is closed: a ``status`` from a tool's OWN
-#: vocabulary is an ordinary payload field that must keep mapping. Kept DISJOINT from the failed
-#: set on purpose: a pause is not a failure, so it must deliver NO error reply to the guest.
-#: ``missing_results`` is deliberately NOT the discriminator — it rides EVERY non-error envelope
-#: the engine returns, a SUCCESS terminal included (as an empty list), so its presence names no
-#: pause; the status does. It is read only to ENRICH the recorded note when the producer carries
-#: it (flows 0.35.0+), and simply absent on the older producer (flows 0.34.0).
-_PAUSED_RESULT_STATUSES: frozenset[str] = frozenset({"suspended", "interrupt"})
+#: vocabulary is an ordinary payload field that must keep mapping. ``missing_results`` is
+#: deliberately NOT the discriminator — it rides EVERY non-error envelope the engine returns, a
+#: SUCCESS terminal included (as an empty list), so its presence names no pause; the status does.
+#: It is read only to ENRICH the recorded detail for producers that ride ``missing_results`` on
+#: paused envelopes, and is simply absent for older producers that do not.
+_SUSPENDED_RESULT_STATUSES: frozenset[str] = frozenset({"suspended"})
+_INTERRUPT_RESULT_STATUSES: frozenset[str] = frozenset({"interrupt"})
 
 
-def _paused_result_note(result: object) -> str | None:
-    """The internal note for a tool result that NAMES a non-terminal PAUSED run
-    (:data:`_PAUSED_RESULT_STATUSES`), or ``None`` when it names none.
+def _suspended_result_note(result: object) -> str | None:
+    """The internal note for a tool result that NAMES a non-terminal SUSPENDED re-park
+    (:data:`_SUSPENDED_RESULT_STATUSES`), or ``None`` when it names none.
 
-    A paused envelope is the run handing control back mid-run — an engine-caller async park or a
-    step-mode tool-call pause — with its flagged reply surface still downstream of the pause, so
-    it must never be mapped as a reply. The note names the paused status and, when the producer
-    rides it (flows 0.35.0+), the ``missing_results`` surfaces the run has not produced YET, so
-    the record can say WHY the turn produced no reply. flows 0.34.0 rides no ``missing_results``
-    and the note simply omits it. Recorded and logged, never delivered — the paused-run sibling of
-    :func:`_failed_result_detail`."""
+    A suspended envelope is the run handing control back mid-run on an engine-caller async park,
+    with its flagged reply surface still downstream of the pause, so it must never be mapped as a
+    reply. The turn ends SILENTLY and the real reply delivers out of band when the resume drives
+    past the pause. The note names the paused status and, for a producer that rides it, the
+    ``missing_results`` surfaces the run has not produced YET, so the record can say WHY the turn
+    produced no reply; a producer that does not ride it omits that cleanly. Recorded and logged,
+    never delivered — the paused-run sibling of :func:`_failed_result_detail`."""
     if not isinstance(result, dict):
         return None
     status = result.get("status")
-    if not isinstance(status, str) or status not in _PAUSED_RESULT_STATUSES:
+    if not isinstance(status, str) or status not in _SUSPENDED_RESULT_STATUSES:
         return None
     missing = result.get("missing_results")
     if isinstance(missing, list) and missing:
         return f"tool run paused (status {status!r}); reply pending, missing_results={_capped_repr(missing)}"
     return f"tool run paused (status {status!r}); reply pending"
+
+
+def _interrupt_result_detail(result: object) -> str | None:
+    """The internal error detail for a tool result that NAMES a step-mode INTERRUPT pause
+    (:data:`_INTERRUPT_RESULT_STATUSES`), or ``None`` when it names none.
+
+    A step-mode interrupt reaching a conversation turn is a permanent route misconfiguration: the
+    turn cannot drive a step-mode run, so the pause has NO delivery leg and the reply would never
+    arrive. It is surfaced as the SAME client-safe error a failed run is, so the failure is loud
+    and noticed rather than silent data loss. The detail names the real cause and, for a producer
+    that rides it, the ``missing_results`` surfaces the run will never produce here. Recorded and
+    logged, never delivered — the loud sibling of :func:`_suspended_result_note`."""
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    if not isinstance(status, str) or status not in _INTERRUPT_RESULT_STATUSES:
+        return None
+    missing = result.get("missing_results")
+    surfaces = f"; missing_results={_capped_repr(missing)}" if isinstance(missing, list) and missing else ""
+    return (
+        f"tool run paused in step mode (status {status!r}) on a conversation turn that cannot "
+        f"drive it — a route misconfiguration; the reply has no delivery leg{surfaces}"
+    )
 
 
 async def _run_tool_turn(
@@ -737,23 +771,30 @@ async def _run_tool_turn(
         # end the turn silently. The completion continuation bound around this dispatch
         # is what delivers the reply back into the thread when the parked run resumes.
         return _SilentOutcome()
-    paused_note = _paused_result_note(result)
-    if paused_note is not None:
-        # The run handed back a NON-TERMINAL PAUSED envelope, NOT the SuspendedInteraction marker:
-        # an engine-caller async re-park (``"suspended"``) or a step-mode tool-call pause
-        # (``"interrupt"``) that no tool-face converted to a sentinel. Its flagged reply surface is
-        # still DOWNSTREAM of the pause, so mapping it through reply_expr would answer a not-ready
-        # reply as a produced one (faulting an authored completeness guard, or delivering a blank).
-        # A pause is NEITHER success nor failure — so it takes NEITHER the reply path NOR the error
-        # path: end the turn silently exactly as the marker branch above does, and the real reply
-        # delivers out of band through the completion continuation bound around this dispatch when
-        # the resume drives past the pause. The note rides the silent record so it reads as
-        # PENDING, not lost. Known limitation: only the ``"suspended"`` re-park captures a
-        # completion engine-side; a step-mode ``"interrupt"`` reaching a conversation route (a
-        # hidden looping tool no route sensibly targets — convention, not validation) stays
-        # silent with no delivery leg.
-        logger.info("conversations: tool turn for route %r paused: %s", route.route_name, paused_note)
-        return _SilentOutcome(note=paused_note)
+    suspended_note = _suspended_result_note(result)
+    if suspended_note is not None:
+        # The run handed back a NON-TERMINAL SUSPENDED envelope, NOT the SuspendedInteraction
+        # marker: an engine-caller async re-park (``"suspended"``) that no tool-face converted to a
+        # sentinel. Its flagged reply surface is still DOWNSTREAM of the pause, so mapping it
+        # through reply_expr would answer a not-ready reply as a produced one (faulting an authored
+        # completeness guard, or delivering a blank). A suspend is NEITHER success nor failure and
+        # HAS a delivery leg, so it takes NEITHER the reply path NOR the error path: end the turn
+        # silently exactly as the marker branch above does, and the real reply delivers out of band
+        # through the completion continuation bound around this dispatch when the resume drives past
+        # the pause. The note rides the silent record so it reads as PENDING, not lost.
+        logger.info("conversations: tool turn for route %r paused: %s", route.route_name, suspended_note)
+        return _SilentOutcome(note=suspended_note)
+    interrupt_detail = _interrupt_result_detail(result)
+    if interrupt_detail is not None:
+        # The run handed back a step-mode INTERRUPT envelope. Unlike a suspend, a step-mode pause
+        # reaching a conversation turn has NO delivery leg — the turn cannot drive the run, so the
+        # reply would never arrive. That is a permanent route misconfiguration, and silencing it
+        # would convert a noticed failure into quiet data loss. It is surfaced as the SAME failed
+        # turn a non-success terminal is — the route's client-safe error reply to the guest, the
+        # cause named in the recorded detail — so the misconfiguration is loud. Logged at WARNING,
+        # not info: this is a fault, not a routine pause.
+        logger.warning("conversations: tool turn for route %r interrupted: %s", route.route_name, interrupt_detail)
+        return _tool_error(interrupt_detail, route)
     failure_detail = _failed_result_detail(result)
     if failure_detail is not None:
         # The tool RETURNED a non-success terminal instead of raising: the run was aborted,
