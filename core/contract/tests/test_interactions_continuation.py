@@ -30,11 +30,13 @@ from tai42_contract.interactions import (
     attach_chained_park,
     chained_park_claims,
     chained_park_context,
+    fire_continuation_abandoned,
     get_park_completion,
     get_resume_continuation_tool,
     is_chained_park_key,
     new_chained_park_key,
     read_suspended_interaction_marker,
+    register_continuation_abandonment_handler,
     repark_notice,
     reset_park_completion,
     reset_resume_continuation_tool,
@@ -55,6 +57,108 @@ def test_set_get_reset_round_trip():
     assert get_resume_continuation_tool() == "resume_tool"
     reset_resume_continuation_tool(token)
     assert get_resume_continuation_tool() is None
+
+
+def test_abandonment_handlers_fire_with_the_interaction_id(monkeypatch):
+    # The abandonment seam invokes every registered handler with the abandoned interaction id.
+    from tai42_contract.interactions import continuation as cont
+
+    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
+    seen_a: list[str] = []
+    seen_b: list[str] = []
+
+    async def _a(interaction_id: str) -> None:
+        seen_a.append(interaction_id)
+
+    async def _b(interaction_id: str) -> None:
+        seen_b.append(interaction_id)
+
+    register_continuation_abandonment_handler(_a)
+    register_continuation_abandonment_handler(_b)
+    # Idempotent by identity: re-registering the SAME callable adds no duplicate.
+    register_continuation_abandonment_handler(_a)
+    assert cont._continuation_abandonment_handlers == [_a, _b]
+
+    asyncio.run(fire_continuation_abandoned("i1"))
+    assert seen_a == ["i1"]
+    assert seen_b == ["i1"]
+
+
+def test_abandonment_fire_is_best_effort_per_handler(monkeypatch):
+    # One handler that raises is logged and swallowed, so it never starves the others or aborts
+    # the fire.
+    from tai42_contract.interactions import continuation as cont
+
+    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
+    seen: list[str] = []
+
+    async def _poison(interaction_id: str) -> None:
+        raise RuntimeError("boom")
+
+    async def _healthy(interaction_id: str) -> None:
+        seen.append(interaction_id)
+
+    register_continuation_abandonment_handler(_poison)
+    register_continuation_abandonment_handler(_healthy)
+    asyncio.run(fire_continuation_abandoned("i1"))
+    assert seen == ["i1"]
+
+
+def test_abandonment_fire_with_no_handlers_is_a_noop(monkeypatch):
+    from tai42_contract.interactions import continuation as cont
+
+    monkeypatch.setattr(cont, "_continuation_abandonment_handlers", [])
+    asyncio.run(fire_continuation_abandoned("i1"))  # no handlers registered — no error
+
+
+def test_execution_identity_bridge_capture_and_bind(monkeypatch):
+    # The bridge is two host-filled slots: an accessor a park reads to capture the current identity,
+    # and a binder the out-of-band fire uses to run under it. With a host accessor/binder registered,
+    # capture returns the host value and the binder wraps the fire; with neither, capture is
+    # (None, "") and the bind is a no-op (the fire runs unbound).
+    import contextlib as _contextlib
+
+    from tai42_contract.interactions import (
+        bound_execution_identity_for_fire,
+        current_execution_identity,
+        register_execution_identity_accessor,
+        register_execution_identity_binder,
+    )
+    from tai42_contract.interactions import continuation as cont
+
+    monkeypatch.setattr(cont, "_execution_identity_accessor", None)
+    monkeypatch.setattr(cont, "_execution_identity_binder", None)
+
+    # No host registered: capture yields none and the bind binds nothing.
+    assert current_execution_identity() == (None, "")
+
+    async def _no_host_fire() -> bool:
+        async with bound_execution_identity_for_fire(None, ""):
+            return True
+
+    assert asyncio.run(_no_host_fire()) is True
+
+    register_execution_identity_accessor(lambda: ("user-x", "fp-x"))
+    assert current_execution_identity() == ("user-x", "fp-x")
+
+    bound: list[tuple[str, str]] = []
+
+    @_contextlib.asynccontextmanager
+    async def _binder(key, fingerprint):
+        bound.append((key, fingerprint))
+        yield
+
+    register_execution_identity_binder(_binder)
+
+    async def _bound_fire() -> None:
+        # A None key stays unbound even with a binder registered.
+        async with bound_execution_identity_for_fire(None, ""):
+            pass
+        async with bound_execution_identity_for_fire("user-x", "fp-x"):
+            pass
+
+    asyncio.run(_bound_fire())
+    assert bound == [("user-x", "fp-x")]
 
 
 def test_reset_restores_previous_value():
