@@ -27,7 +27,7 @@ dependencies = [
     # ABC, the login-method models, and the dual-registry registration function.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.1,<7",
+    "tai42-contract>=6.2,<7",
     # The Redis client (session/state/SSO-code storage), the api-key hash used to
     # store session tokens at rest, AND the OIDC/JWT helper (tai42_kit.net.jwt:
     # discovery, JWKS cache, id_token verification). httpx — the token-exchange
