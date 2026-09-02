@@ -356,7 +356,8 @@ class ConversationRouteCreate(BaseModel):
     target_name: str = Field(min_length=1)
     # tool targets only: a jq program mapping the inbound payload to the tool kwargs, and
     # one mapping the tool result to the reply. Compiled at create; an ``agent`` target
-    # carries neither.
+    # carries neither. ``reply_expr`` maps the SUCCESS shape: a result whose own ``status``
+    # names a non-success terminal diverts to the turn's error outcome without being mapped.
     payload_expr: str | None = None
     reply_expr: str | None = None
     # The thread's control mode when no per-thread override is set: ``agent`` runs the
