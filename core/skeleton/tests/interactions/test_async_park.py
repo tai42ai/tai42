@@ -1,7 +1,7 @@
 """The async ``ask_user`` park in the helper and store: the helper returns a
-``SuspendedInteraction`` immediately (never blocks), stamps the generic
-continuation (tool + identity + fingerprint + expiry) onto the persisted question,
-and refuses an async ask with no resuming driver, no execution identity, no
+``SuspendedInteraction`` immediately (never blocks) naming the park's resume owner,
+stamps the generic continuation (tool + identity + fingerprint + expiry) onto the
+persisted question, and refuses an async ask with no resuming driver, no execution identity, no
 ``expiry_at``, or an ``expiry_at`` on a sync ask. Plus the per-interaction expiry
 index the reaper keys on — populated for an async park, empty for a sync question.
 """
@@ -55,6 +55,9 @@ async def test_async_returns_suspended_without_blocking(monkeypatch, fake_redis,
     result = await ask_user("proceed?", mode="async", expiry_at=expiry)
     assert isinstance(result, SuspendedInteraction)
     assert result.expiry_at == expiry
+    # The sentinel names the park's resume OWNER — the same continuation stamped onto the
+    # stored question — so a caller can tell a park it may adopt from a nested run's.
+    assert result.resume_owner == "resume_tool"
 
     store = InteractionStore("interactions:")
     state = await store.get_state(fake_redis, result.interaction_id)

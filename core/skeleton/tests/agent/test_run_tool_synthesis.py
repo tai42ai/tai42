@@ -166,6 +166,9 @@ def test_agent_run_tool_returns_suspended_interaction_when_the_run_parks():
             result = await app.tools.run_tool("parking", {"text": "hi"})
             assert isinstance(result, SuspendedInteraction)
             assert result.interaction_id == "i-parked"
+            # It names NO resume owner: the parked run holds its own resume state against that
+            # interaction, so no caller may adopt the park as its own (``assert_park_adoptable``).
+            assert result.resume_owner is None
 
     asyncio.run(run())
 

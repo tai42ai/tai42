@@ -2,20 +2,22 @@
 preservation of a ``SuspendedInteraction`` through a preset (``TransformedTool``)."""
 
 from tai42_contract.app import tai42_app
-from tai42_contract.interactions import SuspendedInteraction
+from tai42_contract.interactions import SuspendedInteraction, get_resume_continuation_tool
 from tai42_contract.presets import PresetInputSchemaSupport
 
 
 @tai42_app.tools.tool
 def make_suspend() -> SuspendedInteraction:
     """Return an async-park sentinel."""
-    return SuspendedInteraction(interaction_id="i-preset")
+    # Stamp the resume owner the real platform ask does (the bound resume continuation), so the
+    # fixture sentinel is faithful to what an async ask mints.
+    return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
 
 
 @tai42_app.tools.tool
 def make_suspend_payload(payload: dict) -> SuspendedInteraction:
     """Accept a routed input-schema payload, then return an async-park sentinel."""
-    return SuspendedInteraction(interaction_id="i-preset")
+    return SuspendedInteraction(interaction_id="i-preset", resume_owner=get_resume_continuation_tool())
 
 
 @tai42_app.tools.tool

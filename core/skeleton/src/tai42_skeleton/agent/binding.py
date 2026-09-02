@@ -79,7 +79,12 @@ def _suspended_interaction_from_receipt(receipt: dict[str, Any]) -> SuspendedInt
     The sentinel is single-id; a run parking on one interaction (the common case) maps
     cleanly. A run parking on several at once (parallel sub-agent asks) cannot be represented
     at the single-id tool-face and raises loudly rather than silently surfacing only one park
-    while the siblings strand."""
+    while the siblings strand.
+
+    It carries NO ``resume_owner``: the parked run recorded its OWN resume state against that
+    interaction and is the only thing the platform ever resumes for it. A caller must not adopt
+    the park as its own suspended state (it would wait on a resume fired at the nested run),
+    and ``assert_park_adoptable`` refuses it on the caller's behalf."""
     ids = receipt["interaction_ids"]
     if len(ids) != 1:
         raise RuntimeError(
