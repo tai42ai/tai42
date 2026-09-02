@@ -31,3 +31,17 @@ def bridge(
 ) -> BridgeHarness:
     stack, root_token = bridge_stack
     return BridgeHarness(stack, root_token, fake_twilio, fake_whatsapp, llm_stub)
+
+
+@pytest.fixture
+def agent_route_bridge(
+    agent_route_park_stack: tuple[TaiStack, str],
+    fake_twilio: FakeTwilio,
+    fake_whatsapp: FakeWhatsApp,
+    llm_stub: LlmStub,
+) -> BridgeHarness:
+    """A ``BridgeHarness`` over the DURABLE-agent-state bridge profile — the stack a conversation
+    AGENT route can actually park on. The twilio/whatsapp stubs are carried only to satisfy the
+    harness shape; that profile loads the ``web`` channel alone."""
+    stack, root_token = agent_route_park_stack
+    return BridgeHarness(stack, root_token, fake_twilio, fake_whatsapp, llm_stub)
