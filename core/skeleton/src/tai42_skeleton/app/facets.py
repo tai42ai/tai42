@@ -534,11 +534,20 @@ class PresetsFacet(_Facet):
     def register_seed(self, seed: PresetSeed) -> None:
         return self._app._seed_registry.register(seed)
 
+    def register_retired_seed(self, name: str) -> None:
+        return self._app._seed_registry.register_retired(name)
+
     def seeds(self) -> list[PresetSeed]:
         """Every declared preset seed. Skeleton-only — the startup/reload seed applier
         consults it, so it is not on the ``AppPresets`` protocol (the register-only
         seam), the same precedent :meth:`write_validator` sets."""
         return self._app._seed_registry.all()
+
+    def retired_seeds(self) -> list[str]:
+        """Every declared retired seed name. Skeleton-only — the startup/reload seed
+        applier consults it, so it is not on the ``AppPresets`` protocol (the
+        register-only seam), the same precedent :meth:`seeds` sets."""
+        return self._app._seed_registry.retired()
 
     def write_validator(self, base_tool: str) -> PresetWriteValidator | None:
         """The registered write validator for ``base_tool``, or ``None`` when none

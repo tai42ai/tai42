@@ -756,5 +756,17 @@ class AppPresets(Protocol):
         loudly — a silent overwrite could drop one plugin's default under another's."""
         ...
 
+    def register_retired_seed(self, name: str) -> None:
+        """Declare a previously shipped preset seed ``name`` this release WITHDRAWS.
+
+        A plugin calls this through the ``tai42_app`` handle when its module loads —
+        in the release where it STOPS declaring the seed itself — so deployed
+        instances clean up the stale record instead of showing it forever. The
+        startup/reload seed applier deletes the record only while the seed still
+        owns it (its active version wears the shipped-default tag); an
+        operator-edited record under the name is left in place with a visible skip.
+        Declaring a name both seeded and retired raises loudly, in either order."""
+        ...
+
     @property
     def store(self) -> PresetStore: ...
