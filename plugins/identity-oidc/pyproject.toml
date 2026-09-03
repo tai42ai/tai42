@@ -27,7 +27,7 @@ dependencies = [
     # ABCs and the module-level identity-provider registry.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.2,<7",
+    "tai42-contract>=6.3,<7",
     # The OIDC discovery / JWKS / JWT-verify helper (tai42_kit.net.jwt). The `jwt`
     # extra is REQUIRED, not optional: that module imports joserfc at module top,
     # so tai42-kit[jwt] must resolve for this plugin to import. NO redis extra —
