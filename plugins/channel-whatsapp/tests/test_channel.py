@@ -1323,3 +1323,119 @@ async def test_form_create_without_id_raises_and_releases(waba_env, fake_redis: 
 
 async def test_channel_advertises_form_delivery_capability():
     assert WhatsAppChannel.supports_form_delivery is True
+
+
+# --- Ask-less form notifications (notify with schema) -------------------------
+
+# The wire-visible token namespace for an ask-less form's flow token, pinned as a
+# LITERAL: inbound routing branches on this prefix, so changing it orphans every
+# form already sitting in a chat.
+_NF_PREFIX = "tai42-nf:"
+
+
+def _schema_cache_key(schema_hash: str) -> str:
+    return f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"
+
+
+def _form_notification(**overrides):
+    fields: dict = {"message": "Please fill this in.", "recipient": ALLOWED_A, "schema": _FORM_SCHEMA}
+    fields.update(overrides)
+    return ChannelNotification(**fields)
+
+
+async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.LINKS"))
+    fake_httpx.responses.append(_accepted("wamid.IMG"))
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    ids = await WhatsAppChannel().notify(
+        _form_notification(
+            media=[
+                MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page"),
+                MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/a.jpg", caption="Front"),
+            ]
+        )
+    )
+
+    assert ids == ["wamid.LINKS", "wamid.IMG", "wamid.FLOW"]  # every wamid, in send order
+    # Media rides ahead: the link line-block, then each image — the Flow message LAST,
+    # so the actionable prompt sits at the foot of the chat.
+    assert fake_httpx.calls[0]["json"]["type"] == "text"
+    assert fake_httpx.calls[0]["json"]["text"]["body"] == "Details page: https://docs.example/p/1"
+    assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg", "caption": "Front"}
+    send = fake_httpx.calls[2]["json"]
+    assert send["type"] == "interactive"
+    assert send["interactive"]["body"]["text"] == "Please fill this in."
+    assert send["interactive"]["action"]["parameters"]["flow_id"] == "flow-cached"
+    # The token is namespaced: prefix + schema hash + a random suffix.
+    token = send["interactive"]["action"]["parameters"]["flow_token"]
+    assert token.startswith(f"{_NF_PREFIX}{schema_hash}:")
+    assert len(token) > len(f"{_NF_PREFIX}{schema_hash}:")
+    # NO reservation of any kind: nothing pending on the pair, ever.
+    assert f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}" not in fake_redis.store
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    # The answer schema is cached durably beside the flow id (no TTL): the inbound
+    # reply carries only the hash and cannot repopulate this entry.
+    assert json.loads(fake_redis.store[_schema_cache_key(schema_hash)]) == _FORM_SCHEMA
+    assert _schema_cache_key(schema_hash) not in fake_redis.ttls
+
+
+async def test_notify_form_cache_miss_creates_publishes_then_sends(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The one-published-Flow-per-schema resolve is the SAME machinery the form ask uses.
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    fake_httpx.responses.append(response(200, json={"id": "flow-new"}))
+    fake_httpx.responses.append(response(200, json={"success": True}))
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    ids = await WhatsAppChannel().notify(_form_notification())
+
+    assert ids == ["wamid.FLOW"]
+    assert [call["url"] for call in fake_httpx.calls] == [
+        f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows",
+        "https://graph.facebook.com/v23.0/flow-new/publish",
+        _MESSAGES_URL,
+    ]
+    assert fake_redis.store[_flow_cache_key(schema_hash)] == "flow-new"
+
+
+async def test_notify_form_token_disjoint_from_ask_flow_tokens(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Both directions of the namespace fence: an ask's flow token is its interaction id
+    # verbatim (no prefix), a notification's is always prefixed — and two notifications
+    # for the SAME schema still mint distinct tokens (the random suffix).
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-cached"
+    fake_httpx.responses.append(_accepted("wamid.ASK"))
+    fake_httpx.responses.append(_accepted("wamid.NF1"))
+    fake_httpx.responses.append(_accepted("wamid.NF2"))
+
+    await WhatsAppChannel().deliver(_form_delivery())
+    await WhatsAppChannel().notify(_form_notification(recipient=ALLOWED_B))
+    await WhatsAppChannel().notify(_form_notification(recipient=ALLOWED_B))
+
+    tokens = [call["json"]["interactive"]["action"]["parameters"]["flow_token"] for call in fake_httpx.calls]
+    ask_token, notify_one, notify_two = tokens
+    assert ask_token == "int-1"  # the delivery's interaction id, verbatim
+    assert not ask_token.startswith(_NF_PREFIX)
+    assert notify_one.startswith(_NF_PREFIX)
+    assert notify_two.startswith(_NF_PREFIX)
+    assert notify_one != notify_two  # replay-distinct per send
+    assert ask_token not in (notify_one, notify_two)
+
+
+async def test_notify_form_missing_waba_id_raises_loudly(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    with pytest.raises(ChannelDeliveryError, match="CHANNEL_WHATSAPP_WABA_ID"):
+        await WhatsAppChannel().notify(_form_notification())
+
+    assert not fake_httpx.calls
+
+
+async def test_channel_advertises_form_notification_capability():
+    assert WhatsAppChannel.supports_form_notifications is True

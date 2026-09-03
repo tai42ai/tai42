@@ -21,6 +21,9 @@ option text under the exact ask it was sent for.
 A published-Flow cache maps ``(waba_id, schema_hash)`` to a Meta flow id with NO
 TTL — a published Flow persists on Meta, so the id is reused for every form ask
 sharing that answer schema; a cache miss triggers a create + publish + store.
+Beside it, a schema sidecar maps the same ``(waba_id, schema_hash)`` to the answer
+schema itself, for ask-less form notifications whose reply carries only the hash
+(inside its flow token) and no reservation.
 
 A handled-``wamid`` set is the replay guard (a redelivered webhook repeats the id).
 
@@ -88,6 +91,10 @@ def _pending_key(phone_number_id: str, wa_id: str) -> str:
 
 def _flow_key(waba_id: str, schema_hash: str) -> str:
     return f"channel:whatsapp:flow:{waba_id}:{schema_hash}"
+
+
+def _flow_schema_key(waba_id: str, schema_hash: str) -> str:
+    return f"channel:whatsapp:flow-schema:{waba_id}:{schema_hash}"
 
 
 def _seen_key(wamid: str) -> str:
@@ -284,6 +291,38 @@ async def cache_flow_id(waba_id: str, schema_hash: str, flow_id: str) -> None:
     """Store the published flow id with NO TTL (a published Flow persists on Meta)."""
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_flow_key(waba_id, schema_hash), flow_id)
+
+
+async def cache_flow_schema(waba_id: str, schema_hash: str, schema: dict[str, Any]) -> None:
+    """Store an ask-less form's answer schema under ``(waba_id, schema_hash)`` with NO
+    TTL, beside the published-flow id it renders as.
+
+    Durability is load-bearing here, not an optimization: an inbound reply carries
+    only the schema HASH (inside its flow token), never the schema, so this entry can
+    NOT be repopulated from the reply — a miss is permanent for every form already
+    sitting in a chat, and degrades each of their replies to raw (uncoerced) values.
+    The entry is content-addressed — one schema per hash — so the unconditional
+    overwrite on every send is idempotent.
+    """
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        await redis.set(_flow_schema_key(waba_id, schema_hash), json.dumps(schema))
+
+
+async def get_cached_flow_schema(waba_id: str, schema_hash: str) -> dict[str, Any] | None:
+    """The answer schema cached under ``(waba_id, schema_hash)``, or ``None`` — a miss
+    means a reply for that schema cannot be coerced and lands with its raw values
+    (see :func:`cache_flow_schema`). A stored value that is not a JSON object is
+    treated as a miss (never a crash on the webhook path)."""
+    async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
+        raw = await redis.get(_flow_schema_key(waba_id, schema_hash))
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.warning("cached flow schema under %s is not valid JSON; treating as a miss", schema_hash)
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 async def already_seen(wamid: str) -> bool:

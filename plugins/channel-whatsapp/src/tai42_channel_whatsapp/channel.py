@@ -13,6 +13,9 @@ past those caps — and the human may always type an option instead of tapping. 
 ``form`` ask is also Tier-2: it renders as an in-chat WhatsApp Flow (created and
 published once per answer schema, then reused), and the completed form returns as
 an ``nfm_reply`` matched by the delivery's ``interaction_id`` as the flow token.
+An ask-less form NOTIFICATION reuses the same Flow machinery with a namespaced
+token instead of a reservation — its submission enters the conversation as a
+structured visitor message, never as an answer.
 
 Freeform sends (questions, replies, media) go to any requested recipient: Meta's
 own 24-hour customer-service window is the fence (a send outside it is rejected,
@@ -29,6 +32,7 @@ import logging
 import math
 from datetime import UTC, datetime
 from typing import Any, ClassVar
+from uuid import uuid4
 
 from tai42_contract.channels import (
     ChannelDelivery,
@@ -52,6 +56,7 @@ from tai42_channel_whatsapp.client import (
 )
 from tai42_channel_whatsapp.correlation import (
     cache_flow_id,
+    cache_flow_schema,
     get_cached_flow_id,
     is_known_contact,
     release_pending,
@@ -83,6 +88,14 @@ _INTERACTIVE_BODY_MAX_CHARS = 1024  # interactive body text
 _LIST_BUTTON_LABEL = "Choose an option"
 # The footer on the numbered-text fallback — the human types an option instead of tapping.
 _NUMBERED_FALLBACK_FOOTER = "Reply with the text of one option."
+
+# The flow-token namespace for an ASK-LESS form notification: prefix + schema hash
+# + a random suffix. Inbound routing branches on this prefix BEFORE any pending-ask
+# lookup, so a notify-form submission can never answer (or disturb) a question
+# pending on the same pair — while an ask's flow token stays its interaction id
+# verbatim and never enters this namespace. The prefix is wire-visible in every
+# delivered form's token; changing it orphans the forms already sitting in chats.
+_NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"
 
 # A Flow's name on Meta, the schema-hash suffix making it a deterministic label
 # for operator legibility — NOT a uniqueness key: Meta does not enforce flow-name
@@ -361,6 +374,45 @@ async def _send_notification(phone_number_id: str, target: str, notification: Ch
     return await _send_images(phone_number_id, target, images, sent)
 
 
+async def _send_form_notification(
+    settings: WhatsAppSettings, phone_number_id: str, target: str, notification: ChannelNotification
+) -> list[str]:
+    """Send an ask-less form notification: any display media as the standard prelude
+    (the ``link`` items as one text line-block, each ``image`` as its own message),
+    then the Flow message LAST — the actionable prompt stays at the foot of the chat.
+    Returns every ``wamid`` in send order.
+
+    The Flow is resolved exactly like a form ask's (one published Flow per answer
+    schema, cached under the WABA id), and the answer schema itself is cached beside
+    the flow id — the submission's reply carries only the schema hash inside its
+    flow token, so that sidecar is the ONLY place the inbound side can recover the
+    schema to coerce the values (see :func:`cache_flow_schema`). NO correlation is
+    reserved: the token — minted in the ``tai42-nf:`` namespace as prefix + schema
+    hash + a random suffix — routes the reply, not the pair, so any number of forms
+    may be outstanding and a pending ask on the same pair is never touched.
+    """
+    if notification.schema is None:  # dispatch guard; notify() branches on the field
+        raise ChannelDeliveryError("form notification is missing its schema")
+    flow_json, schema_hash = build_flow(notification.schema)
+    waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
+
+    sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
+    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json)
+    # Written beside every flow-id use — the reply side cannot repopulate it.
+    await cache_flow_schema(waba_id, schema_hash, notification.schema)
+    flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
+    sent.append(
+        await send_flow(
+            phone_number_id=phone_number_id,
+            to=target,
+            body_text=notification.message,
+            flow_id=flow_id,
+            flow_token=flow_token,
+        )
+    )
+    return sent
+
+
 async def _send_template(
     settings: WhatsAppSettings, phone_number_id: str, target: str, template: ChannelTemplate
 ) -> list[str]:
@@ -372,12 +424,14 @@ async def _send_template(
 class WhatsAppChannel:
     """Satisfies the ``tai42_contract.channels.Channel`` protocol."""
 
-    # This channel sends images and out-of-window templates, and renders a
-    # notification's tappable options as native reply buttons/list; the central
-    # notify_user capability guard reads these before dispatching each.
+    # This channel sends images and out-of-window templates, renders a
+    # notification's tappable options as native reply buttons/list, and renders an
+    # ask-less form notification as a WhatsApp Flow; the central notify_user
+    # capability guard reads these before dispatching each.
     supports_media_notifications: ClassVar[bool] = True
     supports_template_notifications: ClassVar[bool] = True
     supports_interactive_notifications: ClassVar[bool] = True
+    supports_form_notifications: ClassVar[bool] = True
     # This channel renders a form ask as a WhatsApp Flow; the ask_user helper reads
     # this before handing a form delivery over.
     supports_form_delivery: ClassVar[bool] = True
@@ -467,10 +521,14 @@ class WhatsAppChannel:
         human saw it). ``sender_identity`` set → send FROM that ``phone_number_id``;
         unset → the configured ``CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID``. When
         ``template`` is set the send is the out-of-window template (recipient
-        allowlist-or-known-contact); otherwise the freeform body plus any tappable
-        ``options`` (native reply buttons/list — a tap enters the conversation as a
-        visitor message) and any media parts (freeform recipient unfenced). The
-        recipient is always required.
+        allowlist-or-known-contact); when ``schema`` is set the send is an ask-less
+        FORM — any media as the prelude, then a WhatsApp Flow whose body is the
+        message and whose flow token rides the ``tai42-nf:`` namespace (a submission
+        enters the conversation as a structured visitor message; nothing is
+        reserved); otherwise the freeform body plus any tappable ``options`` (native
+        reply buttons/list — a tap enters the conversation as a visitor message) and
+        any media parts (freeform recipient unfenced). The recipient is always
+        required.
         """
         settings = whatsapp_settings()
         if notification.sender_identity is not None:
@@ -486,4 +544,6 @@ class WhatsAppChannel:
 
         if notification.template is not None:
             return await _send_template(settings, phone_number_id, target, notification.template)
+        if notification.schema is not None:
+            return await _send_form_notification(settings, phone_number_id, target, notification)
         return await _send_notification(phone_number_id, target, notification)
