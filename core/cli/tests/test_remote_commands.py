@@ -1000,6 +1000,58 @@ def test_notifications_notify_invalid_media_shape_raises_before_request(monkeypa
     assert "media" in result.output.lower()
 
 
+def test_notifications_notify_schema_rides_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The --schema JSON object (an ask-less form's answer schema) is shape-checked and
+    # posted on the body; the server owns the subset walk and the capability gate.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "message": "fill this in",
+            "channel": "whatsapp",
+            "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }
+        return data_response("notification sent via 'whatsapp'")
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "notifications",
+            "notify",
+            "fill this in",
+            "--channel",
+            "whatsapp",
+            "--schema",
+            '{"type": "object", "properties": {"name": {"type": "string"}}}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_notifications_notify_malformed_schema_json_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Malformed --schema never reaches the server: it is a loud usage error.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for malformed --schema")
+
+    result = run_cli(
+        monkeypatch, handler, ["notifications", "notify", "hi", "--channel", "whatsapp", "--schema", "{not json"]
+    )
+    assert result.exit_code != 0
+    assert "schema" in result.output.lower()
+
+
+def test_notifications_notify_non_object_schema_raises_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Well-formed JSON that is not an object is rejected before any request leaves —
+    # a form's answer schema is a JSON object by contract.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request must be made for a non-object --schema")
+
+    result = run_cli(
+        monkeypatch, handler, ["notifications", "notify", "hi", "--channel", "whatsapp", "--schema", '["nope"]']
+    )
+    assert result.exit_code != 0
+    assert "schema" in result.output.lower()
+
+
 def test_notifications_notify_options_ride_validated_body(monkeypatch: pytest.MonkeyPatch) -> None:
     # The --options JSON array is validated into a list of strings and posted on the body.
     def handler(request: httpx.Request) -> httpx.Response:

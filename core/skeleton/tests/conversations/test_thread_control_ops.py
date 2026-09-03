@@ -136,7 +136,16 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
     async def _fake(
-        *, route, thread_id, client_address, text, operator_principal, media=None, template=None, options=None
+        *,
+        route,
+        thread_id,
+        client_address,
+        text,
+        operator_principal,
+        media=None,
+        template=None,
+        options=None,
+        schema=None,
     ):
         calls.append(
             {
@@ -148,6 +157,7 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
                 "media": media,
                 "template": template,
                 "options": options,
+                "schema": schema,
             }
         )
         return "msg-1"
@@ -175,6 +185,7 @@ async def test_send_route_keyed_resolves_the_embedded_address(wired, monkeypatch
             "media": None,
             "template": None,
             "options": None,
+            "schema": None,
         }
     ]
 
@@ -228,6 +239,49 @@ async def test_send_options_and_template_is_a_400(wired, monkeypatch):
             "on it",
             template={"name": "status_update", "language": "en_US"},
             options=["Thanks"],
+        )
+    assert calls == []
+
+
+async def test_send_schema_threads_through_to_operator_send(wired, monkeypatch):
+    # The operator send accepts an ask-less form's answer schema and hands operator_send
+    # the dict unchanged — the same keyword-safe threading template took.
+    calls = _capture_operator_send(monkeypatch)
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+    result = await ops.send_conversation_thread_message("chat", _ROUTE_THREAD, "fill this in", schema=schema)
+
+    assert result == {"message_id": "msg-1", "thread_id": _ROUTE_THREAD}
+    assert calls[0]["schema"] == schema
+    assert calls[0]["template"] is None
+
+
+async def test_send_schema_and_template_is_a_400(wired, monkeypatch):
+    # The contract's schema/template mutual exclusion holds on the operator send — refused
+    # before anything is written or delivered.
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="mutually exclusive"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "fill this in",
+            template={"name": "status_update", "language": "en_US"},
+            schema={"type": "object", "properties": {"name": {"type": "string"}}},
+        )
+    assert calls == []
+
+
+async def test_send_schema_and_options_is_a_400(wired, monkeypatch):
+    # One message carries ONE interactive surface: schema + options is the contract's
+    # exclusivity refusal, mapped to a clean 400.
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="mutually exclusive"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "fill this in",
+            options=["Thanks"],
+            schema={"type": "object", "properties": {"name": {"type": "string"}}},
         )
     assert calls == []
 

@@ -89,6 +89,7 @@ interface Door {
 
 const MESSAGE_DOOR: Door = { what: 'sending a message', subject: 'That message' };
 const QUESTION_DOOR: Door = { what: 'answering a question', subject: 'That answer' };
+const FORM_DOOR: Door = { what: 'submitting a form', subject: 'That form' };
 const ROTATE_DOOR: Door = { what: 'starting a new conversation', subject: 'That request' };
 const STREAM_DOOR: Door = { what: 'opening the chat stream', subject: 'That request' };
 
@@ -214,6 +215,26 @@ export async function answerQuestion(interactionId: string, answer: unknown): Pr
     },
   );
   if (!response.ok) throw await failure(response, QUESTION_DOOR);
+}
+
+/** True when a form submission failed because the form's token no longer resolves
+ * — expired, or never this conversation's. Terminal for that one card: retrying
+ * the same token can only 404 again, so the card says the form is gone instead of
+ * offering a retry. */
+export function isFormGone(error: unknown): boolean {
+  return error instanceof ChatApiError && error.status === 404;
+}
+
+/** Submit one ask-less form card's values through its token door. The door renders
+ * the transcript text from the schema it stored server-side; only the values
+ * travel. Resubmission is allowed — every call is its own guest message. */
+export async function submitForm(token: string, values: Record<string, unknown>): Promise<void> {
+  const response = await fetch(`${apiBase()}/forms/${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({ values }),
+  });
+  if (!response.ok) throw await failure(response, FORM_DOOR);
 }
 
 /** Mint a fresh session for this web route — the visitor's "new conversation". A

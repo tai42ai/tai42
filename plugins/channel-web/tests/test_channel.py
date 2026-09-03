@@ -473,6 +473,106 @@ async def test_notify_options_and_media_appends_a_card_with_both(fake_redis: Fak
     assert payload["options"] == ["Item A"]
 
 
+def _only_form_entry(fake: FakeRedis) -> dict:
+    entries = fake.streams[_TRANSCRIPT_KEY]
+    assert len(entries) == 1
+    assert entries[0][1]["event"] == "chat.form"
+    return json.loads(entries[0][1]["data"])
+
+
+def _only_form_record(fake: FakeRedis) -> tuple[str, dict]:
+    keys = [key for key in fake.store if key.startswith("channel:web:form:")]
+    assert len(keys) == 1
+    token = keys[0].removeprefix("channel:web:form:")
+    return token, json.loads(fake.store[keys[0]])
+
+
+def test_web_channel_advertises_form_notifications():
+    # The plain class attribute the central notify_user capability guard reads before
+    # it dispatches a schema notification here; absent it, this channel never
+    # receives one.
+    assert WebChannel.supports_form_notifications is True
+
+
+async def test_notify_schema_appends_form_card_and_writes_token_record(fake_redis: FakeRedis):
+    # An ask-less form lands as ONE chat.form card carrying the prompt, the schema and
+    # a server-minted submission token; the token record is what the submission door
+    # later resolves — {identity, address, schema, message}, aging out with the card
+    # (TTL = the transcript TTL, so a card still in the replay buffer is answerable).
+    ids = await WebChannel().notify(make_notification(message="Fill this in", schema=_FORM_SCHEMA))
+
+    payload = _only_form_entry(fake_redis)
+    token, record = _only_form_record(fake_redis)
+    assert payload == {
+        "id": ids[0],
+        "text": "Fill this in",
+        "schema": _FORM_SCHEMA,
+        "token": token,
+        "ts": payload["ts"],
+    }
+    assert len(token) == 32  # uuid4().hex — server-minted, never caller-supplied
+    assert record == {
+        "identity": IDENTITY,
+        "address": VISITOR_ID,
+        "schema": _FORM_SCHEMA,
+        "message": "Fill this in",
+    }
+    assert fake_redis.ttls[f"channel:web:form:{token}"] == 30 * 86400
+
+
+async def test_notify_schema_writes_the_record_before_the_frame(fake_redis: FakeRedis):
+    # Record first, frame second: the moment the card is replayable the submission
+    # door must already resolve its token — the reserve-before-append rule questions
+    # follow, for the same race.
+    await WebChannel().notify(make_notification(schema=_FORM_SCHEMA))
+    kinds = [name for name, _ in fake_redis.events]
+    assert kinds.index("redis_set") < kinds.index("redis_xadd")
+
+
+async def test_notify_schema_with_media_rides_the_same_card(fake_redis: FakeRedis):
+    # Media is allowed beside a form (options are impossible by contract): the items
+    # ride the chat.form frame in the SAME shape a chat.media card carries.
+    await WebChannel().notify(
+        make_notification(
+            schema=_FORM_SCHEMA,
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/p.png", caption="a pattern")],
+        )
+    )
+    payload = _only_form_entry(fake_redis)
+    assert payload["schema"] == _FORM_SCHEMA
+    assert payload["media"] == [{"kind": "image", "url": "https://cdn.example/p.png", "caption": "a pattern"}]
+
+
+async def test_notify_schema_without_media_omits_the_key(fake_redis: FakeRedis):
+    await WebChannel().notify(make_notification(schema=_FORM_SCHEMA))
+    assert "media" not in _only_form_entry(fake_redis)
+
+
+async def test_notify_schema_without_sender_identity_splits_composite_recipient(fake_redis: FakeRedis):
+    # The notify_user door sets no sender_identity, so the identity rides in the
+    # recipient — the card and its token record must still land on the same pair.
+    await WebChannel().notify(
+        make_notification(sender_identity=None, recipient=f"{IDENTITY}:{VISITOR_ID}", schema=_FORM_SCHEMA)
+    )
+    assert _TRANSCRIPT_KEY in fake_redis.streams
+    _, record = _only_form_record(fake_redis)
+    assert record["identity"] == IDENTITY
+    assert record["address"] == VISITOR_ID
+
+
+async def test_notify_schema_and_options_rejected_at_contract(fake_redis: FakeRedis):
+    # One message, one interactive surface: the contract refuses schema+options
+    # BEFORE any channel is reached, so a chat.form card never carries chips.
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ChannelNotification(
+            message="x",
+            recipient=VISITOR_ID,
+            sender_identity=IDENTITY,
+            schema=_FORM_SCHEMA,
+            options=["Item A"],
+        )
+
+
 async def test_notify_options_and_template_rejected_at_contract(fake_redis: FakeRedis):
     # The contract refuses options+template BEFORE the channel is reached.
     with pytest.raises(ValidationError, match="mutually exclusive"):

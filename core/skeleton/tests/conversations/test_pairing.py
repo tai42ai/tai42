@@ -266,6 +266,17 @@ def test_classify_is_exact_match_and_first_code_wins():
     assert isinstance(classify("just a normal message"), Passthrough)
 
 
+def test_classify_form_rendered_text_is_passthrough():
+    # An ask-less form submission's rendered text is label:value lines. The command
+    # grammar matches ONLY the whole trimmed message, so a label:value first line —
+    # even one starting with a command literal — can never classify as a command.
+    from tai42_skeleton.conversations.pairing import Passthrough, classify
+
+    assert isinstance(classify("name: Alice\nsize: 42"), Passthrough)
+    assert isinstance(classify("/link: yes\nname: Alice"), Passthrough)
+    assert isinstance(classify("/unlink: true"), Passthrough)
+
+
 # -- C2: link / redeem / unlink e2e ------------------------------------------
 
 

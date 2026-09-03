@@ -9,7 +9,7 @@ outcome sits in the send machine.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tai42_contract.conversations import (
@@ -91,6 +91,12 @@ class ConversationRecord(BaseModel):
     # here, so its size is whatever the door that read it admitted on its own body. A
     # ``client`` record carries the message it answers; an ``operator`` record carries ``""``.
     inbound_text: str
+    # The structured submission that rode WITH the inbound text (an ask-less form's
+    # answers), bounded by the door's transport checks (``validate_inbound_form``) and
+    # stored beside the text as opaque, untrusted guest data — never schema-conformant by
+    # promise. ``None`` for a text-only inbound and for every ``operator`` record (an
+    # operator send answers, it does not submit).
+    inbound_form: dict[str, Any] | None = None
 
     # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
     # channel-door ``silent``); set on every state carrying one.
@@ -165,6 +171,8 @@ class ConversationRecord(BaseModel):
         if self.origin == "operator":
             if self.inbound_text != "":
                 raise ValueError("an operator record carries no inbound_text (must be '')")
+            if self.inbound_form is not None:
+                raise ValueError("an operator record carries no inbound_form (it answers, it does not submit)")
             if self.answer_status != "answered":
                 raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
             if not (self.caller_principal or "").strip():
@@ -198,8 +206,9 @@ class ConversationRecord(BaseModel):
         """The record as the CALLER-scoped read door returns it: the message, its outcome
         and where delivery stands. An allow-list, so a newly added field stays withheld
         until deliberately published here. ``error`` and the delivery bookkeeping are
-        withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text`` is
-        published: it is the text this caller sent.
+        withheld — the turn ran as the ROUTE's key, not the caller's. ``inbound_text`` and
+        ``inbound_form`` are
+        published: they are the message (and structured submission) this caller sent.
         """
         return self.model_dump(
             mode="json",
@@ -212,6 +221,7 @@ class ConversationRecord(BaseModel):
                 "caller_principal",
                 "origin",
                 "inbound_text",
+                "inbound_form",
                 "answer_status",
                 "answer",
                 "answer_parts",

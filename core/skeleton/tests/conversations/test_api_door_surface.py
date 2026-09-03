@@ -44,8 +44,10 @@ class _Engine:
         self._raises = raises
         self.calls: list[tuple] = []
 
-    async def __call__(self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None):
-        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params))
+    async def __call__(
+        self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None, form=None
+    ):
+        self.calls.append((route_name, external_user_id, text, caller_principal, wait_seconds, params, form))
         if self._raises is not None:
             raise self._raises
         return self._result or ApiSubmitResult(message_id="m-1", thread_id="t-1", answer=None)
@@ -195,6 +197,36 @@ def test_an_unfinished_turn_answers_202_without_an_answer(monkeypatch):
     response = _post(client)
     assert response.status_code == 202
     assert "answer" not in response.json()["data"]
+
+
+# -- structured inbound form ---------------------------------------------------
+
+
+def test_a_form_body_field_threads_through_to_the_engine(monkeypatch):
+    # ConversationMessage.form (the structured guest submission) rides the body beside the
+    # required text and reaches the engine as the ``form`` argument.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "name: Alice", "form": {"name": "Alice"}})
+    assert response.status_code == 202
+    assert engine.calls[0][6] == {"name": "Alice"}
+
+
+def test_an_absent_form_reaches_the_engine_as_none(monkeypatch):
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    _post(client)
+    assert engine.calls[0][6] is None
+
+
+def test_a_non_object_form_is_a_400(monkeypatch):
+    # The contract's inbound-form transport bound (a JSON object) refuses at the door.
+    engine = _Engine()
+    client = _client(monkeypatch, engine)
+    response = client.post(_PATH, json={"external_user_id": "u-7", "text": "hi", "form": ["nope"]})
+    assert response.status_code == 400
+    assert "invalid conversation message" in response.json()["error"]
+    assert engine.calls == []
 
 
 # -- entry params --------------------------------------------------------------

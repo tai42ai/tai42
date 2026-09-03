@@ -41,6 +41,7 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/messages",
             "/stream",
             "/questions/{interaction_id}/answer",
+            "/forms/{token}",
             "/session/rotate",
             "/gates/{identity}",
             "/gates/{identity}/codes",
@@ -63,6 +64,7 @@ def test_importing_register_registers_channel_and_routes(stub_app):
             "/messages",
             "/stream",
             "/questions/{interaction_id}/answer",
+            "/forms/{token}",
             "/session/rotate",
         }
         assert managed == {

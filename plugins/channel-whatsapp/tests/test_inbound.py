@@ -4,6 +4,7 @@ correlation, bridge branch, forward policy, and delivery-status webhooks."""
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
@@ -325,6 +326,8 @@ async def test_uncorrelated_routed_inbound_calls_accept_with_verbatim_args(
             "cap_key": WA_ID,
             "text": "ship it",
             "provider_message_id": _WAMID,
+            "params": None,
+            "form": None,  # a plain text message carries no structured form
         }
     ]
     assert _SEEN_KEY in fake_redis.store
@@ -380,6 +383,8 @@ async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_red
             "cap_key": WA_ID,
             "text": "late reply",
             "provider_message_id": _WAMID,
+            "params": None,
+            "form": None,
         }
     ]
 
@@ -681,6 +686,26 @@ def test_render_form_answer_with_a_nested_value_uses_json_not_repr():
     assert 'Tags: ["a", "b"]' in rendered
     assert "['a', 'b']" not in rendered  # never a Python repr
     assert "Note: ship it" in rendered  # scalar rendering unchanged
+
+
+def test_render_form_answer_with_a_boolean_renders_json_not_python_repr():
+    # A boolean renders through JSON (``true``/``false``) — the same standard-faithful
+    # convention the web channel uses — never Python's ``True``/``False`` repr, even
+    # though ``bool`` is a subclass of ``int``. The source value stays a real bool: the
+    # structured form carried alongside the text is untouched by rendering.
+    pending = PendingQuestion(
+        callback_url=_CALLBACK,
+        timeout_at=datetime.now(UTC),
+        schema={"properties": {"subscribed": {"title": "Subscribed"}, "declined": {"title": "Declined"}}},
+    )
+    answer = {"subscribed": True, "declined": False}
+    rendered = _render_answer_for_bridge(answer, pending)
+    assert "Subscribed: true" in rendered
+    assert "Declined: false" in rendered
+    assert "True" not in rendered  # never a Python repr
+    assert "False" not in rendered
+    assert answer["subscribed"] is True  # unmutated real bools
+    assert answer["declined"] is False
 
 
 async def test_ladder_forward_error_does_not_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
@@ -1363,6 +1388,8 @@ async def test_stale_tap_restores_pending_and_bridges_title(
             "cap_key": WA_ID,
             "text": "stale choice",
             "provider_message_id": _WAMID,
+            "params": None,
+            "form": None,
         }
     ]
     assert _SEEN_KEY in fake_redis.store
@@ -1610,3 +1637,168 @@ async def test_typing_signal_delivery_failure_is_logged_and_batch_survives(
     assert len(fake_httpx.typing_calls) == 1  # the signal was attempted
     assert any("typing signal" in record.message for record in caplog.records)
     assert len(stub_app.conversations.accept_calls) == 1  # bridge still reached
+
+
+# --- Ask-less form (notify) replies: the tai42-nf: token namespace ------------
+
+# Pinned as a LITERAL (not the module constant): this prefix is wire-visible in
+# every already-delivered form's token, so changing it orphans those forms.
+_NF_PREFIX = "tai42-nf:"
+
+
+def _nf_token(suffix: str = "cafef00d") -> str:
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    return f"{_NF_PREFIX}{schema_hash}:{suffix}"
+
+
+def _schema_cache_key() -> str:
+    _, schema_hash = build_flow(_FORM_SCHEMA)
+    return f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"
+
+
+def _seed_schema_cache(fake_redis: FakeRedis) -> None:
+    """The durable schema entry the notify-form send left beside the flow id."""
+    fake_redis.store[_schema_cache_key()] = json.dumps(_FORM_SCHEMA)
+
+
+async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
+    waba_env, handler, stub_app, channels, fake_redis: FakeRedis
+):
+    _seed_schema_cache(fake_redis)
+
+    result = await handler(
+        signed_request(
+            form_reply_payload(
+                {"flow_token": _nf_token(), "note": "ship it", "qty": "7", "amount": "3.5", "agree": "true"}
+            )
+        )
+    )
+
+    assert result.status_code == 200
+    # No pending ask involved: the reply enters the conversation as a guest message,
+    # never the inbound-answer ladder.
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.accept_calls == [
+        {
+            "channel": "whatsapp",
+            "our_identity": PHONE_NUMBER_ID,
+            "client_address": WA_ID,
+            "cap_key": WA_ID,
+            # The rendered label:value lines every consumer sees — the boolean is JSON
+            # (``true``), matching the web channel, never Python's ``True`` repr...
+            "text": "note: ship it\nqty: 7\namount: 3.5\nagree: true",
+            "provider_message_id": _WAMID,
+            "params": None,
+            # ...and the structured copy: flow_token stripped, values coerced to the
+            # cached schema's types.
+            "form": {"note": "ship it", "qty": 7, "amount": 3.5, "agree": True},
+        }
+    ]
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_notify_form_reply_cache_miss_degrades_to_raw_values(
+    waba_env, handler, stub_app, channels, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    # The schema sidecar is empty (lost store): the reply DEGRADES — raw string values,
+    # still accepted — never drops.
+    with caplog.at_level(logging.WARNING):
+        result = await handler(
+            signed_request(form_reply_payload({"flow_token": _nf_token(), "note": "ship it", "qty": "7"}))
+        )
+
+    assert result.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form"] == {"note": "ship it", "qty": "7"}  # raw: no schema to coerce against
+    assert call["text"] == "note: ship it\nqty: 7"
+    assert _SEEN_KEY in fake_redis.store
+    assert any("forwarding raw" in record.getMessage() for record in caplog.records)
+
+
+async def test_notify_form_reply_unset_waba_id_degrades_to_raw_values(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
+    # No CHANNEL_WHATSAPP_WABA_ID: the cache cannot even be addressed — same degrade,
+    # never a raise that would have Meta redeliver a permanently-failing reply.
+    result = await handler(signed_request(form_reply_payload({"flow_token": _nf_token(), "qty": "7"})))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls[0]["form"] == {"qty": "7"}
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_notify_form_reply_leaves_pending_ask_untouched(
+    waba_env, handler, stub_app, channels, fake_redis: FakeRedis
+):
+    # The masquerade fence: a notify-form reply on a pair with a PENDING ask must not
+    # answer, claim, or disturb that ask — the token namespace routes it out before any
+    # pending peek.
+    await _seed_pending_form()
+    _seed_schema_cache(fake_redis)
+    pending_before = fake_redis.store[_PENDING_KEY]
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": _nf_token(), "note": "unrelated"})))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls == []  # the ladder never saw it
+    assert fake_redis.store[_PENDING_KEY] == pending_before  # byte-identical record
+    assert stub_app.conversations.accept_calls[0]["form"] == {"note": "unrelated"}
+
+    # The ask is still answerable: a genuine (non-prefixed) form reply resolves it.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "the answer"}, wamid="wamid.ASK")))
+    assert channels.inbound_calls[0].answer == {"note": "the answer"}
+
+
+async def test_notify_form_reply_redelivery_deduped(waba_env, handler, stub_app, channels, fake_redis: FakeRedis):
+    _seed_schema_cache(fake_redis)
+    fake_redis.store[_SEEN_KEY] = "1"
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": _nf_token(), "note": "again"})))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []
+    assert channels.inbound_calls == []
+
+
+async def test_notify_form_reply_empty_form_bridges_compact_json(waba_env, handler, stub_app, fake_redis: FakeRedis):
+    # A completed form carrying nothing but its token still needs non-blank text for
+    # the accept door: the compact-JSON fallback.
+    _seed_schema_cache(fake_redis)
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": _nf_token()})))
+
+    assert result.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form"] == {}
+    assert call["text"] == "{}"
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_notify_form_reply_unrouted_logged_and_acked(
+    waba_env, handler, stub_app, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    _seed_schema_cache(fake_redis)
+    stub_app.conversations.accept_error = LookupError("no route for (whatsapp, ...)")
+
+    with caplog.at_level(logging.WARNING):
+        result = await handler(signed_request(form_reply_payload({"flow_token": _nf_token(), "note": "x"})))
+
+    assert result.status_code == 200  # dropped and logged, never a 5xx retry loop
+    assert _SEEN_KEY in fake_redis.store
+    assert any("unrouted" in record.getMessage() for record in caplog.records)
+
+
+async def test_non_prefixed_form_reply_takes_the_ask_path_unchanged(
+    waba_env, handler, stub_app, channels, fake_redis: FakeRedis
+):
+    # Regression pin: a reply whose token is NOT in the notify namespace runs the ask
+    # path byte-identically — pending peek, ladder resolve, no direct bridge accept.
+    await _seed_pending_form()
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x", "qty": "7"})))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls[0].answer == {"note": "x", "qty": 7}
+    assert stub_app.conversations.accept_calls == []

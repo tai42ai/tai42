@@ -335,11 +335,13 @@ delete_conversation_person = register_operation_route(
 
 
 async def _extract_thread_message(request: Request) -> dict:
-    """The operator-send body ``{thread_id, text, address, media?, template?, options?}`` as
+    """The operator-send body ``{thread_id, text, address, media?, template?, options?,
+    schema?}`` as
     the operation's flat fields. A non-object body, a missing/blank ``thread_id``, a
     non-string ``text``/``address``, a non-list ``media``/``options`` or a non-object
-    ``template`` is a loud 400 here; the operation owns the blank-text, thread-belongs and
-    media/template/options CONTENT guards (item shape, caps, exclusivity).
+    ``template``/``schema`` is a loud 400 here; the operation owns the blank-text,
+    thread-belongs and
+    media/template/options/schema CONTENT guards (item shape, caps, exclusivity).
 
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips."""
@@ -349,7 +351,7 @@ async def _extract_thread_message(request: Request) -> dict:
         raise BadRequestError("invalid JSON body") from exc
     if not isinstance(body, dict):
         raise BadRequestError(
-            "body must be a JSON object of {thread_id, text, address, media?, template?, options?}"
+            "body must be a JSON object of {thread_id, text, address, media?, template?, options?, schema?}"
         ) from None
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
@@ -371,6 +373,9 @@ async def _extract_thread_message(request: Request) -> dict:
     options = body.get("options")
     if options is not None and not isinstance(options, list):
         raise BadRequestError("options must be a list of strings or absent") from None
+    schema = body.get("schema")
+    if schema is not None and not isinstance(schema, dict):
+        raise BadRequestError("schema must be a form answer-schema object or absent") from None
     return {
         "thread_id": thread_id,
         "text": text,
@@ -378,6 +383,7 @@ async def _extract_thread_message(request: Request) -> dict:
         "media": media,
         "template": template,
         "options": options,
+        "schema": schema,
     }
 
 
@@ -568,6 +574,7 @@ async def send_conversation_message(request: Request) -> Response:
             get_current_user_id(),
             wait_seconds,
             params=message.params,
+            form=message.form,
         )
     except ConversationRouteResolutionError as exc:
         return _error(str(exc), 404)

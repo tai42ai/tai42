@@ -79,14 +79,27 @@ def notify(
             help='JSON array of tappable options, e.g. \'["Item A","Item B"]\'.',
         ),
     ] = None,
+    schema: Annotated[
+        str | None,
+        typer.Option(
+            "--schema",
+            help=(
+                "JSON object holding an ask-less form's answer schema (channel-only; the message is the "
+                'form\'s prompt), e.g. \'{"type":"object","properties":{"name":{"type":"string"}}}\'.'
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Send a human a one-way, fire-and-forget notification.
 
-    ``--media``, ``--template`` and ``--options`` are JSON strings (the nested shapes have
+    ``--media``, ``--template``, ``--options`` and ``--schema`` are JSON strings (the nested
+    shapes have
     no flat-flag form). The CLI checks only their shape before the request — a list of
     ``MediaItem`` for ``--media``, ``list[str]`` for ``--options``, a ``ChannelTemplate`` for
-    ``--template`` — so a mis-shaped value raises loudly here; the contract's richer rules
-    (caps, non-blank, exclusivity) are enforced by the server.
+    ``--template``, a JSON object for ``--schema`` — so a mis-shaped value raises loudly
+    here; the contract's richer rules
+    (caps, non-blank, exclusivity, the channel-deliverable form subset) are enforced by the
+    server.
 
     Example: ``tai notifications notify "Deploy finished" --channel telegram``
     """
@@ -117,6 +130,13 @@ def notify(
         except ValidationError as exc:
             raise typer.BadParameter(f"invalid options: {exc}", param_hint="--options") from exc
         body["options"] = list(option_list)
+    if schema is not None:
+        parsed_schema = parse_json_value(schema, param_hint="--schema")
+        if not isinstance(parsed_schema, dict):
+            # The form's answer schema is a JSON object by contract; the server owns the
+            # deeper subset walk, this shape check is the flag's whole local validation.
+            raise typer.BadParameter("invalid schema: must be a JSON object", param_hint="--schema")
+        body["schema"] = parsed_schema
     with ctx_obj.client() as client:
         data = client.post("/api/notifications", json=body)
     emit_result(ctx_obj, data)

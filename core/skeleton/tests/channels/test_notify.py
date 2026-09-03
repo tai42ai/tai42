@@ -71,6 +71,7 @@ class RichChannel:
     supports_media_notifications = True
     supports_template_notifications = True
     supports_interactive_notifications = True
+    supports_form_notifications = True
 
     def __init__(self) -> None:
         self.notifications: list[ChannelNotification] = []
@@ -78,6 +79,22 @@ class RichChannel:
     async def notify(self, notification: ChannelNotification) -> list[str]:
         self.notifications.append(notification)
         return []
+
+
+class FormHookChannel(RichChannel):
+    """A form-capable channel that ALSO declares the OPTIONAL ``validate_form_schema``
+    hook, recording every ``(schema, question)`` pair the notify door hands it and
+    refusing a schema naming a ``reserved`` property — a stand-in for a medium's own
+    form limits the shared subset walk does not know."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hook_calls: list[tuple[dict, str]] = []
+
+    def validate_form_schema(self, schema: dict, question: str) -> None:
+        self.hook_calls.append((schema, question))
+        if "reserved" in schema.get("properties", {}):
+            raise ValueError("form schema property 'reserved' is a reserved name on this channel")
 
 
 class FailingChannel:
@@ -369,6 +386,121 @@ async def test_media_and_template_mutually_exclusive_on_sink(sink_redis):
     with pytest.raises(ValueError, match="mutually exclusive"):
         await notify_user("both", media=[_IMAGE], template=_TEMPLATE)
     assert await notifications_sink.read_notifications() == []
+
+
+# -- schema (ask-less form): channel-only, capability-gated, subset + hook walked --
+
+
+_FORM_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+
+
+async def test_notify_threads_schema_to_a_capable_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA)
+
+    assert channel.notifications == [ChannelNotification(message="fill this in", schema=_FORM_SCHEMA)]
+
+
+async def test_schema_to_channel_without_capability_is_not_implemented(register_channel):
+    # A channel that does not advertise supports_form_notifications refuses the form
+    # send loudly (NotImplementedError → 501) — never a silent prompt-only downgrade.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support form notifications"):
+        await notify_user("fill this in", channel="plain", schema=_FORM_SCHEMA)
+    assert channel.notifications == []
+
+
+async def test_schema_capability_guard_fires_before_the_feed_record(register_channel, sink_redis):
+    # A refused form send leaves NO phantom feed entry: the guard precedes the audience
+    # in-app record, exactly as the media/template/options guards do.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support form notifications"):
+        await notify_user("fill this in", channel="plain", schema=_FORM_SCHEMA, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_schema_outside_the_channel_subset_is_rejected(register_channel, sink_redis):
+    # The shared channel-deliverable subset walk (the ONE definition the ask path uses)
+    # refuses an unrenderable schema at the door — a ValueError naming the property (→ 400),
+    # before any feed write and before the channel is touched.
+    channel = register_channel("rich", RichChannel())
+    nested = {"type": "object", "properties": {"address": {"type": "object"}}}
+
+    with pytest.raises(ValueError, match="'address'"):
+        await notify_user("fill this in", channel="rich", schema=nested, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_schema_channel_hook_refusal_is_rejected(register_channel, sink_redis):
+    # The channel's OPTIONAL validate_form_schema hook (the same one declared method the
+    # ask path reuses) enforces medium-specific limits on top of the subset walk — its
+    # ValueError refuses the send (→ 400) before any feed write or send.
+    channel = register_channel("hooky", FormHookChannel())
+    reserved = {"type": "object", "properties": {"reserved": {"type": "string"}}}
+
+    with pytest.raises(ValueError, match="reserved name"):
+        await notify_user("fill this in", channel="hooky", schema=reserved, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_schema_channel_hook_receives_the_message_as_the_question(register_channel):
+    # The notify door reuses the ask-time hook with the notification's MESSAGE as the
+    # question (the form's prompt), so one declared method covers both surfaces.
+    channel = register_channel("hooky", FormHookChannel())
+
+    await notify_user("fill this in", channel="hooky", schema=_FORM_SCHEMA)
+
+    assert channel.hook_calls == [(_FORM_SCHEMA, "fill this in")]
+    assert channel.notifications == [ChannelNotification(message="fill this in", schema=_FORM_SCHEMA)]
+
+
+async def test_schema_and_options_mutual_exclusion_leaves_no_phantom_feed_entry(register_channel, sink_redis):
+    # One message carries ONE interactive surface: schema + options is refused by the
+    # contract's exclusion validator (→ 400) BEFORE the audience feed record — even on a
+    # channel advertising both capabilities.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        await notify_user("x", channel="rich", schema=_FORM_SCHEMA, options=["Item A"], audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_schema_with_channel_none_is_refused(sink_redis):
+    # A sink notification has no delivery vehicle and no submission door, so a form
+    # notification REQUIRES a channel: the sink path refuses schema loudly (→ 400) and
+    # records nothing — never a feed entry carrying a form nobody can submit.
+    with pytest.raises(ValueError, match="needs a named channel"):
+        await notify_user("fill this in", schema=_FORM_SCHEMA)
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_channel_send_with_audience_records_schema_on_feed(register_channel, sink_redis):
+    # Feed parity: the audience-addressed channel send stores the SAME schema the channel
+    # receives, so the in-app record shows the form the channel delivered.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("fill this in", channel="rich", schema=_FORM_SCHEMA, audience="alice")
+
+    assert channel.notifications == [ChannelNotification(message="fill this in", schema=_FORM_SCHEMA)]
+    own = await notifications_sink.read_notifications(audience="alice")
+    assert len(own) == 1
+    assert own[0]["schema"] == _FORM_SCHEMA
+    assert own[0]["template"] is None
 
 
 # -- data: image substitution: stored by reference, absolute url minted here -----

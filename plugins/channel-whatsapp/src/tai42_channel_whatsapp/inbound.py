@@ -16,7 +16,10 @@ replay guard. A reply matching a pending question is forwarded as ``{"answer":
 <value>}`` — the text verbatim (outer whitespace stripped) for a text reply, the
 resolved option for an interactive tap, or the schema-coerced dict for a
 completed Flow form (``nfm_reply``); on a correlation miss the message enters the
-conversation bridge instead.
+conversation bridge instead. An ``nfm_reply`` whose flow token rides the
+``tai42-nf:`` namespace is an ASK-LESS form (a ``notify`` Flow): it has no
+reservation and enters the bridge as a structured guest message, routed by its
+token prefix before any pending-question lookup.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from tai42_contract.channels import (
 from tai42_contract.conversations import BlankInboundTextError, DeliveryReceipt
 from tai42_kit.settings import require_secret
 
+from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
 from tai42_channel_whatsapp.client import mark_read_typing, send_flow, send_message
 from tai42_channel_whatsapp.correlation import (
     PendingQuestion,
@@ -48,6 +52,7 @@ from tai42_channel_whatsapp.correlation import (
     bump_rejections,
     correlation_key,
     get_cached_flow_id,
+    get_cached_flow_schema,
     mark_known_contact,
     mark_seen,
     peek_pending,
@@ -507,6 +512,10 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
     title, so a blank bridge — the same shape an uncorrelated interactive takes).
     The pending ask is peeked before the destructive pop so a non-answer never
     claims a live ask a concurrent genuine reply could still answer.
+
+    A token in the ``tai42-nf:`` namespace is an ASK-LESS form (a ``notify``
+    Flow) and branches out BEFORE any pending peek: it has no reservation and
+    must never answer — or disturb — a question pending on the same pair.
     """
     response = _extract_form_response(interactive)
     if response is None:
@@ -515,6 +524,10 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
         return
 
     flow_token = response.get("flow_token")
+    if isinstance(flow_token, str) and flow_token.startswith(_NOTIFY_FORM_TOKEN_PREFIX):
+        await _handle_notify_form_reply(response, flow_token, phone_number_id, wa_id, wamid)
+        return
+
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None or not isinstance(flow_token, str) or flow_token != pending.interaction_id:
         await _bridge_inbound(phone_number_id, wa_id, "", wamid)
@@ -527,29 +540,68 @@ async def _handle_form_reply(interactive: dict[str, Any], phone_number_id: str, 
     await _resolve_answer(phone_number_id, wa_id, wamid, answer, pending)
 
 
+async def _handle_notify_form_reply(
+    response: dict[str, Any], flow_token: str, phone_number_id: str, wa_id: str, wamid: str
+) -> None:
+    """A completed ASK-LESS form (a ``notify`` Flow, token in the ``tai42-nf:``
+    namespace): enter it into the conversation as a structured guest message.
+
+    No reservation exists for it — the token itself carries the schema hash, which
+    resolves the answer schema from the durable schema sidecar. On a hit the values
+    are coerced to the schema's types; on a miss (or an unset WABA id, without which
+    the sidecar cannot even be addressed) they are forwarded RAW — the reply
+    DEGRADES, never drops, and never 5xx's into a permanent Meta redelivery loop.
+    The rendered ``label: value`` text (compact JSON for an empty form — never
+    blank) is the turn every consumer sees; the structured copy rides beside it
+    through the bridge's ``form`` seam.
+    """
+    schema_hash = flow_token[len(_NOTIFY_FORM_TOKEN_PREFIX) :].partition(":")[0]
+    waba_id = whatsapp_settings().waba_id
+    schema = await get_cached_flow_schema(waba_id, schema_hash) if waba_id else None
+    if schema is None:
+        logger.warning(
+            "no cached answer schema for whatsapp notify-form reply %s (hash %s); forwarding raw values",
+            wamid,
+            schema_hash,
+        )
+    form = _coerce_form_answer(response, schema)
+    await _bridge_inbound(phone_number_id, wa_id, _render_form_text(form, schema), wamid, form=form)
+
+
 def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQuestion) -> str:
     """A faithful, ALWAYS non-empty text rendering of a correlated reply for the
     conversation bridge when the interaction is terminally gone.
 
     A typed reply or a resolved select tap is already its human-readable string; a
-    completed Flow form is rendered as readable ``label: value`` lines — the schema
-    property's ``title`` when it has one, else the raw field key (the schema may be
-    gone). A scalar value renders as itself; a non-scalar value (list/object) renders
-    as compact JSON, never a Python ``repr``. A completed-but-empty form renders as a
-    compact JSON dump of the raw response so the bridge is handed a non-blank string —
-    the ``conversations.accept`` door rejects blank text, and the reply must never be
-    dropped.
+    completed Flow form renders through :func:`_render_form_text` against the
+    pending ask's schema.
     """
     if isinstance(answer, str):
         return answer
-    properties = pending.schema.get("properties", {}) if isinstance(pending.schema, dict) else {}
+    return _render_form_text(answer, pending.schema)
+
+
+def _render_form_text(answer: dict[str, Any], schema: dict[str, Any] | None) -> str:
+    """A completed form's readable, ALWAYS non-empty ``label: value`` lines — the
+    schema property's ``title`` when it has one, else the raw field key (the schema
+    may be gone). A string/number renders as itself; a boolean and any non-scalar
+    value (list/object) render as compact JSON — ``true``/``false``, never a Python
+    ``repr`` such as ``True``/``False``. A completed-but-empty form
+    renders as a compact JSON dump of the raw answer so the bridge is handed a
+    non-blank string — the ``conversations.accept`` door rejects blank text, and the
+    reply must never be dropped.
+    """
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     props = properties if isinstance(properties, dict) else {}
     lines = []
     for key, value in answer.items():
         prop = props.get(key)
         title = prop.get("title") if isinstance(prop, dict) else None
         label = title if isinstance(title, str) and title else key
-        rendered = value if isinstance(value, str | int | float | bool) else json.dumps(value, ensure_ascii=False)
+        # bool is a subclass of int, so it must be excluded from the scalar fast-path
+        # explicitly — otherwise a boolean would render as its Python repr.
+        scalar = isinstance(value, str | int | float) and not isinstance(value, bool)
+        rendered = value if scalar else json.dumps(value, ensure_ascii=False)
         lines.append(f"{label}: {rendered}")
     text = "\n".join(lines)
     if not text:
@@ -709,13 +761,17 @@ def _rejection_body(question: str, error_line: str) -> str:
     return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail
 
 
-async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: str) -> None:
+async def _bridge_inbound(
+    phone_number_id: str, wa_id: str, text: str, wamid: str, form: dict[str, Any] | None = None
+) -> None:
     """Route an uncorrelated inbound message into the conversation bridge.
 
-    ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim). A
-    message with no route bound, or with blank text (a media-only message or an
-    empty interactive title), is logged and skipped; a retryable overflow or
-    infrastructure failure propagates as a 5xx so Meta redelivers.
+    ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim);
+    ``form`` is an ask-less form submission's structured copy, riding beside its
+    rendered ``text``. A message with no route bound, or with blank text (a
+    media-only message or an empty interactive title), is logged and skipped; a
+    retryable overflow or infrastructure failure propagates as a 5xx so Meta
+    redelivers.
     """
     try:
         await tai42_app.conversations.accept(
@@ -727,6 +783,7 @@ async def _bridge_inbound(phone_number_id: str, wa_id: str, text: str, wamid: st
             cap_key=wa_id,
             text=text,
             provider_message_id=wamid,
+            form=form,
         )
     except BlankInboundTextError as exc:
         logger.warning("blank whatsapp inbound %s dropped: %s", wamid, exc)

@@ -231,132 +231,194 @@ NOTIFICATION_OPTION_MAX_CHARS = MEDIA_CAPTION_MAX_CHARS
 NOTIFICATION_ADDRESS_MAX_CHARS = 512
 
 
-class ChannelNotification(BaseModel):
-    """One fire-and-forget message handed to a channel.
+with warnings.catch_warnings():
+    # The ``schema`` field intentionally shadows pydantic's deprecated
+    # ``BaseModel.schema()`` alias (the current API is ``model_json_schema()``);
+    # the field name matches the JSON-schema payload it carries. Suppress the
+    # shadow warning at the definition site so every importer is safe regardless
+    # of its own warnings config — narrowly matched, never a blanket ignore.
+    warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
 
-    A notification carries no interaction, no ticket, no ``callback_url`` and
-    no deadline: the channel sends the message and nothing travels back.
-    ``recipient`` is the OPTIONAL caller-requested address (chat id, phone
-    number, ...): the channel plugin validates it against its operator-set
-    allowlist and refuses to send to an unlisted address; when omitted the
-    plugin sends to its operator-configured default recipient. It is an
-    address only, never a secret or credential.
+    class ChannelNotification(BaseModel):
+        """One fire-and-forget message handed to a channel.
 
-    ``sender_identity`` is the OPTIONAL address to send FROM when the channel fronts
-    several operator identities: an internal routing control set by the sending side,
-    never caller-supplied, and an address only — never a secret.
+        A notification carries no interaction, no ticket, no ``callback_url`` and
+        no deadline: the channel sends the message and nothing travels back.
+        ``recipient`` is the OPTIONAL caller-requested address (chat id, phone
+        number, ...): the channel plugin validates it against its operator-set
+        allowlist and refuses to send to an unlisted address; when omitted the
+        plugin sends to its operator-configured default recipient. It is an
+        address only, never a secret or credential.
 
-    ``message`` is the human-readable text, non-blank BY DEFAULT — EXCEPT it may be the empty
-    string ``""`` for a MEDIA-ONLY send: a caption-less image or other bubble that is just
-    ``media``, with no text carrier. The admissible states are "``message`` non-blank" OR
-    "blank ``message`` WITH non-empty ``media``"; a blank ``message`` and no media has nothing
-    to deliver and is refused. (``message`` stays REQUIRED — a media-only sender passes ``""``
-    explicitly — because every caller constructs it in code with the text in hand.) ``options``
-    REQUIRE a non-blank ``message`` — a tappable choice needs a prompt — so a media-only send
-    carries none; a ``template`` likewise rides a non-blank ``message`` (it is not ``media``, so
-    a blank message with only a template is refused).
+        ``sender_identity`` is the OPTIONAL address to send FROM when the channel fronts
+        several operator identities: an internal routing control set by the sending side,
+        never caller-supplied, and an address only — never a secret.
 
-    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms reusing the
-    same ``message`` as the human-readable equivalent. ``media`` is display media the
-    channel sends alongside the message (reusing :class:`MediaItem`); a present
-    list is non-empty. ``template`` sends a pre-approved :class:`ChannelTemplate`
-    for out-of-window delivery. ``options`` is a list of tappable options; a tap enters
-    the conversation as a visitor message on channels that support it — a present list is
-    non-empty, each option non-blank and at most ``NOTIFICATION_OPTION_MAX_CHARS`` characters,
-    at most ``NOTIFICATION_OPTIONS_MAX`` entries.
-    ``media`` and ``template`` are MUTUALLY EXCLUSIVE — a template is the out-of-window
-    send and a companion standalone media item would be rejected by the medium there, so
-    setting both is refused rather than partially delivered; ``options`` is likewise
-    incompatible with ``template`` but MAY combine with ``media`` (a card with a list).
-    A channel that does not advertise the matching capability flag
-    (``supports_media_notifications`` / ``supports_template_notifications`` /
-    ``supports_interactive_notifications``, the OPTIONAL class-attribute convention
-    documented on :class:`Channel`) never receives the matching field.
-    """
+        ``message`` is the human-readable text, non-blank BY DEFAULT — EXCEPT it may be the empty
+        string ``""`` for a MEDIA-ONLY send: a caption-less image or other bubble that is just
+        ``media``, with no text carrier. The admissible states are "``message`` non-blank" OR
+        "blank ``message`` WITH non-empty ``media``"; a blank ``message`` and no media has nothing
+        to deliver and is refused. (``message`` stays REQUIRED — a media-only sender passes ``""``
+        explicitly — because every caller constructs it in code with the text in hand.) ``options``
+        REQUIRE a non-blank ``message`` — a tappable choice needs a prompt — so a media-only send
+        carries none; a ``template`` likewise rides a non-blank ``message`` (it is not ``media``, so
+        a blank message with only a template is refused).
 
-    model_config = ConfigDict(frozen=True)
+        ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms reusing the
+        same ``message`` as the human-readable equivalent. ``media`` is display media the
+        channel sends alongside the message (reusing :class:`MediaItem`); a present
+        list is non-empty. ``template`` sends a pre-approved :class:`ChannelTemplate`
+        for out-of-window delivery. ``options`` is a list of tappable options; a tap enters
+        the conversation as a visitor message on channels that support it — a present list is
+        non-empty, each option non-blank and at most ``NOTIFICATION_OPTION_MAX_CHARS`` characters,
+        at most ``NOTIFICATION_OPTIONS_MAX`` entries.
+        ``media`` and ``template`` are MUTUALLY EXCLUSIVE — a template is the out-of-window
+        send and a companion standalone media item would be rejected by the medium there, so
+        setting both is refused rather than partially delivered; ``options`` is likewise
+        incompatible with ``template`` but MAY combine with ``media`` (a card with a list).
+        A channel that does not advertise the matching capability flag
+        (``supports_media_notifications`` / ``supports_template_notifications`` /
+        ``supports_interactive_notifications`` / ``supports_form_notifications``, the
+        OPTIONAL class-attribute convention documented on :class:`Channel`) never receives
+        the matching field.
 
-    message: str  # human-readable text; blank ("") ONLY for a media-only send (media carries it)
-    recipient: str | None = None  # caller-requested address; None -> plugin default
-    sender_identity: str | None = None  # internal sending identity; None -> plugin default
-    media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
-    template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
-    options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+        ``schema`` is the form answer schema for an ASK-LESS FORM: the channel renders
+        ``message`` as the form's prompt and ``schema`` as the fillable form, and the
+        guest's submission enters the conversation as a guest message — no interaction,
+        no ticket, no callback, the same inbound path a tapped option takes. A present
+        ``schema`` is a non-empty dict; its deep shape is the sender's shared
+        channel-deliverable subset walk (the same split :class:`ChannelDelivery` keeps),
+        never re-checked here. ``schema`` REQUIRES a non-blank ``message`` — a form needs
+        a prompt — and is MUTUALLY EXCLUSIVE with ``template`` and with ``options`` (one
+        message carries ONE interactive surface); it MAY combine with ``media``. It rides
+        the ``supports_form_notifications`` capability flag, and a form channel's OPTIONAL
+        ``validate_form_schema(schema, question)`` hook (see :class:`Channel`) is reused
+        at notify time with this ``message`` as the ``question`` argument, so the
+        channel's own form limits refuse an unrenderable form before the send. Some channels
+        also constrain WHEN a form may be sent: WhatsApp delivers a notify-form only inside
+        the provider's customer-service window, and an out-of-window send fails loudly at the
+        channel — never silently downgraded.
+        """
 
-    @field_validator("message")
-    @classmethod
-    def _message_valid(cls, value: str) -> str:
-        # Length cap only; whether a BLANK message is admissible depends on ``media`` (a
-        # media-only send carries no text) and is decided in :meth:`_message_or_media` once
-        # every field is bound.
-        if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
-            raise ValueError(f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}")
-        return value
+        model_config = ConfigDict(frozen=True)
 
-    @field_validator("recipient", "sender_identity")
-    @classmethod
-    def _address_non_empty(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
-            raise ValueError("must be a non-empty address when present")
-        if value is not None and len(value) > NOTIFICATION_ADDRESS_MAX_CHARS:
-            raise ValueError(f"address must be at most {NOTIFICATION_ADDRESS_MAX_CHARS} characters, got {len(value)}")
-        return value
+        message: str  # human-readable text; blank ("") ONLY for a media-only send (media carries it)
+        recipient: str | None = None  # caller-requested address; None -> plugin default
+        sender_identity: str | None = None  # internal sending identity; None -> plugin default
+        media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
+        template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
+        options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+        # The form answer schema for an ask-less form; the submission enters the conversation as
+        # a guest message. Intentionally named ``schema`` (matches the payload it carries);
+        # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
+        schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
 
-    @field_validator("media")
-    @classmethod
-    def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
-        # None means no media; the shared list-level caps (non-empty, item count, summed
-        # URI) are the same wire-contract bound on the notify REQUEST as on the ask
-        # REQUEST — the channel refuses anything beyond its own native envelope.
-        if value is not None:
-            check_media_list(value)
-        return value
-
-    @field_validator("options")
-    @classmethod
-    def _options_valid(cls, value: list[str] | None) -> list[str] | None:
-        # None means no options; a present list is non-empty, each option non-blank,
-        # and capped so one notification cannot fan out an unbounded tap list.
-        if value is None:
-            return value
-        if not value:
-            raise ValueError("options must be a non-empty list when present")
-        if len(value) > NOTIFICATION_OPTIONS_MAX:
-            raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
-        for option in value:
-            if not option.strip():
-                raise ValueError("each option must be a non-blank string")
-            if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
+        @field_validator("message")
+        @classmethod
+        def _message_valid(cls, value: str) -> str:
+            # Length cap only; whether a BLANK message is admissible depends on ``media`` (a
+            # media-only send carries no text) and is decided in :meth:`_message_or_media` once
+            # every field is bound.
+            if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
                 raise ValueError(
-                    f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
+                    f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}"
                 )
-        return value
+            return value
 
-    @model_validator(mode="after")
-    def _message_or_media(self) -> ChannelNotification:
-        # A message is either non-blank text OR a media-only send: a blank message carried by
-        # non-empty media (a caption-less image). A blank message with no media has nothing to
-        # deliver and is refused. Options REQUIRE a non-blank message — a tappable choice needs
-        # a prompt — so a media-only send carries none. A template is not media, so a blank
-        # message with only a template is refused here too (its ``not self.media`` branch).
-        if not self.message.strip():
-            if not self.media:
-                raise ValueError("message must be non-blank unless media carries the content")
-            if self.options is not None:
-                raise ValueError("media-only (blank-message) notification carries no options; a choice needs a prompt")
-        return self
+        @field_validator("recipient", "sender_identity")
+        @classmethod
+        def _address_non_empty(cls, value: str | None) -> str | None:
+            if value is not None and not value.strip():
+                raise ValueError("must be a non-empty address when present")
+            if value is not None and len(value) > NOTIFICATION_ADDRESS_MAX_CHARS:
+                raise ValueError(
+                    f"address must be at most {NOTIFICATION_ADDRESS_MAX_CHARS} characters, got {len(value)}"
+                )
+            return value
 
-    @model_validator(mode="after")
-    def _media_template_exclusive(self) -> ChannelNotification:
-        if self.media is not None and self.template is not None:
-            raise ValueError("media and template are mutually exclusive on one notification")
-        return self
+        @field_validator("media")
+        @classmethod
+        def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+            # None means no media; the shared list-level caps (non-empty, item count, summed
+            # URI) are the same wire-contract bound on the notify REQUEST as on the ask
+            # REQUEST — the channel refuses anything beyond its own native envelope.
+            if value is not None:
+                check_media_list(value)
+            return value
 
-    @model_validator(mode="after")
-    def _options_template_exclusive(self) -> ChannelNotification:
-        if self.options is not None and self.template is not None:
-            raise ValueError("options and template are mutually exclusive on one notification")
-        return self
+        @field_validator("options")
+        @classmethod
+        def _options_valid(cls, value: list[str] | None) -> list[str] | None:
+            # None means no options; a present list is non-empty, each option non-blank,
+            # and capped so one notification cannot fan out an unbounded tap list.
+            if value is None:
+                return value
+            if not value:
+                raise ValueError("options must be a non-empty list when present")
+            if len(value) > NOTIFICATION_OPTIONS_MAX:
+                raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
+            for option in value:
+                if not option.strip():
+                    raise ValueError("each option must be a non-blank string")
+                if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
+                    raise ValueError(
+                        f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
+                    )
+            return value
+
+        @field_validator("schema")
+        @classmethod
+        def _schema_non_empty(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+            # None means no form; a present schema is a non-empty dict — the same bound the
+            # ask-path ChannelDelivery enforces. The deep shape is the sender's shared
+            # channel-deliverable subset walk, never re-implemented here.
+            if value is not None and not value:
+                raise ValueError("schema must be a non-empty dict when present")
+            return value
+
+        @model_validator(mode="after")
+        def _message_or_media(self) -> ChannelNotification:
+            # A message is either non-blank text OR a media-only send: a blank message carried by
+            # non-empty media (a caption-less image). A blank message with no media has nothing to
+            # deliver and is refused. Options REQUIRE a non-blank message — a tappable choice needs
+            # a prompt — and a schema does too — a form needs a prompt — so a media-only send
+            # carries neither. A template is not media, so a blank message with only a template is
+            # refused here too (its ``not self.media`` branch).
+            if not self.message.strip():
+                if not self.media:
+                    raise ValueError("message must be non-blank unless media carries the content")
+                if self.options is not None:
+                    raise ValueError(
+                        "media-only (blank-message) notification carries no options; a choice needs a prompt"
+                    )
+                if self.schema is not None:
+                    raise ValueError("media-only (blank-message) notification carries no schema; a form needs a prompt")
+            return self
+
+        @model_validator(mode="after")
+        def _media_template_exclusive(self) -> ChannelNotification:
+            if self.media is not None and self.template is not None:
+                raise ValueError("media and template are mutually exclusive on one notification")
+            return self
+
+        @model_validator(mode="after")
+        def _options_template_exclusive(self) -> ChannelNotification:
+            if self.options is not None and self.template is not None:
+                raise ValueError("options and template are mutually exclusive on one notification")
+            return self
+
+        @model_validator(mode="after")
+        def _schema_template_exclusive(self) -> ChannelNotification:
+            if self.schema is not None and self.template is not None:
+                raise ValueError("schema and template are mutually exclusive on one notification")
+            return self
+
+        @model_validator(mode="after")
+        def _schema_options_exclusive(self) -> ChannelNotification:
+            # One message carries ONE interactive surface: a form's fields or a tap list, never both.
+            if self.schema is not None and self.options is not None:
+                raise ValueError("schema and options are mutually exclusive on one notification")
+            return self
 
 
 @runtime_checkable
@@ -369,23 +431,25 @@ class Channel(Protocol):
     minted. A channel never reaches the interactions store directly: the
     human's reply travels back through the delivery's public ``callback_url``.
 
-    A channel MAY advertise richer support with four OPTIONAL, class-level
+    A channel MAY advertise richer support with five OPTIONAL, class-level
     capability flags — ``supports_media_notifications``,
-    ``supports_template_notifications``, ``supports_interactive_notifications``
-    (all three for ``notify``) and ``supports_form_delivery`` (for ``deliver``)
-    — set as plain class attributes. They are a documented convention, NOT
-    Protocol members: a channel that supports the richer form sets the matching
-    attribute to ``True``; a channel that omits it advertises no support (absent
-    = ``False``). Because they are not part of the Protocol, a text-only channel
+    ``supports_template_notifications``, ``supports_interactive_notifications``,
+    ``supports_form_notifications`` (all four for ``notify``) and
+    ``supports_form_delivery`` (for ``deliver``) — set as plain class
+    attributes. They are a documented convention, NOT Protocol members: a
+    channel that supports the richer form sets the matching attribute to
+    ``True``; a channel that omits it advertises no support (absent =
+    ``False``). Because they are not part of the Protocol, a text-only channel
     that declares none is still a valid ``Channel`` (both structurally and under
     runtime ``isinstance``). The ask/notify helpers read them defensively with
     ``getattr(channel, "<flag>", False)`` and refuse the matching richer send to
     a channel that does not advertise the flag: ``notify_user`` refuses a media,
-    template or options notification, and the ``ask_user`` helper refuses a
-    ``form`` delivery, to a channel without the flag — so a channel that reads
-    only the plain fields can never silently drop the extra content. A channel
-    that does not advertise ``supports_form_delivery`` never receives a ``form``
-    delivery.
+    template, options or schema notification, and the ``ask_user`` helper
+    refuses a ``form`` delivery, to a channel without the flag — so a channel
+    that reads only the plain fields can never silently drop the extra content.
+    A channel that does not advertise ``supports_form_delivery`` never receives
+    a ``form`` delivery, and one that does not advertise
+    ``supports_form_notifications`` never receives a ``schema`` notification.
 
     A form channel MAY also declare one OPTIONAL method, ``validate_form_schema``,
     following the same convention as the capability flags — a documented member,
@@ -402,7 +466,10 @@ class Channel(Protocol):
     front instead of persisting a question that only fails at delivery. A channel
     that omits it advertises no extra ask-time limits; its delivery path still
     refuses an unrenderable question or schema (a permanent
-    :class:`ChannelInputError`).
+    :class:`ChannelInputError`). The SAME hook is reused for a form notification:
+    the notify helper calls ``channel.validate_form_schema(schema, message)`` with
+    the notification's ``message`` as the ``question`` argument before the send, so
+    one declared method covers both the ask and the notify form surfaces.
 
     A channel MAY also declare one OPTIONAL method, ``deliver_ordered(notifications)``,
     for a NATIVE in-order batch (a bulk API, a transactional transcript append) — the

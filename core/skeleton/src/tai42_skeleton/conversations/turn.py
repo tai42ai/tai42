@@ -46,6 +46,7 @@ from tai42_contract.conversations import (
     Person,
     PersonAddress,
     joined_answer_text,
+    validate_inbound_form,
 )
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
@@ -132,6 +133,18 @@ def _checked_params(params: dict[str, str] | None) -> dict[str, str] | None:
         if not isinstance(key, str) or not isinstance(value, str):
             raise ValueError("params must map str keys to str values")
     return params
+
+
+def _checked_form(form: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Run the contract's inbound-form transport bounds defensively at the seam (the
+    ``params`` pattern): a JSON object with string keys, finite numbers, bounded nesting and
+    a bounded serialized size — the contents stay opaque and untrusted. The api door's
+    ``ConversationMessage`` already validated its body; a channel adapter calling the facet
+    directly is defended here just the same. ``None`` passes through; a violation raises
+    ``ValueError`` BEFORE any state is written."""
+    if form is None:
+        return None
+    return validate_inbound_form(form)
 
 
 class ConversationRouteResolutionError(LookupError):
@@ -746,6 +759,7 @@ async def _run_tool_turn(
     client_address: str,
     person: Person | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> _ToolOutcome:
     """Dispatch one tool turn as the route's execution key and return its resolved outcome
     (a :class:`_SilentOutcome` or a :class:`_ResolvedOutcome`).
@@ -757,6 +771,11 @@ async def _run_tool_turn(
     carries ``person_id`` and ``person_addresses`` IFF the target has multichannel on;
     ``sender`` stays the sending address either way. Non-empty ``params`` nest under a
     ``params`` key (never merged into the root); ``None``/empty leave the payload unchanged.
+    A structured inbound ``form`` (an ask-less form's submission) rides the payload under a
+    ``form`` key ONLY when the inbound carried one, so an existing ``payload_expr`` over a
+    form-less inbound sees a byte-identical payload; the default no-``payload_expr`` kwargs
+    stay the fixed ``{message, sender}`` either way — a route maps the form deliberately or
+    not at all.
     A reply that is ``None`` or blank is a deliberate silent outcome; a mapping fault, a
     denied or failed dispatch, or a wrong-typed result is a client-safe ``error`` outcome
     whose detail is logged, never delivered.
@@ -787,6 +806,8 @@ async def _run_tool_turn(
         payload["person_addresses"] = [a.model_dump(mode="json") for a in person.addresses]
     if params:
         payload["params"] = params
+    if form is not None:
+        payload["form"] = form
     try:
         kwargs = await _tool_kwargs(route, payload)
     except Exception as exc:
@@ -994,11 +1015,14 @@ def _new_record(
     answer_parts: list[AnswerPart] | None = None,
     error: str | None = None,
     origin: Literal["client", "operator"] = "client",
+    inbound_form: dict[str, Any] | None = None,
 ) -> ConversationRecord:
     """A freshly minted record for one accepted message, in the state its door commits it
     to (``accepted``, ``pending_delivery`` or ``shed``). ``inbound_text`` is the message
     verbatim, durable from here so the record reads as a turn of a conversation and not
-    only as its answer. A ``client`` api-door record MUST name the authenticated caller its
+    only as its answer; ``inbound_form`` is the structured submission that rode WITH it
+    (an ask-less form's answers), stored beside the text — ``None`` for an ordinary
+    text-only inbound. A ``client`` api-door record MUST name the authenticated caller its
     thread and rate bucket are keyed by, and a ``client`` channel-door record names none; an
     ``operator`` record names the operator that sent it on EITHER door — it rides no rate
     bucket and carries no inbound to dedupe."""
@@ -1027,6 +1051,7 @@ def _new_record(
         origin=origin,
         provider_message_id=provider_message_id,
         inbound_text=inbound_text,
+        inbound_form=inbound_form,
         delivery_status=delivery_status,
         answer_status=answer_status,
         answer=answer,
@@ -1115,11 +1140,14 @@ async def _target_outcome(
     text: str,
     person: Person | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> _ToolOutcome:
     """The route's TARGET turn as an outcome: a tool dispatch (which may be silent) or an
     agent run (always answered/error). The single dispatch both the plain and the
-    multichannel paths route ordinary text to. ``person`` and ``params`` reach only the tool
-    payload; the agent branch ignores both.
+    multichannel paths route ordinary text to. ``person``, ``params`` and ``form`` (the
+    structured inbound submission) reach only the tool
+    payload; the agent branch ignores all three — an agent target reads the rendered TEXT
+    only, so a form-unaware agent still sees the whole turn.
 
     A thread whose effective mode is ``manual`` runs NO target turn: this is where the
     suppression lives, so a pairing turn — dispatched on its own path, never through here —
@@ -1135,7 +1163,7 @@ async def _target_outcome(
         return await _manual_target_outcome(route, intake, text)
     with run_attribution(_conversation_attribution(route, intake, person)):
         if route.target_kind == "tool":
-            return await _run_tool_turn(route, text, intake.thread_id, intake.client_address, person, params)
+            return await _run_tool_turn(route, text, intake.thread_id, intake.client_address, person, params, form)
         return await _run_agent_turn(route, text, intake.thread_id, intake.client_address)
 
 
@@ -1219,6 +1247,7 @@ async def _resolve_turn_record(
     text: str,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> ConversationRecord:
     """Run the route's target (or a pairing turn) and build the completed record the
     transition persists. With ``multichannel`` off this is byte-identical to the target turn.
@@ -1226,16 +1255,18 @@ async def _resolve_turn_record(
     execution — AFTER the door's terminal admission write: ``ensure_provisional`` (the sole
     person WRITE, keying the first-contact greeting and the redeem's own side) → classify
     → dispatch to the pairing turn or the target — and a due first-contact greeting is
-    PREPENDED into the answer before it is persisted. ``params`` reach only a tool target's
-    payload; a pairing turn ignores them."""
+    PREPENDED into the answer before it is persisted. ``params`` and ``form`` reach only a
+    tool target's payload; a pairing turn ignores them. ``classify`` runs on the rendered
+    TEXT (the commands match only the whole trimmed message, so a form's label:value lines
+    can never classify as a command)."""
     if multichannel is None:
-        return _outcome_record(intake, await _target_outcome(route, intake, text, params=params))
+        return _outcome_record(intake, await _target_outcome(route, intake, text, params=params, form=form))
 
     person, created = await _person_store().ensure_provisional(multichannel.target, multichannel.address_row())
     greeting, greeting_code = await _greeting_and_code(multichannel) if created else (None, None)
     action = classify(text)
     if isinstance(action, Passthrough):
-        outcome = await _target_outcome(route, intake, text, person, params)
+        outcome = await _target_outcome(route, intake, text, person, params, form)
     else:
         # ``greeting_code`` is the greeting's already-minted code, if any: a first-contact
         # ``/link`` reuses it rather than minting a SECOND code that rotation would delete,
@@ -1375,6 +1406,7 @@ async def _complete_turn(
     text: str,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> ConversationRecord:
     """Run the turn and move its intake record to its outcome (persist before send);
     delivery is the caller's to spawn. A produced answer goes to ``pending_delivery``; a
@@ -1383,7 +1415,7 @@ async def _complete_turn(
     re-drive resolved its record raises rather than overwriting the outcome the client was
     given."""
     completed = await _resolve_turn_record(
-        route=route, intake=intake, text=text, multichannel=multichannel, params=params
+        route=route, intake=intake, text=text, multichannel=multichannel, params=params, form=form
     )
     if completed.delivery_status is DeliveryStatus.SILENT:
         outcome = await _store().complete_silent(completed)
@@ -1413,6 +1445,7 @@ async def _shed_with_reply(
     client_address: str,
     text: str,
     provider_message_id: str,
+    form: dict[str, Any] | None = None,
 ) -> str:
     """Answer an over-limit address with its one paid slow-down reply, committed in the
     turn path's order: the record is persisted at ``accepted`` under an intake lease, the
@@ -1428,6 +1461,7 @@ async def _shed_with_reply(
         caller_principal=None,
         provider_message_id=provider_message_id,
         inbound_text=text,
+        inbound_form=form,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1465,6 +1499,7 @@ async def _shed_silently(
     client_address: str,
     text: str,
     provider_message_id: str,
+    form: dict[str, Any] | None = None,
 ) -> str:
     """Drop a message from an address already given its slow-down reply this window,
     leaving a terminal ``shed`` record. The claim behind that record is what makes a
@@ -1477,6 +1512,7 @@ async def _shed_silently(
         caller_principal=None,
         provider_message_id=provider_message_id,
         inbound_text=text,
+        inbound_form=form,
         delivery_status=DeliveryStatus.SHED,
         error=f"address {client_address!r} was over its rate cap after a prior slow-down reply",
     )
@@ -1504,6 +1540,7 @@ async def accept(
     text: str,
     provider_message_id: str,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> str:
     """Accept one inbound channel message, persist-and-deliver its answer, and return its
     ``message_id`` (a uuid4). See :meth:`AppConversations.accept`.
@@ -1522,10 +1559,19 @@ async def accept(
     leave the turn byte-identical to today. The door validates their bounds before accept;
     this seam runs only a cheap isinstance sweep against its in-process caller.
 
+    ``form`` is a structured guest submission (an ask-less form's answers) riding WITH the
+    required rendered ``text`` — the text stays the turn every consumer sees, while a tool
+    route's ``payload_expr`` may map the structured copy from the payload's ``form`` key.
+    It is validated here against the contract's transport bounds
+    (``validate_inbound_form`` — a JSON object, bounded depth and size, contents opaque and
+    untrusted) BEFORE any state is written, and stored on the record's ``inbound_form``
+    beside the text (shed records included).
+
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
     any state is written — there is nothing to run a turn on — for the channel adapter to
     drop like an unrouted message."""
     checked_params = _checked_params(params)
+    checked_form = _checked_form(form)
     if not text.strip():
         raise BlankInboundTextError(
             f"channel {channel!r} inbound {provider_message_id!r} carries blank text; nothing to run a turn on"
@@ -1564,6 +1610,7 @@ async def accept(
             client_address=address,
             text=text,
             provider_message_id=provider_message_id,
+            form=checked_form,
         )
     if admission is AddressAdmission.SHED_SILENT:
         return await _shed_silently(
@@ -1575,6 +1622,7 @@ async def accept(
             client_address=address,
             text=text,
             provider_message_id=provider_message_id,
+            form=checked_form,
         )
 
     return await _accept_for_turn(
@@ -1588,6 +1636,7 @@ async def accept(
         provider_message_id=provider_message_id,
         multichannel=multichannel,
         params=checked_params,
+        form=checked_form,
     )
 
 
@@ -1603,6 +1652,7 @@ async def _accept_for_turn(
     provider_message_id: str,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> str:
     """Commit an admitted channel message to a turn in the one order that keeps the
     release-less inbound claim sound: reserve the per-thread FIFO slot (the last gate that
@@ -1620,6 +1670,7 @@ async def _accept_for_turn(
         caller_principal=None,
         provider_message_id=provider_message_id,
         inbound_text=text,
+        inbound_form=form,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1652,6 +1703,7 @@ async def _accept_for_turn(
         deliver_on_completion=True,
         multichannel=multichannel,
         params=params,
+        form=form,
     )
     return message_id
 
@@ -1666,6 +1718,7 @@ async def submit_api_message(
     caller_principal: str | None,
     wait_seconds: int,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> ApiSubmitResult:
     """Accept one authed API-door message and run its turn.
 
@@ -1685,8 +1738,15 @@ async def submit_api_message(
 
     Non-empty ``params`` reach a tool target's payload under ``params``; ``None``/empty
     leave the turn byte-identical to today. The door validates their bounds before submit;
-    this seam runs only a cheap isinstance sweep against its in-process caller."""
+    this seam runs only a cheap isinstance sweep against its in-process caller.
+
+    ``form`` is the structured guest submission riding WITH ``text``
+    (``ConversationMessage.form``), carried with the same record + payload semantics the
+    channel door has: transport-bounds-checked here (defensively — the door's body model
+    already validated it), stored on the record's ``inbound_form``, and surfaced to a tool
+    target's payload under ``form`` only when present."""
     checked_params = _checked_params(params)
+    checked_form = _checked_form(form)
     if caller_principal is None or not caller_principal.strip():
         raise UnauthenticatedApiCallerError(
             f"api conversation route {route_name!r} needs an authenticated caller principal and this "
@@ -1721,6 +1781,7 @@ async def submit_api_message(
         caller_principal=caller_principal,
         provider_message_id=None,
         inbound_text=text,
+        inbound_form=checked_form,
         delivery_status=DeliveryStatus.ACCEPTED,
     )
     try:
@@ -1739,6 +1800,7 @@ async def submit_api_message(
         deliver_on_completion=False,
         multichannel=multichannel,
         params=checked_params,
+        form=checked_form,
     )
 
     if wait_seconds > 0:
@@ -1783,6 +1845,7 @@ async def operator_send(
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
     options: list[str] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> str:
     """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
     record's ``message_id`` (a uuid4). No turn runs: the record is minted already
@@ -1790,15 +1853,19 @@ async def operator_send(
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
 
-    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms: when any is set
+    ``media``, ``template``, ``options`` and ``schema`` (an ask-less form's answer schema —
+    the guest's submission enters the conversation as an ordinary inbound message) are
+    OPTIONAL richer-send forms: when any is set
     the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
-    media/template/options), so the delivery machine sends the operator's message with its
+    media/template/options/schema), so the delivery machine sends the operator's message with
+    its
     rich fields exactly as it sends a produced rich part — including the capability gate: a
     channel that does not advertise the matching ``supports_*_notifications`` flag never
     receives the part, and the record fails loudly instead of the field silently dropping.
     With none set the record stays a plain single-message answer (byte-parity with the
-    pre-rich operator send). A contract-invalid value (an empty list, an over-cap value, or
-    the mutually exclusive media+template / options+template) raises before any state is
+    pre-rich operator send). A contract-invalid value (an empty list/dict, an over-cap value,
+    or the mutually exclusive media+template / options+template / schema+template /
+    schema+options) raises before any state is
     written.
 
     For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
@@ -1821,16 +1888,17 @@ async def operator_send(
     worker — raises the loud, retriable :class:`ThreadBusyError` (503) rather than blocking the
     caller past the proxy timeout. A full FIFO raises the loud, retriable
     :class:`ThreadQueueOverflowError` (503) before anything is written."""
-    # A rich operator send (media/template/options present) stores one :class:`AnswerPart`
+    # A rich operator send (media/template/options/schema present) stores one
+    # :class:`AnswerPart`
     # carrying the text plus its rich fields — the shape the delivery machine sends as a rich
     # part. A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich
     # path (and unbounded by the part message cap, which only governs a rich part's text).
-    if media is None and template is None and options is None:
+    if media is None and template is None and options is None and schema is None:
         answer: str = text
         answer_parts: list[AnswerPart] | None = None
     else:
         answer, answer_parts = _answer_fields(
-            [AnswerPart(message=text, media=media, template=template, options=options)]
+            [AnswerPart(message=text, media=media, template=template, options=options, schema=schema)]
         )
     message_id = str(uuid4())
     caps = get_turn_caps()
@@ -2214,6 +2282,7 @@ def _schedule_turn(
     deliver_on_completion: bool,
     multichannel: _Multichannel | None = None,
     params: dict[str, str] | None = None,
+    form: dict[str, Any] | None = None,
 ) -> asyncio.Task[ConversationRecord]:
     """Schedule ``intake``'s turn as a background task consuming the caller's reservation;
     returns the task whose result is the completed :class:`ConversationRecord`.
@@ -2224,7 +2293,9 @@ def _schedule_turn(
 
     async def _run() -> ConversationRecord:
         async with _intake_lease_held(intake.message_id, intake_token), caps.run_reserved(intake.thread_id):
-            return await _complete_turn(route=route, intake=intake, text=text, multichannel=multichannel, params=params)
+            return await _complete_turn(
+                route=route, intake=intake, text=text, multichannel=multichannel, params=params, form=form
+            )
 
     task = asyncio.create_task(_run())
     _TURN_TASKS.add(task)

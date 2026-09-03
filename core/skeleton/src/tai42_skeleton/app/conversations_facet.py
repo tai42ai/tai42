@@ -8,7 +8,7 @@ reports an outbound message's terminal fate.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tai42_contract.conversations import DeliveryReceipt
 
@@ -34,9 +34,10 @@ class ConversationsFacet:
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        form: dict[str, Any] | None = None,
     ) -> str:
         return await self._app._conversation_accept(
-            channel, our_identity, client_address, cap_key, text, provider_message_id, params=params
+            channel, our_identity, client_address, cap_key, text, provider_message_id, params=params, form=form
         )
 
     async def record_delivery_status(self, channel: str, provider_message_id: str, status: DeliveryReceipt) -> None:

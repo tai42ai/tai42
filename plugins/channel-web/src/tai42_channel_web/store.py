@@ -35,6 +35,13 @@ first); ``claim_question`` claims it with ``GETDEL`` (atomic — a duplicate ans
 POST gets ``None``); ``restore_question`` puts it back with ``SET NX`` after a
 failed forward, refused with a loud log rather than clobbering a newer reservation,
 and refused again once the record has already been restored ``max_restores`` times.
+
+An ask-less form's submission record is the string key ``channel:web:form:{token}``
+holding the transcript pair its card was appended to, the form's answer schema, and
+the prompt message. Unlike a question record it is READ, never claimed: a form may
+be submitted again and again (each submission is its own guest message), and its
+TTL is the transcript TTL — the card ages out of the replay buffer and its
+answerability with it.
 """
 
 from __future__ import annotations
@@ -65,6 +72,7 @@ MESSAGE_EVENT = "chat.message"
 QUESTION_EVENT = "chat.question"
 ANSWERED_EVENT = "chat.answered"
 MEDIA_EVENT = "chat.media"
+FORM_EVENT = "chat.form"
 
 
 class SessionRecordError(RuntimeError):
@@ -100,6 +108,24 @@ class QuestionRecord:
     restores: int = 0
 
 
+@dataclass(frozen=True)
+class FormRecord:
+    """One ask-less form card's submission record: the transcript pair the card was
+    appended to (what binds a submission to the conversation it was sent into), the
+    form's answer schema (the server-trusted source of the rendered labels), and the
+    card's prompt message.
+
+    Stored under ``channel:web:form:{token}`` with a TTL of the transcript TTL: the
+    card lives in the replay buffer, so its answerability ages out with it. The
+    record is only ever READ — a form is submittable again and again (each
+    submission is its own guest message), unlike a question's one-shot claim."""
+
+    identity: str
+    address: str
+    schema: dict[str, Any]
+    message: str
+
+
 def _session_key(token: str) -> str:
     return f"channel:web:session:{token}"
 
@@ -110,6 +136,10 @@ def _transcript_key(identity: str, address: str) -> str:
 
 def _question_key(interaction_id: str) -> str:
     return f"channel:web:question:{interaction_id}"
+
+
+def _form_key(token: str) -> str:
+    return f"channel:web:form:{token}"
 
 
 def _entry_gate_key(identity: str) -> str:
@@ -535,6 +565,31 @@ async def append_answered(identity: str, address: str, interaction_id: str, answ
     return entry_id
 
 
+async def append_form(
+    identity: str,
+    address: str,
+    text: str,
+    schema: dict[str, Any],
+    token: str,
+    media: list[dict[str, Any]] | None = None,
+) -> str:
+    """Append one ``chat.form`` agent entry (an ask-less form card) and return its id.
+
+    ``text`` is the form's prompt, ``schema`` the JSON answer schema the page's form
+    widget renders — display-input material, never a secret. ``token`` names the
+    submission door for THIS card (``POST /forms/{token}``); it is a capability on
+    the card's own conversation only — the door checks the record against the
+    caller's session, so a token replayed from a foreign transcript resolves to
+    nothing. ``media`` is the card's display items, the same ``{"kind", "url",
+    "caption"?}`` shape every other card carries, present ONLY when non-empty."""
+    entry_id = _mint_id()
+    data: dict[str, Any] = {"id": entry_id, "text": text, "schema": schema, "token": token, "ts": _now_iso()}
+    if media:
+        data["media"] = media
+    await _append(identity, address, FORM_EVENT, data)
+    return entry_id
+
+
 def _mint_id() -> str:
     return uuid4().hex
 
@@ -637,6 +692,42 @@ async def restore_question(interaction_id: str, record: QuestionRecord, max_rest
         )
         return False
     return True
+
+
+async def store_form_record(record: FormRecord) -> str:
+    """Store one form card's submission record under a freshly minted token and
+    return that token.
+
+    The token is minted HERE, server-side (``uuid4().hex``) — never caller-supplied,
+    so no sender can choose (or collide) a submission door's name. The TTL is the
+    transcript TTL: the card sits in the replay buffer for at most that long, and a
+    submission against a card that has aged out of every replay must refuse."""
+    token = _mint_id()
+    payload = json.dumps(
+        {
+            "identity": record.identity,
+            "address": record.address,
+            "schema": record.schema,
+            "message": record.message,
+        }
+    )
+    async with _redis() as redis:
+        await redis.set(_form_key(token), payload, ex=web_settings().transcript_ttl_seconds)
+    return token
+
+
+async def read_form_record(token: str) -> FormRecord | None:
+    """The record a form token stands for, or ``None`` when it is unknown or has
+    expired — indistinguishable on purpose (the door refuses both uniformly). A pure
+    read: submission never claims the record (resubmission is allowed)."""
+    async with _redis() as redis:
+        raw = await redis.get(_form_key(token))
+    if raw is None:
+        return None
+    data = json.loads(raw)
+    return FormRecord(
+        identity=data["identity"], address=data["address"], schema=data["schema"], message=data["message"]
+    )
 
 
 def _as_str(value: str | bytes) -> str:

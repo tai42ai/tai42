@@ -77,7 +77,7 @@ Settings are read from the `CHANNEL_WHATSAPP_` environment group (see
 | `CHANNEL_WHATSAPP_APP_SECRET` | yes | Meta app secret (`SecretStr`) — the `X-Hub-Signature-256` HMAC key for inbound webhooks |
 | `CHANNEL_WHATSAPP_VERIFY_TOKEN` | yes | Shared token (`SecretStr`) echoed during Meta's GET webhook verification handshake |
 | `CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID` | for ask_user | The `phone_number_id` messages are sent FROM when no sender identity is routed |
-| `CHANNEL_WHATSAPP_WABA_ID` | for form asks | The WhatsApp Business Account id that owns Flows — a `form` ask is rendered as a WhatsApp Flow created and published under this WABA. Required only on the form-delivery path |
+| `CHANNEL_WHATSAPP_WABA_ID` | for forms | The WhatsApp Business Account id that owns Flows — a `form` ask and an ask-less form notification are rendered as a WhatsApp Flow created and published under this WABA, and the notify-form schema cache is keyed under it. Required only on the form paths |
 | `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS` | for cold templates | Whitelist of `wa_id`s a **template** send may reach when the recipient is not a known contact — comma-separated or a JSON list. Freeform sends are not fenced by it |
 | `CHANNEL_WHATSAPP_TEMPLATE_CONTACT_WINDOW_DAYS` | no (30) | Rolling "seen within N days" window admitting a template send to a `wa_id` the inbound webhook has messaged from; `0` disables known-contact tracking (allowlist-only templates) |
 | `CHANNEL_WHATSAPP_API_BASE_URL` | no | Graph API origin + pinned version (default `https://graph.facebook.com/v23.0`) |
@@ -142,10 +142,30 @@ a submitted form) from the recipient resolves the `(phone_number_id, wa_id)`
 pair's pending question, so one question can be pending per pair at a time; a
 second concurrent one is rejected loudly.
 
-An agent notification (`notify_user`) may also carry **media** — images
-sent as image messages, links appended to the message text — or, for a send
-outside the 24-hour window, a pre-approved **template** referenced by name. Media
-and template are mutually exclusive on one notification.
+An agent notification (`notify_user`) advertises the full capability set —
+`supports_media_notifications`, `supports_template_notifications`,
+`supports_interactive_notifications`, and `supports_form_notifications` — so a
+notification may carry **media** (images sent as image messages, links appended
+to the message text), tappable **options** (native reply buttons/list; a tap
+enters the conversation as a visitor message), an **ask-less form** (`schema`),
+or, for a send outside the 24-hour window, a pre-approved **template**
+referenced by name. Template, options, and schema are mutually exclusive on one
+notification.
+
+An **ask-less form** notification renders exactly like a form ask — any media
+first, then a WhatsApp Flow whose body is the message — but stores **no
+correlation**: the flow token is minted in the `tai42-nf:` namespace
+(`tai42-nf:{schema hash}:{random}`), and the inbound webhook routes an
+`nfm_reply` by that prefix *before* any pending-question lookup, so a submission
+enters the conversation as a structured guest message (rendered `label: value`
+text plus the structured copy) and can never answer — or disturb — a question
+pending on the same pair. The answer schema is cached durably beside the
+published-flow id under the schema hash; a reply carries only the hash, so a
+lost cache entry cannot be repopulated from it — the reply then degrades to its
+raw (uncoerced) values, and is still accepted. Like every freeform send, a form
+notification delivers only inside Meta's 24-hour customer-service window — out
+of window the send fails loudly (error 131047), synchronously or as a `failed`
+status; it is never silently downgraded to a template.
 
 A `confirm` or `external` question arrives as a tappable link and is answered in
 the browser via the callback door — no WhatsApp reply is expected or matched, and

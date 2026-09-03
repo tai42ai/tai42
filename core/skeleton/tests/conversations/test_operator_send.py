@@ -198,6 +198,7 @@ class RichFakeChannel(FakeChannel):
     supports_media_notifications = True
     supports_template_notifications = True
     supports_interactive_notifications = True
+    supports_form_notifications = True
 
 
 async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, monkeypatch):
@@ -264,6 +265,60 @@ async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(en
     assert channel.sends[0].message == "your order shipped"
     assert channel.sends[0].template == template
     assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_with_schema_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    # An operator's ask-less form send: the schema rides one rich AnswerPart and the
+    # delivery machine hands it to the channel on the part's final chunk.
+    agent = RecordingAgent()
+    channel = RichFakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="fill this in",
+        operator_principal="op-1",
+        schema=schema,
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "fill this in"
+    assert record.answer_parts is not None
+    assert record.answer_parts[0].schema == schema
+    # The delivered notification carries the operator's schema (final chunk of the part).
+    assert channel.sends[0].message == "fill this in"
+    assert channel.sends[0].schema == schema
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_schema_to_incapable_channel_fails_the_record(env, monkeypatch):
+    # The delivery machine's capability gate holds for an operator form send exactly as for
+    # a produced answer: a channel that does not advertise supports_form_notifications never
+    # receives the part — the record fails loudly instead of the schema silently dropping.
+    channel = FakeChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="fill this in",
+        operator_principal="op-1",
+        schema={"type": "object", "properties": {"name": {"type": "string"}}},
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
 
 
 async def test_operator_send_template_to_incapable_channel_fails_the_record(env, monkeypatch):

@@ -395,3 +395,62 @@ describe('applyFrame', () => {
     expect(EMPTY_MODEL.items).toHaveLength(0);
   });
 });
+
+/** A `chat.form` frame spelled as the wire spells it: `media` present only when
+ * the case is about it. */
+function formFrame(extra: Record<string, unknown> = {}) {
+  return frame('chat.form', {
+    id: 'f1',
+    text: 'Fill this in',
+    schema: { type: 'object', properties: { note: { type: 'string' } } },
+    token: 'tok-1',
+    ts: TS,
+    ...extra,
+  });
+}
+
+describe('applyFrame: chat.form', () => {
+  it('folds a form entry with its schema and submission token', () => {
+    const model = fold(EMPTY_MODEL, formFrame());
+
+    expect(model.items).toEqual([
+      {
+        kind: 'form',
+        id: 'f1',
+        text: 'Fill this in',
+        schema: { type: 'object', properties: { note: { type: 'string' } } },
+        token: 'tok-1',
+        media: null,
+        ts: TS,
+      },
+    ]);
+  });
+
+  it('folds a form entry carrying media through the same vetted parse a card uses', () => {
+    const model = fold(
+      EMPTY_MODEL,
+      formFrame({ media: [{ kind: 'image', url: 'https://example.com/a.png' }] }),
+    );
+
+    expect(model.items[0]).toMatchObject({
+      kind: 'form',
+      media: [{ kind: 'image', url: 'https://example.com/a.png', caption: null }],
+    });
+  });
+
+  it.each([
+    ['a form missing its token', formFrame({ token: undefined })],
+    ['a form with a blank token', formFrame({ token: '   ' })],
+    ['a form with a non-string token', formFrame({ token: 42 })],
+    ['a form missing its schema', formFrame({ schema: undefined })],
+    ['a form whose schema is not an object', formFrame({ schema: ['not', 'an', 'object'] })],
+    ['a form missing its text', formFrame({ text: undefined })],
+    ['a form with an unparsable timestamp', formFrame({ ts: 'soon' })],
+    [
+      'a form with an off-scheme image',
+      formFrame({ media: [{ kind: 'image', url: 'http://example.com/a.png' }] }),
+    ],
+  ])('surfaces %s as malformed rather than dropping the widget', (_label, bad) => {
+    expect(applyFrame(EMPTY_MODEL, bad).kind).toBe('malformed');
+  });
+});

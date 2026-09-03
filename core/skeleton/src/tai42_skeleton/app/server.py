@@ -701,10 +701,13 @@ class TaiMCP(TaiMCPLifecycleMixin):
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        form: dict[str, Any] | None = None,
     ) -> str:
         from tai42_skeleton.conversations import accept
 
-        return await accept(channel, our_identity, client_address, cap_key, text, provider_message_id, params=params)
+        return await accept(
+            channel, our_identity, client_address, cap_key, text, provider_message_id, params=params, form=form
+        )
 
     async def _conversation_record_delivery_status(
         self, channel: str, provider_message_id: str, status: "DeliveryReceipt"

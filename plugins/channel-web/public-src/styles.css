@@ -365,6 +365,14 @@
   align-items: stretch;
 }
 
+/* The scalar-widget `flex: 1 1 12rem` above is for inputs sitting directly on
+   the row-direction actions bar. Inside the form the inputs live in
+   column-direction `.tai-field` wrappers, where that basis would read as a
+   12rem HEIGHT; reset each control to its natural size. */
+.tcw-question-form .tai-input {
+  flex: none;
+}
+
 .tcw-question-malformed {
   display: flex;
   align-items: center;
@@ -435,6 +443,28 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--tai-space-2);
+}
+
+/* -- Ask-less form cards ---------------------------------------------------- */
+
+/* The same raised interactive-card chrome a question wears: a form card asks for
+   input too, and the two must read as the same class of thing. */
+.tcw-form {
+  max-width: min(95%, 40rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  border: 1px solid var(--tai-color-border-strong);
+  background: var(--tai-color-surface-raised);
+  box-shadow: var(--tai-shadow-lift);
+}
+
+.tcw-form-gone {
+  margin: 0;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
 }
 
 /* -- Floating affordances -------------------------------------------------- */

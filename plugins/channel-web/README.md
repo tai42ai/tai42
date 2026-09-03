@@ -379,6 +379,25 @@ unknown token.
   answer is not this visitor's). A callback door that refuses the answer → `400`, and
   the record is put back so the visitor can re-answer — up to `MAX_ANSWER_RESTORES`
   times, after which the question is left dropped and the refusal says so.
+- `POST /api/channels/web/forms/{token}` — body `{values}`, optionally
+  `client_message_id` → `{message_id}`; submit an ask-less form card (a `chat.form`
+  transcript entry). The token names the card's stored record — key
+  `channel:web:form:{token}`, holding the transcript pair, the form's schema and its
+  prompt, written by `notify` with a TTL of the transcript TTL, so a card is
+  submittable exactly as long as it can replay. The record must belong to the
+  caller's own conversation; a foreign, expired and never-minted token all answer
+  ONE uniform `404` (no oracle). `values` must be a non-empty JSON object passing
+  the same transport bound as a form answer (finite numbers, at most 32 KiB
+  serialized) and is **never validated against the form's schema** — guest-shaped
+  data, bridged verbatim as the turn's structured `form` while the door renders the
+  `label: value` text every consumer sees from the STORED schema's titles
+  (server-trusted labels; client values are untrusted data). The record is READ,
+  never claimed: a form may be submitted repeatedly, each submission its own guest
+  message — the same settle model as the option chips. `client_message_id` is the
+  messages door's retry key, same derivation, same echo. Refusals map as the
+  messages door's: `401` no/foreign session, `400` unparseable JSON, `413` over the
+  body cap, `422` malformed values or retry key, `404` unroutable identity, `503`
+  full thread queue.
 - `POST /api/channels/web/session/rotate` — body `{identity}`, optionally
   `entry_code` → `{status: "rotated"}`; unregisters the old session and sets a
   freshly minted cookie bound to the web route the body names, with no link
@@ -418,7 +437,16 @@ media cards (text + media items — absolute-`https` images and outbound links, 
 optionally captioned) and interactive option lists (at most 10 options), appended as one `chat.media`
 entry the page renders as a card; a link item rides the card as a safe outbound link
 element, never folded into the body text, and a tap on an option sends the option's own text
-through the message door as an ordinary visitor message. A `data:` image is refused loudly
+through the message door as an ordinary visitor message. A `notify` carrying a `schema`
+(an **ask-less form**) lands as one `chat.form` entry: the message is the form's prompt,
+the schema is the fillable widget (any media rides the same card; options are impossible
+beside a schema by contract), and the frame carries a server-minted submission token —
+`uuid4().hex`, stored under `channel:web:form:{token}` for the transcript TTL — naming
+the form door the submission posts back through. Unlike a question the card has no
+deadline and no answered state: it settles like the option chips — a local "Sent" badge
+for the page session, fillable again on a backlog replay, resubmittable at will (each
+submission is its own guest message), inert on a locked session, and an expired token's
+`404` renders as an inline "no longer available" line. A `data:` image is refused loudly
 (the page renders an image only from an absolute `https` source), and a template
 notification is refused loudly — a template is a vendor construct this channel does not send.
 

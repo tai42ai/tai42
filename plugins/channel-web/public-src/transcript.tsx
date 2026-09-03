@@ -18,6 +18,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ArrowDownIcon, Button, EmptyState, Spinner } from '@tai42/studio-sdk';
 
 import { Bubble, type SendStatus } from '@/bubble';
+import { FormCard, type FormCardItem } from '@/form-card';
 import { MediaCard, type MediaCardItem } from '@/media-card';
 import { QuestionCard, type QuestionItem } from '@/question-card';
 
@@ -60,6 +61,12 @@ export type TranscriptEntry =
       readonly key: string;
       readonly ts: string;
       readonly item: MediaCardItem;
+    }
+  | {
+      readonly kind: 'form';
+      readonly key: string;
+      readonly ts: string;
+      readonly item: FormCardItem;
     };
 
 /** A rendered row: a day divider, or one entry with its grouping decisions. */
@@ -161,6 +168,8 @@ export interface TranscriptProps {
   /** Sends a media card chip's label as a regular visitor message — the same send
    * door the composer uses. */
   readonly onSend: (text: string) => void;
+  /** Submits one ask-less form card's values through its token door. */
+  readonly onSubmitForm: (token: string, values: Record<string, unknown>) => Promise<void>;
   /** Bumped on every send from this page. The visitor's own message always
    * returns them to the tail and never counts as something they missed. */
   readonly pinToken: number;
@@ -176,6 +185,7 @@ export function Transcript({
   onAnswered,
   onRetry,
   onSend,
+  onSubmitForm,
   pinToken,
 }: TranscriptProps): ReactElement {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -284,6 +294,7 @@ export function Transcript({
               onAnswered={onAnswered}
               onRetry={onRetry}
               onSend={onSend}
+              onSubmitForm={onSubmitForm}
             />
           ),
         )}
@@ -315,6 +326,7 @@ interface EntryRowProps {
   readonly onAnswered: () => void;
   readonly onRetry: (retryId: string) => void;
   readonly onSend: (text: string) => void;
+  readonly onSubmitForm: (token: string, values: Record<string, unknown>) => Promise<void>;
 }
 
 function EntryRow({
@@ -325,6 +337,7 @@ function EntryRow({
   onAnswered,
   onRetry,
   onSend,
+  onSubmitForm,
 }: EntryRowProps): ReactElement {
   const { entry, time } = row;
   const retryId = entry.kind === 'message' ? entry.retryId : null;
@@ -351,6 +364,8 @@ function EntryRow({
         />
       ) : entry.kind === 'media' ? (
         <MediaCard item={entry.item} onSend={onSend} locked={locked} />
+      ) : entry.kind === 'form' ? (
+        <FormCard item={entry.item} onSubmitForm={onSubmitForm} locked={locked} />
       ) : (
         <Bubble
           direction={entry.direction}
