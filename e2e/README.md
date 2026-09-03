@@ -20,7 +20,7 @@ it is the only one that runs the real multi-process topology.
 docker compose up -d          # core profile: redis:7-alpine + postgres:16
 uv python install 3.13
 uv sync
-uv run pytest                 # the default variant leg: arq + redis identity + local storage
+uv run --no-sync pytest       # the default variant leg: arq + redis identity + local storage
 ```
 
 The suite runs sequentially in one pytest process (no xdist by design — a stack
@@ -43,11 +43,11 @@ valid set.
 ```bash
 # the rq and celery backend legs — celery needs its broker
 docker compose --profile celery up -d
-TAI_E2E_BACKEND=rq     uv run pytest -m "not backendless"
-TAI_E2E_BACKEND=celery uv run pytest -m "not backendless"
+TAI_E2E_BACKEND=rq     uv run --no-sync pytest -m "not backendless"
+TAI_E2E_BACKEND=celery uv run --no-sync pytest -m "not backendless"
 
 # the second identity/storage values, on the identity/storage-bearing suites
-TAI_E2E_IDENTITY=fixture TAI_E2E_STORAGE=fixture uv run pytest tests/redis_semantics tests/storage tests/harness
+TAI_E2E_IDENTITY=fixture TAI_E2E_STORAGE=fixture uv run --no-sync pytest tests/redis_semantics tests/storage tests/harness
 ```
 
 `backendless` marks a module whose stack runs no backend worker: it exercises no
