@@ -20,12 +20,12 @@ import tai42_contract
 
 from ._helpers import protocol_members  # stdlib-only helper, no application package
 
-# The frozen facade surface: the 73 (sub-protocol, member) pairs over 70
+# The frozen facade surface: the 78 (sub-protocol, member) pairs over 75
 # distinct flat names, grouped into the 22 sub-protocols. This is the
 # contract's own source of truth — no external lookup needed. Three leaf names
 # are shared: ``store`` (versioning + presets) and ``register``/``get``
-# (webhook_verifiers + channels), so the distinct-name union (70) is three
-# fewer than the pair count (73).
+# (webhook_verifiers + channels), so the distinct-name union (75) is three
+# fewer than the pair count (78).
 EXPECTED_FACADE = {
     # tools (13)
     "tool",
@@ -119,10 +119,11 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (8) — `store` shared with versioning above
+    # presets (9) — `store` shared with versioning above
     "bind",
     "register_write_validator",
     "register_seed",
+    "register_retired_seed",
     "register_input_schema_support",
     "input_schema_support",
     "register_registration_tier",
@@ -230,11 +231,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 77 (sub-protocol, member) pairs over 74 distinct names — ``store`` is
+    # 78 (sub-protocol, member) pairs over 75 distinct names — ``store`` is
     # exposed by both AppVersioning and AppPresets, and ``register``/``get``
     # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 74, f"union={len(union)}"
-    assert total == 77 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 75, f"union={len(union)}"
+    assert total == 78 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_two_namespaces():

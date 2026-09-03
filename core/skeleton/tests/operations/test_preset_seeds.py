@@ -120,6 +120,25 @@ def test_seed_registry_all_preserves_order_and_reset_clears() -> None:
     assert registry.all() == []
 
 
+def test_seed_registry_retired_names_ordered_guarded_and_reset() -> None:
+    registry = PresetSeedRegistry()
+    registry.register_retired("old_a")
+    registry.register_retired("old_b")
+    assert registry.retired() == ["old_a", "old_b"]
+    # Duplicate retired declaration is a loud programming error, like a duplicate seed.
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register_retired("old_a")
+    # One name declared BOTH seeded and retired raises loudly in either load order —
+    # the applier could not honor both create and delete for the same name.
+    with pytest.raises(ValueError, match="cannot be both"):
+        registry.register(PresetSeed(name="old_a", description="d", base_tool="echo"))
+    registry.register(PresetSeed(name="live", description="d", base_tool="echo"))
+    with pytest.raises(ValueError, match="cannot be both"):
+        registry.register_retired("live")
+    registry.reset()
+    assert registry.retired() == []
+
+
 # -- fresh boot: create + LIVE + tag + tool_meta -----------------------------
 
 
@@ -881,5 +900,207 @@ def test_invalid_seed_raises_loudly(pg) -> None:
             # Nothing was persisted for the rejected seed.
             with pytest.raises(PresetNotFoundError):
                 await instance.app.presets.store.get_preset("broken_default")
+
+    asyncio.run(run())
+
+
+# -- retirement: a withdrawn seed's untouched record is deleted ---------------
+
+
+def _next_release(*, retired: list[str], seeds: tuple[PresetSeed, ...] = ()) -> None:
+    """Swap the declaration set to the NEXT release's: the registry is reset (exactly
+    what ``start()`` does before plugins re-declare) and the new declarations land."""
+    instance.app._seed_registry.reset()
+    for seed in seeds:
+        instance.app.presets.register_seed(seed)
+    for name in retired:
+        instance.app.presets.register_retired_seed(name)
+
+
+def test_retired_untouched_seed_deleted_with_overlay_cascade(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_default",
+                description="the shipped echo preset",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                tool_meta=PresetSeedToolMeta(display_name="Echo Bot", tags=["seeded"], folder_path="acme/echoes"),
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+            assert instance.app.preset_manager.is_registered("echo_default")
+
+            _next_release(retired=["echo_default"])
+            await preset_ops.apply_preset_seeds()
+
+            # The record is gone (soft-deleted through the ordinary delete door)...
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("echo_default")
+            # ...the live tool is torn down...
+            assert not instance.app.preset_manager.is_registered("echo_default")
+            assert "echo_default" not in await instance.app.tools.get_tools()
+            # ...and the tool_meta overlay row cascaded with it, as every preset delete does.
+            assert await instance.app.tool_meta.store.get_meta("echo_default") is None
+
+    asyncio.run(run())
+
+
+def test_retirement_is_idempotent_and_absent_name_is_noop(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            # ``never_shipped`` was never a record on this deploy — retiring it is a no-op.
+            _next_release(retired=["echo_default", "never_shipped"])
+            await preset_ops.apply_preset_seeds()
+            await preset_ops.apply_preset_seeds()  # second apply: nothing left to do, no raise
+
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("echo_default")
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("never_shipped")
+
+    asyncio.run(run())
+
+
+def test_concurrent_sibling_retirement_absorbed_not_raised(pg, monkeypatch, caplog) -> None:
+    """Two replicas boot on the deploy that introduces a retirement and the SIBLING wins
+    the delete between this worker's ownership check and its own delete door. The loser's
+    delete finds no active record — absorbed as benign (the sibling already retired it,
+    the outcome this worker wanted), with a visible line, NEVER a boot-lifecycle crash
+    (mirrors the create path's concurrent-create absorption)."""
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            _next_release(retired=["echo_default"])
+
+            real_list_versions = PresetStoreView.list_versions
+            raced = False
+
+            async def racing_list_versions(self, name):
+                versions = await real_list_versions(self, name)
+                nonlocal raced
+                if name == "echo_default" and not raced:
+                    raced = True
+                    # The sibling's whole retirement lands between this worker's
+                    # ownership check and its delete.
+                    await preset_ops.delete_preset("echo_default")
+                return versions
+
+            monkeypatch.setattr(PresetStoreView, "list_versions", racing_list_versions)
+
+            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
+                await preset_ops.apply_preset_seeds()  # no raise
+
+            # The record is gone (the sibling's delete) and the loser surfaced the
+            # concurrent absorption visibly instead of crashing its boot.
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("echo_default")
+            assert any("echo_default" in rec.getMessage() and "sibling" in rec.getMessage() for rec in caplog.records)
+
+    asyncio.run(run())
+
+
+def test_retired_operator_edited_kept_with_visible_skip(pg, caplog) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="weather_default", description="d", base_tool="weather", fixed_kwargs={"units": "si"}
+            )
+            instance.app.presets.register_seed(seed)
+            await preset_ops.apply_preset_seeds()
+
+            # An operator saves a new version — the save door tags nothing, so the
+            # active version is UNtagged and the operator now owns the preset.
+            await preset_ops.save_version(
+                name="weather_default",
+                fixed_kwargs={"units": "operator"},
+                extensions=None,
+                output_schema=None,
+                output_schema_provided=False,
+                description="operator description",
+            )
+
+            _next_release(retired=["weather_default"])
+            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
+                await preset_ops.apply_preset_seeds()
+
+            # The operator's preset survives retirement, live and store-side, with a
+            # VISIBLE skip line naming the preset and why.
+            record = await instance.app.presets.store.get_preset("weather_default")
+            assert record.name == "weather_default"
+            assert instance.app.preset_manager.is_registered("weather_default")
+            body = await instance.app.presets.store.get_active_body("weather_default")
+            assert body.fixed_kwargs == {"units": "operator"}
+            assert any(
+                "weather_default" in rec.getMessage() and "operator-edited" in rec.getMessage()
+                for rec in caplog.records
+            )
+
+    asyncio.run(run())
+
+
+def test_retired_untagged_operator_created_preset_kept(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            # An operator-CREATED preset that merely shares the retired name: no version
+            # ever wore the shipped-default tag, so the seed never owned it.
+            await preset_ops.create_preset("echo_default", "echo", "operator's own", {"text": "mine"}, [], None)
+
+            _next_release(retired=["echo_default"])
+            await preset_ops.apply_preset_seeds()
+
+            record = await instance.app.presets.store.get_preset("echo_default")
+            assert record.name == "echo_default"
+            assert instance.app.preset_manager.is_registered("echo_default")
+
+    asyncio.run(run())
+
+
+def test_still_declared_seed_unaffected_by_sibling_retirement(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            keep = PresetSeed(name="echo_default", description="d", base_tool="echo", fixed_kwargs={"text": "x"})
+            drop = PresetSeed(name="weather_default", description="d", base_tool="weather", fixed_kwargs={"units": "x"})
+            instance.app.presets.register_seed(keep)
+            instance.app.presets.register_seed(drop)
+            await preset_ops.apply_preset_seeds()
+
+            _next_release(seeds=(keep,), retired=["weather_default"])
+            await preset_ops.apply_preset_seeds()
+
+            # The still-declared seed rides on untouched (same single version, still live).
+            versions = await instance.app.presets.store.list_versions("echo_default")
+            assert len(versions) == 1
+            assert instance.app.preset_manager.is_registered("echo_default")
+            # The withdrawn sibling is gone.
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("weather_default")
+
+    asyncio.run(run())
+
+
+def test_store_off_retirement_visible_skip_no_raise(monkeypatch, caplog) -> None:
+    # No versioned-document store configured (the OFF posture) — a retirement must skip
+    # visibly and never raise, exactly like a seed.
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app.presets.register_retired_seed("old_default")
+
+            with caplog.at_level(logging.INFO, logger=_SEED_LOGGER):
+                await preset_ops.apply_preset_seeds()  # no raise
+
+            assert any(
+                "old_default" in rec.getMessage() and "not configured" in rec.getMessage() for rec in caplog.records
+            )
 
     asyncio.run(run())

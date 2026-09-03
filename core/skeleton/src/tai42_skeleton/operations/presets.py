@@ -1888,6 +1888,15 @@ async def set_preset_version_tags(name: str, version: str, tags: list[str]) -> d
 _SHIPPED_DEFAULT_TAG = "shipped-default"
 
 
+def _operator_edited(active_tags: Sequence[str]) -> bool:
+    """The applier's single untouched-vs-edited policy, over the ACTIVE version's tags.
+    Every version the applier writes carries ``shipped-default`` in the SAME commit (no
+    untagged window can exist) and the operator save door tags nothing, so an untagged
+    active version is unambiguously operator-authored — the applier never touches the
+    preset again (no upgrade, no retirement delete)."""
+    return _SHIPPED_DEFAULT_TAG not in active_tags
+
+
 def _canonical(value: Any) -> str:
     """A stable JSON rendering for the normalized seed-vs-body content compare — key order
     and container identity never register as a difference."""
@@ -2064,10 +2073,9 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
         versions = await store.list_versions(seed.name)
         active = next(version for version in versions if version.is_current)
         active_body = PresetBody.model_validate(active.body)
-        if _SHIPPED_DEFAULT_TAG not in active.tags:
-            # The create tags version 1 in the SAME commit, so no untagged window can exist:
-            # an untagged active version is unambiguously operator-authored (a save-door edit
-            # tags nothing) — never re-shipped, a VISIBLE skip names the seed and why.
+        if _operator_edited(active.tags):
+            # Operator-authored (see ``_operator_edited``) — never re-shipped, a VISIBLE
+            # skip names the seed and why.
             logger.info(
                 "preset seeds: leaving %r untouched — its active version %d is operator-edited (not %s-tagged)",
                 seed.name,
@@ -2101,20 +2109,67 @@ async def _apply_one_seed(seed: PresetSeed) -> None:
         await mgr.reload(seed.name)
 
 
+async def _retire_one_seed(name: str) -> None:
+    """Retire a WITHDRAWN shipped default — delete the deployed record while the seed
+    still owns it, so a plugin that stops shipping a seed does not leave the stale
+    record visible forever. Ownership is the applier's single untouched-vs-edited
+    policy (:func:`_operator_edited`): only a record whose active version still wears
+    the ``shipped-default`` tag is deleted, and it goes through the ordinary delete
+    door — the registration teardown, tool_meta-overlay cascade, and fleet fan-out are
+    exactly a manual delete's (a quarantined record takes that door's hard-delete
+    branch). An operator-edited record — or an operator-created preset that merely
+    shares the retired name — is left in place with a VISIBLE skip line; an absent
+    name is a no-op, so a re-run is idempotent.
+
+    Concurrent-boot dedup (symmetric with the create path's conflict absorption): a
+    sibling worker running the same startup hook may win the delete between this
+    worker's ownership check and its own delete door, leaving the door a 404 — the
+    record is already gone, which is the outcome this worker wanted, so it is absorbed
+    as benign rather than crashing the boot lifecycle."""
+    try:
+        versions = await instance.app.presets.store.list_versions(name)
+    except PresetNotFoundError:
+        return
+    active = next(version for version in versions if version.is_current)
+    if _operator_edited(active.tags):
+        logger.info(
+            "preset seeds: leaving retired %r in place — its active version %d is operator-edited (not %s-tagged)",
+            name,
+            active.version,
+            _SHIPPED_DEFAULT_TAG,
+        )
+        return
+    try:
+        await delete_preset(name)
+    except NotFoundError:
+        logger.info("preset seeds: retired %r deleted concurrently by a sibling — treating as retired", name)
+        return
+    logger.info("preset seeds: retired %r — its shipped-default record was deleted", name)
+
+
 async def apply_preset_seeds() -> None:
-    """Startup/reload/epoch-swap handler: apply every declared preset seed.
+    """Startup/reload/epoch-swap handler: apply every declared preset seed, then every
+    declared seed retirement.
 
     Registered AFTER the preset-rehydrate handler so a just-created seed is LIVE in the
     same epoch (resolvable in the tool registry) — it creates through the operations-layer
-    internal path, which registers the tool. Feature-OFF is legal: with the versioned store
-    unconfigured every seed logs a VISIBLE skip and nothing is created. Any real failure
-    raises loudly. Idempotent across re-runs."""
+    internal path, which registers the tool — and a retired record is rehydrated/registered
+    before its delete tears it down. Feature-OFF is legal: with the versioned store
+    unconfigured every seed and retirement logs a VISIBLE skip and nothing is touched.
+    Any real failure raises loudly. Idempotent across re-runs."""
     seeds = instance.app.presets.seeds()
-    if not seeds:
+    retired = instance.app.presets.retired_seeds()
+    if not seeds and not retired:
         return
     if not component_store_configured(SKELETON_COMPONENT):
         for seed in seeds:
             logger.info("preset seeds: skipping seed %r — the versioned-document store is not configured", seed.name)
+        for name in retired:
+            logger.info(
+                "preset seeds: skipping retirement of %r — the versioned-document store is not configured", name
+            )
         return
     for seed in seeds:
         await _apply_one_seed(seed)
+    for name in retired:
+        await _retire_one_seed(name)
