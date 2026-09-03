@@ -30,7 +30,7 @@ dependencies = [
     # a published agents wheel paired with the contract release carrying its
     # imports (the ambient trace-context carrier lands with contract 5.10.0).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.3,<7",
+    "tai42-contract>=6.4,<7",
     # Leaf helpers: settings machinery and the llm factories agents configure
     # model access through (never a direct model-provider SDK).
     "tai42-kit>=3.8,<4",
@@ -94,7 +94,7 @@ dev = [
     # dependency, NEVER a runtime one — the shipped wheel stays contract-facing and
     # never imports tai42-skeleton (the ruff banned-api guard enforces that for src;
     # the e2e test is the sole, per-file-exempted importer).
-    "tai42-skeleton>=9.14,<10",
+    "tai42-skeleton>=9.15,<10",
 ]
 
 [tool.setuptools]

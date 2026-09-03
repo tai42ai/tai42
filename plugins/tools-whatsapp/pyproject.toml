@@ -28,7 +28,7 @@ dependencies = [
     # handle and the tool facet.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.3,<7",
+    "tai42-contract>=6.4,<7",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Graph REST module wires to.
     "tai42-kit[curl]>=3.8,<4",
