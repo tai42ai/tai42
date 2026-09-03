@@ -951,6 +951,20 @@ async def test_a_shed_reply_can_never_precede_the_message_that_caused_it(
     assert texts == ["ship it", "Slow down."]
 
 
+async def test_messages_deeply_nested_body_is_a_400_not_a_recursion_error(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # ``json.loads`` raises RecursionError (not ValueError) past the interpreter's
+    # recursion limit, and a ~40KiB body nests far deeper than that while staying
+    # under the body cap — an unhandled one is an opaque 500 on a public door. The
+    # shared body parse refuses it as invalid JSON instead, the same clean refusal
+    # the contract's iterative depth walk gives deep nesting.
+    nested = b'{"identity": "x", "text": ' + b"[" * 20000 + b"]" * 20000 + b"}"
+    resp = await _handler(stub_app, _MESSAGES)(build_request(raw_body=nested, token=SESSION_TOKEN))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == "invalid JSON body"
+
+
 async def test_messages_unexpected_error_propagates(web_env, stub_app, registered_session: FakeRedis):
     stub_app.conversations.accept_error = RuntimeError("boom")
     with pytest.raises(RuntimeError, match="boom"):
@@ -1452,6 +1466,288 @@ async def test_answer_transport_failure_restores_and_raises(
     with pytest.raises(httpx.HTTPError):
         await _handler(stub_app, _ANSWER)(_answer_request(answer="x"))
     assert "channel:web:question:int-1" in registered_session.store
+
+
+# -- POST /forms/{token} --------------------------------------------------------
+
+_FORMS = "/forms/{token}"
+_FORM_TOKEN = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+_FORM_KEY = f"channel:web:form:{_FORM_TOKEN}"
+_ROUTE_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string", "title": "Name"}, "age": {"type": "number"}},
+    "required": ["name"],
+}
+# The uniform not-found wording: unknown, expired and foreign tokens must all read
+# byte-identically, so a probe learns nothing from the refusal.
+_FORM_NOT_FOUND_BODY = {"error": "form not found (unknown, expired, or already gone)"}
+
+
+def _seed_form(
+    fake: FakeRedis,
+    token: str = _FORM_TOKEN,
+    identity: str = IDENTITY,
+    address: str = VISITOR_ID,
+    schema: dict | None = None,
+    message: str = "Fill this in",
+) -> None:
+    """Seed one form token record exactly as the notify path writes it."""
+    fake.store[f"channel:web:form:{token}"] = json.dumps(
+        {"identity": identity, "address": address, "schema": schema or _ROUTE_FORM_SCHEMA, "message": message}
+    )
+
+
+_DEFAULT_VALUES = object()  # sentinel: ``None`` is itself a value the door must refuse
+
+
+def _form_request(
+    token: str = _FORM_TOKEN, values: object = _DEFAULT_VALUES, session: str | None = SESSION_TOKEN, **kwargs
+):
+    body = {"values": values if values is not _DEFAULT_VALUES else {"name": "Ada", "age": 42}}
+    body.update(kwargs.pop("extra_body", {}))
+    return build_request(
+        path=f"/api/channels/web/forms/{token}",
+        json_body=body,
+        path_params={"token": token},
+        token=session,
+        **kwargs,
+    )
+
+
+async def test_forms_bridges_values_with_rendered_text_and_appends_inbound(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # The one accept: the structured values ride ``form`` verbatim while the text is
+    # the server-rendered ``label: value`` transcript form — labels from the STORED
+    # schema (server-trusted), values from the caller (untrusted data). The visitor's
+    # own chat.message frame reuses the accept-returned id, like the messages door.
+    stub_app.conversations.accept_result = "turn-77"
+    _seed_form(registered_session)
+
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+
+    assert resp.status_code == 200
+    assert _body(resp) == {"data": {"message_id": "turn-77"}}
+    call = stub_app.conversations.accept_calls[0]
+    assert call["channel"] == "web"
+    assert call["our_identity"] == IDENTITY
+    assert call["client_address"] == VISITOR_ID
+    assert call["cap_key"] == CLIENT_HOST
+    assert call["text"] == "Name: Ada\nage: 42"
+    assert call["form"] == {"name": "Ada", "age": 42}
+    assert call["params"] is None
+    assert len(call["provider_message_id"]) == 32
+    payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert payload == {"id": "turn-77", "direction": "in", "text": "Name: Ada\nage: 42", "ts": payload["ts"]}
+
+
+async def test_forms_schema_violating_values_still_land_in_form(web_env, stub_app, registered_session: FakeRedis):
+    # The pinned no-trust contract: this door never validates values against the
+    # stored schema — transport bounds only. Guest-shaped data lands in ``form``
+    # verbatim (the platform's validate_inbound_form still bounds size/depth at
+    # accept), and the consumer treats it as never schema-conformant.
+    _seed_form(registered_session)
+    values = {"name": 7, "unlisted": [True, None], "age": "not-a-number"}
+
+    resp = await _handler(stub_app, _FORMS)(_form_request(values=values))
+
+    assert resp.status_code == 200
+    call = stub_app.conversations.accept_calls[0]
+    assert call["form"] == values
+    assert call["text"] == "Name: 7\nage: not-a-number\nunlisted: [true, null]"
+
+
+async def test_forms_renders_values_the_schema_never_named(web_env, stub_app, registered_session: FakeRedis):
+    # A key outside the schema still renders (nothing the consumers see may be
+    # silently dropped) — labelled by its own raw key, since the schema names none.
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(values={"extra": "x"}))
+    assert resp.status_code == 200
+    assert stub_app.conversations.accept_calls[0]["text"] == "extra: x"
+
+
+async def test_forms_foreign_session_is_the_uniform_404(web_env, stub_app, fake_redis: FakeRedis):
+    # The record exists but belongs to another conversation: the caller is told
+    # exactly what an unknown token is told — never "exists, but not yours".
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    _seed_form(fake_redis, identity=OTHER_IDENTITY)
+
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+
+    assert resp.status_code == 404
+    assert _body(resp) == _FORM_NOT_FOUND_BODY
+    assert stub_app.conversations.accept_calls == []
+    # Read, never claimed: the record still stands for its own conversation.
+    assert _FORM_KEY in fake_redis.store
+
+
+async def test_forms_foreign_address_is_the_uniform_404(web_env, stub_app, fake_redis: FakeRedis):
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY)
+    _seed_form(fake_redis, address="vis-someoneelse00")
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+    assert resp.status_code == 404
+    assert _body(resp) == _FORM_NOT_FOUND_BODY
+
+
+async def test_forms_unknown_or_expired_token_is_the_uniform_404(web_env, stub_app, registered_session: FakeRedis):
+    # An expired record and a token that never existed are indistinguishable here —
+    # Redis expiry deletes the key — and both must read as the foreign refusal does.
+    resp = await _handler(stub_app, _FORMS)(_form_request(token="0" * 32))
+    assert resp.status_code == 404
+    assert _body(resp) == _FORM_NOT_FOUND_BODY
+    assert stub_app.conversations.accept_calls == []
+
+
+async def test_forms_resubmission_is_its_own_guest_message(web_env, stub_app, registered_session: FakeRedis):
+    # The record is READ, never claimed (the chips precedent): a second submission is
+    # a second guest message through a second accept, and the card stays answerable
+    # until its record ages out with the transcript.
+    _seed_form(registered_session)
+    first = await _handler(stub_app, _FORMS)(_form_request(values={"name": "Ada"}))
+    second = await _handler(stub_app, _FORMS)(_form_request(values={"name": "Grace"}))
+
+    assert first.status_code == second.status_code == 200
+    assert [call["form"] for call in stub_app.conversations.accept_calls] == [{"name": "Ada"}, {"name": "Grace"}]
+    assert len(registered_session.streams[_TRANSCRIPT_KEY]) == 2
+    assert _FORM_KEY in registered_session.store
+
+
+async def test_forms_without_a_session_cookie_is_401(web_env, stub_app, fake_redis: FakeRedis):
+    _seed_form(fake_redis)
+    resp = await _handler(stub_app, _FORMS)(_form_request(session=None))
+    assert resp.status_code == 401
+    assert _body(resp)["code"] == "session_missing"
+
+
+async def test_forms_cross_origin_is_403(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(extra_headers=_FOREIGN_ORIGIN))
+    assert resp.status_code == 403
+    assert _body(resp)["code"] == "origin_mismatch"
+
+
+async def test_forms_unconfigured_store_is_501(no_web_env, stub_app):
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+    assert resp.status_code == 501
+    assert _body(resp)["code"] == "web_transcript_store_off"
+
+
+async def test_forms_oversized_values_object_is_422(web_env, stub_app, registered_session: FakeRedis):
+    # The SAME transport bound the answer door's form branch applies: serialized
+    # UTF-8 size, well under the body cap so the refusal is a precise 422.
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(values={"blob": "x" * (32 * 1024)}))
+    assert resp.status_code == 422
+    assert "32768 bytes" in _body(resp)["error"]
+    assert stub_app.conversations.accept_calls == []
+
+
+async def test_forms_non_finite_number_is_422(web_env, stub_app, registered_session: FakeRedis):
+    # ``json.loads`` accepts Infinity/NaN; forwarding one would persist an
+    # unparseable token into the transcript — refused by the shared bound.
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(values={"x": float("inf")}))
+    assert resp.status_code == 422
+    assert "finite" in _body(resp)["error"]
+
+
+@pytest.mark.parametrize("values", ["text", 7, [1, 2], True, None])
+async def test_forms_non_object_values_is_422(web_env, stub_app, registered_session: FakeRedis, values: object):
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(values=values))
+    assert resp.status_code == 422
+
+
+async def test_forms_empty_values_is_422(web_env, stub_app, registered_session: FakeRedis):
+    # {} carries nothing to bridge and would render a blank message; a transport
+    # shape rule, not schema validation.
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(values={}))
+    assert resp.status_code == 422
+    assert stub_app.conversations.accept_calls == []
+
+
+async def test_forms_body_without_values_is_422(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(
+        build_request(
+            path=f"/api/channels/web/forms/{_FORM_TOKEN}",
+            json_body={"answer": {"name": "Ada"}},
+            path_params={"token": _FORM_TOKEN},
+            token=SESSION_TOKEN,
+        )
+    )
+    assert resp.status_code == 422
+
+
+async def test_forms_invalid_json_is_400(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(
+        build_request(
+            path=f"/api/channels/web/forms/{_FORM_TOKEN}",
+            raw_body=b"not json",
+            path_params={"token": _FORM_TOKEN},
+            token=SESSION_TOKEN,
+        )
+    )
+    assert resp.status_code == 400
+
+
+async def test_forms_derives_the_dedup_id_from_a_retry_key_like_the_messages_door(
+    web_env, stub_app, registered_session: FakeRedis
+):
+    # Same derivation as the messages door: the key AND the whole conversation, so a
+    # re-POST resolves to the first attempt's turn and no caller reaches another
+    # conversation's dedup space. The key is echoed onto the visitor's own frame.
+    _seed_form(registered_session)
+    key = "retry-key-0001"
+    expected = hashlib.sha256(f"{IDENTITY}:{VISITOR_ID}:{key}".encode()).hexdigest()
+
+    await _handler(stub_app, _FORMS)(_form_request(extra_body={"client_message_id": key}))
+    await _handler(stub_app, _FORMS)(_form_request(extra_body={"client_message_id": key}))
+
+    first, second = stub_app.conversations.accept_calls
+    assert first["provider_message_id"] == second["provider_message_id"] == expected
+    payload = json.loads(registered_session.streams[_TRANSCRIPT_KEY][0][1]["data"])
+    assert payload["client_message_id"] == key
+
+
+async def test_forms_rejects_a_malformed_retry_key(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    resp = await _handler(stub_app, _FORMS)(_form_request(extra_body={"client_message_id": "no spaces!"}))
+    assert resp.status_code == 422
+
+
+async def test_forms_delivers_the_session_link_params(web_env, stub_app, fake_redis: FakeRedis):
+    # The captured entry params ride the turn exactly as a typed message's do.
+    register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, params={"topic": "news"})
+    _seed_form(fake_redis)
+    await _handler(stub_app, _FORMS)(_form_request())
+    assert stub_app.conversations.accept_calls[0]["params"] == {"topic": "news"}
+
+
+async def test_forms_unrouted_maps_to_404(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    stub_app.conversations.accept_error = LookupError("no web route matches")
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+    assert resp.status_code == 404
+
+
+async def test_forms_thread_overflow_maps_to_503(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+
+    class ThreadQueueOverflowError(Exception): ...
+
+    stub_app.conversations.accept_error = ThreadQueueOverflowError("queue full")
+    resp = await _handler(stub_app, _FORMS)(_form_request())
+    assert resp.status_code == 503
+
+
+async def test_forms_no_frame_is_appended_when_accept_refuses(web_env, stub_app, registered_session: FakeRedis):
+    _seed_form(registered_session)
+    stub_app.conversations.accept_error = LookupError("no web route matches")
+    await _handler(stub_app, _FORMS)(_form_request())
+    assert _TRANSCRIPT_KEY not in registered_session.streams
 
 
 # -- POST /session/rotate -------------------------------------------------------

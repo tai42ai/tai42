@@ -2,10 +2,11 @@
  * The transcript stream: the SSE feed of one visitor's conversation, folded into
  * the ordered items the page renders.
  *
- * The wire carries five events. `chat.message`, `chat.question` and `chat.media`
- * are transcript ENTRIES and become items in arrival order; `chat.answered` is not
- * an entry of its own — it settles the question it names, so it only records an
- * interaction id; `chat.backlog_done` marks the replayed backlog as complete.
+ * The wire carries six events. `chat.message`, `chat.question`, `chat.media` and
+ * `chat.form` are transcript ENTRIES and become items in arrival order;
+ * `chat.answered` is not an entry of its own — it settles the question it names,
+ * so it only records an interaction id; `chat.backlog_done` marks the replayed
+ * backlog as complete.
  *
  * Entries are at-least-once (a reconnect replays the whole backlog), so items are
  * de-duplicated by entry id and a redelivered entry replaces its twin in place
@@ -79,6 +80,19 @@ interface QuestionBase {
 
 /** One rendered row of the transcript. */
 export type ChatItem =
+  | {
+      /** An agent-sent ask-less form card: a prompt, a fillable schema and the
+       * server-minted token its submission door is named by. Always the agent's
+       * turn. Unlike a question it has no deadline, no answered state and no
+       * options — it stays fillable for as long as it replays. */
+      readonly kind: 'form';
+      readonly id: string;
+      readonly text: string;
+      readonly schema: JsonSchema;
+      readonly token: string;
+      readonly media: readonly MediaItem[] | null;
+      readonly ts: string;
+    }
   | {
       readonly kind: 'message';
       readonly id: string;
@@ -308,6 +322,26 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
     return {
       kind: 'model',
       model: withItem(model, { kind: 'media', id, text, media, options, ts }),
+    };
+  }
+
+  if (frame.event === 'chat.form') {
+    const { text, schema, token, ts } = payload;
+    if (typeof text !== 'string' || !isTimestamp(ts)) {
+      return { kind: 'malformed', event: frame.event };
+    }
+    // Strict: the schema must be an object and the token a non-blank string —
+    // without either the card has no widget to render or no door to submit to,
+    // and a silently dropped control is exactly what "malformed" exists to stop.
+    if (!isRecord(schema)) return { kind: 'malformed', event: frame.event };
+    if (typeof token !== 'string' || token.trim() === '') {
+      return { kind: 'malformed', event: frame.event };
+    }
+    const media = mediaOf(payload.media);
+    if (media === undefined) return { kind: 'malformed', event: frame.event };
+    return {
+      kind: 'model',
+      model: withItem(model, { kind: 'form', id, text, schema, token, media, ts }),
     };
   }
 

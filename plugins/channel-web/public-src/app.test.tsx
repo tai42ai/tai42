@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   answerQuestion: vi.fn(),
   rotateSession: vi.fn(),
+  submitForm: vi.fn(),
 }));
 
 vi.mock('@/api', async (importOriginal) => ({
@@ -734,6 +735,50 @@ describe('questions', () => {
     expect(screen.getByText('Session ended')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Message')).toBeDisabled();
+  });
+});
+
+describe('form cards', () => {
+  function agentSentForm(id: string): ChatItem {
+    return {
+      kind: 'form',
+      id,
+      text: 'Fill this in',
+      schema: { type: 'object', properties: { note: { type: 'string' } } },
+      token: 'tok-1',
+      media: null,
+      ts: TS,
+    };
+  }
+
+  it('renders an ask-less form card and submits it through the form door', async () => {
+    const user = userEvent.setup();
+    api.submitForm.mockResolvedValueOnce(undefined);
+    stream.state = streamState({ items: [agentSentForm('f1')] });
+    render(app());
+
+    await user.type(screen.getByRole('textbox', { name: /note/i }), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(api.submitForm).toHaveBeenCalledWith('tok-1', { note: 'ship it' }));
+    expect(await screen.findByText('Sent')).toBeInTheDocument();
+  });
+
+  it('ends the conversation when a submission reports the session is gone', async () => {
+    const user = userEvent.setup();
+    api.submitForm.mockRejectedValueOnce(
+      new ChatApiError('Your chat session ended.', 401, 'session_missing'),
+    );
+    stream.state = streamState({ items: [agentSentForm('f1')] });
+    render(app());
+
+    await user.type(screen.getByRole('textbox', { name: /note/i }), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText(/Reload the page to start a new one/)).toBeInTheDocument();
+    // The locked page withdraws the form's controls behind the badge.
+    expect(screen.getByText('Session ended')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
   });
 });
 

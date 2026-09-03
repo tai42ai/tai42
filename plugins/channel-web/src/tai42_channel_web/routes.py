@@ -23,6 +23,14 @@ are AUTHED — they carry the platform api key and declare an explicit action-cl
   The forwarded answer is one scalar (text/confirm/select) or a JSON object (form);
   this door bounds only its shape and size — the callback door stays authoritative on
   whether it matches the question's stored schema.
+* ``POST /api/channels/web/forms/{token}`` — submit an ask-less form card. The token
+  names a ``chat.form`` card's stored record, which must belong to the caller's own
+  conversation (a foreign or expired token answers ONE uniform 404 — no oracle). The
+  values are bounded as pure transport (a non-empty JSON object of finite numbers,
+  size-capped) and NEVER validated against the form's schema — guest-shaped data;
+  the door renders ``label: value`` text from the STORED schema (server-trusted
+  labels) and bridges text + values through ``conversations.accept`` as one guest
+  message. The record is read, never claimed: every submission is its own message.
 * ``POST /api/channels/web/session/rotate`` — body ``{identity}``; mint a fresh
   session for that web route (the visitor's "new conversation"); the next message
   opens a conversation on the new address.
@@ -122,6 +130,7 @@ from tai42_channel_web.store import (
     list_entry_codes,
     mint_entry_code,
     peek_question,
+    read_form_record,
     register_session,
     resolve_session,
     restore_question,
@@ -174,6 +183,9 @@ _NO_STORE = "no-store"
 _NOSNIFF = {"x-content-type-options": "nosniff"}
 
 _QUESTION_NOT_FOUND = "question not found (unknown, expired, or already answered)"
+# ONE wording for a form token that is unknown, expired, or another conversation's:
+# no response may differ by which, or the refusal becomes a token/ownership oracle.
+_FORM_NOT_FOUND = "form not found (unknown, expired, or already gone)"
 _ALREADY_ANSWERED = "that question was already answered"
 # What a visitor is told when the callback door refused their answer without an error
 # message of its own — never the raw body an intermediary may have written.
@@ -335,6 +347,13 @@ class MintCodeBody(BaseModel):
         return value
 
 
+def _validated_retry_key(value: str | None) -> str | None:
+    """The one shape rule for a retry key, shared by every body that carries one."""
+    if value is not None and _CLIENT_MESSAGE_ID.match(value) is None:
+        raise ValueError("client_message_id must be 8 to 64 characters of [A-Za-z0-9_-]")
+    return value
+
+
 class MessageBody(IdentityBody):
     text: str = Field(max_length=_MAX_TEXT_CHARS)
     # Optional retry key. A POST whose reply never reached the browser is re-sent
@@ -345,9 +364,30 @@ class MessageBody(IdentityBody):
     @field_validator("client_message_id")
     @classmethod
     def _opaque_retry_key(cls, value: str | None) -> str | None:
-        if value is not None and _CLIENT_MESSAGE_ID.match(value) is None:
-            raise ValueError("client_message_id must be 8 to 64 characters of [A-Za-z0-9_-]")
+        return _validated_retry_key(value)
+
+
+class FormSubmissionBody(BaseModel):
+    """One ask-less form submission: the values object and an optional retry key.
+
+    ``values`` must be a NON-EMPTY JSON object — a transport-shape rule ({} carries
+    nothing to bridge and would render a blank message), never schema validation:
+    nothing in this door checks the values against the form's stored schema."""
+
+    values: dict[str, Any]
+    client_message_id: str | None = None
+
+    @field_validator("values")
+    @classmethod
+    def _non_empty(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not value:
+            raise ValueError("values must carry at least one field")
         return value
+
+    @field_validator("client_message_id")
+    @classmethod
+    def _opaque_retry_key(cls, value: str | None) -> str | None:
+        return _validated_retry_key(value)
 
 
 class AnswerForwardError(Exception):
@@ -414,8 +454,12 @@ async def _json_body(request: Request, settings: WebSettings) -> tuple[Any, JSON
         logger.warning("web chat door refused an oversized body: %s", exc)
         return None, _error("request body is too large", 413)
     try:
+        # ``RecursionError`` is what ``json.loads`` raises past the interpreter's
+        # recursion limit, and a body far under the byte cap nests deep enough to
+        # reach it — the same clean refusal the contract's iterative depth walk
+        # gives deep nesting, never an opaque 500 from a public door.
         return json.loads(raw), None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, _error("invalid JSON body", 400)
 
 
@@ -551,6 +595,27 @@ def _is_already_answered(response: httpx.Response) -> bool:
     return isinstance(data, dict) and data.get("status") == "already_answered"
 
 
+def _object_refusal(value: dict[str, Any], what: str) -> str | None:
+    """The ONE transport bound on a visitor-sent JSON object — the answer door's form
+    answer and the form door's values ride it alike; ``what`` names the field in the
+    refusal. ``None`` when the object is forwardable.
+
+    ``allow_nan=False`` rejects a non-finite float nested in the object:
+    ``json.loads`` accepts ``Infinity``/``NaN``, and forwarding one emits invalid
+    JSON downstream AND persists a bad token into the transcript, which then fails
+    the page's own JSON parse on every reconnect for the whole transcript TTL. The
+    dump also measures the exact forwarded bytes. ``RecursionError`` is caught with
+    the same refusal: the encoder's depth limit is its own, so an object the parse
+    admitted can still overrun it here."""
+    try:
+        serialized = json.dumps(value, allow_nan=False)
+    except (ValueError, RecursionError):
+        return f"{what} must contain only finite numbers"
+    if len(serialized.encode("utf-8")) > _MAX_ANSWER_OBJECT_BYTES:
+        return f"{what} must serialize to at most {_MAX_ANSWER_OBJECT_BYTES} bytes"
+    return None
+
+
 def _answer_refusal(answer: Any) -> str | None:
     """The refusal for an answer value this door will not forward, or ``None``.
 
@@ -558,18 +623,7 @@ def _answer_refusal(answer: Any) -> str | None:
     answer is a JSON object bounded by its serialized size. The callback door stays
     authoritative on format and schema match — this only bounds what is forwarded."""
     if isinstance(answer, dict):
-        try:
-            # ``allow_nan=False`` rejects a non-finite float nested in the object:
-            # ``json.loads`` accepts ``Infinity``/``NaN``, and forwarding one emits
-            # invalid JSON to the callback door AND persists a bad token into the
-            # transcript, which then fails the page's own JSON parse on every reconnect
-            # for the whole transcript TTL. It also measures the exact forwarded bytes.
-            serialized = json.dumps(answer, allow_nan=False)
-        except ValueError:
-            return "answer object must contain only finite numbers"
-        if len(serialized.encode("utf-8")) > _MAX_ANSWER_OBJECT_BYTES:
-            return f"answer object must serialize to at most {_MAX_ANSWER_OBJECT_BYTES} bytes"
-        return None
+        return _object_refusal(answer, "answer object")
     if not isinstance(answer, _ANSWER_TYPES):
         return "answer must be a string, number, boolean, or object"
     if isinstance(answer, float) and not math.isfinite(answer):
@@ -609,6 +663,34 @@ def _provider_message_id(identity: str, address: str, client_message_id: str | N
     if client_message_id is None:
         return uuid4().hex
     return hashlib.sha256(f"{identity}:{address}:{client_message_id}".encode()).hexdigest()
+
+
+def _render_form_text(schema: dict[str, Any], values: dict[str, Any]) -> str:
+    """The submitted values as the ``label: value`` text every consumer of the turn
+    sees, one line per field.
+
+    Labels come from the STORED schema — the server-trusted half: a property's
+    ``title`` when it is a non-blank string, its key otherwise. Values are the
+    caller's — untrusted DATA rendered as text (a string verbatim, anything else as
+    compact JSON), never interpreted. Schema-named fields render first in schema
+    order; fields the schema never named still render (nothing a consumer sees may
+    be silently dropped), labelled by their own raw key. Every line carries a
+    ``label: `` prefix, so the whole message can never equal a bare command — the
+    bridge's classify matches commands against the whole trimmed message only."""
+    properties = schema.get("properties")
+    labels: dict[str, str] = {}
+    if isinstance(properties, dict):
+        for key, prop in properties.items():
+            title = prop.get("title") if isinstance(prop, dict) else None
+            labels[key] = title if isinstance(title, str) and title.strip() else key
+    ordered = [key for key in labels if key in values]
+    ordered += [key for key in values if key not in labels]
+    lines = []
+    for key in ordered:
+        value = values[key]
+        rendered = value if isinstance(value, str) else json.dumps(value, allow_nan=False)
+        lines.append(f"{labels.get(key, key)}: {rendered}")
+    return "\n".join(lines)
 
 
 async def _forward_answer(callback_url: str, answer: Any) -> httpx.Response:
@@ -987,6 +1069,97 @@ async def web_answer(request: Request) -> Response:
     raise AnswerForwardError(
         f"interactions callback rejected the answer: HTTP {forwarded.status_code}: {forwarded.text[:500]}"
     )
+
+
+@tai42_app.http.custom_route(
+    "/forms/{token}",
+    methods=["POST"],
+    summary="Submit an ask-less web form into the visitor's conversation",
+    tags=["channels"],
+    response_model=None,
+)
+async def web_form_submit(request: Request) -> Response:
+    """Bridge one ask-less form submission as a guest message.
+
+    The token names a ``chat.form`` card's stored record. The record must exist AND
+    its conversation — both the web route identity and the address — must be the
+    caller's own session's: a foreign, expired, and never-minted token all answer
+    the ONE uniform 404, so the refusal is never a token or ownership oracle. The
+    record is READ, never claimed — a form is submittable again and again, each
+    submission its own guest message (the option-chips precedent).
+
+    The values pass the same transport bound the answer door's form branch applies
+    (a JSON object of finite numbers, size-capped) and are NEVER validated against
+    the stored schema: guest-shaped data the platform re-bounds (size/depth) at
+    ``accept`` and no consumer may trust as schema-conformant. The text every
+    consumer sees is rendered HERE from the STORED schema's labels — the client
+    contributes values only. ``accept`` and the visitor's own ``chat.message`` frame
+    ride the conversation's write-order gate exactly as the messages door does, and
+    the frame reuses the accept-returned id so it joins the bridge record.
+    """
+    if is_cross_origin(request):
+        return _error(_CROSS_ORIGIN, 403, _CROSS_ORIGIN_CODE)
+    off = _store_off()
+    if off is not None:
+        return off
+    settings = web_settings()
+    registration = await _session(request, settings)
+    if registration is None:
+        return _error(_SESSION_MISSING, 401, _SESSION_MISSING_CODE)
+    token = request.path_params["token"]
+
+    raw, refusal = await _json_body(request, settings)
+    if refusal is not None:
+        return refusal
+    try:
+        body = FormSubmissionBody.model_validate(raw)
+    except ValidationError as exc:
+        return _error(_body_refusal(exc), 422)
+    bad_values = _object_refusal(body.values, "values object")
+    if bad_values is not None:
+        return _error(bad_values, 422)
+
+    record = await read_form_record(token)
+    if record is None or not _serves(registration, record.identity) or record.address != registration.visitor_id:
+        return _error(_FORM_NOT_FOUND, 404)
+    address = registration.visitor_id
+    # The same accountable cap key as the messages door: the network bucket, never
+    # the resettable visitor id.
+    cap_key = _client_bucket(request)
+    text = _render_form_text(record.schema, body.values)
+
+    async with transcript_order(record.identity, address):
+        try:
+            message_id = await tai42_app.conversations.accept(
+                channel="web",
+                our_identity=record.identity,
+                client_address=address,
+                cap_key=cap_key,
+                text=text,
+                provider_message_id=_provider_message_id(record.identity, address, body.client_message_id),
+                params=registration.params or None,
+                form=body.values,
+            )
+        except BlankInboundTextError:
+            # Defensive: a non-empty values object always renders at least one
+            # ``label: `` line, but blankness is the bridge's rule to own.
+            return _error("form values render to a blank message", 400)
+        except LookupError as exc:
+            return _error(str(exc), 404)
+        except Exception as exc:
+            if type(exc).__name__ == _THREAD_QUEUE_OVERFLOW:
+                return _error(str(exc), 503)
+            raise
+
+        await append_message(
+            record.identity,
+            address,
+            "in",
+            text,
+            entry_id=message_id,
+            client_message_id=body.client_message_id,
+        )
+    return _ok({"message_id": message_id})
 
 
 @tai42_app.http.custom_route(

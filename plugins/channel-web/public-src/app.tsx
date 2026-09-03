@@ -22,7 +22,7 @@ import type { ReactElement, RefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmDialog, ErrorState, Spinner } from '@tai42/studio-sdk';
 
-import { answerQuestion, isSessionMissing, rotateSession, sendMessage } from '@/api';
+import { answerQuestion, isSessionMissing, rotateSession, sendMessage, submitForm } from '@/api';
 import { Composer } from '@/composer';
 import { Header } from '@/header';
 import { Transcript, type TranscriptEntry } from '@/transcript';
@@ -330,6 +330,22 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     }
   }, []);
 
+  const onSubmitForm = useCallback(
+    async (token: string, values: Record<string, unknown>): Promise<void> => {
+      // Same stale-session guard as an answer: a rotate that landed while this
+      // submission was in flight makes its `session_missing` describe the
+      // conversation the visitor just left, never the fresh one.
+      const generation = generationRef.current;
+      try {
+        await submitForm(token, values);
+      } catch (err) {
+        if (generationRef.current === generation && isSessionMissing(err)) setSessionEnded(true);
+        throw err;
+      }
+    },
+    [],
+  );
+
   const focusComposer = useCallback(() => {
     composerRef.current?.focus();
   }, []);
@@ -373,6 +389,9 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
       }
       if (item.kind === 'media') {
         return { kind: 'media', key: item.id, ts: item.ts, item };
+      }
+      if (item.kind === 'form') {
+        return { kind: 'form', key: item.id, ts: item.ts, item };
       }
       return { kind: 'question', key: item.id, ts: item.ts, question: item };
     });
@@ -443,6 +462,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
           onAnswered={focusComposer}
           onRetry={onRetry}
           onSend={send}
+          onSubmitForm={onSubmitForm}
           pinToken={pinToken}
         />
       )}

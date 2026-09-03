@@ -128,6 +128,7 @@ function transcript(
       onAnswered={noop}
       onRetry={noop}
       onSend={noop}
+      onSubmitForm={answer}
       pinToken={0}
       {...overrides}
     />
@@ -281,6 +282,32 @@ describe('Transcript', () => {
 
     await user.click(screen.getByRole('button', { name: 'See all' }));
     expect(onSend).toHaveBeenCalledWith('See all');
+  });
+
+  it('renders a form card entry and wires the submission door to it', async () => {
+    const user = userEvent.setup();
+    const onSubmitForm = vi.fn().mockResolvedValue(undefined);
+    const form: TranscriptEntry = {
+      kind: 'form',
+      key: 'f1',
+      ts: new Date(NOW).toISOString(),
+      item: {
+        kind: 'form',
+        id: 'f1',
+        text: 'Fill this in',
+        schema: { type: 'object', properties: { note: { type: 'string' } } },
+        token: 'tok-1',
+        media: null,
+        ts: new Date(NOW).toISOString(),
+      },
+    };
+    renderTranscript([form], { onSubmitForm });
+
+    expect(screen.getByText('Fill this in')).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox'), 'ship it');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(onSubmitForm).toHaveBeenCalledWith('tok-1', { note: 'ship it' });
   });
 
   it('renders a media card chip disabled once the session is locked', () => {

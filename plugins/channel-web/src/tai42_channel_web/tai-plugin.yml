@@ -54,6 +54,10 @@ provides:
           methods:
             - POST
           public: true
+        - path: /forms/{token}
+          methods:
+            - POST
+          public: true
         - path: /session/rotate
           methods:
             - POST

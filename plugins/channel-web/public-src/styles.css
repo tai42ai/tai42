@@ -437,6 +437,28 @@
   gap: var(--tai-space-2);
 }
 
+/* -- Ask-less form cards ---------------------------------------------------- */
+
+/* The same raised interactive-card chrome a question wears: a form card asks for
+   input too, and the two must read as the same class of thing. */
+.tcw-form {
+  max-width: min(95%, 40rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tai-space-3);
+  padding: var(--tai-space-3);
+  border-radius: var(--tai-radius-lg);
+  border: 1px solid var(--tai-color-border-strong);
+  background: var(--tai-color-surface-raised);
+  box-shadow: var(--tai-shadow-lift);
+}
+
+.tcw-form-gone {
+  margin: 0;
+  color: var(--tai-color-text-muted);
+  font-size: var(--tai-text-sm);
+}
+
 /* -- Floating affordances -------------------------------------------------- */
 
 /* Clicks fall through the wrapper to the transcript behind it; only the button

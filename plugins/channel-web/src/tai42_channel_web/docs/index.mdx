@@ -90,6 +90,29 @@ page sends no `Referer`). Point card images only at a host the visitor may revea
 themselves to.
 </Warning>
 
+## Ask-less forms
+
+A `notify_user` carrying a `schema` renders an **ask-less form card**: the message is
+the form's prompt, the schema draws the same schema-driven widget an `ask_user` form
+question uses — but nothing waits on it. There is no deadline, no timeout, and no
+pending interaction; the card simply sits in the conversation, and a submission enters
+it as an ordinary guest message: the agent sees a `label: value` text (labels come from
+the schema stored server-side; a tool target additionally receives the structured
+values on its payload under a `form` key). `schema` requires a non-blank message (the
+form needs a prompt), combines with `media` on the same card, and excludes `options`
+and `template` — one message, one interactive surface.
+
+The card settles like an option list, not like a question: submitting shows a local
+"Sent" badge and the form **stays fillable** — a visitor may revise and submit again,
+and each submission is its own message. The card is submittable for as long as it can
+replay in the transcript (the submission token stored server-side ages out with the
+transcript itself); after that, a submission is answered with a uniform not-found and
+the card says the form is no longer available.
+
+Submitted values are **transport, never validated**: the platform bounds their size
+and nesting but does not check them against the schema — treat them exactly as you
+treat typed guest text.
+
 ## Link parameters
 
 Query parameters on the chat page URL are **captured with the visitor's session**

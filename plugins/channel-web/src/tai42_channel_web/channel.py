@@ -14,11 +14,14 @@ the conversation bridge sets ``sender_identity`` and a bare visitor-id
 ``recipient``; the ``notify_user`` door sets no ``sender_identity``, so its
 ``recipient`` carries the same composite encoding as a delivery.
 
-This channel advertises media and interactive (options) notification support but no
-template capability: a template is a vendor construct, so the central ``notify_user``
-guard refuses a template send before it reaches here and the defensive guard below
-refuses one loudly if it ever arrives. A media or options notification lands as one
-durable ``chat.media`` transcript entry the page renders as a card.
+This channel advertises media, interactive (options) and form notification support
+but no template capability: a template is a vendor construct, so the central
+``notify_user`` guard refuses a template send before it reaches here and the
+defensive guard below refuses one loudly if it ever arrives. A media or options
+notification lands as one durable ``chat.media`` transcript entry the page renders
+as a card; a schema notification (an ask-less form) lands as one ``chat.form``
+entry the page renders as a fillable card, submittable through the plugin's own
+form door by the token the card carries.
 """
 
 from __future__ import annotations
@@ -33,12 +36,15 @@ from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, Chann
 from tai42_contract.interactions.models import MediaItem
 
 from tai42_channel_web.store import (
+    FormRecord,
     QuestionRecord,
+    append_form,
     append_media,
     append_message,
     append_question,
     release_question,
     reserve_question,
+    store_form_record,
     transcript_order,
 )
 
@@ -128,8 +134,9 @@ class WebChannel:
 
     Advertises ``supports_form_delivery`` — the chat page renders a schema-driven
     form widget, so a ``form`` question is delivered here. ``notify`` also carries
-    media cards and tappable option lists (``supports_media_notifications`` /
-    ``supports_interactive_notifications``); it advertises NO template capability
+    media cards, tappable option lists and ask-less forms
+    (``supports_media_notifications`` / ``supports_interactive_notifications`` /
+    ``supports_form_notifications``); it advertises NO template capability
     (``supports_template_notifications`` absent) — a template is a vendor construct."""
 
     # The page renders a schema-driven form widget, so the ask_user helper may route
@@ -139,6 +146,10 @@ class WebChannel:
     # capability guard reads these before dispatching either. Templates stay unsupported.
     supports_media_notifications: ClassVar[bool] = True
     supports_interactive_notifications: ClassVar[bool] = True
+    # notify also carries an ask-less form (a schema notification): the page renders
+    # the same schema-driven widget as a fillable card, and the submission enters the
+    # conversation as a guest message through this plugin's own form door.
+    supports_form_notifications: ClassVar[bool] = True
 
     async def deliver(self, delivery: ChannelDelivery) -> None:
         """Reserve the pending-question record, then append the question to the
@@ -229,6 +240,14 @@ class WebChannel:
         media card with no text bubble. A ``data:`` image is refused loudly — the page renders
         an image only from an absolute ``https`` source. A template notification is refused
         loudly — this channel sends no vendor templates.
+
+        A ``schema`` notification (an ask-less form) lands as ONE ``chat.form`` card:
+        the message is the form's prompt, the schema is the fillable widget, any media
+        rides the same card, and the frame carries a server-minted submission token.
+        The token's record (the transcript pair, the schema, the message) is stored
+        for the transcript TTL, so the card is submittable exactly as long as it can
+        replay; the submission door reads it, renders the ``label: value`` text from
+        the STORED schema, and bridges the values as a guest message.
         """
         if notification.template is not None:
             raise NotImplementedError("web channel sends no vendor templates; template notifications are not supported")
@@ -237,6 +256,26 @@ class WebChannel:
         else:
             identity = _canonical_identity(notification.sender_identity)
             address = _require_recipient(notification.recipient, _NO_RECIPIENT)
+
+        if notification.schema is not None:
+            # An ask-less form: ONE chat.form card carrying the prompt, the schema and
+            # a server-minted submission token; any media rides the same card
+            # (options are impossible beside a schema by contract). The token record
+            # is written BEFORE the frame — the reserve-before-append rule — so the
+            # moment the card is replayable the submission door already resolves its
+            # token. A record whose frame then failed to land is unreadable (the
+            # token never left the server) and ages out on its own TTL.
+            token = await store_form_record(
+                FormRecord(identity=identity, address=address, schema=notification.schema, message=notification.message)
+            )
+            frame_media = (
+                [_media_frame_item(item) for item in notification.media] if notification.media is not None else None
+            )
+            async with transcript_order(identity, address):
+                entry_id = await append_form(
+                    identity, address, notification.message, notification.schema, token, frame_media
+                )
+            return [entry_id]
 
         if notification.media is None and notification.options is None:
             async with transcript_order(identity, address):
