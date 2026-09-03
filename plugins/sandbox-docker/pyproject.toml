@@ -29,7 +29,7 @@ dependencies = [
     # first ships the sandbox contract module.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.3,<7",
+    "tai42-contract>=6.4,<7",
     # TaiBaseSettings + settings cache and the sandbox lifecycle base. The floor
     # names the first kit minor carrying `tai42_kit.sandbox` (ManagedSandbox,
     # ManagedSandboxSession, SandboxDispatchSettings, the conformance suite), which
