@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, ValidationError
 from tai42_contract.agent import Agent
+from tai42_contract.channels import ChannelTemplate
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
 
 from tai42_skeleton.conversations import mode as mode_module
@@ -134,7 +135,9 @@ async def _seed_record(
 def _capture_operator_send(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
-    async def _fake(*, route, thread_id, client_address, text, operator_principal, media=None, options=None):
+    async def _fake(
+        *, route, thread_id, client_address, text, operator_principal, media=None, template=None, options=None
+    ):
         calls.append(
             {
                 "route_name": route.route_name,
@@ -143,6 +146,7 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
                 "text": text,
                 "operator_principal": operator_principal,
                 "media": media,
+                "template": template,
                 "options": options,
             }
         )
@@ -169,9 +173,63 @@ async def test_send_route_keyed_resolves_the_embedded_address(wired, monkeypatch
             "text": "on it",
             "operator_principal": "op-1",
             "media": None,
+            "template": None,
             "options": None,
         }
     ]
+
+
+async def test_send_template_threads_through_as_channel_template(wired, monkeypatch):
+    # The operator send accepts a template dict and hands operator_send the coerced
+    # ChannelTemplate — the same out-of-window richer-send form the notify door carries.
+    calls = _capture_operator_send(monkeypatch)
+
+    result = await ops.send_conversation_thread_message(
+        "chat",
+        _ROUTE_THREAD,
+        "your order shipped",
+        template={"name": "status_update", "language": "en_US", "parameters": ["A-42"]},
+    )
+
+    assert result == {"message_id": "msg-1", "thread_id": _ROUTE_THREAD}
+    assert calls[0]["template"] == ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    assert calls[0]["media"] is None
+    assert calls[0]["options"] is None
+
+
+async def test_send_invalid_template_is_a_400(wired, monkeypatch):
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="invalid media/template/options"):
+        await ops.send_conversation_thread_message("chat", _ROUTE_THREAD, "on it", template={"name": "   "})
+    assert calls == []
+
+
+async def test_send_media_and_template_is_a_400(wired, monkeypatch):
+    # The contract's media/template mutual exclusion holds on the operator send — refused
+    # before anything is written or delivered.
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="mutually exclusive"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "on it",
+            media=[{"kind": "image", "url": "https://cdn.example/x.png"}],
+            template={"name": "status_update", "language": "en_US"},
+        )
+    assert calls == []
+
+
+async def test_send_options_and_template_is_a_400(wired, monkeypatch):
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="mutually exclusive"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "on it",
+            template={"name": "status_update", "language": "en_US"},
+            options=["Thanks"],
+        )
+    assert calls == []
 
 
 async def test_send_explicit_address_must_match_the_route_keyed_thread(wired, monkeypatch):

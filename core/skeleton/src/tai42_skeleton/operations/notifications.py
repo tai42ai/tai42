@@ -7,7 +7,8 @@
   or (channel omitted) recorded to the internal notifications sink the Studio inbox
   reads. No reply, no blocking wait. It delivers over the channels feature's
   ``notify_user`` helper, mapping the helper's loud
-  failures to the operation's typed errors: a blank message / unknown channel /
+  failures to the operation's typed errors: a blank message with no media to carry
+  it / unknown channel /
   blank recipient/audience — or a caller-supplied ``sender_identity`` (an
   internal-only control) — or a channel's permanent refusal of the input's shape
   (a :class:`ChannelInputError`, retrying cannot succeed) — is a
@@ -138,7 +139,8 @@ async def notify_user(
     notifications sink the Studio inbox reads. One send attempt, no retry; every
     failure raises loudly, never a silent no-op:
 
-    * a blank message, an unknown channel name, a blank recipient/audience, a
+    * a blank message with no media to carry it (the contract admits a blank message
+      only for a media-only send), an unknown channel name, a blank recipient/audience, a
       caller-supplied ``sender_identity``, a contract-invalid ``media``/``template``/
       ``options`` combination (an empty list, an over-cap value, or a mutually exclusive
       media+template / options+template), or a channel's permanent refusal of the input's

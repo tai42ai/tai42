@@ -110,7 +110,9 @@ async def notify_user(
     ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms (the contract
     enforces media/template and options/template are each mutually exclusive; options may
     combine with media). On a NAMED channel they are threaded onto the
-    ``ChannelNotification`` the channel receives; on the INTERNAL sink (``channel=None``)
+    ``ChannelNotification`` the channel receives — and an ``audience``-addressed channel
+    send stores them on the in-app feed record too, so the feed shows the same rich
+    content the channel delivered; on the INTERNAL sink (``channel=None``)
     they are STORED on the feed record and returned by the read doors (rendering them, media
     included, is the host inbox's own surface) — a clean break from the old
     sink-refuses-rich-content rule.
@@ -126,9 +128,12 @@ async def notify_user(
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
-    Raises ``ValueError`` for a blank message, an unknown channel name, a blank
+    Raises ``ValueError`` for a non-string message, a blank message with no media to
+    carry it (the contract admits a blank ``message`` ONLY for a media-only send), an
+    unknown channel name, a blank
     ``recipient``/``audience``, or a ``media``/``template``/``options`` combination the
-    contract refuses (a present-but-empty list, an over-cap value, or the mutually
+    contract refuses (a present-but-empty list, an over-cap value, options on a
+    media-only send, or the mutually
     exclusive media+template / options+template); ``CrossIdentityAudienceError`` when a
     restricted caller addresses another identity (a cross-identity authorization denial
     the operation door maps to a 403);
@@ -139,8 +144,13 @@ async def notify_user(
     given for a channel send with no ``INTERACTIONS_PUBLIC_BASE_URL`` to mint its absolute
     url. Every failure propagates loudly — nothing is swallowed.
     """
-    if not isinstance(message, str) or not message.strip():
-        raise ValueError("message must be a non-blank string")
+    # Type check only: whether a BLANK message is admissible is the contract's blank-vs-media
+    # rule (blank rides only non-empty media — a caption-less, media-only send), enforced by
+    # the ``ChannelNotification`` construction on both branches below, before any feed write
+    # or send attempt. Duplicating the rule here would refuse media-only sends the contract
+    # admits.
+    if not isinstance(message, str):
+        raise ValueError("message must be a string")
     if audience is not None and (not isinstance(audience, str) or not audience.strip()):
         raise ValueError("audience must be a non-empty identity")
     # ``audience`` becomes a per-identity Redis feed key and persists into the record,
@@ -156,9 +166,8 @@ async def notify_user(
     # operation door maps to a 403 (the write-side mirror of the read door).
     audience = clamp_write_audience(audience)
     if channel is None:
-        # Internal sink path. It now STORES ``media``/``template``/``options`` (parity with
-        # the channel path) rather than refusing them — a clean break from the old
-        # sink-carries-no-rich-content rule. The rich fields are validated exactly as the
+        # Internal sink path. It stores ``media``/``template``/``options`` in full parity
+        # with the channel path. The rich fields are validated exactly as the
         # channel path validates them by constructing the notification the contract validates:
         # the message cap, the recipient cap, the media/options caps AND the media-vs-template
         # / options-vs-template exclusivity all raise here as a pydantic ``ValidationError`` (a
@@ -227,9 +236,19 @@ async def notify_user(
     # channel path, matching ``ask_user`` (which always persists). After the clamp a
     # restricted caller always has an audience here (scoped to its own identity), so
     # its channel send records to its own feed too; only an unrestricted caller's send
-    # with no audience stores nothing.
+    # with no audience stores nothing. The record carries the SAME rich fields the
+    # channel receives (feed parity with the sink path) — for media that is the
+    # post-substitution value, so a ``data:`` image is recorded as the served absolute
+    # reference the channel was handed, one value for both surfaces.
     if audience is not None:
-        await record_notification(message, recipient=recipient, audience=audience)
+        await record_notification(
+            notification.message,
+            recipient=notification.recipient,
+            audience=audience,
+            media=notification.media,
+            template=notification.template,
+            options=notification.options,
+        )
     # Tier 1 of the send-outcome monitoring layer: one structured ``send:<channel>`` span
     # around the single send seam. A no-op outside a flow trace; on failure the span is
     # marked ERROR with the typed ``ChannelDeliveryError``/``ChannelInputError`` detail and

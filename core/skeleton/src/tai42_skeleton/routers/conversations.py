@@ -335,10 +335,11 @@ delete_conversation_person = register_operation_route(
 
 
 async def _extract_thread_message(request: Request) -> dict:
-    """The operator-send body ``{thread_id, text, address, media?, options?}`` as the
-    operation's flat fields. A non-object body, a missing/blank ``thread_id``, a non-string
-    ``text``/``address`` or a non-list ``media``/``options`` is a loud 400 here; the operation
-    owns the blank-text, thread-belongs and media/options CONTENT guards (item shape, caps).
+    """The operator-send body ``{thread_id, text, address, media?, template?, options?}`` as
+    the operation's flat fields. A non-object body, a missing/blank ``thread_id``, a
+    non-string ``text``/``address``, a non-list ``media``/``options`` or a non-object
+    ``template`` is a loud 400 here; the operation owns the blank-text, thread-belongs and
+    media/template/options CONTENT guards (item shape, caps, exclusivity).
 
     ``thread_id`` rides the body, not the path: it carries the api door's percent-encoded
     ``{principal}/{end user}`` address, which no path spelling round-trips."""
@@ -347,7 +348,9 @@ async def _extract_thread_message(request: Request) -> dict:
     except ValueError as exc:
         raise BadRequestError("invalid JSON body") from exc
     if not isinstance(body, dict):
-        raise BadRequestError("body must be a JSON object of {thread_id, text, address, media?, options?}") from None
+        raise BadRequestError(
+            "body must be a JSON object of {thread_id, text, address, media?, template?, options?}"
+        ) from None
     thread_id = body.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise BadRequestError("thread_id is required and must be a non-blank string") from None
@@ -362,10 +365,20 @@ async def _extract_thread_message(request: Request) -> dict:
     media = body.get("media")
     if media is not None and not isinstance(media, list):
         raise BadRequestError("media must be a list of media items or absent") from None
+    template = body.get("template")
+    if template is not None and not isinstance(template, dict):
+        raise BadRequestError("template must be a template object or absent") from None
     options = body.get("options")
     if options is not None and not isinstance(options, list):
         raise BadRequestError("options must be a list of strings or absent") from None
-    return {"thread_id": thread_id, "text": text, "address": address, "media": media, "options": options}
+    return {
+        "thread_id": thread_id,
+        "text": text,
+        "address": address,
+        "media": media,
+        "template": template,
+        "options": options,
+    }
 
 
 async def _extract_thread_mode_query(request: Request) -> dict:

@@ -5,7 +5,8 @@ that answers ``None``, and for the sink path); with
 no channel, the message is recorded to the internal notifications sink. Every failure
 propagates loudly (``ChannelDeliveryError``, and the protocol's default-body
 ``NotImplementedError`` from a channel that cannot notify), and a blank message, an
-unknown channel name, or a blank recipient is rejected before any send.
+unknown channel name, or a blank recipient is rejected before any send (a blank
+message is admissible only when media carries the content — a media-only send).
 """
 
 from __future__ import annotations
@@ -209,6 +210,36 @@ async def test_notify_threads_options_with_media_to_a_capable_channel(register_c
     assert channel.notifications == [
         ChannelNotification(message="a card with a list", media=[_IMAGE], options=["Item A"])
     ]
+
+
+async def test_media_only_notify_sends_blank_message_with_media(register_channel):
+    # The contract admits a blank message exactly when media carries the content (a
+    # caption-less image); the door mirrors that rule rather than refusing blank outright.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("", channel="rich", media=[_IMAGE])
+
+    assert channel.notifications == [ChannelNotification(message="", media=[_IMAGE])]
+
+
+async def test_media_only_notify_records_to_sink(sink_redis):
+    # The sink path admits the same media-only shape: a blank message stored with its media.
+    await notify_user("", media=[_IMAGE])
+
+    records = await notifications_sink.read_notifications()
+    assert len(records) == 1
+    assert records[0]["message"] == ""
+    assert records[0]["media"] == [_IMAGE.model_dump(mode="json")]
+
+
+async def test_blank_message_with_options_still_refused(register_channel):
+    # The contract's options-need-a-prompt rule holds at the door: a blank message may ride
+    # only media, never options.
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValueError, match="carries no options"):
+        await notify_user("", channel="rich", media=[_IMAGE], options=["Item A"])
+    assert channel.notifications == []
 
 
 async def test_options_to_channel_without_capability_is_not_implemented(register_channel):
@@ -645,6 +676,33 @@ async def test_channel_with_audience_records_in_app_and_sends(register_channel, 
     assert own[0]["recipient"] == "123"
 
 
+async def test_channel_send_with_audience_records_rich_fields_on_feed(register_channel, sink_redis):
+    # The channel-path feed record carries the SAME rich fields the channel receives —
+    # media/options land on the in-app record, not just the channel push.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("pick one", channel="rich", media=[_IMAGE], options=["Item A"], audience="alice")
+
+    assert channel.notifications == [ChannelNotification(message="pick one", media=[_IMAGE], options=["Item A"])]
+    own = await notifications_sink.read_notifications(audience="alice")
+    assert len(own) == 1
+    assert own[0]["media"] == [_IMAGE.model_dump(mode="json")]
+    assert own[0]["options"] == ["Item A"]
+    assert own[0]["template"] is None
+
+
+async def test_channel_send_with_audience_records_template_on_feed(register_channel, sink_redis):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("your item is done", channel="rich", template=_TEMPLATE, audience="alice")
+
+    assert channel.notifications == [ChannelNotification(message="your item is done", template=_TEMPLATE)]
+    own = await notifications_sink.read_notifications(audience="alice")
+    assert len(own) == 1
+    assert own[0]["template"] == _TEMPLATE.model_dump(mode="json")
+    assert own[0]["media"] is None
+
+
 async def test_channel_without_audience_stores_nothing(register_channel, sink_redis):
     # A plain channel send with no audience records nothing — today's behavior.
     register_channel("fake", RecordingChannel())
@@ -682,10 +740,12 @@ async def test_empty_channel_name_rejected(register_channel):
 
 
 @pytest.mark.parametrize("bad_message", ["", "   ", "\n\t"])
-async def test_blank_message_rejected(register_channel, bad_message):
+async def test_blank_message_without_media_rejected(register_channel, bad_message):
+    # The contract's blank-vs-media rule: with no media to carry the content, a blank
+    # message has nothing to deliver and the door refuses it before any send.
     channel = register_channel("fake", RecordingChannel())
 
-    with pytest.raises(ValueError, match="message must be a non-blank string"):
+    with pytest.raises(ValueError, match="message must be non-blank unless media carries the content"):
         await notify_user(bad_message, channel="fake")
     assert channel.notifications == []
 
@@ -693,7 +753,7 @@ async def test_blank_message_rejected(register_channel, bad_message):
 async def test_non_string_message_rejected(register_channel):
     channel = register_channel("fake", RecordingChannel())
 
-    with pytest.raises(ValueError, match="message must be a non-blank string"):
+    with pytest.raises(ValueError, match="message must be a string"):
         await notify_user(42, channel="fake")  # type: ignore[arg-type]
     assert channel.notifications == []
 
