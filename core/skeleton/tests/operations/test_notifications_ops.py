@@ -130,6 +130,7 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
                 "media": None,
                 "template": None,
                 "options": None,
+                "schema": None,
             },
         )
     ]
@@ -148,7 +149,15 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
     assert helper.calls == [
         (
             ("hello",),
-            {"channel": None, "recipient": None, "audience": None, "media": None, "template": None, "options": None},
+            {
+                "channel": None,
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+                "schema": None,
+            },
         )
     ]
 
@@ -248,6 +257,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "media": media,
                 "template": None,
                 "options": None,
+                "schema": None,
             },
         ),
         (
@@ -259,6 +269,7 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "media": None,
                 "template": template,
                 "options": None,
+                "schema": None,
             },
         ),
     ]
@@ -350,9 +361,47 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "media": None,
                 "template": None,
                 "options": ["Item A", "Item B"],
+                "schema": None,
             },
         )
     ]
+
+
+async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The ask-less form's answer schema is forwarded verbatim to the channels helper,
+    # exactly as the other richer-send fields are.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+    await notifications_ops.notify_user("fill this in", channel="web", schema=schema)
+
+    assert helper.calls == [
+        (
+            ("fill this in",),
+            {
+                "channel": "web",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+                "schema": schema,
+            },
+        )
+    ]
+
+
+async def test_notify_user_schema_capability_gap_maps_not_implemented_to_501(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A channel that does not advertise supports_form_notifications is the same 501
+    # capability-gap vocabulary the other richer-send fields map to.
+    helper = _RecordingHelper(raise_exc=NotImplementedError("channel 'telegram' does not support form notifications"))
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+
+    with pytest.raises(NotSupportedError, match="does not support form notifications"):
+        await notifications_ops.notify_user(
+            "fill this in", channel="telegram", schema={"type": "object", "properties": {"n": {"type": "string"}}}
+        )
 
 
 async def test_notify_user_media_without_channel_maps_valueerror_to_400(monkeypatch: pytest.MonkeyPatch) -> None:

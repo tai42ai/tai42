@@ -28,6 +28,7 @@ case only.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
@@ -45,6 +46,7 @@ from tai42_skeleton.access_control.user import clamp_write_audience
 from tai42_skeleton.channels.notifications_sink import record_notification
 from tai42_skeleton.channels.send_receipts import index_flow_send
 from tai42_skeleton.channels.send_span import active_trace_id, send_span
+from tai42_skeleton.interactions.form_schema import validate_channel_form_schema
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -82,6 +84,7 @@ async def notify_user(
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
     options: list[str] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> list[str]:
     """Notify a human of ``message``, fire-and-forget.
 
@@ -125,20 +128,40 @@ async def notify_user(
     the in-app feed record, so a refused send leaves no phantom feed entry. (The sink path
     stores rich content unconditionally — there is no channel to advertise a capability.)
 
+    ``schema`` is the ask-less form's answer schema: the channel renders ``message`` as the
+    form's prompt and ``schema`` as the fillable form, and the guest's submission enters the
+    conversation as an ordinary inbound message — no ticket, no callback, no wait. It is
+    CHANNEL-ONLY: a sink notification (``channel=None``) has no delivery vehicle and no
+    submission door, so a schema there is refused loudly (a ``ValueError`` → 400) before any
+    feed write. On a named channel it rides the ``supports_form_notifications`` capability
+    flag (absent = unsupported → ``NotImplementedError`` → 501, BEFORE any feed write), then
+    the shared channel-deliverable subset walk (``validate_channel_form_schema`` — the ONE
+    definition the ask path uses), then the channel's OPTIONAL ``validate_form_schema``
+    hook with ``message`` as the question — so a form the channel could never render is
+    refused up front, never sent half-broken. The contract enforces schema/template and
+    schema/options mutual exclusivity (one message, one interactive surface) and requires a
+    non-blank ``message`` (a form needs a prompt); schema may combine with media. An
+    ``audience``-addressed channel send stores the schema on the in-app feed record too
+    (feed parity with the other rich fields).
+
     The notification carries no ``sender_identity`` — that field is the conversation
     bridge's — so the channel sends from its own configured identity.
 
     Raises ``ValueError`` for a non-string message, a blank message with no media to
     carry it (the contract admits a blank ``message`` ONLY for a media-only send), an
     unknown channel name, a blank
-    ``recipient``/``audience``, or a ``media``/``template``/``options`` combination the
-    contract refuses (a present-but-empty list, an over-cap value, options on a
+    ``recipient``/``audience``, a ``schema`` with ``channel=None`` or one outside the
+    channel-deliverable subset (or refused by the channel's own hook), or a
+    ``media``/``template``/``options``/``schema`` combination the
+    contract refuses (a present-but-empty list/dict, an over-cap value, options or a schema on a
     media-only send, or the mutually
-    exclusive media+template / options+template); ``CrossIdentityAudienceError`` when a
+    exclusive media+template / options+template / schema+template / schema+options);
+    ``CrossIdentityAudienceError`` when a
     restricted caller addresses another identity (a cross-identity authorization denial
     the operation door maps to a 403);
     ``NotImplementedError`` when a channel cannot notify or does not advertise the
-    ``media``/``template``/``options`` capability; ``ChannelDeliveryError`` when a channel
+    ``media``/``template``/``options``/``schema`` capability; ``ChannelDeliveryError`` when a
+    channel
     send fails; ``ChannelInputError`` when a channel permanently refuses the input's shape
     (an input it cannot render by nature — retrying cannot succeed) or a ``data:`` image is
     given for a channel send with no ``INTERACTIONS_PUBLIC_BASE_URL`` to mint its absolute
@@ -165,6 +188,15 @@ async def notify_user(
     # caller is unchanged. The cross-identity rejection is an authorization denial the
     # operation door maps to a 403 (the write-side mirror of the read door).
     audience = clamp_write_audience(audience)
+    if channel is None and schema is not None:
+        # A form notification NEEDS a channel: the sink has no delivery vehicle to render
+        # the form and no submission door for the answers, so a feed entry carrying a
+        # schema would be a form nobody can ever submit. Refused loudly (→ 400) before
+        # any feed write — never stored and silently un-submittable.
+        raise ValueError(
+            "a form notification (schema) needs a named channel to render the form and receive the "
+            "submission; the internal sink has neither"
+        )
     if channel is None:
         # Internal sink path. It stores ``media``/``template``/``options`` in full parity
         # with the channel path. The rich fields are validated exactly as the
@@ -200,6 +232,19 @@ async def notify_user(
         raise NotImplementedError(f"channel {channel!r} does not support template notifications")
     if options is not None and not getattr(channel_obj, "supports_interactive_notifications", False):
         raise NotImplementedError(f"channel {channel!r} does not support interactive notifications")
+    if schema is not None and not getattr(channel_obj, "supports_form_notifications", False):
+        raise NotImplementedError(f"channel {channel!r} does not support form notifications")
+    if schema is not None:
+        # The shared channel-deliverable subset walk — the ONE definition the ask path's
+        # form delivery uses — refuses an unrenderable schema loudly (ValueError → 400),
+        # then the channel's OPTIONAL ``validate_form_schema`` hook enforces its own
+        # medium-specific limits (reserved names, per-medium caps) with the notification's
+        # MESSAGE as the question, exactly as the ask path calls it. Both run BEFORE any
+        # feed write or send, so a form the channel could never render leaves no trace.
+        validate_channel_form_schema(schema)
+        validate_form_schema = getattr(channel_obj, "validate_form_schema", None)
+        if validate_form_schema is not None:
+            validate_form_schema(schema, message)
     if media is not None:
         # The operation door hands this seam the request model's ``media`` as plain dicts
         # (``model_dump`` of the validated body), so coerce each to ``MediaItem`` ONCE up
@@ -230,7 +275,7 @@ async def notify_user(
     # them ahead of the feed write keeps the no-phantom-feed guarantee for ALL rich-send
     # refusals — the capability guards above plus these — so none leaves a stray entry.
     notification = ChannelNotification(
-        message=message, recipient=recipient, media=media, template=template, options=options
+        message=message, recipient=recipient, media=media, template=template, options=options, schema=schema
     )
     # An addressed notification lands in the identity's in-app feed even on the
     # channel path, matching ``ask_user`` (which always persists). After the clamp a
@@ -248,6 +293,7 @@ async def notify_user(
             media=notification.media,
             template=notification.template,
             options=notification.options,
+            schema=notification.schema,
         )
     # Tier 1 of the send-outcome monitoring layer: one structured ``send:<channel>`` span
     # around the single send seam. A no-op outside a flow trace; on failure the span is

@@ -3551,3 +3551,139 @@ def test_conversation_attribution_api_door_omits_none_metadata():
     assert attribution.user_id == "+15550002222"
     assert attribution.session_id == "bridge:chat:caller:addr"
     assert attribution.tags == ["route:chat"]
+
+
+# -- structured inbound (an ask-less form's submission) -----------------------
+
+
+_FORM = {"name": "Alice", "size": 42}
+
+
+async def test_accept_with_form_stamps_the_record_and_the_tool_payload(env, monkeypatch):
+    # A channel door hands the turn the guest's structured submission WITH its rendered
+    # text: the record stores it beside inbound_text, both read doors publish it, and a
+    # tool target's jq payload gains a "form" key the route's payload_expr can map.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr="{msg: .message, form: .form}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice\nsize: 42", "PID1", form=_FORM
+    )
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"msg": "name: Alice\nsize: 42", "form": _FORM}
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_form == _FORM
+    assert record.view()["inbound_form"] == _FORM
+    assert record.caller_view()["inbound_form"] == _FORM
+
+
+async def test_accept_without_form_keeps_the_payload_byte_identical(env, monkeypatch):
+    # A form-less inbound emits NO "form" key at all — an existing payload_expr over the
+    # whole payload sees exactly the shape it saw before the field existed.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr=".")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "hi", "PID1")
+    await _settle()
+
+    assert "form" not in tools.calls[0]["arguments"]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_form is None
+    assert record.caller_view()["inbound_form"] is None
+
+
+async def test_accept_form_reaches_an_agent_target_as_text_only(env, monkeypatch):
+    # An agent target sees the RENDERED TEXT only — the structured submission stays on the
+    # record (and on a tool payload), never in the agent's user message.
+    agent = EchoAgent()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_channel_route()), channel)
+    monkeypatch.setattr(turn_module, "_agent_registry", lambda: {"echo": agent})
+
+    message_id = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID1", form={"name": "Alice"}
+    )
+    await _settle()
+
+    assert agent.calls == [("name: Alice", "bridge:line:+15550002222")]
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.inbound_form == {"name": "Alice"}
+
+
+async def test_accept_refuses_an_invalid_form_before_any_state(env, monkeypatch):
+    # The defensive transport-bounds check runs at the seam (the params pattern): a
+    # non-object form is refused loudly BEFORE any record or claim is written.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+
+    with pytest.raises(ValueError, match="form must be a JSON object"):
+        await turn_module.accept(
+            "twilio",
+            "+15550001111",
+            "+15550002222",
+            "+15550002222",
+            "hi",
+            "PID1",
+            form=["nope"],  # type: ignore[arg-type]
+        )
+    await _settle()
+
+    assert await _store().get_inbound_owner("twilio", "PID1") is None
+
+
+async def test_shed_records_carry_the_inbound_form(env, monkeypatch):
+    # Both shed shapes stamp the form beside the verbatim text, so a rate-capped
+    # submission still reads back complete from the record.
+    monkeypatch.setenv("CONVERSATIONS_PER_ADDRESS_TURNS_PER_HOUR", "1")
+    caps_module._CAPS_CACHE.clear()
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    _wire_tool(monkeypatch, lambda kw: "ok")
+    store = _store()
+
+    await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "one", "PID1")
+    await _settle()
+    shed_with_reply = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Alice", "PID2", form={"name": "Alice"}
+    )
+    await _settle()
+    shed_silent = await turn_module.accept(
+        "twilio", "+15550001111", "+15550002222", "+15550002222", "name: Bob", "PID3", form={"name": "Bob"}
+    )
+    await _settle()
+
+    replied = await store.get_record(shed_with_reply)
+    assert replied is not None
+    assert replied.answer == turn_module._SLOW_DOWN_TEXT
+    assert replied.inbound_form == {"name": "Alice"}
+    silent = await store.get_record(shed_silent)
+    assert silent is not None
+    assert silent.delivery_status is DeliveryStatus.SHED
+    assert silent.inbound_form == {"name": "Bob"}
+
+
+async def test_api_submit_with_form_stamps_the_record_and_the_tool_payload(env, monkeypatch):
+    # The api door twin: ConversationMessage.form threads through submit_api_message with
+    # the same record + payload semantics the channel door has.
+    route = _tool_api_route(payload_expr="{msg: .message, form: .form}")
+    _wire(monkeypatch, FakeManager(route))
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+    monkeypatch.setattr(delivery_module, "_post_callback", _accepting_callback())
+
+    result = await turn_module.submit_api_message("tool-api", "u-7", "name: Alice", "caller", 2, form={"name": "Alice"})
+    await _settle()
+
+    assert tools.calls[0]["arguments"] == {"msg": "name: Alice", "form": {"name": "Alice"}}
+    record = await _store().get_record(result.message_id)
+    assert record is not None
+    assert record.inbound_form == {"name": "Alice"}
+    assert record.caller_view()["inbound_form"] == {"name": "Alice"}

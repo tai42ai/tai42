@@ -60,7 +60,9 @@ class _Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
 
-    async def __call__(self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None):
+    async def __call__(
+        self, route_name, external_user_id, text, caller_principal, wait_seconds, params=None, form=None
+    ):
         self.calls.append((route_name, external_user_id, caller_principal))
         return ApiSubmitResult(message_id="m-1", thread_id=f"bridge:{route_name}:{external_user_id}", answer=None)
 

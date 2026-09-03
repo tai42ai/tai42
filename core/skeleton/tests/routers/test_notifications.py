@@ -92,7 +92,9 @@ def _post_request(body: bytes) -> Request:
 async def test_notify_user_route_sends_and_wraps_in_envelope(monkeypatch) -> None:
     sent: list = []
 
-    async def _helper(message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None):
+    async def _helper(
+        message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None, schema=None
+    ):
         sent.append((message, channel, recipient, audience))
 
     monkeypatch.setattr(notifications_ops, "_notify_user", _helper)
@@ -105,7 +107,9 @@ async def test_notify_user_route_sends_and_wraps_in_envelope(monkeypatch) -> Non
 async def test_notify_user_route_threads_audience_to_helper(monkeypatch) -> None:
     sent: list = []
 
-    async def _helper(message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None):
+    async def _helper(
+        message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None, schema=None
+    ):
         sent.append((message, channel, recipient, audience))
 
     monkeypatch.setattr(notifications_ops, "_notify_user", _helper)
@@ -118,7 +122,9 @@ async def test_notify_user_route_threads_audience_to_helper(monkeypatch) -> None
 
 
 async def test_notify_user_route_maps_valueerror_to_400(monkeypatch) -> None:
-    async def _helper(message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None):
+    async def _helper(
+        message, *, channel=None, recipient=None, audience=None, media=None, template=None, options=None, schema=None
+    ):
         raise ValueError("channel must be a non-empty string")
 
     monkeypatch.setattr(notifications_ops, "_notify_user", _helper)

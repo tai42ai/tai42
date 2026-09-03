@@ -1107,20 +1107,25 @@ async def send_conversation_thread_message(
     # Appended after the earlier rich fields so their positional slots are unchanged —
     # the release API gate treats a moved positional parameter as breaking.
     template: dict[str, Any] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Send a message BY HAND into ``thread_id`` on ``route_name`` as the route identity, and
     return ``{"message_id", "thread_id"}``. No turn runs: the message is stored already
     ``answered`` and delivered through the same machine a produced answer takes.
 
     ``media`` (a list of ``{"kind", "url", "caption"?}`` display items), ``template`` (a
-    pre-approved ``{"name", "language", "parameters"?}`` out-of-window template) and
-    ``options`` (a list of tappable suggested replies) are OPTIONAL richer-send forms
+    pre-approved ``{"name", "language", "parameters"?}`` out-of-window template),
+    ``options`` (a list of tappable suggested replies) and ``schema`` (an ask-less form's
+    answer schema — the channel renders ``text`` as the form's prompt, and the guest's
+    submission enters the conversation as an ordinary inbound message) are OPTIONAL
+    richer-send forms
     delivered ALONGSIDE ``text`` — the message is then stored and delivered as one rich
     part, exactly as a produced rich answer is, including the delivery machine's capability
     gate (a channel that does not advertise the matching ``supports_*_notifications`` flag
     never receives the part; the record fails loudly instead of the field dropping). A
-    contract-invalid value (an empty list, an over-cap value, or the mutually exclusive
-    media+template / options+template) is a loud 400; omit all three for a plain text send.
+    contract-invalid value (an empty list/dict, an over-cap value, or the mutually exclusive
+    media+template / options+template / schema+template / schema+options) is a loud 400;
+    omit all four for a plain text send.
 
     Allowed in either mode and it never flips the mode. Blank ``text`` is a loud 400, and a
     present-but-blank ``address`` is a 400. The thread-belongs-to-route guard is the thread
@@ -1146,13 +1151,15 @@ async def send_conversation_thread_message(
         raise BadRequestError("thread_id must be a non-blank thread identifier")
     if not text.strip():
         raise BadRequestError("text must be a non-blank message to send")
-    # Coerce and validate the rich fields up front, so a bad media/template/options value is
+    # Coerce and validate the rich fields up front, so a bad media/template/options/schema
+    # value is
     # a clean 400 here rather than a 500 from deep in the send. Constructing the AnswerPart
-    # the send will build applies every contract check (empty list, over-cap, and the
-    # media/template and options/template exclusivity) — reused, never duplicated here.
+    # the send will build applies every contract check (empty list/dict, over-cap, and the
+    # media/template, options/template, schema/template and schema/options exclusivity) —
+    # reused, never duplicated here.
     media_items: list[MediaItem] | None = None
     template_item: ChannelTemplate | None = None
-    if media is not None or template is not None or options is not None:
+    if media is not None or template is not None or options is not None or schema is not None:
         try:
             media_items = (
                 [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
@@ -1160,9 +1167,9 @@ async def send_conversation_thread_message(
                 else None
             )
             template_item = ChannelTemplate.model_validate(template) if template is not None else None
-            AnswerPart(message=text, media=media_items, template=template_item, options=options)
+            AnswerPart(message=text, media=media_items, template=template_item, options=options, schema=schema)
         except (ValidationError, ValueError) as exc:
-            raise BadRequestError(f"invalid media/template/options: {exc}") from exc
+            raise BadRequestError(f"invalid media/template/options/schema: {exc}") from exc
     manager = _require_backend()
     named_route = await _require_route(manager, route_name)
     caller = await resolve_caller()
@@ -1191,6 +1198,7 @@ async def send_conversation_thread_message(
             media=media_items,
             template=template_item,
             options=options,
+            schema=schema,
         )
     except OperatorAppendError as exc:
         raise OperationFailed(str(exc)) from exc

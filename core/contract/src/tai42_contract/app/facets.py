@@ -360,6 +360,7 @@ class AppConversations(Protocol):
         text: str,
         provider_message_id: str,
         params: dict[str, str] | None = None,
+        form: dict[str, Any] | None = None,
     ) -> str:
         """Accept one inbound channel message, persist it, and return its
         ``message_id`` (a uuid4).
@@ -380,6 +381,14 @@ class AppConversations(Protocol):
         entry, delivered verbatim to a tool target's payload under ``params``;
         ``None``/empty leaves the payload unchanged. The door validates them with
         :func:`~tai42_contract.conversations.validate_entry_params` before accept.
+
+        ``form`` is an optional structured guest submission (an ask-less form's answers)
+        riding WITH the required rendered ``text`` — the text stays the whole turn every
+        consumer sees, while a tool target's ``payload_expr`` may map the structured copy
+        from the payload's ``form`` key (present only when the inbound carried one). The
+        platform bounds it as pure transport
+        (:func:`~tai42_contract.conversations.validate_inbound_form`) and attaches no
+        meaning and NO TRUST to the contents: guest-shaped data, never schema-conformant.
         """
         ...
 

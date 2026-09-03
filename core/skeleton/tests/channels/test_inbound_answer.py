@@ -128,7 +128,9 @@ def wired(monkeypatch):
 
     accept_calls: list[SimpleNamespace] = []
 
-    async def _fake_accept(channel_id, our_identity, client_address, cap_key, text, provider_message_id, params=None):
+    async def _fake_accept(
+        channel_id, our_identity, client_address, cap_key, text, provider_message_id, params=None, form=None
+    ):
         accept_calls.append(
             SimpleNamespace(
                 channel=channel_id,

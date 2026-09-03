@@ -28,6 +28,9 @@ so it is NOT authority-changing and stays a plain (includable) projected tool.
 
 from __future__ import annotations
 
+import warnings
+from typing import Any
+
 from pydantic import BaseModel, Field
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate
 from tai42_contract.interactions.models import MediaItem
@@ -46,57 +49,76 @@ from tai42_skeleton.operations import (
     operation,
 )
 
+with warnings.catch_warnings():
+    # The ``schema`` field intentionally shadows pydantic's deprecated
+    # ``BaseModel.schema()`` alias (the current API is ``model_json_schema()``);
+    # the field name matches the wire key and the helper keyword it maps to
+    # (``model_dump`` feeds the operation's kwargs by FIELD NAME, so an aliased
+    # spelling would break the mapping). Suppressed at the definition site,
+    # narrowly matched — the same pattern the contract's ``ChannelNotification``
+    # uses for its own ``schema`` field.
+    warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
 
-class NotifyUser(BaseModel):
-    """A notification to send: the ``message`` text, an optional named ``channel``
-    that carries it (omit to record to the internal sink), an optional per-call
-    ``recipient`` delivery address, and an optional ``audience`` identity whose in-app
-    inbox shows it (honored even with a channel set; distinct from ``recipient``)."""
+    class NotifyUser(BaseModel):
+        """A notification to send: the ``message`` text, an optional named ``channel``
+        that carries it (omit to record to the internal sink), an optional per-call
+        ``recipient`` delivery address, and an optional ``audience`` identity whose in-app
+        inbox shows it (honored even with a channel set; distinct from ``recipient``)."""
 
-    message: str
-    channel: str | None = None
-    recipient: str | None = None
-    audience: str | None = Field(
-        default=None,
-        description=(
-            "The identity (user_id) whose in-app inbox shows this (honored even with a channel set); "
-            "leave unset for an operator/broadcast notification. Distinct from recipient, which is a "
-            "channel delivery address."
-        ),
-    )
-    sender_identity: str | None = Field(
-        default=None,
-        description=(
-            "Reserved: the sending identity a channel message leaves FROM, set by the conversation "
-            "bridge on the notification it builds to answer a route. Callers MUST NOT supply it here — "
-            "a set value is rejected with a 400, never forwarded."
-        ),
-    )
-    media: list[MediaItem] | None = Field(
-        default=None,
-        description=(
-            "Optional display media sent WITH the message. On a named channel it requires a channel that "
-            "advertises media support (else a 501); with no channel it is stored on the internal inbox "
-            "record and rendered there. Mutually exclusive with template."
-        ),
-    )
-    template: ChannelTemplate | None = Field(
-        default=None,
-        description=(
-            "Optional pre-approved template for an out-of-window send. On a named channel it requires a "
-            "channel that advertises template support (else a 501); with no channel it is stored on the "
-            "internal inbox record. Mutually exclusive with media and options."
-        ),
-    )
-    options: list[str] | None = Field(
-        default=None,
-        description=(
-            "Optional tappable options sent WITH the message; a tap enters the conversation as a visitor "
-            "message on channels that support it. On a named channel it requires a channel that advertises "
-            "interactive support (else a 501); with no channel it is stored on the internal inbox record. "
-            "Mutually exclusive with template, may combine with media."
-        ),
-    )
+        message: str
+        channel: str | None = None
+        recipient: str | None = None
+        audience: str | None = Field(
+            default=None,
+            description=(
+                "The identity (user_id) whose in-app inbox shows this (honored even with a channel set); "
+                "leave unset for an operator/broadcast notification. Distinct from recipient, which is a "
+                "channel delivery address."
+            ),
+        )
+        sender_identity: str | None = Field(
+            default=None,
+            description=(
+                "Reserved: the sending identity a channel message leaves FROM, set by the conversation "
+                "bridge on the notification it builds to answer a route. Callers MUST NOT supply it here — "
+                "a set value is rejected with a 400, never forwarded."
+            ),
+        )
+        media: list[MediaItem] | None = Field(
+            default=None,
+            description=(
+                "Optional display media sent WITH the message. On a named channel it requires a channel that "
+                "advertises media support (else a 501); with no channel it is stored on the internal inbox "
+                "record and rendered there. Mutually exclusive with template."
+            ),
+        )
+        template: ChannelTemplate | None = Field(
+            default=None,
+            description=(
+                "Optional pre-approved template for an out-of-window send. On a named channel it requires a "
+                "channel that advertises template support (else a 501); with no channel it is stored on the "
+                "internal inbox record. Mutually exclusive with media and options."
+            ),
+        )
+        options: list[str] | None = Field(
+            default=None,
+            description=(
+                "Optional tappable options sent WITH the message; a tap enters the conversation as a visitor "
+                "message on channels that support it. On a named channel it requires a channel that advertises "
+                "interactive support (else a 501); with no channel it is stored on the internal inbox record. "
+                "Mutually exclusive with template, may combine with media."
+            ),
+        )
+        schema: dict[str, Any] | None = Field(  # pyright: ignore[reportIncompatibleMethodOverride]
+            default=None,
+            description=(
+                "Optional form answer schema for an ask-less form: the channel renders the message as the "
+                "form's prompt and this schema as the fillable form, and a submission enters the conversation "
+                "as a message from the person. Requires a named channel (else a 400 — the internal sink has no "
+                "submission door) that advertises form support (else a 501). Mutually exclusive with template "
+                "and with options, may combine with media."
+            ),
+        )
 
 
 @operation(summary="List internal notifications", tags=["notifications"])
@@ -130,6 +152,7 @@ async def notify_user(
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
     options: list[str] | None = None,
+    schema: dict[str, Any] | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -142,23 +165,31 @@ async def notify_user(
     * a blank message with no media to carry it (the contract admits a blank message
       only for a media-only send), an unknown channel name, a blank recipient/audience, a
       caller-supplied ``sender_identity``, a contract-invalid ``media``/``template``/
-      ``options`` combination (an empty list, an over-cap value, or a mutually exclusive
-      media+template / options+template), or a channel's permanent refusal of the input's
+      ``options``/``schema`` combination (an empty list/dict, an over-cap value, or a
+      mutually exclusive
+      media+template / options+template / schema+template / schema+options), a ``schema``
+      with no channel (the internal sink has no submission door) or one the channel's form
+      subset/hook refuses, or a channel's permanent refusal of the input's
       shape (retrying cannot succeed) → 400;
     * a restricted caller addressing another identity (cross-identity denial) → 403;
     * a channel that cannot notify, or does not advertise the
-      ``media``/``template``/``options`` capability the send needs → 501;
+      ``media``/``template``/``options``/``schema`` capability the send needs → 501;
     * a transient channel delivery failure (the raised error's ``retryable``) → 503,
       carrying the medium's ``retry_after`` when it named one;
     * a permanent channel delivery refusal → 502.
 
     ``media`` (display media sent with the message), ``template`` (a pre-approved
-    out-of-window send) and ``options`` (tappable options a tap of which enters the
-    conversation) are OPTIONAL richer-send forms; the contract enforces media/template and
-    options/template are each mutually exclusive (options may combine with media). On a
+    out-of-window send), ``options`` (tappable options a tap of which enters the
+    conversation) and ``schema`` (an ask-less form's answer schema — the channel renders the
+    message as the form's prompt, and a submission enters the conversation as a message from
+    the person) are OPTIONAL richer-send forms; the contract enforces media/template,
+    options/template, schema/template and schema/options are each mutually exclusive
+    (options and schema may each combine with media). On a
     named channel each needs a channel that advertises the matching capability — otherwise
     the send is refused as a 501, never downgraded to a silent freeform send. With no
-    channel they are stored on the internal inbox record and rendered there.
+    channel media/template/options are stored on the internal inbox record and rendered
+    there; ``schema`` alone REQUIRES a channel (a 400 without one) — a stored form nobody
+    could submit would be a dead surface, not a notification.
 
     ``audience`` addresses the in-app record to an identity's feed; it is honored
     even when a channel also delivers the message (channel push AND in-app record).
@@ -184,6 +215,7 @@ async def notify_user(
             media=media,
             template=template,
             options=options,
+            schema=schema,
         )
     except SenderIdentityNotAllowedError as exc:
         raise BadRequestError(str(exc)) from exc

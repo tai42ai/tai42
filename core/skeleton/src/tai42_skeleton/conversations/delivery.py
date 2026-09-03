@@ -148,8 +148,10 @@ def _remaining_parts(parts: list[AnswerPart], sent: list[SentChunk]) -> list[tup
 
 def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord, *, final: bool) -> ChannelNotification:
     """The :class:`ChannelNotification` for one chunk of ``part``. The part's rich fields
-    (media, template, options) ride the FINAL chunk of the part — its completed message — so a
-    multi-chunk part's earlier chunks are plain text and the media/buttons land with the last.
+    (media, template, options, schema) ride the FINAL chunk of the part — its completed
+    message — so a
+    multi-chunk part's earlier chunks are plain text and the media/buttons/form land with the
+    last.
     A MEDIA-ONLY part has a single final chunk of ``""``: the notification then carries a blank
     message plus the media, which the contract admits exactly because media is present.
     ``recipient``/``sender_identity`` are the per-delivery routing the record carries, never
@@ -161,6 +163,7 @@ def _part_notification(part: AnswerPart, chunk: str, record: ConversationRecord,
         media=part.media if final else None,
         template=part.template if final else None,
         options=part.options if final else None,
+        schema=part.schema if final else None,
     )
 
 
@@ -178,6 +181,8 @@ def _unsupported_rich_capability(channel: Channel, parts: list[AnswerPart]) -> s
             return "template"
         if part.options is not None and not getattr(channel, "supports_interactive_notifications", False):
             return "interactive options"
+        if part.schema is not None and not getattr(channel, "supports_form_notifications", False):
+            return "form"
     return None
 
 
@@ -516,13 +521,14 @@ async def _refuse_unrenderable_parts(
     store: ConversationRecordStore, record: ConversationRecord, missing: str, attempts: int, token: str
 ) -> None:
     """Fail a record whose parts need a richer-send capability the channel does not advertise.
-    A route/tool misconfiguration (a media/template/options part routed to a text-only channel):
+    A route/tool misconfiguration (a media/template/options/schema part routed to a text-only
+    channel):
     the record fails loudly and terminally so it is never re-driven, and no half-rendered send
     goes out. No client-safe reply is sent — the missing capability is an operator's business,
     not a guest-facing size hint."""
     logger.error(
         "conversations: record %s carries a part needing %s, which channel %r does not advertise support for; "
-        "failing the record (a media/template/options part cannot be routed to a text-only channel)",
+        "failing the record (a media/template/options/schema part cannot be routed to a text-only channel)",
         record.message_id,
         missing,
         record.channel,
