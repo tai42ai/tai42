@@ -14,7 +14,6 @@ from tai42_contract.connectors.errors import (
 from tai42_contract.connectors.models import (
     ALIAS_MAX_LEN,
     ALIAS_RE,
-    SLUG_RE,
     UUID_RE,
     AuthHealthState,
     ConnectedAccountView,
@@ -38,6 +37,7 @@ from tai42_contract.connectors.models import (
     normalize_uuid,
 )
 from tai42_contract.connectors.providers import (
+    SLUG_RE,
     ConfigFieldSpec,
     McpServerDescriptor,
     OAuthEndpoints,
