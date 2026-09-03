@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract this provider implements — the ConfigManager ABC.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.2,<7",
+    "tai42-contract>=6.3,<7",
     # Settings machinery (TaiBaseSettings + settings_cache) and the manifest
     # !ENV-tag yaml utilities (EnvTagLoader / merge_and_dump_manifest).
     "tai42-kit>=3.8,<4",
