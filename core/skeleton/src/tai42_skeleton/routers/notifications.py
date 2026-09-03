@@ -1,14 +1,19 @@
 """HTTP surface for the internal notifications sink and the send door.
 
 - ``GET /api/notifications`` (AUTHED) — return the deployment's internal
-  notifications, newest-first. Each record is
-  ``{"id", "message", "recipient", "audience", "created_at"}``. A restricted caller
+  notifications, newest-first. Each record is ``{"id", "message", "recipient",
+  "audience", "media", "template", "options", "created_at"}`` — the rich fields
+  hold the richer-send forms the notification carried (``None`` each for a plain
+  text record). A restricted caller
   reads its own per-identity feed (only its ``audience``-addressed records); an
   unrestricted caller reads the shared feed.
 - ``POST /api/notifications`` (AUTHED) — send a human a one-way, fire-and-forget
   notification: on a named ``channel``, or (channel omitted) recorded to the
-  internal sink. A blank message / unknown channel / blank recipient / blank
-  audience is a loud 400, a channel that cannot notify a 501, and a delivery
+  internal sink, optionally carrying the richer-send forms ``media`` (blank
+  ``message`` allowed for a media-only send) / ``template`` / ``options``. A blank
+  message with no media / unknown channel / blank recipient / blank audience — or a
+  rich combination the contract refuses — is a loud 400, a channel that cannot
+  notify (or does not advertise a needed rich capability) a 501, and a delivery
   failure a 502.
 
 Both doors are thin adapters over operations in

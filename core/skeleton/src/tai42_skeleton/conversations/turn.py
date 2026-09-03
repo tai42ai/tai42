@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
+from tai42_contract.channels import ChannelTemplate
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
     AnswerPart,
@@ -1780,6 +1781,7 @@ async def operator_send(
     text: str,
     operator_principal: str,
     media: list[MediaItem] | None = None,
+    template: ChannelTemplate | None = None,
     options: list[str] | None = None,
 ) -> str:
     """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
@@ -1788,12 +1790,16 @@ async def operator_send(
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
 
-    ``media`` and ``options`` are OPTIONAL richer-send forms: when either is set the reply is
-    stored as a single rich :class:`AnswerPart` (``message=text`` carrying the media/options),
-    so the delivery machine sends the operator's message with its media/options exactly as it
-    sends a produced rich part; with neither set the record stays a plain single-message
-    answer (byte-parity with the pre-rich operator send). A contract-invalid media/options
-    value (an empty list, an over-cap value) raises before any state is written.
+    ``media``, ``template`` and ``options`` are OPTIONAL richer-send forms: when any is set
+    the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
+    media/template/options), so the delivery machine sends the operator's message with its
+    rich fields exactly as it sends a produced rich part — including the capability gate: a
+    channel that does not advertise the matching ``supports_*_notifications`` flag never
+    receives the part, and the record fails loudly instead of the field silently dropping.
+    With none set the record stays a plain single-message answer (byte-parity with the
+    pre-rich operator send). A contract-invalid value (an empty list, an over-cap value, or
+    the mutually exclusive media+template / options+template) raises before any state is
+    written.
 
     For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
     text is appended to the thread's checkpoint as an ``assistant`` message BEFORE the record
@@ -1815,15 +1821,17 @@ async def operator_send(
     worker — raises the loud, retriable :class:`ThreadBusyError` (503) rather than blocking the
     caller past the proxy timeout. A full FIFO raises the loud, retriable
     :class:`ThreadQueueOverflowError` (503) before anything is written."""
-    # A rich operator send (media/options present) stores one :class:`AnswerPart` carrying
-    # the text plus its media/options — the shape the delivery machine sends as a rich part.
-    # A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich path
-    # (and unbounded by the part message cap, which only governs a rich part's text).
-    if media is None and options is None:
+    # A rich operator send (media/template/options present) stores one :class:`AnswerPart`
+    # carrying the text plus its rich fields — the shape the delivery machine sends as a rich
+    # part. A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich
+    # path (and unbounded by the part message cap, which only governs a rich part's text).
+    if media is None and template is None and options is None:
         answer: str = text
         answer_parts: list[AnswerPart] | None = None
     else:
-        answer, answer_parts = _answer_fields([AnswerPart(message=text, media=media, options=options)])
+        answer, answer_parts = _answer_fields(
+            [AnswerPart(message=text, media=media, template=template, options=options)]
+        )
     message_id = str(uuid4())
     caps = get_turn_caps()
     caps.reserve_thread_slot(thread_id)

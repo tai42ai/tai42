@@ -193,9 +193,10 @@ async def test_operator_send_agent_appends_creates_and_delivers(env, monkeypatch
 
 class RichFakeChannel(FakeChannel):
     """A channel that advertises the richer-send capabilities, so the delivery machine sends
-    an operator part's media/options instead of refusing them as unrenderable."""
+    an operator part's media/template/options instead of refusing them as unrenderable."""
 
     supports_media_notifications = True
+    supports_template_notifications = True
     supports_interactive_notifications = True
 
 
@@ -233,6 +234,64 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
     assert channel.sends[0].media == [item]
     assert channel.sends[0].options == ["Thanks"]
     assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    from tai42_contract.channels import ChannelTemplate
+
+    agent = RecordingAgent()
+    channel = RichFakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+
+    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="your order shipped",
+        operator_principal="op-1",
+        template=template,
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer == "your order shipped"
+    assert record.answer_parts is not None
+    assert record.answer_parts[0].template == template
+    # The delivered notification carries the operator's template (final chunk of the part).
+    assert channel.sends[0].message == "your order shipped"
+    assert channel.sends[0].template == template
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_template_to_incapable_channel_fails_the_record(env, monkeypatch):
+    # The delivery machine's capability gate holds for an operator template send exactly as
+    # for a produced answer: a channel that does not advertise
+    # supports_template_notifications never receives the part — the record fails loudly
+    # instead of the template silently dropping.
+    from tai42_contract.channels import ChannelTemplate
+
+    channel = FakeChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    template = ChannelTemplate(name="status_update", language="en_US", parameters=["A-42"])
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="your order shipped",
+        operator_principal="op-1",
+        template=template,
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
 
 
 async def test_operator_send_plain_text_carries_no_parts(env, monkeypatch):
