@@ -294,9 +294,9 @@ with warnings.catch_warnings():
         the ``supports_form_notifications`` capability flag, and a form channel's OPTIONAL
         ``validate_form_schema(schema, question)`` hook (see :class:`Channel`) is reused
         at notify time with this ``message`` as the ``question`` argument, so the
-        channel's own form limits refuse an unrenderable form before the send. Some media
-        bound WHEN a form may be sent: WhatsApp delivers a notify-form only inside the
-        provider's customer-service window, and an out-of-window send fails loudly at the
+        channel's own form limits refuse an unrenderable form before the send. Some channels
+        also constrain WHEN a form may be sent: WhatsApp delivers a notify-form only inside
+        the provider's customer-service window, and an out-of-window send fails loudly at the
         channel — never silently downgraded.
         """
 
