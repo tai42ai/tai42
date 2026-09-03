@@ -584,8 +584,9 @@ def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQues
 def _render_form_text(answer: dict[str, Any], schema: dict[str, Any] | None) -> str:
     """A completed form's readable, ALWAYS non-empty ``label: value`` lines — the
     schema property's ``title`` when it has one, else the raw field key (the schema
-    may be gone). A scalar value renders as itself; a non-scalar value (list/object)
-    renders as compact JSON, never a Python ``repr``. A completed-but-empty form
+    may be gone). A string/number renders as itself; a boolean and any non-scalar
+    value (list/object) render as compact JSON — ``true``/``false``, never a Python
+    ``repr`` such as ``True``/``False``. A completed-but-empty form
     renders as a compact JSON dump of the raw answer so the bridge is handed a
     non-blank string — the ``conversations.accept`` door rejects blank text, and the
     reply must never be dropped.
@@ -597,7 +598,10 @@ def _render_form_text(answer: dict[str, Any], schema: dict[str, Any] | None) -> 
         prop = props.get(key)
         title = prop.get("title") if isinstance(prop, dict) else None
         label = title if isinstance(title, str) and title else key
-        rendered = value if isinstance(value, str | int | float | bool) else json.dumps(value, ensure_ascii=False)
+        # bool is a subclass of int, so it must be excluded from the scalar fast-path
+        # explicitly — otherwise a boolean would render as its Python repr.
+        scalar = isinstance(value, str | int | float) and not isinstance(value, bool)
+        rendered = value if scalar else json.dumps(value, ensure_ascii=False)
         lines.append(f"{label}: {rendered}")
     text = "\n".join(lines)
     if not text:

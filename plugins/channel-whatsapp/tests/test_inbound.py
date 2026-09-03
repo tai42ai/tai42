@@ -688,6 +688,26 @@ def test_render_form_answer_with_a_nested_value_uses_json_not_repr():
     assert "Note: ship it" in rendered  # scalar rendering unchanged
 
 
+def test_render_form_answer_with_a_boolean_renders_json_not_python_repr():
+    # A boolean renders through JSON (``true``/``false``) — the same standard-faithful
+    # convention the web channel uses — never Python's ``True``/``False`` repr, even
+    # though ``bool`` is a subclass of ``int``. The source value stays a real bool: the
+    # structured form carried alongside the text is untouched by rendering.
+    pending = PendingQuestion(
+        callback_url=_CALLBACK,
+        timeout_at=datetime.now(UTC),
+        schema={"properties": {"subscribed": {"title": "Subscribed"}, "declined": {"title": "Declined"}}},
+    )
+    answer = {"subscribed": True, "declined": False}
+    rendered = _render_answer_for_bridge(answer, pending)
+    assert "Subscribed: true" in rendered
+    assert "Declined: false" in rendered
+    assert "True" not in rendered  # never a Python repr
+    assert "False" not in rendered
+    assert answer["subscribed"] is True  # unmutated real bools
+    assert answer["declined"] is False
+
+
 async def test_ladder_forward_error_does_not_bridge(handler, stub_app, channels, fake_redis: FakeRedis):
     # A raised AnswerForwardError (5xx/transport) must NOT be converted into a bridge:
     # the ladder kept the correlation and the plugin re-raises for Meta's retry.
@@ -1664,8 +1684,9 @@ async def test_notify_form_reply_accepts_coerced_form_and_rendered_text(
             "our_identity": PHONE_NUMBER_ID,
             "client_address": WA_ID,
             "cap_key": WA_ID,
-            # The rendered label:value lines every consumer sees...
-            "text": "note: ship it\nqty: 7\namount: 3.5\nagree: True",
+            # The rendered label:value lines every consumer sees — the boolean is JSON
+            # (``true``), matching the web channel, never Python's ``True`` repr...
+            "text": "note: ship it\nqty: 7\namount: 3.5\nagree: true",
             "provider_message_id": _WAMID,
             "params": None,
             # ...and the structured copy: flow_token stripped, values coerced to the
