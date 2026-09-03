@@ -597,6 +597,77 @@ def test_notification_options_may_combine_with_media():
     assert notification.options == ["Item A"]
 
 
+# -- schema (ask-less form) ------------------------------------------------------------
+
+
+def _form_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {"size": {"type": "string"}}}
+
+
+def test_notification_accepts_a_form_schema():
+    # An ask-less form: the message is the form's prompt, the schema the fillable form;
+    # the submission enters the conversation as a guest message.
+    from tai42_contract.channels import ChannelNotification
+
+    notification = ChannelNotification(message="tell us your size", schema=_form_schema())
+    assert notification.schema == _form_schema()
+    # Absent by default — a plain notification carries no form.
+    assert ChannelNotification(message="hi").schema is None
+
+
+def test_notification_schema_rejects_present_but_empty_dict():
+    # A present schema is a non-empty dict — the same bound the ask-path delivery enforces;
+    # the deep shape is the sender's shared subset walk, not this model's concern.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="non-empty dict"):
+        ChannelNotification(message="hi", schema={})
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_notification_schema_requires_a_non_blank_message(blank: str):
+    # A form needs a prompt: a media-only (blank-message) send carries no schema.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match=r"carries no schema; a form needs a prompt"):
+        ChannelNotification(message=blank, media=[_image_item()], schema=_form_schema())
+
+
+def test_notification_schema_and_template_are_mutually_exclusive():
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification, ChannelTemplate
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ChannelNotification(
+            message="both set",
+            schema=_form_schema(),
+            template=ChannelTemplate(name="status_update", language="en_US"),
+        )
+
+
+def test_notification_schema_and_options_are_mutually_exclusive():
+    # One message carries ONE interactive surface: a form's fields or a tap list, never both.
+    from pydantic import ValidationError
+
+    from tai42_contract.channels import ChannelNotification
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        ChannelNotification(message="both set", schema=_form_schema(), options=["Item A"])
+
+
+def test_notification_schema_may_combine_with_media():
+    from tai42_contract.channels import ChannelNotification
+
+    notification = ChannelNotification(message="pick from the chart", media=[_image_item()], schema=_form_schema())
+    assert notification.media == [_image_item()]
+    assert notification.schema == _form_schema()
+
+
 # -- media-only (blank message) matrix -------------------------------------------------
 
 

@@ -153,6 +153,122 @@ def test_conversation_message_refuses_invalid_params():
 # -- ConversationAnswer ---------------------------------------------------------
 
 
+def test_validate_inbound_form_returns_a_clean_dict_unchanged():
+    from tai42_contract.conversations import validate_inbound_form
+
+    form = {"size": "L", "count": 2, "nested": {"ok": True, "tags": ["a", "b"], "note": None}}
+    assert validate_inbound_form(form) is form
+
+
+@pytest.mark.parametrize("bad", [["a"], "scalar", 1, 1.5, True, None])
+def test_validate_inbound_form_refuses_non_objects(bad: Any):
+    # The submission is a JSON OBJECT — a list or scalar top level is refused.
+    from tai42_contract.conversations import validate_inbound_form
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        validate_inbound_form(bad)
+
+
+@pytest.mark.parametrize("bad_number", [float("nan"), float("inf"), float("-inf")])
+def test_validate_inbound_form_refuses_non_finite_numbers(bad_number: float):
+    # NaN/Infinity are not JSON; a consumer parsing the stored form must never hit them.
+    from tai42_contract.conversations import validate_inbound_form
+
+    with pytest.raises(ValueError, match="must be finite"):
+        validate_inbound_form({"x": bad_number})
+
+
+def test_validate_inbound_form_refuses_non_serializable_values():
+    from tai42_contract.conversations import validate_inbound_form
+
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        validate_inbound_form({"x": object()})
+
+
+def test_validate_inbound_form_refuses_non_string_keys():
+    # A non-string key would be silently coerced by serialization, altering the submission.
+    from tai42_contract.conversations import validate_inbound_form
+
+    with pytest.raises(ValueError, match="keys must be strings"):
+        validate_inbound_form({1: "x"})
+
+
+def test_validate_inbound_form_size_cap_counts_utf8_bytes():
+    from tai42_contract.conversations import INBOUND_FORM_MAX_BYTES, validate_inbound_form
+
+    # Just under the cap in ASCII passes; the same character count in a multi-byte
+    # alphabet is over it — the bound is UTF-8 BYTES, not characters.
+    char_count = INBOUND_FORM_MAX_BYTES - 100
+    assert validate_inbound_form({"x": "a" * char_count}) is not None
+    with pytest.raises(ValueError, match=f"over the {INBOUND_FORM_MAX_BYTES} allowed"):
+        validate_inbound_form({"x": "é" * char_count})
+
+
+def test_validate_inbound_form_deeply_nested_is_a_clean_refusal():
+    # A pathological nesting well under the byte cap must refuse with a plain ValueError
+    # naming the depth bound — never surface a RecursionError from the interpreter stack.
+    from tai42_contract.conversations import INBOUND_FORM_MAX_DEPTH, validate_inbound_form
+
+    deep: dict[str, Any] = {}
+    node = deep
+    for _ in range(5000):
+        child: dict[str, Any] = {}
+        node["a"] = child
+        node = child
+    with pytest.raises(ValueError, match=f"deeper than the {INBOUND_FORM_MAX_DEPTH}"):
+        validate_inbound_form(deep)
+
+
+def test_validate_inbound_form_accepts_nesting_at_the_depth_bound():
+    from tai42_contract.conversations import INBOUND_FORM_MAX_DEPTH, validate_inbound_form
+
+    at_bound: dict[str, Any] = {}
+    node = at_bound
+    for _ in range(INBOUND_FORM_MAX_DEPTH - 1):
+        child: dict[str, Any] = {}
+        node["a"] = child
+        node = child
+    assert validate_inbound_form(at_bound) is at_bound
+    over = {"a": at_bound}
+    with pytest.raises(ValueError, match="deeper than"):
+        validate_inbound_form(over)
+
+
+def test_validate_inbound_form_error_never_carries_a_value():
+    # Form contents are opaque guest data: no refusal message may quote a submitted value.
+    from tai42_contract.conversations import validate_inbound_form
+
+    marker = "secret-answer-material"
+    for bad in ({marker: object()}, {"k": marker + "!" * (32 * 1024)}, {1: marker}):
+        with pytest.raises(ValueError, match="form") as exc_info:
+            validate_inbound_form(bad)
+        assert marker not in str(exc_info.value)
+
+
+def test_conversation_message_accepts_none_and_a_valid_form():
+    from tai42_contract.conversations import ConversationMessage
+
+    assert ConversationMessage(external_user_id="u1", text="hi").form is None
+    message = ConversationMessage(external_user_id="u1", text="size: L", form={"size": "L"})
+    assert message.form == {"size": "L"}
+
+
+def test_conversation_message_form_still_requires_non_blank_text():
+    # ``text`` is the carrier every reader consumes; a structured submission never
+    # replaces it — a channel submits a faithful text form alongside the data.
+    from tai42_contract.conversations import ConversationMessage
+
+    with pytest.raises(ValidationError, match="must be non-blank"):
+        ConversationMessage(external_user_id="u1", text="   ", form={"size": "L"})
+
+
+def test_conversation_message_refuses_an_invalid_form():
+    from tai42_contract.conversations import ConversationMessage
+
+    with pytest.raises(ValidationError, match="must be finite"):
+        ConversationMessage(external_user_id="u1", text="hi", form={"x": float("nan")})
+
+
 def test_conversation_answer_is_frozen_and_carries_status():
     from tai42_contract.conversations import ConversationAnswer
 
@@ -279,6 +395,86 @@ def test_answer_part_media_only_carries_no_options():
         AnswerPart(
             message="", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")], options=["Yes"]
         )
+
+
+def _part_form_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {"size": {"type": "string"}}}
+
+
+def test_answer_part_carries_a_form_schema():
+    # An ask-less form part: the message is the form's prompt, the schema the fillable
+    # form; the guest's submission enters the conversation as a guest message.
+    from tai42_contract.conversations import AnswerPart
+
+    part = AnswerPart(message="tell us your size", schema=_part_form_schema())
+    assert part.schema == _part_form_schema()
+    assert not part.is_plain_text()
+    assert AnswerPart(message="hi").schema is None
+
+
+def test_answer_part_schema_rejects_present_but_empty_dict():
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="non-empty dict"):
+        AnswerPart(message="hi", schema={})
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_answer_part_schema_requires_a_non_blank_message(blank: str):
+    # A form needs a prompt: a media-only (blank-message) part carries no schema.
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    with pytest.raises(ValidationError, match=r"carries no schema; a form needs a prompt"):
+        AnswerPart(
+            message=blank,
+            media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
+            schema=_part_form_schema(),
+        )
+
+
+def test_answer_part_schema_and_template_are_exclusive():
+    from tai42_contract.channels import ChannelTemplate
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="schema and template are mutually exclusive"):
+        AnswerPart(message="hi", schema=_part_form_schema(), template=ChannelTemplate(name="t", language="en"))
+
+
+def test_answer_part_schema_and_options_are_exclusive():
+    # One message carries ONE interactive surface: a form's fields or a tap list, never both.
+    from tai42_contract.conversations import AnswerPart
+
+    with pytest.raises(ValidationError, match="schema and options are mutually exclusive"):
+        AnswerPart(message="hi", schema=_part_form_schema(), options=["Yes"])
+
+
+def test_answer_part_schema_may_combine_with_media():
+    from tai42_contract.conversations import AnswerPart
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    part = AnswerPart(
+        message="pick from the chart",
+        media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")],
+        schema=_part_form_schema(),
+    )
+    assert part.media is not None
+    assert part.schema == _part_form_schema()
+
+
+def test_answer_part_field_set_is_the_notification_content_surface():
+    # The mirror invariant, enforced MECHANICALLY: AnswerPart's field set IS
+    # ChannelNotification's CONTENT surface — every notification field minus the
+    # per-delivery routing fields, which stay on the single delivery and never ride a
+    # part. A field added to one model and not the other (or added to the routing set
+    # without a decision here) fails this test instead of drifting silently.
+    from tai42_contract.channels import ChannelNotification
+    from tai42_contract.conversations import AnswerPart
+
+    routing_fields = {"recipient", "sender_identity"}
+    assert routing_fields <= set(ChannelNotification.model_fields)
+    content_fields = set(ChannelNotification.model_fields) - routing_fields
+    assert set(AnswerPart.model_fields) == content_fields
 
 
 # -- ConversationAnswer.parts (ordered multi-message) ---------------------------

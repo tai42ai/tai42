@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import re
 import string
+import warnings
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
@@ -90,6 +91,59 @@ def validate_entry_params(params: dict[str, str]) -> dict[str, str]:
     return params
 
 
+# Inbound-form transport bounds. The platform carries a guest's structured submission (an
+# ask-less form's answers) to the turn as opaque, untrusted data; these bounds cap the
+# transport alone (JSON-object shape, string keys, finite numbers, nesting depth, total
+# serialized size) — never the submission's meaning or its conformance to any schema.
+INBOUND_FORM_MAX_BYTES = 32 * 1024
+INBOUND_FORM_MAX_DEPTH = 64
+
+
+def validate_inbound_form(form: object) -> dict[str, Any]:
+    """Refuse (``ValueError`` naming the first violated bound) or return the dict unchanged.
+
+    Checks, in order: the value is a JSON object (a dict — never a list or a scalar); every
+    object key is a string (a non-string key would be silently coerced by serialization,
+    altering the submission); nesting stays within ``INBOUND_FORM_MAX_DEPTH`` container
+    levels — checked ITERATIVELY, so an arbitrarily deep (or self-referential) payload is a
+    clean refusal, never a ``RecursionError`` from the interpreter stack; every number is
+    finite (``allow_nan=False`` — ``NaN``/``Infinity`` are not JSON) and every value
+    JSON-serializable; the serialized form fits in ``INBOUND_FORM_MAX_BYTES`` UTF-8 bytes.
+    Messages name the violated bound and NEVER a submitted value — the contents are opaque
+    guest data and must never surface in a log or an error.
+    """
+    if not isinstance(form, dict):
+        raise ValueError("form must be a JSON object")
+    # Iterative depth walk: bounds nesting BEFORE the recursive ``json.dumps`` below, so a
+    # deeply nested payload refuses cleanly here instead of overflowing the interpreter
+    # stack. A self-referential container revisits itself one level deeper each time, so it
+    # trips the same bound rather than looping.
+    stack: list[tuple[object, int]] = [(form, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > INBOUND_FORM_MAX_DEPTH:
+            raise ValueError(f"form nests deeper than the {INBOUND_FORM_MAX_DEPTH} container levels allowed")
+        if isinstance(node, dict):
+            children = cast("Mapping[object, object]", node)
+            for key in children:
+                if not isinstance(key, str):
+                    raise ValueError("form object keys must be strings")
+            stack.extend((child, depth + 1) for child in children.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend((child, depth + 1) for child in cast("Sequence[object]", node))
+    try:
+        serialized = json.dumps(form, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    except ValueError as exc:
+        raise ValueError("form numbers must be finite (NaN and Infinity are not JSON)") from exc
+    except TypeError as exc:
+        raise ValueError("form must contain only JSON-serializable values") from exc
+    total_bytes = len(serialized.encode())
+    if total_bytes > INBOUND_FORM_MAX_BYTES:
+        raise ValueError(f"form serializes to {total_bytes} bytes, over the {INBOUND_FORM_MAX_BYTES} allowed")
+    # Honest by construction: the walk above verified every object key is a string.
+    return cast("dict[str, Any]", form)
+
+
 class BlankInboundTextError(ValueError):
     """The channel door was handed a blank/whitespace-only message body — nothing to run
     a turn on. Raised by ``AppConversations.accept``; a channel adapter catches it and
@@ -141,6 +195,18 @@ class ConversationMessage(BaseModel):
             "under ``params``; the platform attaches no meaning and no trust."
         ),
     )
+    form: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "A structured guest submission (an ask-less form's answers) riding WITH the "
+            "text. ``text`` stays required and non-blank — it is the CARRIER every reader "
+            "consumes: a channel submits a faithful text form of the submission alongside "
+            "the structured data, so a form-unaware consumer still sees the whole turn, "
+            "and a future ``media`` sibling rides the same pattern without a break. The "
+            "platform attaches no meaning and NO TRUST to the contents: guest-shaped "
+            "data, never schema-conformant — a target that reads it validates it itself."
+        ),
+    )
 
     @field_validator("external_user_id", "text")
     @classmethod
@@ -156,105 +222,158 @@ class ConversationMessage(BaseModel):
             return None
         return validate_entry_params(value)
 
-
-class AnswerPart(BaseModel):
-    """One message of an ordered multi-message answer — the platform's rich part shape.
-
-    It mirrors :class:`ChannelNotification`'s CONTENT surface exactly (``message`` plus the
-    optional ``media`` / ``template`` / ``options`` richer-send forms and their validators),
-    MINUS the per-delivery routing fields (``recipient`` / ``sender_identity``) — those stay
-    on the single delivery, never per part. The delivery machine sends each part as its own
-    ``ChannelNotification``, in order, chunking the ``message`` text at the channel width and
-    carrying the part's media/template/options alongside it, exactly as a single notification
-    does today.
-
-    A part is a NEW authoring surface, so it is STRICT FROM BIRTH: unknown keys are refused
-    (``extra="forbid"``) rather than silently dropped. A tool route authors parts as a JSON
-    array whose elements are each EITHER a plain string (shorthand for a text-only part) or a
-    part object — both normalize to THIS one model. Frozen.
-
-    ``message`` mirrors :class:`ChannelNotification.message`'s blank-vs-media RULE: non-blank BY
-    DEFAULT, EXCEPT it may be blank for a MEDIA-ONLY part — a caption-less image with no text
-    carrier. The admissible states are "``message`` non-blank" OR "blank ``message`` WITH non-empty
-    ``media``"; a blank ``message`` and no media has nothing to deliver and is refused. ``options``
-    REQUIRE a non-blank ``message`` (a tappable choice needs a prompt), and a ``template`` rides a
-    non-blank ``message`` too — so a media-only part carries only ``media``. Unlike
-    ``ChannelNotification`` (always constructed in code), a part is authored as JSON where the
-    ``message`` key may be ABSENT, so it defaults to ``""`` — a media-only part is just ``{"media": …}``.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    message: str = ""  # human-readable text; blank/omitted ONLY for a media-only part (media carries it)
-    media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
-    template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
-    options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
-
-    @field_validator("message")
+    @field_validator("form")
     @classmethod
-    def _message_valid(cls, value: str) -> str:
-        # Mirrors ChannelNotification.message: length cap only here, with the blank-vs-media
-        # rule decided in :meth:`_message_or_media` once every field is bound.
-        if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
-            raise ValueError(f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}")
-        return value
-
-    @field_validator("media")
-    @classmethod
-    def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
-        if value is not None:
-            check_media_list(value)
-        return value
-
-    @field_validator("options")
-    @classmethod
-    def _options_valid(cls, value: list[str] | None) -> list[str] | None:
+    def _check_form(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        # None means no structured submission; a present dict is bounded as pure transport
+        # (shape, depth, size) — its meaning stays opaque and untrusted.
         if value is None:
-            return value
-        if not value:
-            raise ValueError("options must be a non-empty list when present")
-        if len(value) > NOTIFICATION_OPTIONS_MAX:
-            raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
-        for option in value:
-            if not option.strip():
-                raise ValueError("each option must be a non-blank string")
-            if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
+            return None
+        return validate_inbound_form(value)
+
+
+with warnings.catch_warnings():
+    # The ``schema`` field intentionally shadows pydantic's deprecated
+    # ``BaseModel.schema()`` alias (the current API is ``model_json_schema()``);
+    # the field name matches the JSON-schema payload it carries. Suppress the
+    # shadow warning at the definition site so every importer is safe regardless
+    # of its own warnings config — narrowly matched, never a blanket ignore.
+    warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
+
+    class AnswerPart(BaseModel):
+        """One message of an ordered multi-message answer — the platform's rich part shape.
+
+        It mirrors :class:`ChannelNotification`'s CONTENT surface exactly (``message`` plus the
+        optional ``media`` / ``template`` / ``options`` / ``schema`` richer-send forms and their
+        validators), MINUS the per-delivery routing fields (``recipient`` / ``sender_identity``)
+        — those stay on the single delivery, never per part. The delivery machine sends each part
+        as its own ``ChannelNotification``, in order, chunking the ``message`` text at the
+        channel width and carrying the part's richer forms alongside it, exactly as a single
+        notification does today. ``schema`` is the ask-less form's answer schema and follows the
+        notification's rules: a present schema is a non-empty dict, REQUIRES a non-blank
+        ``message`` (the form's prompt), is MUTUALLY EXCLUSIVE with ``template`` and with
+        ``options`` (one message carries ONE interactive surface), MAY combine with ``media``,
+        and rides the channel's ``supports_form_notifications`` capability flag.
+
+        A part is a NEW authoring surface, so it is STRICT FROM BIRTH: unknown keys are refused
+        (``extra="forbid"``) rather than silently dropped. A tool route authors parts as a JSON
+        array whose elements are each EITHER a plain string (shorthand for a text-only part) or a
+        part object — both normalize to THIS one model. Frozen.
+
+        ``message`` mirrors :class:`ChannelNotification.message`'s blank-vs-media RULE: non-blank BY
+        DEFAULT, EXCEPT it may be blank for a MEDIA-ONLY part — a caption-less image with no text
+        carrier. The admissible states are "``message`` non-blank" OR "blank ``message`` WITH non-empty
+        ``media``"; a blank ``message`` and no media has nothing to deliver and is refused. ``options``
+        REQUIRE a non-blank ``message`` (a tappable choice needs a prompt), and a ``template`` rides a
+        non-blank ``message`` too — so a media-only part carries only ``media``. Unlike
+        ``ChannelNotification`` (always constructed in code), a part is authored as JSON where the
+        ``message`` key may be ABSENT, so it defaults to ``""`` — a media-only part is just ``{"media": …}``.
+        """
+
+        model_config = ConfigDict(frozen=True, extra="forbid")
+
+        message: str = ""  # human-readable text; blank/omitted ONLY for a media-only part (media carries it)
+        media: list[MediaItem] | None = None  # display media sent WITH the message; None -> none
+        template: ChannelTemplate | None = None  # out-of-window template send; None -> freeform
+        options: list[str] | None = None  # tappable options; a tap enters the conversation; None -> none
+        # The form answer schema for an ask-less form; the submission enters the conversation as
+        # a guest message. Intentionally named ``schema`` (matches the payload it carries);
+        # shadows the deprecated ``BaseModel.schema()`` alias, which this model never uses.
+        schema: dict[str, Any] | None = None  # pyright: ignore[reportIncompatibleMethodOverride]
+
+        @field_validator("message")
+        @classmethod
+        def _message_valid(cls, value: str) -> str:
+            # Mirrors ChannelNotification.message: length cap only here, with the blank-vs-media
+            # rule decided in :meth:`_message_or_media` once every field is bound.
+            if len(value) > NOTIFICATION_MESSAGE_MAX_CHARS:
                 raise ValueError(
-                    f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
+                    f"message must be at most {NOTIFICATION_MESSAGE_MAX_CHARS} characters, got {len(value)}"
                 )
-        return value
+            return value
 
-    @model_validator(mode="after")
-    def _message_or_media(self) -> AnswerPart:
-        # Mirrors ChannelNotification._message_or_media: a part is non-blank text OR a
-        # media-only part (blank message carried by non-empty media). A blank message with no
-        # media has nothing to deliver; options require a non-blank message (a choice needs a
-        # prompt); a template rides a non-blank message (its ``not self.media`` branch).
-        if not self.message.strip():
-            if not self.media:
-                raise ValueError("message must be non-blank unless media carries the content")
-            if self.options is not None:
-                raise ValueError("a media-only (blank-message) part carries no options; a choice needs a prompt")
-        return self
+        @field_validator("media")
+        @classmethod
+        def _check_media(cls, value: list[MediaItem] | None) -> list[MediaItem] | None:
+            if value is not None:
+                check_media_list(value)
+            return value
 
-    @model_validator(mode="after")
-    def _media_template_exclusive(self) -> AnswerPart:
-        if self.media is not None and self.template is not None:
-            raise ValueError("media and template are mutually exclusive on one part")
-        return self
+        @field_validator("options")
+        @classmethod
+        def _options_valid(cls, value: list[str] | None) -> list[str] | None:
+            if value is None:
+                return value
+            if not value:
+                raise ValueError("options must be a non-empty list when present")
+            if len(value) > NOTIFICATION_OPTIONS_MAX:
+                raise ValueError(f"options carries at most {NOTIFICATION_OPTIONS_MAX} entries, got {len(value)}")
+            for option in value:
+                if not option.strip():
+                    raise ValueError("each option must be a non-blank string")
+                if len(option) > NOTIFICATION_OPTION_MAX_CHARS:
+                    raise ValueError(
+                        f"each option must be at most {NOTIFICATION_OPTION_MAX_CHARS} characters, got {len(option)}"
+                    )
+            return value
 
-    @model_validator(mode="after")
-    def _options_template_exclusive(self) -> AnswerPart:
-        if self.options is not None and self.template is not None:
-            raise ValueError("options and template are mutually exclusive on one part")
-        return self
+        @field_validator("schema")
+        @classmethod
+        def _schema_non_empty(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+            # Mirrors ChannelNotification: None means no form; a present schema is a non-empty
+            # dict. The deep shape is the sender's shared channel-deliverable subset walk, never
+            # re-implemented here.
+            if value is not None and not value:
+                raise ValueError("schema must be a non-empty dict when present")
+            return value
 
-    def is_plain_text(self) -> bool:
-        """Whether this part carries nothing beyond its ``message`` — the case a
-        single-message answer degenerates to (``parts`` then adds nothing over the joined
-        ``answer`` and is dropped). A media-only part (blank message carrying media) is NOT
-        plain text — it adds the media the joined ``answer`` cannot carry."""
-        return self.media is None and self.template is None and self.options is None
+        @model_validator(mode="after")
+        def _message_or_media(self) -> AnswerPart:
+            # Mirrors ChannelNotification._message_or_media: a part is non-blank text OR a
+            # media-only part (blank message carried by non-empty media). A blank message with no
+            # media has nothing to deliver; options require a non-blank message (a choice needs a
+            # prompt) and a schema does too (a form needs a prompt); a template rides a non-blank
+            # message (its ``not self.media`` branch).
+            if not self.message.strip():
+                if not self.media:
+                    raise ValueError("message must be non-blank unless media carries the content")
+                if self.options is not None:
+                    raise ValueError("a media-only (blank-message) part carries no options; a choice needs a prompt")
+                if self.schema is not None:
+                    raise ValueError("a media-only (blank-message) part carries no schema; a form needs a prompt")
+            return self
+
+        @model_validator(mode="after")
+        def _media_template_exclusive(self) -> AnswerPart:
+            if self.media is not None and self.template is not None:
+                raise ValueError("media and template are mutually exclusive on one part")
+            return self
+
+        @model_validator(mode="after")
+        def _options_template_exclusive(self) -> AnswerPart:
+            if self.options is not None and self.template is not None:
+                raise ValueError("options and template are mutually exclusive on one part")
+            return self
+
+        @model_validator(mode="after")
+        def _schema_template_exclusive(self) -> AnswerPart:
+            if self.schema is not None and self.template is not None:
+                raise ValueError("schema and template are mutually exclusive on one part")
+            return self
+
+        @model_validator(mode="after")
+        def _schema_options_exclusive(self) -> AnswerPart:
+            # One message carries ONE interactive surface: a form's fields or a tap list, never both.
+            if self.schema is not None and self.options is not None:
+                raise ValueError("schema and options are mutually exclusive on one part")
+            return self
+
+        def is_plain_text(self) -> bool:
+            """Whether this part carries nothing beyond its ``message`` — the case a
+            single-message answer degenerates to (``parts`` then adds nothing over the joined
+            ``answer`` and is dropped). A media-only part (blank message carrying media) is NOT
+            plain text — it adds the media the joined ``answer`` cannot carry."""
+            return self.media is None and self.template is None and self.options is None and self.schema is None
 
 
 def joined_answer_text(parts: Sequence[AnswerPart]) -> str:
@@ -659,6 +778,8 @@ __all__ = [
     "ENTRY_PARAM_KEY_RE",
     "ENTRY_PARAM_VALUE_MAX_CHARS",
     "GREETING_PLACEHOLDER",
+    "INBOUND_FORM_MAX_BYTES",
+    "INBOUND_FORM_MAX_DEPTH",
     "ROUTE_NAME_RE",
     "AnswerPart",
     "AnswerStatus",
@@ -680,4 +801,5 @@ __all__ = [
     "TargetConversationConfig",
     "joined_answer_text",
     "validate_entry_params",
+    "validate_inbound_form",
 ]
