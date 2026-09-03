@@ -173,7 +173,7 @@ marketplace page and the public site over a browser.
 
 ```bash
 docker compose up -d
-TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
+TAI_E2E_MARKETPLACE=1 uv run --no-sync pytest tests/marketplace
 # the browser legs (built Studio dist + the tai-marketplace/web checkout):
 cd ui && TAI_E2E_MARKETPLACE=1 pnpm exec playwright test tests/marketplace.spec.ts tests/marketplace-web.spec.ts
 ```
@@ -189,5 +189,5 @@ whether the registry venv was absent (a harness ordering bug) or the dispatched
 ref regressed its tai42-contract floor. Reproduce a dispatched run locally:
 
 ```bash
-TAI_E2E_MARKETPLACE_REF=<40-hex-sha> TAI_E2E_MARKETPLACE=1 uv run pytest tests/marketplace
+TAI_E2E_MARKETPLACE_REF=<40-hex-sha> TAI_E2E_MARKETPLACE=1 uv run --no-sync pytest tests/marketplace
 ```
