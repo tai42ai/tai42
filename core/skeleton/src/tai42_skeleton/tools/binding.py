@@ -11,6 +11,7 @@ import inspect
 import logging
 import sys
 import types
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from functools import lru_cache
@@ -820,8 +821,16 @@ class ToolBinding:
             # langchain's overloaded ``tool`` is typed to return ``BaseTool | Callable``
             # and to want a ``Runnable`` for ``runnable``; this call shape (name + a
             # plain callable) always builds a ``StructuredTool`` at runtime.
-            client_tools.append(
-                cast(
+            with warnings.catch_warnings():
+                # Inferring a client tool's schema rebuilds a pydantic model from the
+                # presented signature, so an operation carrying a field named ``schema``
+                # (a wire key mapped by FIELD NAME, whose name shadows pydantic's
+                # deprecated ``BaseModel.schema()`` alias) re-emits the shadowing warning
+                # here — outside the model definition site that suppresses it. Suppressed
+                # narrowly at this rebuild site, matching the message the operation and
+                # contract models suppress at their own definition.
+                warnings.filterwarnings("ignore", message='Field name "schema"', category=UserWarning)
+                built = cast(
                     StructuredTool,
                     tool(
                         name_or_callable=name[:CLIENT_TOOL_NAME_MAX_LEN],
@@ -829,7 +838,7 @@ class ToolBinding:
                         **extra_kwargs,
                     ),
                 )
-            )
+            client_tools.append(built)
         return client_tools
 
     def _client_args_schema(self, tool_obj: Tool) -> dict[str, Any] | None:
