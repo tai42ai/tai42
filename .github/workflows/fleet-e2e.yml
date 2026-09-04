@@ -139,7 +139,14 @@ jobs:
           [[ "$SRC_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha: $SRC_REF"; exit 1; }
           git clone https://github.com/tai42ai/tai-studio
           if [ "$SRC_REPO" = "tai-studio" ]; then
-            git -C tai-studio checkout --detach "$SRC_REF"
+            # A dispatched sha can vanish before this run starts (source branch
+            # deleted on merge, or rewritten) — fall back to main rather than
+            # failing a fleet check whose real subject still exists there.
+            if git -C tai-studio checkout --detach "$SRC_REF" 2>/dev/null; then
+              :
+            else
+              echo "::warning::dispatched sha $SRC_REF is gone; falling back to main"
+            fi
           fi
       - name: Record the resolved tai-studio commit (provenance, no pinning)
         # tai-studio is checked out at the dispatched sha when studio-dispatched, else
