@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: agents
 package: tai42-agents
-version: 5.3.0
+version: 5.4.0
 description: >-
   Ready-made agents for the TAI ecosystem — coding/deep agents, tool-calling,
   retrieval, voting, refinement, and vision agents — opt-in and manifest-loaded.
