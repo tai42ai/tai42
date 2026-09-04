@@ -485,12 +485,11 @@ def test_abandonment_of_a_chained_park_binds_identity_around_the_chain_drive(
     asyncio.run(go())
 
 
-def test_legacy_entry_without_identity_fires_unbound_with_a_warning(
-    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any, caplog: Any
+def test_entry_without_recorded_identity_fires_unbound(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
 ) -> None:
-    # Back-compat: a park persisted before the identity was recorded carries no field. The fire
-    # runs UNBOUND (the binder is never entered) with a warning naming the limitation — never a
-    # crash, and never a silent drop of the answer.
+    # An entry without a recorded execution identity fires its completion UNBOUND (the binder is
+    # never entered) — never a crash, and never a silent drop of the answer.
     from tai42_contract.interactions import continuation as cont
 
     bound: list[tuple[str | None, str]] = []
@@ -505,7 +504,7 @@ def test_legacy_entry_without_identity_fires_unbound_with_a_warning(
     delivered: list[dict[str, Any]] = []
     app_tools.tool_runners[_COMPLETION_TOOL] = lambda **kwargs: delivered.append(kwargs)
 
-    # A pre-upgrade entry: every current field EXCEPT the identity pair.
+    # An entry carrying every current field EXCEPT the identity pair.
     entry = {
         "agent_name": "tools_agent",
         "thread_id": "bridge:acme:alice",
@@ -519,12 +518,10 @@ def test_legacy_entry_without_identity_fires_unbound_with_a_warning(
 
     async def go() -> None:
         await fake_park_redis.set(idx._park_key("i1"), json.dumps(entry))
-        with caplog.at_level("WARNING"):
-            await drv.fire_park_failed_completion("i1")
+        await drv.fire_park_failed_completion("i1")
         # Unbound: the binder was never entered, yet the completion still fired.
         assert bound == []
         assert delivered == [_expected_failed_delivery("bridge:acme:alice", ["i1"])]
-        assert any("predates the recorded execution identity" in rec.message for rec in caplog.records)
 
     asyncio.run(go())
 

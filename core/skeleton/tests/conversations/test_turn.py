@@ -380,6 +380,43 @@ async def test_tool_target_payload_expr_maps_the_kwargs(env, monkeypatch):
     assert tools.calls[0]["arguments"] == {"example_config_kwargs": {"text": "run it", "from": "+15550002222"}}
 
 
+async def test_tool_payload_builder_always_carries_the_thread_id(env, monkeypatch):
+    # Unit on the payload builder: the payload the ``payload_expr`` sees always carries this
+    # turn's canonical thread_id alongside the message/sender/channel/our_identity fields. An
+    # identity expr (".") surfaces the whole payload as the dispatched kwargs.
+    route = _tool_channel_route(payload_expr=".")
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    await turn_module._run_tool_turn(route, "hello", "bridge:tool-line:+15550002222", "+15550002222")
+
+    kwargs = tools.calls[0]["arguments"]
+    assert kwargs["thread_id"] == "bridge:tool-line:+15550002222"
+    assert kwargs["message"] == "hello"
+    assert kwargs["sender"] == "+15550002222"
+    assert kwargs["channel"] == "twilio"
+    assert kwargs["our_identity"] == "+15550001111"
+
+
+async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
+    # Composed accept→turn→dispatch: the routed flow/tool's received kwargs carry the thread_id
+    # matching the thread this turn ran under — the same opaque id the thread doors address.
+    channel = FakeChannel()
+    route = _tool_channel_route(payload_expr="{tid: .thread_id}")
+    _wire(monkeypatch, FakeManager(route), channel)
+    tools = _wire_tool(monkeypatch, lambda kw: "ok")
+
+    message_id = await turn_module.accept("twilio", "+15550001111", "+15550002222", "+15550002222", "run it", "PID1")
+    await _settle()
+
+    expected_thread = turn_module._thread_id("tool-line", "+15550002222")
+    assert tools.calls[0]["arguments"] == {"tid": expected_thread}
+    # The kwargs' thread_id is the very thread the turn's record was written under — the id
+    # the thread doors accept (``DELETE .../thread?thread_id=``).
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.thread_id == expected_thread
+
+
 async def test_tool_target_reply_expr_over_an_envelope_dict(env, monkeypatch):
     channel = FakeChannel()
     route = _tool_channel_route(reply_expr=".result.reply // null")
@@ -1920,6 +1957,7 @@ _BASELINE_CHANNEL_PAYLOAD = {
     "sender": "+15550002222",
     "our_identity": "+15550001111",
     "channel": "twilio",
+    "thread_id": "bridge:tool-line:+15550002222",
 }
 
 

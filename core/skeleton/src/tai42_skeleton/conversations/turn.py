@@ -768,6 +768,9 @@ async def _run_tool_turn(
     the tool kwargs (``payload_expr`` or a fixed ``{message, sender}``), the tool runs under
     the bound execution identity (whose ``run_tool`` seam authorizes the dispatch), and the
     result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
+    always carries ``thread_id`` — this turn's canonical thread id, the same opaque string the
+    thread doors address (``DELETE /api/conversations/{route_name}/thread?thread_id=``) — so a
+    ``payload_expr`` can thread the conversation id through to the tool/flow kwargs. The payload
     carries ``person_id`` and ``person_addresses`` IFF the target has multichannel on;
     ``sender`` stays the sending address either way. Non-empty ``params`` nest under a
     ``params`` key (never merged into the root); ``None``/empty leave the payload unchanged.
@@ -800,6 +803,7 @@ async def _run_tool_turn(
         "sender": client_address,
         "our_identity": route.our_identity,
         "channel": route.channel,
+        "thread_id": thread_id,
     }
     if person is not None:
         payload["person_id"] = person.person_id

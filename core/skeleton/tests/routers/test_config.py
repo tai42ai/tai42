@@ -210,9 +210,11 @@ async def test_settings_schema_shape(install, monkeypatch):
         "description",
         "nested_group",
         "value",
+        "value_source",
     ):
         assert key in field
     assert field["value"] == "x"
+    assert field["value_source"] == "field_default"
 
 
 async def test_settings_schema_value_overlay(install, monkeypatch):
@@ -266,6 +268,41 @@ async def test_settings_schema_resolves_through_tai_default_namespace(install, m
     assert fields["proc_dflt"]["value"] == "redis://proc-default"
     # The default-namespace value can also come from the stored env layer.
     assert fields["store_dflt"]["value"] == "from_store_default"
+
+
+async def test_settings_schema_value_source_marks_provenance(install, monkeypatch):
+    # Each field names which layer supplied its resolved value so a UI can badge provenance
+    # (notably "from default" for a TAI_DEFAULT_* fallback, distinct from an explicit set).
+    install({"STORE_ONLY": "from_store", "STORE_DEFAULT": "from_store_default"})
+    monkeypatch.setenv("PROC_WINS", "proc_value")
+    monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://proc-default")
+    monkeypatch.delenv("STORE_ONLY", raising=False)
+    monkeypatch.delenv("DEFAULT_ONLY", raising=False)
+    monkeypatch.delenv("OWN_VAR", raising=False)
+    monkeypatch.delenv("OTHER_VAR", raising=False)
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        fields=[
+            _field("proc", "PROC_WINS"),
+            _field("store", "STORE_ONLY"),
+            _field("proc_dflt", "OWN_VAR", default="d", default_namespace_var="TAI_DEFAULT_REDIS_URL"),
+            _field("store_dflt", "OTHER_VAR", default="d", default_namespace_var="STORE_DEFAULT"),
+            _field("dflt", "DEFAULT_ONLY", default="the_default"),
+            _field("nested", "", type_="object", nested_group="Other"),
+        ],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+    resp = await router.read_settings_schema(_req())
+    fields = {f["name"]: f for f in _json(resp)["data"]["groups"][0]["fields"]}
+    assert fields["proc"]["value_source"] == "env"
+    assert fields["store"]["value_source"] == "stored"
+    # Both TAI_DEFAULT_* fallbacks (process-env and store-side) are one "from default" source.
+    assert fields["proc_dflt"]["value_source"] == "default_namespace"
+    assert fields["store_dflt"]["value_source"] == "default_namespace"
+    assert fields["dflt"]["value_source"] == "field_default"
+    assert fields["nested"]["value_source"] is None
 
 
 async def test_settings_schema_secret_value_unmasked(install, monkeypatch):

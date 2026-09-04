@@ -819,8 +819,9 @@ async def fire_park_failed_completion(interaction_id: str) -> None:
     Subscript, not ``get``, for the always-written fields (``completion_tool``/``thread_id``/
     ``superstep_id``): every persisted park entry writes them, so an entry missing one is a corrupt
     index and belongs raised (the caller's abandonment fire is guarded and logs it), not silently
-    read as 'nothing to deliver'. The identity fields use ``get`` — their ABSENCE is the legitimate
-    pre-upgrade case, distinct from a corrupt entry."""
+    read as 'nothing to deliver'. The identity fields use ``get``: an entry without a recorded
+    identity fires its abandonment completion UNBOUND (authz skipped), distinct from a corrupt
+    entry missing a structural field."""
     entry = await read_park_entry(interaction_id)
     if entry is None or is_resolved_tombstone(entry):
         return
@@ -837,12 +838,6 @@ async def fire_park_failed_completion(interaction_id: str) -> None:
     if not await try_claim_drive(thread_id, superstep_id, token):
         return
     try:
-        if "execution_identity" not in entry:
-            logger.warning(
-                "park entry %s predates the recorded execution identity; its abandonment completion "
-                "fires UNBOUND (authz skipped). Re-created parks carry the identity and bind it.",
-                interaction_id,
-            )
         async with bound_execution_identity_for_fire(
             entry.get("execution_identity"), entry.get("execution_fingerprint") or ""
         ):
