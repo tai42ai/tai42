@@ -59,7 +59,7 @@ dependencies = [
     "prometheus-client>=0.24",
     "fastapi>=0.135",
     "starlette>=0.40",
-    "uvicorn>=0.43",
+    "uvicorn>=0.52.4",
     "redis>=5",
     # uvicorn runtime accelerators — not imported directly; uvicorn loads them at
     # serve time for the websocket protocol, a faster event loop, and faster HTTP
