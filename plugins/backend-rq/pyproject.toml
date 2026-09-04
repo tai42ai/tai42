@@ -50,7 +50,7 @@ dependencies = [
     "redis>=5.2.1,<7.0.0",
     # Settings models and the ScheduleRecord round-trip model.
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
     # Imported directly by the signature helpers (Context detection when a
     # tool's kwargs are serialized into a queued job).
     "fastmcp>=3.4.7",

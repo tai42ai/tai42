@@ -29,7 +29,7 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=6.5,<7",
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
     "python-dotenv>=1.0",
     "fastmcp>=3.4.7,<4",
     # Imported directly by utils/lc/lc_util.py (not just transitively via fastmcp).

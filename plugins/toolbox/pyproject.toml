@@ -36,7 +36,7 @@ dependencies = [
     # Imported directly in base (non-extra) modules: settings machinery and model
     # building in the extensions and their settings.
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
 ]
 
 [project.urls]

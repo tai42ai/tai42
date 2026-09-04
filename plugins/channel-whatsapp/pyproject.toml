@@ -37,7 +37,7 @@ dependencies = [
     "starlette>=0.40",
     # SecretStr for the credentials and the settings base/config.
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
 ]
 
 [project.urls]

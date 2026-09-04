@@ -50,7 +50,7 @@ dependencies = [
     "pydantic>=2",
     # Settings base for the agent settings group (``SettingsConfigDict`` in
     # settings.py); declared directly rather than leaned on as a transitive.
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
     # OpenTelemetry context reset when starting an independent monitoring trace
     # (a run must not inherit spans/tags from a caller). Provides
     # ``opentelemetry.context``; declared directly rather than leaned on as a
