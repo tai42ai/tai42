@@ -16,7 +16,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
@@ -29,6 +29,7 @@ from tai42_contract.channels import (
 )
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import MediaItem, check_media_list
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, expression_annotation
 
 #: Which door a route is reached through: ``api`` delivers by signed callback,
 #: ``channel`` delivers back through the medium adapter's ``notify``.
@@ -477,8 +478,44 @@ class ConversationRouteCreate(BaseModel):
     # one mapping the tool result to the reply. Compiled at create; an ``agent`` target
     # carries neither. ``reply_expr`` maps the SUCCESS shape: a result whose own ``status``
     # names a non-success terminal diverts to the turn's error outcome without being mapped.
-    payload_expr: str | None = None
-    reply_expr: str | None = None
+    # Both carry the ``x-tai42-expression`` schema annotation (via ``Annotated`` so the
+    # attribute default stays the ``None`` literal — the api-gate flags a ``Field(default=...)``
+    # redeclaration as breaking) so a schema-driven UI auto-renders the jq editor.
+    payload_expr: Annotated[
+        str | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="payload expression",
+                    blurb="the inbound turn payload the route maps to the tool/flow kwargs",
+                    keys=[
+                        ("message", "the inbound message text"),
+                        ("sender", "the sending address"),
+                        ("our_identity", "door=channel: the medium address we are texted at"),
+                        ("channel", "door=channel: the registry channel name"),
+                        ("thread_id", "the turn's canonical thread id (the thread doors' id)"),
+                        ("person_id", "multichannel only: the linked person's id"),
+                        ("person_addresses", "multichannel only: the person's known addresses"),
+                        ("params", "non-empty entry params, nested under this key"),
+                        ("form", "a structured form submission, present only when the inbound carried one"),
+                    ],
+                    returns="the JSON object dispatched as the tool/flow kwargs",
+                )
+            }
+        ),
+    ] = None
+    reply_expr: Annotated[
+        str | None,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="reply expression",
+                    blurb="the tool/flow result (the SUCCESS shape) the route maps to the guest reply",
+                    returns="the reply: null (silent), a string, or a list of answer parts",
+                )
+            }
+        ),
+    ] = None
     # The thread's control mode when no per-thread override is set: ``agent`` runs the
     # target turn, ``manual`` suppresses it for an operator to answer.
     initial_mode: ConversationMode = "agent"

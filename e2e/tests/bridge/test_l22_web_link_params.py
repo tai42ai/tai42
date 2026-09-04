@@ -195,7 +195,7 @@ async def test_a_no_params_visitor_delivers_a_byte_identical_payload(
     assert (await web.send(text)).status_code == 200
     (entry,) = await _wait_record_count(bridge, text, 1)
     # jq ``keys`` is sorted; the base set carries no ``params`` for a no-params entry.
-    assert entry["value"] == "channel,message,our_identity,sender", "a no-params turn must add no params key"
+    assert entry["value"] == "channel,message,our_identity,sender,thread_id", "a no-params turn must add no params key"
 
 
 async def test_bounds_violations_answer_a_400_page_and_mint_no_session(

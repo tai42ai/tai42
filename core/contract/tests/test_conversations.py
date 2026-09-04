@@ -678,6 +678,42 @@ def test_tool_target_carries_optional_exprs():
 
 
 @pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
+def test_route_exprs_carry_the_jq_expression_annotation(field: str):
+    # ``payload_expr``/``reply_expr`` are jq-typed strings, so each declares itself in the
+    # generated JSON schema under the shared ``x-tai42-expression`` vendor key (language jq)
+    # for a schema-driven UI to auto-render the jq editor.
+    from tai42_contract.conversations import ConversationRouteCreate
+    from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
+
+    prop = ConversationRouteCreate.model_json_schema()["properties"][field]
+    annotation = prop[EXPRESSION_ANNOTATION_KEY]
+    assert annotation["language"] == "jq"
+    assert annotation["label"]
+
+
+def test_route_expr_annotation_keeps_the_none_default_additive():
+    # CRITICAL api-gate trap: the annotation must ride ``Annotated`` so the attribute default
+    # stays the ``None`` literal — a ``Field(default=None, ...)`` redeclaration is flagged as a
+    # breaking change by the griffe api-gate. The field stays optional-defaulting-None and the
+    # annotation adds ONLY the vendor key to a plain declaration.
+    from tai42_contract.conversations import ConversationRouteCreate
+    from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
+
+    route = ConversationRouteCreate(**_route_kwargs(target_kind="tool", target_name="echo"))
+    assert route.payload_expr is None
+    assert route.reply_expr is None
+
+    schema = ConversationRouteCreate.model_json_schema()
+    for field in ("payload_expr", "reply_expr"):
+        prop = dict(schema["properties"][field])
+        prop.pop(EXPRESSION_ANNOTATION_KEY)
+        # Once the vendor key is removed, the schema is a plain nullable-string defaulting None:
+        # the annotation added ONLY its key and left nullability + the None default intact.
+        assert prop["default"] is None
+        assert prop["anyOf"] == [{"type": "string"}, {"type": "null"}]
+
+
+@pytest.mark.parametrize("field", ["payload_expr", "reply_expr"])
 def test_agent_target_forbids_exprs(field: str):
     from tai42_contract.conversations import ConversationRouteCreate
 

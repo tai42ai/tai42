@@ -804,7 +804,7 @@ async def test_tool_payload_off_carries_no_person_keys(env, monkeypatch):
     await turn_module.accept("twilio", "+15550001111", "+2000", "+2000", "hi", "PID-1")
     await _settle()
     assert len(seen) == 1
-    assert set(seen[0]) == {"message", "sender", "our_identity", "channel"}
+    assert set(seen[0]) == {"message", "sender", "our_identity", "channel", "thread_id"}
 
 
 async def test_tool_payload_on_carries_a_stable_person_id(env, monkeypatch):

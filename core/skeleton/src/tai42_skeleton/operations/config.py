@@ -107,10 +107,18 @@ async def read_settings_schema() -> dict:
     Each group carries the settings class' field metadata plus a ``value`` per
     field, resolved with pydantic-settings precedence: ``os.environ`` wins (in
     k8s config mode the cluster injects vars the dotenv store never sees), then
-    the stored env override, then the field default. Nested-group reference
-    fields (``env_var == ""``) are non-editable and report ``value: null``.
-    Secret fields report their real value — this authed surface round-trips
-    values through the editor; masking is display-side only, never on the wire.
+    the stored env override, then the shared ``TAI_DEFAULT_*`` namespace, then the
+    field default. Nested-group reference fields (``env_var == ""``) are non-editable
+    and report ``value: null``. Secret fields report their real value — this authed
+    surface round-trips values through the editor; masking is display-side only,
+    never on the wire.
+
+    Each field also carries ``value_source`` naming which layer supplied its
+    resolved ``value`` so a UI can badge provenance (notably "from default" for a
+    ``TAI_DEFAULT_*`` fallback): ``"env"`` (process env), ``"stored"`` (the dotenv
+    override), ``"default_namespace"`` (a ``TAI_DEFAULT_*`` fallback, from process
+    env or the store), ``"field_default"`` (the bare field default), or ``null``
+    for a non-editable nested-group reference.
 
     Only IMPORTED settings classes appear: in a running skeleton the kit,
     skeleton, and manifest-loaded plugin modules — the intended scope.
@@ -124,20 +132,26 @@ async def read_settings_schema() -> dict:
             default_var = field.default_namespace_var
             if field.env_var and field.env_var in os.environ:
                 payload["value"] = os.environ[field.env_var]
+                payload["value_source"] = "env"
             elif field.env_var and field.env_var in stored:
                 payload["value"] = stored[field.env_var]
+                payload["value_source"] = "stored"
             elif field.env_var and default_var and default_var in os.environ:
                 # The field's own var and stored override are both absent, but it
                 # participates in the shared ``TAI_DEFAULT_*`` namespace and that layer
                 # supplies a value — the truth an operator sees, resolved before the
                 # bare field default.
                 payload["value"] = os.environ[default_var]
+                payload["value_source"] = "default_namespace"
             elif field.env_var and default_var and default_var in stored:
                 payload["value"] = stored[default_var]
+                payload["value_source"] = "default_namespace"
             elif field.env_var:
                 payload["value"] = field.default
+                payload["value_source"] = "field_default"
             else:
                 payload["value"] = None
+                payload["value_source"] = None
             fields.append(payload)
         groups.append(
             {
