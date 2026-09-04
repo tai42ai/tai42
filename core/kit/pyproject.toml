@@ -80,7 +80,7 @@ jq = ["jq>=1.10"]
 
 # uvicorn CLI-arg parsing (utils/runtime/uvicorn_util.py) — opt-in for
 # consumers that run their own server.
-uvicorn = ["uvicorn>=0.43"]
+uvicorn = ["uvicorn>=0.52.4"]
 
 # LLM provider backends — imported lazily by llm/models.py and llm/embedding.py
 # inside the per-provider match branches. Each pulls the llm base stack.

@@ -88,7 +88,7 @@ dependencies = [
     # ``tai42_kit.net.jwt`` verifier uses, so fixture-signed tokens verify identically.
     "joserfc>=1.7,<2",
     "fastapi>=0.135",
-    "uvicorn>=0.43",
+    "uvicorn>=0.52.4",
     "pydantic>=2.12",
     "pydantic-settings>=2.13",
     "PyYAML>=6.0",
