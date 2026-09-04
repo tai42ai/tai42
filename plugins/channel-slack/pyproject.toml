@@ -27,7 +27,7 @@ dependencies = [
     # and the tai42_app handle the plugin registers through.
     # Republished for the tai42-contract 5.x major (unified park protocol).
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.4,<7",
+    "tai42-contract>=6.5,<7",
     # HttpxClient + RedisClient pooling, TaiBaseSettings + the settings cache
     # registry. The [redis] extra carries the correlation store's driver.
     "tai42-kit[redis]>=3.8,<4",
