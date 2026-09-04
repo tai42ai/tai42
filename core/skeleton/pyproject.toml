@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-skeleton"
-version = "9.15.0"
+version = "9.16.0"
 description = "Open-source implementation of tai42-contract: the extended MCP server hosting tools, agents, extensions, connectors, hooks, and storage for the TAI ecosystem."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     # The pure interface contract this package implements.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=6.4,<7",
+    "tai42-contract>=6.5,<7",
     # Generic leaf helpers + pooled-client framework. Extras: the LLM stack
     # (agent facets, checkpoint/store registries), jq (hooks + policy
     # conditions), uvicorn (CLI arg parsing), redis/postgres drivers. The floor
