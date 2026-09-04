@@ -90,7 +90,7 @@ dependencies = [
     "fastapi>=0.135",
     "uvicorn>=0.43",
     "pydantic>=2.12",
-    "pydantic-settings>=2.13",
+    "pydantic-settings>=2.15.0",
     "PyYAML>=6.0",
     # The Celery client library the celery-backend census pings the control plane
     # with (never tai42_backend_celery — the harness does not import the SUT), plus

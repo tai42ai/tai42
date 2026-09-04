@@ -35,7 +35,7 @@ dependencies = [
     "botocore>=1.40,<1.41",
     # SecretStr for the AWS credentials and the settings base/config.
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
 ]
 
 [project.urls]

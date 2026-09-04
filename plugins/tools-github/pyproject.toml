@@ -33,7 +33,7 @@ dependencies = [
     "tai42-kit[curl]>=3.8,<4",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
 ]
 
 [project.urls]

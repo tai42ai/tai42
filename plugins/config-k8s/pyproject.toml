@@ -32,7 +32,7 @@ dependencies = [
     "tai42-kit>=3.8,<4",
     # settings.py imports these directly (model_validator + SettingsConfigDict).
     "pydantic>=2.12",
-    "pydantic-settings>=2.11",
+    "pydantic-settings>=2.15.0",
     # Manifest YAML: parse_config (!ENV expansion) + direct yaml load/dump.
     "pyaml-env>=1.2",
     "PyYAML>=6.0",
