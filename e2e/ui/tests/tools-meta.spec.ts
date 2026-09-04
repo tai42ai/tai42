@@ -166,7 +166,7 @@ test('folder explorer: a filed tool lives inside its folder, reached via the bre
 
   // At the root the folder is offered as a subfolder to open; the filed tool is NOT
   // listed. `exact` so a longer-named tool at the root never substring-matches e2e_echo.
-  const folderButton = page.getByRole('button', { name: folderName });
+  const folderButton = page.getByRole('button', { name: folderName, exact: true });
   await expect(folderButton).toBeVisible();
   await expect(page.getByRole('link', { name: `Open tool e2e_echo`, exact: true })).toBeHidden();
 
@@ -174,7 +174,7 @@ test('folder explorer: a filed tool lives inside its folder, reached via the bre
   // appears in the folder's flat list.
   await folderButton.click();
   const breadcrumb = page.getByRole('navigation', { name: 'Folder path' });
-  await expect(breadcrumb.getByRole('button', { name: folderName })).toHaveAttribute('aria-current', 'page');
+  await expect(breadcrumb.getByRole('button', { name: folderName, exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(
     page.getByRole('link', { name: `Open tool e2e_echo`, exact: true }),
   ).toBeVisible();
