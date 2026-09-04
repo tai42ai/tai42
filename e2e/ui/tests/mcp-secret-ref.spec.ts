@@ -1,24 +1,25 @@
 /**
- * The MCP tab's secret-reference flow (`/manifest` → MCP) over the REAL stack. An
+ * The MCP config editor's secret-reference flow (the Connectors page `/connectors`) over
+ * the REAL stack. An
  * MCP entry's `config.env` map is secret-bearing: the editor mounts a masked
  * `SecretRefField` per env value that EITHER references an existing env key (stored
  * as an `!ENV ${KEY}` manifest leaf) OR pastes a new secret (a combined
  * store-then-mark op that generates the key). On save, an env key THIS editor
  * generated via a paste and no longer referenced is swept; a key it did not generate
  * is NEVER swept. This orphan handling is NOT a prompt/dialog — it is an automatic,
- * per-key, provenance-based sweep at save time (McpTab's `orphanedKeysOf`): "accept"
+ * per-key, provenance-based sweep at save time (the MCP editor's `orphanedKeysOf`): "accept"
  * (drop) is what happens to a session-generated orphan, "decline" (keep) is what
  * happens to a picked/pre-existing one. The three orphan passes are
  * driven here end to end over the live combined-op + reload seam (accept a
  * session-generated key, decline a picked key, and the per-key split of a two-secret
- * server), the browser-level counterpart of the pytest unit proofs in `McpTab.test.tsx`.
+ * server), the browser-level counterpart of the unit proofs in `mcp-servers.test.tsx`.
  *
  * Real-UX notes (verified against tai-studio source, not the plan's wording):
  *  - The entry is seeded via the API (`POST /api/mcp-config`) rather than authored
  *    through the schema-driven form: the focus is the SecretRefField + save-time
  *    sweep, not driving the nested transport/record form. `env` is launcher-only, so
  *    the seeded entry carries a `command` transport.
- *  - McpTab NEVER passes a `{source:'paste'}` value to SecretRefField — the field's
+ *  - The MCP editor NEVER passes a `{source:'paste'}` value to SecretRefField — the field's
  *    value is always derived from the stored `!ENV` marker. So a paste does NOT show
  *    the field's "New secret" chip; it surfaces as a freshly GENERATED env key plus a
  *    masked key-reference chip. The honest observable of a paste is the generated key
@@ -77,11 +78,12 @@ async function seedEntry(request: APIRequestContext, title: string, key: string)
   await seedEntryEnv(request, title, { [ENV_ENTRY]: key });
 }
 
-/** Open the MCP tab of the Manifest page and wait for the entry's `leaf` SecretRefField. */
+/** Open the Connectors page (the MCP config surface's new home) and wait for the entry's
+ *  `leaf` SecretRefField. The nav refit folded the former Manifest → MCP tab into the
+ *  Connectors page's inline "Configuration" section (default form view), so no tab click:
+ *  the seeded entry's SecretRefField mounts directly once the page loads. */
 async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void> {
-  await page.goto('/manifest');
-  // ``exact`` so the "MCP" tab is not ambiguous with the "Sub-MCP" tab (a substring match).
-  await page.getByRole('tab', { name: 'MCP', exact: true }).click();
+  await page.goto('/connectors');
   await expect(page.getByTestId(`mcp-secret-0-${leaf}`)).toBeVisible();
 }
 
@@ -89,7 +91,7 @@ async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void>
  * Paste a fresh secret into entry 0's `leaf` SecretRefField and return the server-generated
  * env key. The combined store-then-mark op (`POST /api/mcp-config/secret-env`) writes a new
  * env key then repoints the leaf's `!ENV` marker at it — and a key generated THIS way is the
- * only kind the save-time orphan sweep may later delete (McpTab's `sessionGeneratedKeysRef`).
+ * only kind the save-time orphan sweep may later delete (the MCP editor's `sessionGeneratedKeysRef`).
  * The op's response carries a COUNT, not the key name, so the generated key is discovered as
  * the single env key present after the op that was absent before it.
  */

@@ -26,8 +26,15 @@ import { seedCredential } from './helpers';
  * the sidebar) paired with the page's own `<h1>` text. The two differ for the
  * Dashboard row (nav "Dashboard" → observability page `<h1>` "Dashboard") and the
  * extensions page (nav "Extensions" → `<h1>` "Tool extensions"). Ordered as the
- * grouped nav renders: the Dashboard lead row, then Capabilities, Integrations,
- * Activity, Administration.
+ * grouped nav renders: the Dashboard lead row, then Capabilities, Connections,
+ * Triggers, Activity, Administration.
+ *
+ * Marketplace lives in Administration but is intentionally NOT walked here: its
+ * Browse tab reads a live registry that this smoke stack does not wire (the
+ * dedicated marketplace specs gate themselves on `TAI_E2E_MARKETPLACE`), so an
+ * unbrowsable registry would surface a loud failure this default-surface smoke
+ * must not assert. The Marketplace nav link still renders (its `/api/marketplace`
+ * door is mounted under `default_routers="all"`); only its page is left uncovered.
  */
 const NAV_PAGES: ReadonlyArray<{ readonly navLabel: string; readonly heading: string }> = [
   // Dashboard lead row.
@@ -38,22 +45,27 @@ const NAV_PAGES: ReadonlyArray<{ readonly navLabel: string; readonly heading: st
   { navLabel: 'Presets', heading: 'Presets' },
   { navLabel: 'Extensions', heading: 'Tool extensions' },
   { navLabel: 'Templates', heading: 'Templates' },
-  // Integrations.
+  // Connections. The MCP config surface moved onto the Connectors page (its own
+  // secret-ref flow is covered by mcp-secret-ref.spec.ts); sub-MCP is now the
+  // Served endpoints page.
   { navLabel: 'Connectors', heading: 'Connectors' },
+  { navLabel: 'Served endpoints', heading: 'Served endpoints' },
+  // Triggers.
   { navLabel: 'Hooks', heading: 'Hooks' },
-  { navLabel: 'Storage', heading: 'Storage' },
-  // Activity.
   { navLabel: 'Scheduling', heading: 'Scheduling' },
+  // Activity.
+  { navLabel: 'Conversations', heading: 'Conversations' },
   { navLabel: 'Interactions', heading: 'Interactions' },
   { navLabel: 'Notifications', heading: 'Notifications' },
   // Administration.
-  { navLabel: 'Manifest', heading: 'Manifest' },
   { navLabel: 'Settings', heading: 'Settings' },
+  { navLabel: 'Storage', heading: 'Storage' },
+  { navLabel: 'Manifest', heading: 'Manifest' },
   { navLabel: 'System', heading: 'System' },
 ];
 
-/** The grouped nav's four section headers, in render order under the Dashboard row. */
-const NAV_SECTIONS = ['Capabilities', 'Integrations', 'Activity', 'Administration'] as const;
+/** The grouped nav's five section headers, in render order under the Dashboard row. */
+const NAV_SECTIONS = ['Capabilities', 'Connections', 'Triggers', 'Activity', 'Administration'] as const;
 
 /**
  * Assert the routed feature page came up cleanly: its own heading is visible and
@@ -66,7 +78,7 @@ async function assertPageRenders(page: Page, heading: string): Promise<void> {
   await expect(page.getByText("isn't available for your session")).toHaveCount(0);
 }
 
-test('the grouped primary nav renders its Dashboard lead row and four sections', async ({
+test('the grouped primary nav renders its Dashboard lead row and five sections', async ({
   page,
 }) => {
   await seedCredential(page);
