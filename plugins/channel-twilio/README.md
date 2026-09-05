@@ -31,6 +31,8 @@ settings cache). Beyond those it depends on `httpx`, `starlette`, and
 `httpx`, and webhook signature validation is ~30 lines of stdlib
 `hmac`/`hashlib`/`base64`.
 
+The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the
