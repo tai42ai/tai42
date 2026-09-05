@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: tools-twilio
 package: tai42-tools-twilio
-version: 1.0.7
+version: 1.0.8
 description: >-
   Twilio provisioning tools for the TAI ecosystem: manifest-loaded REST tools
   that list a Twilio account's incoming phone numbers, read a number's

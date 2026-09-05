@@ -2,7 +2,7 @@ spec_version: 1
 namespace: tai42
 name: config-k8s
 package: tai42-config-k8s
-version: 1.0.8
+version: 1.0.9
 description: >-
   Kubernetes ConfigManager provider plugin for the TAI ecosystem: env via
   Secrets, manifest via ConfigMaps.
