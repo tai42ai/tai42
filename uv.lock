@@ -6295,7 +6295,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.24" },
     { name = "pyaml-env", specifier = ">=1.2" },
     { name = "pydantic", specifier = ">=2.12" },
-    { name = "pydantic-core", specifier = ">=2.48.0" },
+    { name = "pydantic-core", specifier = ">=2" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "pypdf", marker = "extra == 'files'", specifier = ">=5" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.389" },
