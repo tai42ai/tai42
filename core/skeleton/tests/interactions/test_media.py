@@ -89,6 +89,44 @@ async def test_substitute_absolute_url_for_a_channel_send(fake_redis):
     assert result[0].url.startswith("https://box.example" + MEDIA_ROUTE_PREFIX)
 
 
+async def test_substitute_absolutizes_relative_route_ref_all_kinds(fake_redis):
+    # An ALREADY-STORED same-origin route reference (any media kind) is made absolute against
+    # base_url for an off-origin channel fetch — not only a freshly-decoded data: image. caption
+    # and filename ride the rewrite unchanged.
+    store = InteractionStore("t:")
+    doc_ref = MEDIA_ROUTE_PREFIX + "d" * 43
+    img_ref = MEDIA_ROUTE_PREFIX + "i" * 43
+    items: list[MediaItem | dict] = [
+        {"kind": "document", "url": doc_ref, "filename": "receipt.pdf"},
+        {"kind": "image", "url": img_ref, "caption": "shot"},
+    ]
+    result = await substitute_media(store, fake_redis, items, ttl_seconds=100, base_url="https://box.example/")
+    assert result[0].url == "https://box.example" + doc_ref
+    assert result[0].filename == "receipt.pdf"
+    assert result[1].url == "https://box.example" + img_ref
+    assert result[1].caption == "shot"
+
+
+async def test_substitute_relative_route_ref_passes_through_without_base_url(fake_redis):
+    # With no base_url (inbox-only) a relative route reference passes through unchanged — the
+    # pre-existing same-origin behavior.
+    store = InteractionStore("t:")
+    doc_ref = MEDIA_ROUTE_PREFIX + "d" * 43
+    items: list[MediaItem | dict] = [{"kind": "document", "url": doc_ref, "filename": "r.pdf"}]
+    result = await substitute_media(store, fake_redis, items, ttl_seconds=100)
+    assert result[0].url == doc_ref
+
+
+async def test_substitute_already_absolute_served_url_is_idempotent(fake_redis):
+    # An already-absolute served url does not start with MEDIA_ROUTE_PREFIX, so the rewrite
+    # leaves it untouched — re-running the substitution never double-prefixes.
+    store = InteractionStore("t:")
+    absolute = "https://box.example" + MEDIA_ROUTE_PREFIX + "d" * 43
+    items: list[MediaItem | dict] = [{"kind": "document", "url": absolute, "filename": "r.pdf"}]
+    result = await substitute_media(store, fake_redis, items, ttl_seconds=100, base_url="https://box.example/")
+    assert result[0].url == absolute
+
+
 async def test_substitute_is_pure_over_the_input(fake_redis):
     store = InteractionStore("t:")
     original: list[MediaItem | dict] = [{"kind": "image", "url": _DATA_PNG}]

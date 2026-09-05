@@ -198,6 +198,7 @@ class RichFakeChannel(FakeChannel):
     supports_media_notifications = True
     supports_template_notifications = True
     supports_interactive_notifications = True
+    supports_location_notifications = True
     supports_form_notifications = True
 
 
@@ -236,6 +237,98 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
     assert channel.sends[0].media == [item]
     assert channel.sends[0].options == [ReplyOption(text="Thanks")]
     assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_with_full_vocabulary_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    # Full parity with the flow answer path: an operator send carrying location/sections/
+    # header/footer stores ONE rich AnswerPart and the delivery machine hands the whole
+    # vocabulary to the channel on the part's final chunk.
+    from tai42_contract.channels import OptionSection, ReplyOption
+    from tai42_contract.interactions import MediaItem, MediaKind
+
+    agent = RecordingAgent()
+    channel = RichFakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+
+    section = OptionSection(title="Pick", rows=[ReplyOption(text="Item A")])
+    header = MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.png")
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="a titled card",
+        operator_principal="op-1",
+        sections=[section],
+        header=header,
+        footer="powered by us",
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_parts is not None
+    assert record.answer_parts[0].sections == [section]
+    assert record.answer_parts[0].header == header
+    assert record.answer_parts[0].footer == "powered by us"
+    # The delivered notification carries the operator's sectioned card (final chunk of the part).
+    assert channel.sends[0].sections == [section]
+    assert channel.sends[0].header == header
+    assert channel.sends[0].footer == "powered by us"
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_with_location_stores_a_rich_part_and_delivers_it(env, monkeypatch):
+    from tai42_contract.interactions import LocationElement
+
+    agent = RecordingAgent()
+    channel = RichFakeChannel()
+    route = _channel_route()
+    _wire(monkeypatch, FakeManager(route), agent, channel)
+
+    location = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="we are here",
+        operator_principal="op-1",
+        location=location,
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.answer_parts is not None
+    assert record.answer_parts[0].location == location
+    assert channel.sends[0].location == location
+    assert record.delivery_status is DeliveryStatus.DELIVERED
+
+
+async def test_operator_send_location_to_incapable_channel_fails_the_record(env, monkeypatch):
+    # The delivery machine's capability gate holds for an operator location send: a channel that
+    # does not advertise supports_location_notifications never receives the part — the record
+    # fails loudly instead of the location silently dropping.
+    from tai42_contract.interactions import LocationElement
+
+    channel = FakeChannel()
+    route = _channel_route(target_kind="tool")
+    _wire(monkeypatch, FakeManager(route), None, channel)
+
+    message_id = await operator_send(
+        route=route,
+        thread_id="bridge:line:+15550002222",
+        client_address="+15550002222",
+        text="we are here",
+        operator_principal="op-1",
+        location=LocationElement(latitude=51.5, longitude=-0.12),
+    )
+    await _settle()
+
+    record = await _store().get_record(message_id)
+    assert record is not None
+    assert record.delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
 
 
 async def test_operator_send_with_template_stores_a_rich_part_and_delivers_it(env, monkeypatch):

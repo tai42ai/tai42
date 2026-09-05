@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.app import tai42_app
@@ -25,9 +26,10 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    OptionSection,
     ReplyOption,
 )
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 from tai42_contract.manifest import ApiToolsConfig
 
 from tai42_skeleton.access_control.request_scopes import (
@@ -131,6 +133,10 @@ async def test_notify_user_forwards_arguments_and_confirms(monkeypatch: pytest.M
                 "media": None,
                 "template": None,
                 "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": None,
             },
         )
@@ -157,6 +163,10 @@ async def test_notify_user_defaults_forwarded_and_maps_valueerror(monkeypatch: p
                 "media": None,
                 "template": None,
                 "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": None,
             },
         )
@@ -258,6 +268,10 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "media": media,
                 "template": None,
                 "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": None,
             },
         ),
@@ -270,6 +284,10 @@ async def test_notify_user_forwards_media_and_template(monkeypatch: pytest.Monke
                 "media": None,
                 "template": template,
                 "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": None,
             },
         ),
@@ -364,6 +382,10 @@ async def test_notify_user_forwards_options(monkeypatch: pytest.MonkeyPatch) -> 
                 "media": None,
                 "template": None,
                 "options": [ReplyOption(text="Item A"), ReplyOption(text="Item B")],
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": None,
             },
         )
@@ -389,10 +411,91 @@ async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> N
                 "media": None,
                 "template": None,
                 "options": None,
+                "location": None,
+                "sections": None,
+                "header": None,
+                "footer": None,
                 "schema": schema,
             },
         )
     ]
+
+
+async def test_notify_user_forwards_full_vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Full parity with the flow answer path: location/sections/header/footer are forwarded
+    # verbatim to the channels helper alongside the earlier rich fields.
+    helper = _RecordingHelper()
+    monkeypatch.setattr(notifications_ops, "_notify_user", helper)
+    location = LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
+    sections = [OptionSection(title="Pick one", rows=[ReplyOption(text="Item A")])]
+    header = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/h.png")
+
+    await notifications_ops.notify_user(
+        "choose", channel="web", location=location, sections=sections, header=header, footer="thanks"
+    )
+
+    assert helper.calls == [
+        (
+            ("choose",),
+            {
+                "channel": "web",
+                "recipient": None,
+                "audience": None,
+                "media": None,
+                "template": None,
+                "options": None,
+                "location": location,
+                "sections": sections,
+                "header": header,
+                "footer": "thanks",
+                "schema": None,
+            },
+        )
+    ]
+
+
+def test_notifyuser_model_enforces_composition_matrix() -> None:
+    # The composition matrix is enforced ON the operator request model itself (the shared
+    # check_interactive_composition, reused not duplicated), so a bad combination is a clean
+    # request-boundary ValidationError → 400 — parity with the flow AnswerPart.
+    section = OptionSection(title="Pick", rows=[ReplyOption(text="A")])
+    header = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/h.png")
+
+    # options XOR sections — one choice surface.
+    with pytest.raises(ValidationError, match="options and sections are mutually exclusive"):
+        notifications_ops.NotifyUser(message="hi", options=[ReplyOption(text="A")], sections=[section])
+    # schema excludes a choice surface.
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        notifications_ops.NotifyUser(message="hi", schema={"type": "object"}, sections=[section])
+    # header/footer require a choice surface.
+    with pytest.raises(ValidationError, match="header requires options or sections"):
+        notifications_ops.NotifyUser(message="hi", header=header)
+    with pytest.raises(ValidationError, match="footer requires options or sections"):
+        notifications_ops.NotifyUser(message="hi", footer="ps")
+    # template is the standalone out-of-window send.
+    with pytest.raises(ValidationError, match="sections and template are mutually exclusive"):
+        notifications_ops.NotifyUser(
+            message="hi",
+            template=ChannelTemplate(name="t", language="en_US"),
+            sections=[section],
+        )
+    # A valid sectioned interactive message with a header/footer composes cleanly.
+    ok = notifications_ops.NotifyUser(message="pick", sections=[section], header=header, footer="thanks")
+    assert ok.sections == [section]
+    assert ok.header == header
+    assert ok.footer == "thanks"
+    # A blank message may ride a location alone (content-only send).
+    assert notifications_ops.NotifyUser(message="", location=LocationElement(latitude=1.0, longitude=2.0)).message == ""
+
+
+def test_notifyuser_options_description_is_accurate_for_the_extended_model() -> None:
+    # Regression on the stale field description: with sections now a real field, the options
+    # description names the true exclusivity set (template, sections and schema) and the
+    # media/location combination — never a forward-reference to a missing field.
+    desc = notifications_ops.NotifyUser.model_fields["options"].description
+    assert desc is not None
+    assert "mutually exclusive with template, sections and schema" in desc.lower()
+    assert "may combine with media and location" in desc.lower()
 
 
 async def test_notify_user_schema_capability_gap_maps_not_implemented_to_501(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -28,6 +28,7 @@ from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions.models import (
     MEDIA_CAPTION_MAX_CHARS,
+    MISMATCH_NOTICE_MAX_CHARS,
     AnswerFormat,
     AnswerMismatchPolicy,
     LocationElement,
@@ -168,6 +169,22 @@ with warnings.catch_warnings():
             # cannot render media ignores it (no capability flag), never refuses the send.
             if value is not None:
                 check_media_list(value)
+            return value
+
+        @field_validator("mismatch_notice")
+        @classmethod
+        def _check_mismatch_notice(cls, value: str | None) -> str | None:
+            # None uses the built-in default; a set notice is re-validated to the SAME
+            # non-blank + guest-reply cap the ask REQUEST (``InteractionRequest``) enforces,
+            # so the delivery frame is bounded exactly as the ask that produced it — the
+            # symmetric defensive re-check the ``media`` re-validation above applies.
+            if value is not None:
+                if not value.strip():
+                    raise ValueError("mismatch_notice must be non-blank when set")
+                if len(value) > MISMATCH_NOTICE_MAX_CHARS:
+                    raise ValueError(
+                        f"mismatch_notice must be at most {MISMATCH_NOTICE_MAX_CHARS} characters, got {len(value)}"
+                    )
             return value
 
         @model_validator(mode="after")

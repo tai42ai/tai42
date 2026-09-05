@@ -31,9 +31,19 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
-from pydantic import BaseModel, Field
-from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate, Option
-from tai42_contract.interactions.models import MediaItem
+from pydantic import BaseModel, Field, field_validator, model_validator
+from tai42_contract.channels import (
+    ChannelDeliveryError,
+    ChannelInputError,
+    ChannelTemplate,
+    Option,
+    OptionSection,
+    check_footer,
+    check_header,
+    check_interactive_composition,
+    check_sections,
+)
+from tai42_contract.interactions.models import LocationElement, MediaItem
 
 from tai42_skeleton.access_control.user import CrossIdentityAudienceError, request_identity
 from tai42_skeleton.channels.notifications_sink import read_notifications
@@ -92,6 +102,15 @@ with warnings.catch_warnings():
                 "record and rendered there. Mutually exclusive with template."
             ),
         )
+        location: LocationElement | None = Field(
+            default=None,
+            description=(
+                "Optional shared geographic point sent WITH the message (a map pin). On a named channel it "
+                "requires a channel that advertises location support (else a 501); with no channel it is stored "
+                "on the internal inbox record. It may carry the message content on its own (a blank message is "
+                "admissible when media or a location carries it). Mutually exclusive with template."
+            ),
+        )
         template: ChannelTemplate | None = Field(
             default=None,
             description=(
@@ -103,10 +122,37 @@ with warnings.catch_warnings():
         options: list[Option] | None = Field(
             default=None,
             description=(
-                "Optional tappable options sent WITH the message — each a reply option (a tap submits its text "
-                "as a visitor message) or a link option (a tap opens its url). On a named channel it requires a "
-                "channel that advertises interactive support (else a 501); with no channel it is stored on the "
-                "internal inbox record. Mutually exclusive with template and sections, may combine with media."
+                "Optional FLAT tappable options sent WITH the message — each a reply option (a tap submits its "
+                "text as a visitor message) or a link option (a tap opens its url). On a named channel it "
+                "requires a channel that advertises interactive support (else a 501); with no channel it is "
+                "stored on the internal inbox record. One message carries ONE interactive surface: mutually "
+                "exclusive with template, sections and schema; may combine with media and location."
+            ),
+        )
+        sections: list[OptionSection] | None = Field(
+            default=None,
+            description=(
+                "Optional SECTIONED tappable options — titled groups of reply rows, the sectioned alternative to "
+                "the flat options list (rows summed across sections stay within the same cap). On a named channel "
+                "it requires a channel that advertises interactive support (else a 501); with no channel it is "
+                "stored on the internal inbox record. One message carries ONE interactive surface: mutually "
+                "exclusive with options, template and schema; may combine with media and location."
+            ),
+        )
+        header: MediaItem | None = Field(
+            default=None,
+            description=(
+                "Optional single display-media header above an interactive message. It COMPOSES an interactive "
+                "message, so it REQUIRES options or sections; it rides the interactive choice surface's own "
+                "capability (no separate flag) and mutually exclusive with template."
+            ),
+        )
+        footer: str | None = Field(
+            default=None,
+            description=(
+                "Optional short trailing line under an interactive message. Like the header it COMPOSES an "
+                "interactive message, so it REQUIRES options or sections; it rides the choice surface's own "
+                "capability (no separate flag) and mutually exclusive with template."
             ),
         )
         schema: dict[str, Any] | None = Field(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -119,6 +165,45 @@ with warnings.catch_warnings():
                 "and with options, may combine with media."
             ),
         )
+
+        # The new rich fields reuse AnswerPart's/ChannelNotification's SAME field validators, so
+        # the operator send surface bounds each shape identically to the flow answer path — never
+        # a second, drift-prone rule set.
+        @field_validator("sections")
+        @classmethod
+        def _sections_valid(cls, value: list[OptionSection] | None) -> list[OptionSection] | None:
+            return check_sections(value)
+
+        @field_validator("footer")
+        @classmethod
+        def _footer_valid(cls, value: str | None) -> str | None:
+            return check_footer(value)
+
+        @field_validator("header")
+        @classmethod
+        def _header_valid(cls, value: MediaItem | None) -> MediaItem | None:
+            return check_header(value)
+
+        @model_validator(mode="after")
+        def _check_composition(self) -> NotifyUser:
+            # The SHARED cross-field composition matrix every option-carrying carrier enforces
+            # (ChannelNotification, AnswerPart), so the operator send model and the delivered
+            # notification can never diverge — reused, never duplicated. The channels helper
+            # re-validates by constructing the ChannelNotification, but enforcing it HERE gives the
+            # operator door a clean 400 at the request boundary.
+            check_interactive_composition(
+                message=self.message,
+                media=self.media,
+                location=self.location,
+                template=self.template,
+                options=self.options,
+                sections=self.sections,
+                schema=self.schema,
+                header=self.header,
+                footer=self.footer,
+                noun="notification",
+            )
+            return self
 
 
 @operation(summary="List internal notifications", tags=["notifications"])
@@ -153,6 +238,12 @@ async def notify_user(
     template: ChannelTemplate | None = None,
     options: list[Option] | None = None,
     schema: dict[str, Any] | None = None,
+    # Appended after the earlier rich fields so their positional slots are unchanged —
+    # the release API gate treats a moved positional parameter as breaking.
+    location: LocationElement | None = None,
+    sections: list[OptionSection] | None = None,
+    header: MediaItem | None = None,
+    footer: str | None = None,
 ) -> str:
     """Send a human a one-way notification, fire-and-forget.
 
@@ -178,16 +269,26 @@ async def notify_user(
       carrying the medium's ``retry_after`` when it named one;
     * a permanent channel delivery refusal → 502.
 
-    ``media`` (display media sent with the message), ``template`` (a pre-approved
-    out-of-window send), ``options`` (tappable options a tap of which enters the
-    conversation) and ``schema`` (an ask-less form's answer schema — the channel renders the
+    ``media`` (display media sent with the message), ``location`` (a shared map pin),
+    ``template`` (a pre-approved out-of-window send), ``options`` (FLAT tappable options a tap
+    of which enters the conversation), ``sections`` (the SECTIONED tappable-options
+    alternative), ``header``/``footer`` (a media header / trailing line composing an interactive
+    message) and ``schema`` (an ask-less form's answer schema — the channel renders the
     message as the form's prompt, and a submission enters the conversation as a message from
-    the person) are OPTIONAL richer-send forms; the contract enforces media/template,
-    options/template, schema/template and schema/options are each mutually exclusive
-    (options and schema may each combine with media). On a
-    named channel each needs a channel that advertises the matching capability — otherwise
+    the person) are OPTIONAL richer-send forms — FULL parity with the flow answer path's
+    ``AnswerPart`` vocabulary. The contract's shared composition matrix is enforced on this
+    request model identically: ``options`` XOR ``sections`` (one choice surface); ``schema``
+    excludes both; ``header``/``footer`` require a choice surface; ``template`` is the standalone
+    out-of-window send exclusive with every other content/interactive field; ``options``/
+    ``sections`` may each combine with ``media``/``location`` (a contract-invalid combination is
+    a 400). On a
+    named channel each needs a channel that advertises the matching capability
+    (``media``→media, ``location``→location, ``template``→template, ``options``/``sections``→
+    interactive, ``schema``→form; ``header``/``footer`` ride the choice surface's capability, no
+    flag of their own) — otherwise
     the send is refused as a 501, never downgraded to a silent freeform send. With no
-    channel media/template/options are stored on the internal inbox record and rendered
+    channel media/location/template/options/sections/header/footer are stored on the internal
+    inbox record and rendered
     there; ``schema`` alone REQUIRES a channel (a 400 without one) — a stored form nobody
     could submit would be a dead surface, not a notification.
 
@@ -215,6 +316,10 @@ async def notify_user(
             media=media,
             template=template,
             options=options,
+            location=location,
+            sections=sections,
+            header=header,
+            footer=footer,
             schema=schema,
         )
     except SenderIdentityNotAllowedError as exc:

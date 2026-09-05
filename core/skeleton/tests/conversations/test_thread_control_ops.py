@@ -11,8 +11,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, ValidationError
 from tai42_contract.agent import Agent
-from tai42_contract.channels import ChannelTemplate
+from tai42_contract.channels import ChannelTemplate, OptionSection, ReplyOption
 from tai42_contract.conversations import ConversationRoute, Person, PersonAddress
+from tai42_contract.interactions import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.conversations import mode as mode_module
 from tai42_skeleton.conversations import records as records_module
@@ -145,6 +146,10 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
         media=None,
         template=None,
         options=None,
+        location=None,
+        sections=None,
+        header=None,
+        footer=None,
         schema=None,
     ):
         calls.append(
@@ -157,6 +162,10 @@ def _capture_operator_send(monkeypatch) -> list[dict]:
                 "media": media,
                 "template": template,
                 "options": options,
+                "location": location,
+                "sections": sections,
+                "header": header,
+                "footer": footer,
                 "schema": schema,
             }
         )
@@ -185,6 +194,10 @@ async def test_send_route_keyed_resolves_the_embedded_address(wired, monkeypatch
             "media": None,
             "template": None,
             "options": None,
+            "location": None,
+            "sections": None,
+            "header": None,
+            "footer": None,
             "schema": None,
         }
     ]
@@ -210,7 +223,7 @@ async def test_send_template_threads_through_as_channel_template(wired, monkeypa
 
 async def test_send_invalid_template_is_a_400(wired, monkeypatch):
     calls = _capture_operator_send(monkeypatch)
-    with pytest.raises(BadRequestError, match="invalid media/template/options"):
+    with pytest.raises(BadRequestError, match="invalid rich-send fields"):
         await ops.send_conversation_thread_message("chat", _ROUTE_THREAD, "on it", template={"name": "   "})
     assert calls == []
 
@@ -254,6 +267,57 @@ async def test_send_schema_threads_through_to_operator_send(wired, monkeypatch):
     assert result == {"message_id": "msg-1", "thread_id": _ROUTE_THREAD}
     assert calls[0]["schema"] == schema
     assert calls[0]["template"] is None
+
+
+async def test_send_full_vocabulary_threads_through_to_operator_send(wired, monkeypatch):
+    # Full parity with the flow answer path: location/sections/header/footer are coerced to the
+    # typed contract models and handed to operator_send alongside the earlier rich fields.
+    calls = _capture_operator_send(monkeypatch)
+
+    result = await ops.send_conversation_thread_message(
+        "chat",
+        _ROUTE_THREAD,
+        "a titled card",
+        location={"latitude": 51.5, "longitude": -0.12, "name": "HQ"},
+        sections=[{"title": "Pick", "rows": [{"kind": "reply", "text": "Item A"}]}],
+        header={"kind": "image", "url": "https://cdn.example/banner.png"},
+        footer="powered by us",
+    )
+
+    assert result == {"message_id": "msg-1", "thread_id": _ROUTE_THREAD}
+    assert calls[0]["location"] == LocationElement(latitude=51.5, longitude=-0.12, name="HQ")
+    assert calls[0]["sections"] == [OptionSection(title="Pick", rows=[ReplyOption(text="Item A")])]
+    assert calls[0]["header"] == MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/banner.png")
+    assert calls[0]["footer"] == "powered by us"
+
+
+async def test_send_options_and_sections_is_a_400(wired, monkeypatch):
+    # The shared composition matrix (options XOR sections) is enforced on the operator send —
+    # refused before anything is written or delivered.
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="mutually exclusive"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "on it",
+            options=[{"kind": "reply", "text": "A"}],
+            sections=[{"title": "Pick", "rows": [{"kind": "reply", "text": "B"}]}],
+        )
+    assert calls == []
+
+
+async def test_send_header_without_choice_surface_is_a_400(wired, monkeypatch):
+    # A header/footer COMPOSES an interactive message, so it requires options or sections — a
+    # bare header is a loud 400, enforced by the shared composition matrix.
+    calls = _capture_operator_send(monkeypatch)
+    with pytest.raises(BadRequestError, match="header requires options or sections"):
+        await ops.send_conversation_thread_message(
+            "chat",
+            _ROUTE_THREAD,
+            "on it",
+            header={"kind": "image", "url": "https://cdn.example/banner.png"},
+        )
+    assert calls == []
 
 
 async def test_send_schema_and_template_is_a_400(wired, monkeypatch):

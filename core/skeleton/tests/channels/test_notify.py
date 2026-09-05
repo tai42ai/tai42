@@ -25,10 +25,11 @@ from tai42_contract.channels import (
     ChannelInputError,
     ChannelNotification,
     ChannelTemplate,
+    OptionSection,
     ReplyOption,
 )
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX
-from tai42_contract.interactions.models import MediaItem, MediaKind
+from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.channels import notifications_sink
@@ -72,6 +73,7 @@ class RichChannel:
     supports_media_notifications = True
     supports_template_notifications = True
     supports_interactive_notifications = True
+    supports_location_notifications = True
     supports_form_notifications = True
 
     def __init__(self) -> None:
@@ -396,6 +398,126 @@ async def test_media_and_template_mutually_exclusive_on_sink(sink_redis):
     assert await notifications_sink.read_notifications() == []
 
 
+# -- location / sections / header / footer: full flow-path vocabulary parity ---------
+
+
+_LOCATION = LocationElement(latitude=51.5074, longitude=-0.1278, name="London HQ")
+_SECTION = OptionSection(title="Choose an item", rows=[ReplyOption(text="Item A"), ReplyOption(text="Item B")])
+_HEADER = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/banner.png")
+
+
+async def test_notify_threads_location_to_a_capable_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("we are here", channel="rich", location=_LOCATION)
+
+    assert channel.notifications == [ChannelNotification(message="we are here", location=_LOCATION)]
+
+
+async def test_location_only_notify_sends_blank_message_with_location(register_channel):
+    # The contract admits a blank message when a location carries the content (a bare pin),
+    # exactly as it does for a media-only send.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("", channel="rich", location=_LOCATION)
+
+    assert channel.notifications == [ChannelNotification(message="", location=_LOCATION)]
+
+
+async def test_location_to_channel_without_capability_is_not_implemented(register_channel):
+    # Mirrors delivery.py's gating: location rides supports_location_notifications; a channel
+    # without it refuses loudly (NotImplementedError → 501), never a silent drop.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support location notifications"):
+        await notify_user("here", channel="plain", location=_LOCATION)
+    assert channel.notifications == []
+
+
+async def test_location_capability_guard_fires_before_the_feed_record(register_channel, sink_redis):
+    # A refused location send leaves NO phantom feed entry: the guard precedes the audience
+    # in-app record, exactly as the media/options guards do.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support location notifications"):
+        await notify_user("here", channel="plain", location=_LOCATION, audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_notify_threads_sections_to_a_capable_channel(register_channel):
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user("pick a row", channel="rich", sections=[_SECTION])
+
+    assert channel.notifications == [ChannelNotification(message="pick a row", sections=[_SECTION])]
+
+
+async def test_sections_to_channel_without_capability_is_not_implemented(register_channel):
+    # A sectioned list IS an interactive choice surface — the SAME supports_interactive_notifications
+    # flag flat options ride, mirroring the delivery path. A channel without it refuses loudly.
+    channel = register_channel("plain", RecordingChannel())
+
+    with pytest.raises(NotImplementedError, match="does not support interactive notifications"):
+        await notify_user("pick a row", channel="plain", sections=[_SECTION])
+    assert channel.notifications == []
+
+
+async def test_notify_threads_header_and_footer_ungated_on_a_choice_surface(register_channel):
+    # header/footer COMPOSE an interactive message (they require options/sections) and ride the
+    # choice surface's own capability — NO gate of their own, mirroring delivery.py. A channel
+    # advertising interactive support receives them alongside the options.
+    channel = register_channel("rich", RichChannel())
+
+    await notify_user(
+        "a titled card",
+        channel="rich",
+        options=[ReplyOption(text="Item A")],
+        header=_HEADER,
+        footer="powered by us",
+    )
+
+    assert channel.notifications == [
+        ChannelNotification(
+            message="a titled card",
+            options=[ReplyOption(text="Item A")],
+            header=_HEADER,
+            footer="powered by us",
+        )
+    ]
+
+
+async def test_options_and_sections_mutual_exclusion_leaves_no_phantom_feed_entry(register_channel, sink_redis):
+    # options + sections both set is refused by the contract's composition matrix (a pydantic
+    # ValidationError → 400), BEFORE the audience feed record — even on a channel that advertises
+    # interactive support (so the capability guards pass).
+    channel = register_channel("rich", RichChannel())
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        await notify_user("x", channel="rich", options=[ReplyOption(text="A")], sections=[_SECTION], audience="alice")
+
+    assert channel.notifications == []
+    assert await notifications_sink.read_notifications(audience="alice") == []
+    assert await notifications_sink.read_notifications() == []
+
+
+async def test_location_sections_header_footer_stored_on_sink(sink_redis):
+    # Sink parity: the channel-less path STORES the full vocabulary on the feed record, serialized
+    # as the contract dicts, for the inbox to render.
+    await notify_user("we are here", location=_LOCATION)
+    await notify_user("pick a row", sections=[_SECTION], header=_HEADER, footer="ps")
+
+    records = await notifications_sink.read_notifications()
+    assert records[1]["location"] == _LOCATION.model_dump(mode="json")
+    assert records[1]["sections"] is None
+    assert records[0]["sections"] == [_SECTION.model_dump(mode="json")]
+    assert records[0]["header"] == _HEADER.model_dump(mode="json")
+    assert records[0]["footer"] == "ps"
+    assert records[0]["location"] is None
+
+
 # -- schema (ask-less form): channel-only, capability-gated, subset + hook walked --
 
 
@@ -566,6 +688,47 @@ async def test_notify_data_image_http_localhost_base_validates_end_to_end(regist
     forwarded = channel.notifications[0].media
     assert forwarded is not None
     assert forwarded[0].url == "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX + "N" * 43
+
+
+async def test_notify_relative_route_ref_absolutized_for_the_channel(register_channel, monkeypatch, fake_redis):
+    # An ALREADY-STORED same-origin route reference (``{MEDIA_ROUTE_PREFIX}{id}``, any kind —
+    # here a document served by id, not a data: image) reaches an external channel RELATIVE and
+    # unfetchable unless absolutized. The notify path absolutizes it against the public base url
+    # the same way the ask path does — a vendor fetches media from its own servers.
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(
+        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
+    )
+
+    @asynccontextmanager
+    async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        yield fake_redis
+
+    monkeypatch.setattr(notify_module, "client_ctx", _ctx)
+
+    route_ref = MediaItem(kind=MediaKind.DOCUMENT, url=MEDIA_ROUTE_PREFIX + "d" * 43, filename="receipt.pdf")
+    await notify_user("your receipt", channel="rich", media=[route_ref])
+
+    forwarded = channel.notifications[0].media
+    assert forwarded is not None
+    assert forwarded[0].url == "https://box.example" + MEDIA_ROUTE_PREFIX + "d" * 43
+    # caption/filename ride the rewrite unchanged.
+    assert forwarded[0].filename == "receipt.pdf"
+
+
+async def test_notify_relative_route_ref_passes_through_when_no_public_base_url(register_channel, monkeypatch):
+    # With no public base url (an inbox-only deployment) a relative route reference passes
+    # through UNCHANGED — the pre-existing behavior, and no Redis is opened for it (the fixture
+    # provides no client_ctx, so a store access would raise).
+    channel = register_channel("rich", RichChannel())
+    monkeypatch.setattr(notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+
+    route_ref = MediaItem(kind=MediaKind.DOCUMENT, url=MEDIA_ROUTE_PREFIX + "d" * 43, filename="receipt.pdf")
+    await notify_user("your receipt", channel="rich", media=[route_ref])
+
+    forwarded = channel.notifications[0].media
+    assert forwarded is not None
+    assert forwarded[0].url == MEDIA_ROUTE_PREFIX + "d" * 43
 
 
 async def test_notify_data_image_without_public_base_url_raises(register_channel, monkeypatch):

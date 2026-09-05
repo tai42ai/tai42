@@ -561,6 +561,34 @@ def test_mismatch_notice_defaults_bounds_and_rides_the_shapes():
     )
     assert entry.mismatch_notice == "Try again: {reason}"
 
+    # ChannelDelivery re-validates the notice defensively — the SAME non-blank + cap bound the
+    # ask REQUEST enforces, symmetric with its media re-validation, so the delivery frame is
+    # bounded exactly as the ask that produced it.
+    assert (
+        ChannelDelivery(
+            interaction_id="i", question="pick", answer_format="text", callback_url="https://x/cb", timeout_at=now
+        ).mismatch_notice
+        is None
+    )
+    with pytest.raises(ValidationError, match="mismatch_notice must be non-blank"):
+        ChannelDelivery(
+            interaction_id="i",
+            question="pick",
+            answer_format="text",
+            callback_url="https://x/cb",
+            timeout_at=now,
+            mismatch_notice="   ",
+        )
+    with pytest.raises(ValidationError, match=f"at most {MISMATCH_NOTICE_MAX_CHARS}"):
+        ChannelDelivery(
+            interaction_id="i",
+            question="pick",
+            answer_format="text",
+            callback_url="https://x/cb",
+            timeout_at=now,
+            mismatch_notice="x" * (MISMATCH_NOTICE_MAX_CHARS + 1),
+        )
+
 
 def test_interaction_response_params_roundtrip_and_validation():
     resp = InteractionResponse(

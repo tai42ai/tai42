@@ -31,7 +31,7 @@ from uuid import uuid4
 
 from tai42_contract.agent import Agent
 from tai42_contract.agent.events import InterruptFinal, MessageFinal, StructuredFinal, SuspendedFinal
-from tai42_contract.channels import ChannelTemplate, Option
+from tai42_contract.channels import ChannelTemplate, Option, OptionSection
 from tai42_contract.conversations import (
     GREETING_PLACEHOLDER,
     AnswerPart,
@@ -1948,6 +1948,10 @@ async def operator_send(
     media: list[MediaItem] | None = None,
     template: ChannelTemplate | None = None,
     options: list[Option] | None = None,
+    location: LocationElement | None = None,
+    sections: list[OptionSection] | None = None,
+    header: MediaItem | None = None,
+    footer: str | None = None,
     schema: dict[str, Any] | None = None,
 ) -> str:
     """Send an operator's message ``text`` into ``thread_id`` on ``route``, returning its
@@ -1956,19 +1960,22 @@ async def operator_send(
     it from the route identity exactly as it sends a produced answer (same chunking, ledger
     and receipts). Allowed in either mode; it never flips the mode.
 
-    ``media``, ``template``, ``options`` and ``schema`` (an ask-less form's answer schema —
+    ``media``, ``template``, ``options``, ``location``, ``sections``, ``header``, ``footer``
+    and ``schema`` (an ask-less form's answer schema —
     the guest's submission enters the conversation as an ordinary inbound message) are
-    OPTIONAL richer-send forms: when any is set
+    OPTIONAL richer-send forms — FULL parity with the flow answer path's :class:`AnswerPart`
+    vocabulary: when any is set
     the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
-    media/template/options/schema), so the delivery machine sends the operator's message with
+    rich fields), so the delivery machine sends the operator's message with
     its
     rich fields exactly as it sends a produced rich part — including the capability gate: a
     channel that does not advertise the matching ``supports_*_notifications`` flag never
     receives the part, and the record fails loudly instead of the field silently dropping.
     With none set the record stays a plain single-message answer (byte-parity with the
     pre-rich operator send). A contract-invalid value (an empty list/dict, an over-cap value,
-    or the mutually exclusive media+template / options+template / schema+template /
-    schema+options) raises before any state is
+    or a combination the shared composition matrix refuses — options XOR sections, schema
+    excludes both, header/footer require a choice surface, template standalone) raises before
+    any state is
     written.
 
     For an agent target that HOLDS thread memory (implements ``append_thread_messages``) the
@@ -1996,12 +2003,33 @@ async def operator_send(
     # carrying the text plus its rich fields — the shape the delivery machine sends as a rich
     # part. A plain send keeps ``answer=text`` with no parts, byte-identical to the pre-rich
     # path (and unbounded by the part message cap, which only governs a rich part's text).
-    if media is None and template is None and options is None and schema is None:
+    if (
+        media is None
+        and template is None
+        and options is None
+        and location is None
+        and sections is None
+        and header is None
+        and footer is None
+        and schema is None
+    ):
         answer: str = text
         answer_parts: list[AnswerPart] | None = None
     else:
         answer, answer_parts = _answer_fields(
-            [AnswerPart(message=text, media=media, template=template, options=options, schema=schema)]
+            [
+                AnswerPart(
+                    message=text,
+                    media=media,
+                    template=template,
+                    options=options,
+                    location=location,
+                    sections=sections,
+                    header=header,
+                    footer=footer,
+                    schema=schema,
+                )
+            ]
         )
     message_id = str(uuid4())
     caps = get_turn_caps()
