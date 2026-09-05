@@ -31,7 +31,10 @@ uv run --package <package> pytest --cov --cov-report=term-missing
 ```
 
 Run each package's checks with its own directory as cwd so its coverage floor,
-`filterwarnings`, markers, ruff, and pyright configs bind.
+`filterwarnings`, markers, ruff, and pyright configs bind. `pyright` from the
+repository root is unsupported: no root config, so it falls back to defaults and
+reports hundreds of false positives. Always run it per package so that member's
+`[tool.pyright]` binds; `scripts/pyright-all.sh` sweeps every member as CI does.
 
 ## Comments and docs
 

@@ -35,7 +35,9 @@ uv run --package tai42-kit ruff check .
 ```
 
 Run each package's own checks from its directory so its coverage floor, warning
-filters, markers, and ruff/pyright configs apply.
+filters, markers, and ruff/pyright configs apply. A root `pyright` run is
+unsupported — there is no root config, so it falls back to defaults and reports
+false positives; run it per package (`scripts/pyright-all.sh` sweeps them all).
 
 ## Naming
 
