@@ -168,6 +168,8 @@ unreachable issuer or Redis is caught loudly by `healthcheck()` at startup rathe
 than failing per-request. Chaining two different JWT-issuer providers against
 distinct issuers is out of scope for v1.
 
+The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the

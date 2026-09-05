@@ -45,3 +45,5 @@ The durable store is provisioned at the tai-distribution layer.
 
 See `docs/index.mdx` and the tai-docs operate page for the full settings table and
 deployment topology.
+
+The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).

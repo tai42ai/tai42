@@ -34,6 +34,8 @@ depends on the broker stack — `arq`, `croniter`, `orjson`, `makefun`, `click` 
 plus `fastmcp` (the platform's tool substrate) and `pydantic` /
 `pydantic-settings` / `pydantic-core`.
 
+The current release line tracks the **7.x contract** (`tai42-contract>=7,<8`).
+
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI into the environment that runs the
