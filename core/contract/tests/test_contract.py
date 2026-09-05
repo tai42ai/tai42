@@ -119,8 +119,10 @@ EXPECTED_FACADE = {
     "mcp_sub_app_router",
     # versioning (1)
     "store",
-    # presets (9) — `store` shared with versioning above
+    # presets (11) — `store` shared with versioning above
     "bind",
+    "create",
+    "save_version",
     "register_write_validator",
     "register_seed",
     "register_retired_seed",
@@ -128,6 +130,8 @@ EXPECTED_FACADE = {
     "input_schema_support",
     "register_registration_tier",
     "registration_tier",
+    # tool_meta (2) — `store` shared with versioning and presets above
+    "patch",
 }
 
 
@@ -193,6 +197,7 @@ def test_facade_partition_against_frozen_surface():
         AppSandboxes,
         AppStorage,
         AppSubApp,
+        AppToolMeta,
         AppTools,
         AppVersioning,
         AppWebhookVerifiers,
@@ -221,6 +226,7 @@ def test_facade_partition_against_frozen_surface():
         AppSubApp,
         AppVersioning,
         AppPresets,
+        AppToolMeta,
     ]
     union: set[str] = set()
     total = 0
@@ -231,14 +237,14 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 78 (sub-protocol, member) pairs over 75 distinct names — ``store`` is
-    # exposed by both AppVersioning and AppPresets, and ``register``/``get``
-    # by both AppWebhookVerifiers and AppChannels.
-    assert len(union) == 75, f"union={len(union)}"
-    assert total == 78 == len(union) + 3, f"partition broken: sum={total} union={len(union)}"
+    # 82 (sub-protocol, member) pairs over 78 distinct names — ``store`` is exposed
+    # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
+    # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
+    assert len(union) == 78, f"union={len(union)}"
+    assert total == 82 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_twenty_two_namespaces():
+def test_taiapp_exposes_twenty_three_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
@@ -264,6 +270,7 @@ def test_taiapp_exposes_twenty_two_namespaces():
         "sub_app",
         "versioning",
         "presets",
+        "tool_meta",
     }
 
 

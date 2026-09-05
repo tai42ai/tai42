@@ -20,6 +20,7 @@ from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.connectors.store import ConnectorTokenStore
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.presets import CARRY_FORWARD
 
 from tai42_skeleton.extensions.registry import extension_name
 
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from tai42_contract.interactions import AskUser
     from tai42_contract.monitoring import Monitoring
     from tai42_contract.presets import (
+        CarryForward,
         PresetBody,
         PresetInputSchemaSupport,
         PresetSeed,
@@ -516,6 +518,90 @@ class PresetsFacet(_Facet):
             input_schema=input_schema,
         )
 
+    async def create(
+        self,
+        name: str,
+        base_tool: str,
+        description: str,
+        fixed_kwargs: dict[str, Any],
+        *,
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        extensions: list[list[ExtensionElement]] | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a preset in-process, returning the record view the HTTP create door
+        returns (shared response builder — the two doors cannot drift). Runs the
+        identical content path: the ordered name pre-checks, combo/schema/bind
+        validation, input-schema support, the base tool's write validator, store write
+        THEN register, one ``list_changed``, and the rebind fan-out.
+
+        The caller-authorization tier fence is OFF: the registration-tier fence belongs to
+        the HTTP doors, where it authorizes a request principal. An in-process caller
+        authorizes its own callers and passes only the base tools it is entitled to author,
+        so there is no request principal to fence here — ``enforce_tier`` is ``False`` while
+        every content check stays on."""
+        from tai42_skeleton.operations.presets import _create_preset_core, _create_response
+
+        combos = extensions or []
+        record, report = await _create_preset_core(
+            name,
+            base_tool,
+            description,
+            fixed_kwargs,
+            combos,
+            output_schema,
+            input_schema,
+            tags=tags,
+            enforce_tier=False,
+        )
+        return await _create_response(
+            name,
+            base_tool,
+            description,
+            combos,
+            output_schema,
+            input_schema,
+            active_version=record.active_version,
+            report=report,
+        )
+
+    async def save_version(
+        self,
+        name: str,
+        *,
+        fixed_kwargs: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        output_schema: dict[str, Any] | None = None,
+        output_schema_provided: bool = False,
+        description: str | None = None,
+        extensions: list[list[ExtensionElement]] | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Save a new preset version in-process, returning the version row the HTTP save
+        door returns (shared response builder — the two doors cannot drift). Omitted
+        fields carry the active value forward (``input_schema`` via the ``CARRY_FORWARD``
+        sentinel; ``output_schema`` only when ``output_schema_provided`` is ``True``).
+
+        The tier fence is OFF for the reason :meth:`create` states — the registration-tier
+        fence authorizes a request principal at the HTTP doors, and an in-process caller
+        authorizes its own callers and passes only the base tools it may author — while
+        every content check stays on."""
+        from tai42_skeleton.operations.presets import _save_version_core, _save_version_response
+
+        row, report = await _save_version_core(
+            name,
+            fixed_kwargs=fixed_kwargs,
+            extensions=extensions,
+            output_schema=output_schema,
+            output_schema_provided=output_schema_provided,
+            description=description,
+            input_schema=input_schema,
+            tags=tags,
+            enforce_tier=False,
+        )
+        return _save_version_response(row, report)
+
     def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
         return self._app._write_validator_registry.register(base_tool, validator)
 
@@ -614,15 +700,36 @@ class PresetsFacet(_Facet):
 
 
 class ToolMetaFacet(_Facet):
-    """``app.tool_meta`` — the tool-metadata overlay store (folders + per-tool rows).
-
-    Skeleton-only surface — like ``preset_manager``, it is deliberately not on the
-    ``tai42_contract.app.TaiApp`` protocol; the tool_meta routes and the preset
-    lifecycle cascade reach it through this concrete instance."""
+    """``app.tool_meta`` — the tool-metadata overlay (folders + per-tool rows), the
+    ``tai42_contract.app.AppToolMeta`` namespace: the ``store`` view plus the
+    in-process ``patch`` edit seam."""
 
     @property
     def store(self) -> ToolMetaStore:
         return self._app._tool_meta_store
+
+    async def patch(
+        self,
+        tool_name: str,
+        *,
+        tags: list[str] | None = None,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Patch a tool's overlay row in-process, returning the record the HTTP PATCH
+        door returns (the same operation, so validation is identical: an unknown
+        ``folder_id`` is the same loud error). Only the arguments given are written:
+        ``folder_id`` places the tool, and a ``tags`` list REPLACES the whole tag set
+        (the door's merge-patch semantic — array values are set replacements, never
+        merges). ``tags=None`` leaves the tag set untouched; ``folder_id=None`` leaves
+        the placement untouched."""
+        from tai42_skeleton.operations.tool_meta import upsert_tool_meta
+
+        patch: dict[str, Any] = {}
+        if tags is not None:
+            patch["tags"] = tags
+        if folder_id is not None:
+            patch["folder_id"] = folder_id
+        return await upsert_tool_meta(tool_name, patch)
 
 
 class BackupFacet(_Facet):

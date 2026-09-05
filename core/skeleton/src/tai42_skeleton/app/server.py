@@ -471,9 +471,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
     @property
     def tool_meta(self) -> ToolMetaFacet:
-        """The tool-metadata overlay facet (folders + per-tool rows). Skeleton-only
-        surface, like ``preset_manager`` — reached by the tool_meta routes and the
-        preset lifecycle cascade through this concrete instance."""
+        """The tool-metadata overlay facet (folders + per-tool rows) — the
+        ``tai42_contract.app.AppToolMeta`` namespace."""
         return self._tool_meta_facet
 
     # -- Raw FastMCP escape hatch (skeleton-only, ungoverned) ----------------

@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -24,17 +25,36 @@ _GUARD_PREAMBLE = (
 
 
 @lru_cache(maxsize=512)
-def get_compiled_jq(expression: str):
+def get_compiled_jq(expression: str, prelude: str = ""):
     # Opt-in dependency (the "jq" extra) — imported at call time so the module
     # (and the utils.data namespace re-exporting it) stays importable without it.
     import jq
 
-    if "$ENV" in expression:
+    if "$ENV" in expression or "$ENV" in prelude:
         raise ValueError("jq: $ENV is disabled (process environment is not readable from expressions)")
-    # Raw compile first so a syntax error reports the author's own line/column;
-    # the ``\n)`` closes the preamble paren past any trailing line comment.
-    jq.compile(expression)
-    return jq.compile(_GUARD_PREAMBLE + expression + "\n)")
+    # ``prelude`` is a run of ``def …;`` declarations the expression may call. It
+    # ends with a newline so the expression's first line is line ``prelude_lines
+    # + 1`` — keeping the raw-compile error's line arithmetic exact below.
+    if prelude and not prelude.endswith("\n"):
+        prelude += "\n"
+    prelude_lines = prelude.count("\n")
+    # Raw compile first so a syntax error reports the author's own line/column.
+    # A bare ``expression`` calling a prelude def does not compile alone, so the
+    # raw compile runs over ``prelude + expression``; a prelude shifts the line
+    # numbers, so on error re-raise with the prelude's line count subtracted.
+    try:
+        jq.compile(prelude + expression)
+    except ValueError as exc:
+        if not prelude:
+            raise
+        message = str(exc)
+
+        def _shift(match: re.Match[str]) -> str:
+            return f"{match.group(1)}{int(match.group(2)) - prelude_lines}"
+
+        raise ValueError(re.sub(r"(, line )(\d+)", _shift, message)) from exc
+    # The ``\n)`` closes the preamble paren past any trailing line comment.
+    return jq.compile(_GUARD_PREAMBLE + prelude + expression + "\n)")
 
 
 class JqSettings(TaiBaseSettings):
@@ -55,7 +75,7 @@ def jq_settings() -> JqSettings:
 _NO_DEFAULT = object()
 
 
-async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFAULT) -> Any:
+async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFAULT, prelude: str = "") -> Any:
     """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
     thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
 
@@ -70,7 +90,7 @@ async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFA
     finishes on its own; the budget only protects the event loop and the
     caller's latency, and the timeout is raised loudly.
     """
-    program = get_compiled_jq(expression)
+    program = get_compiled_jq(expression, prelude)
     timeout = jq_settings().timeout_seconds
 
     def _run() -> Any:
@@ -87,7 +107,7 @@ async def run_jq_first(expression: str, payload: Any, *, default: Any = _NO_DEFA
         raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
 
 
-async def run_jq_bounded(expression: str, payload: Any, limit: int) -> list[Any]:
+async def run_jq_bounded(expression: str, payload: Any, limit: int, *, prelude: str = "") -> list[Any]:
     """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker
     thread, bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted
     values, taken lazily from the program's iterator.
@@ -101,7 +121,7 @@ async def run_jq_bounded(expression: str, payload: Any, limit: int) -> list[Any]
     """
     if limit < 1:
         raise ValueError(f"run_jq_bounded limit must be positive, got {limit}")
-    program = get_compiled_jq(expression)
+    program = get_compiled_jq(expression, prelude)
     timeout = jq_settings().timeout_seconds
     try:
         return await asyncio.wait_for(

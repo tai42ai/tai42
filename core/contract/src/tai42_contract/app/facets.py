@@ -2,9 +2,9 @@
 
 One ``Protocol`` per feature area. The app members are partitioned across
 these — each member lives in exactly one, save the shared leaf names:
-``store`` (:class:`AppVersioning` + :class:`AppPresets`) and ``register`` /
-``get`` (:class:`AppWebhookVerifiers` + :class:`AppChannels`). Vendor return
-types follow the ``TYPE_CHECKING`` rule.
+``store`` (:class:`AppVersioning` + :class:`AppPresets` + :class:`AppToolMeta`)
+and ``register`` / ``get`` (:class:`AppWebhookVerifiers` + :class:`AppChannels`).
+Vendor return types follow the ``TYPE_CHECKING`` rule.
 """
 
 from __future__ import annotations
@@ -44,7 +44,14 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions.asker import AskUser
 from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_contract.monitoring import Monitoring
-from tai42_contract.presets import PresetInputSchemaSupport, PresetSeed, PresetStore, PresetWriteValidator
+from tai42_contract.presets import (
+    CARRY_FORWARD,
+    CarryForward,
+    PresetInputSchemaSupport,
+    PresetSeed,
+    PresetStore,
+    PresetWriteValidator,
+)
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
 from tai42_contract.sub_mcp import SubMcpAppRouter
@@ -55,6 +62,9 @@ if TYPE_CHECKING:
     from fastmcp.tools import Tool
     from starlette.requests import Request
     from starlette.responses import Response
+
+    from tai42_contract.manifest import ExtensionElement
+    from tai42_contract.tool_meta import ToolMetaStore
 
 _AgentT = TypeVar("_AgentT", bound=Agent)
 _StorageT = TypeVar("_StorageT", bound=Storage)
@@ -735,6 +745,54 @@ class AppPresets(Protocol):
         transform."""
         ...
 
+    async def create(
+        self,
+        name: str,
+        base_tool: str,
+        description: str,
+        fixed_kwargs: dict[str, Any],
+        *,
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        extensions: list[list[ExtensionElement]] | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a versioned preset in-process and return its record view.
+
+        The in-process authoring seam beside the HTTP create door: it runs the same
+        content path (name pre-checks, combo/schema/bind validation, input-schema
+        support, the base tool's write validator, store write THEN register, and the
+        rebind fan-out) and returns the same record shape, so the two doors cannot drift.
+        A body its base tool cannot accept, a colliding name, or an ``input_schema`` over
+        a base tool with no registered support is a loud error that persists nothing. The
+        caller-authorization tier fence is OFF — the registration-tier fence authorizes a
+        request principal at the HTTP doors; an in-process caller authorizes its own callers
+        and passes only the base tools it is entitled to author — while every content check
+        stays on."""
+        ...
+
+    async def save_version(
+        self,
+        name: str,
+        *,
+        fixed_kwargs: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        output_schema: dict[str, Any] | None = None,
+        output_schema_provided: bool = False,
+        description: str | None = None,
+        extensions: list[list[ExtensionElement]] | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Save a new version of an existing preset in-process and return the version row.
+
+        The in-process sibling of the HTTP save-version door, running the identical
+        content path and returning the same shape. Omitted fields carry the active
+        value forward (``input_schema`` via the ``CARRY_FORWARD`` sentinel;
+        ``output_schema`` only when ``output_schema_provided`` is ``True``). A body that
+        cannot bind is a loud error that commits nothing; the tier fence is OFF for the
+        reason :meth:`create` states."""
+        ...
+
     def register_write_validator(self, base_tool: str, validator: PresetWriteValidator) -> None:
         """Register the write validator for ``base_tool`` (one per base tool;
         duplicate registration raises).
@@ -800,3 +858,35 @@ class AppPresets(Protocol):
 
     @property
     def store(self) -> PresetStore: ...
+
+
+@runtime_checkable
+class AppToolMeta(Protocol):
+    """The tool-metadata namespace (``app.tool_meta``) — the organizational overlay
+    over any live tool: a folder tree plus a per-tool row (display name, folder
+    placement, tags, badges, a hidden override).
+
+    ``store`` is the :class:`~tai42_contract.tool_meta.ToolMetaStore` view the routes
+    and the preset lifecycle cascade read and write. ``patch`` is the in-process edit
+    seam beside the HTTP PATCH door.
+    """
+
+    @property
+    def store(self) -> ToolMetaStore: ...
+
+    async def patch(
+        self,
+        tool_name: str,
+        *,
+        tags: list[str] | None = None,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Patch a tool's overlay row in-process and return its record.
+
+        The in-process sibling of the HTTP PATCH door, running the same operation so
+        validation is identical (an unknown ``folder_id`` is a loud error). Only the
+        arguments given are written: ``folder_id`` places the tool, and a ``tags`` list
+        REPLACES the whole tag set (array values are set replacements, not merges).
+        ``tags=None`` leaves the tag set untouched; ``folder_id=None`` leaves the
+        placement untouched."""
+        ...

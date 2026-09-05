@@ -4,7 +4,7 @@ One ``Protocol`` per feature (see :mod:`tai42_contract.app.facets`), composed in
 a single ``TaiApp`` protocol that exposes them as namespaces (``app.tools``,
 ``app.agents``, ...). The app members are partitioned across the
 sub-protocols — each lives in exactly one, save the shared leaf names
-``store`` (``versioning`` + ``presets``) and ``register``/``get``
+``store`` (``versioning`` + ``presets`` + ``tool_meta``) and ``register``/``get``
 (``webhook_verifiers`` + ``channels``). The runtime forwarding handle is
 ``tai42_app`` (see :mod:`tai42_contract.app.handle`).
 """
@@ -36,6 +36,7 @@ from .facets import (
     AppSandboxes,
     AppStorage,
     AppSubApp,
+    AppToolMeta,
     AppVersioning,
     AppWebhookVerifiers,
     DeclaredRouteMetadata,
@@ -114,6 +115,9 @@ class TaiApp(Protocol):
     @property
     def presets(self) -> AppPresets: ...
 
+    @property
+    def tool_meta(self) -> AppToolMeta: ...
+
 
 class _TaiAppRuntime(TaiApp, Protocol):
     """The runtime forwarding handle: the assembled ``TaiApp`` facade plus the two
@@ -149,6 +153,7 @@ __all__ = [
     "AppSandboxes",
     "AppStorage",
     "AppSubApp",
+    "AppToolMeta",
     "AppTools",
     "AppVersioning",
     "AppWebhookVerifiers",

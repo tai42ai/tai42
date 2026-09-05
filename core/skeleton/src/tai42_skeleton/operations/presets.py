@@ -1054,9 +1054,39 @@ async def create_preset(
     record, report = await _create_preset_core(
         name, base_tool, description, fixed_kwargs, extensions, output_schema, input_schema
     )
-    # Cross-references from the post-write population — the new body may already
-    # compose other presets (``uses``), and a sibling authored against this name is
-    # picked up too (``used_by``); one source of truth with the list / get rows.
+    return await _create_response(
+        name,
+        base_tool,
+        description,
+        extensions,
+        output_schema,
+        input_schema,
+        active_version=record.active_version,
+        report=report,
+    )
+
+
+async def _create_response(
+    name: str,
+    base_tool: str,
+    description: str,
+    extensions: list[list[ExtensionElement]],
+    output_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None,
+    *,
+    active_version: int,
+    report: FleetResult,
+) -> dict[str, Any]:
+    """The create response every create door returns, built once so no two doors drift:
+    the fresh record view plus its post-write ``uses`` / ``used_by`` cross-references,
+    with the per-worker rebind fan-out report embedded under ``fanout``.
+
+    Cross-references come from the post-write population — the new body may already
+    compose other presets (``uses``), and a sibling authored against this name is picked
+    up too (``used_by``); one source of truth with the list / get rows. The ``fanout``
+    (the same shape the template writers return) is the read-your-writes barrier signal —
+    proof the new binding propagated to every serving worker, not only the one that
+    applied this call."""
     bodies = await instance.app.presets.list_active_bodies()
     uses_map, used_by_map = _reference_maps(bodies)
     view = _new_record_view(
@@ -1066,13 +1096,10 @@ async def create_preset(
         extensions,
         output_schema,
         input_schema,
-        active_version=record.active_version,
+        active_version=active_version,
         uses=uses_map.get(name, []),
         used_by=used_by_map.get(name, []),
     )
-    # Embed the per-worker rebind fan-out report (mirrors the template writers): a
-    # deployer reads it as the read-your-writes barrier signal — proof the new binding
-    # propagated to every serving worker, not only the one that served this call.
     view["fanout"] = fleet_fanout(report)
     return view
 
@@ -1312,8 +1339,14 @@ async def save_version(
         description=description,
         input_schema=input_schema if input_schema_provided else CARRY_FORWARD,
     )
-    # Embed the per-worker rebind fan-out report (mirrors the template writers): the
-    # read-your-writes barrier proving the new version reached every serving worker.
+    return _save_version_response(row, report)
+
+
+def _save_version_response(row: Any, report: FleetResult) -> dict[str, Any]:
+    """The save-version response every save door returns, built once so no two doors
+    drift: the new version row plus the per-worker rebind fan-out report embedded under
+    ``fanout`` (mirrors the template writers) — the read-your-writes barrier proving the
+    new version reached every serving worker."""
     return {**row.model_dump(), "fanout": fleet_fanout(report)}
 
 
