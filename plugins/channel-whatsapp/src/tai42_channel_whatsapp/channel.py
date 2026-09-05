@@ -85,15 +85,24 @@ logger = logging.getLogger(__name__)
 # Tier-1 answer formats resolve via the callback link, not a WhatsApp reply.
 _TIER1_FORMATS = frozenset({"confirm", "external"})
 
-# WhatsApp interactive-message caps (Meta Cloud API). A select ask renders as
-# reply buttons when its options fit the button caps, else as a list when they
-# fit the list caps, else as numbered text. An option longer than the tier's
-# title cap forces the fallback for the WHOLE ask — a truncated title would show
-# the human a choice that differs from what the answer validates against.
+# WhatsApp interactive-message caps (Meta Cloud API). A select ask (and an
+# interactive notification) renders as reply buttons when its options fit the button
+# caps, else as a list when every list field fits the list caps, else as numbered
+# text. A field longer than its tier's wire cap forces the fallback for the WHOLE
+# message — a truncated title/description would show the human content that differs
+# from what the author wrote (and Meta 400s an over-cap value outright). The contract
+# admits far longer strings than these wire caps (an option/section-title/footer up to
+# NOTIFICATION_*_MAX_CHARS, a body up to NOTIFICATION_MESSAGE_MAX_CHARS), so a
+# contract-valid notification can still exceed a wire cap; each degrade below keeps the
+# whole message renderable rather than shipping a value Meta would reject.
 _BUTTON_MAX_COUNT = 3  # reply-buttons: at most three buttons
 _BUTTON_TITLE_MAX_CHARS = 20  # reply-button title (also must be unique)
 _LIST_MAX_ROWS = 10  # list: at most ten rows across all sections
 _LIST_ROW_TITLE_MAX_CHARS = 24  # list-row title
+_LIST_ROW_DESCRIPTION_MAX_CHARS = 72  # list-row secondary description line
+_SECTION_TITLE_MAX_CHARS = 24  # sectioned-list section header
+_FOOTER_MAX_CHARS = 60  # interactive footer line
+_CTA_URL_LABEL_MAX_CHARS = 20  # cta_url button display_text (label)
 _INTERACTIVE_BODY_MAX_CHARS = 1024  # interactive body text
 # The list-opening button label (its own 20-char cap); a fixed, generic prompt.
 _LIST_BUTTON_LABEL = "Choose an option"
@@ -210,14 +219,26 @@ def _interaction_ids(delivery: ChannelDelivery) -> list[tuple[str, str]]:
     return [(f"{delivery.interaction_id}:{index}", option) for index, option in enumerate(delivery.options or [])]
 
 
-def _interactive_choice_kind(body: str, options: list[str], *, allow_buttons: bool = True) -> str:
+def _interactive_choice_kind(
+    body: str,
+    options: list[str],
+    *,
+    allow_buttons: bool = True,
+    descriptions: list[str | None] | None = None,
+) -> str:
     """Which native shape a tappable-choice message renders as: ``"buttons"``,
     ``"list"``, or ``"fallback"`` (numbered text) when it fits neither interactive
     shape. Shared by the select ask and the interactive notification.
 
     ``allow_buttons=False`` skips the reply-buttons shape (buttons render no per-row
     description, so a notification whose reply options carry descriptions prefers the list
-    even when it would otherwise fit buttons)."""
+    even when it would otherwise fit buttons).
+
+    ``descriptions`` (aligned with ``options`` when given) carries each row's optional
+    secondary line. A description longer than ``_LIST_ROW_DESCRIPTION_MAX_CHARS`` cannot
+    ride the list either — and a described option can never be a button (its caller sets
+    ``allow_buttons=False``), so the WHOLE message degrades a tier to numbered text rather
+    than silently dropping authored content or shipping an over-cap value Meta 400s."""
     if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
         return "fallback"
     if (
@@ -228,7 +249,17 @@ def _interactive_choice_kind(body: str, options: list[str], *, allow_buttons: bo
         and len(set(options)) == len(options)
     ):
         return "buttons"
-    if len(options) <= _LIST_MAX_ROWS and all(len(option) <= _LIST_ROW_TITLE_MAX_CHARS for option in options):
+    if (
+        len(options) <= _LIST_MAX_ROWS
+        and all(len(option) <= _LIST_ROW_TITLE_MAX_CHARS for option in options)
+        and (
+            descriptions is None
+            or all(
+                description is None or len(description) <= _LIST_ROW_DESCRIPTION_MAX_CHARS
+                for description in descriptions
+            )
+        )
+    ):
         return "list"
     return "fallback"
 
@@ -363,33 +394,120 @@ async def _send_media_prelude(phone_number_id: str, target: str, media: list[Med
     return await _send_file_media(phone_number_id, target, files, sent)
 
 
-def _reply_wire_ids(replies: list[ReplyOption]) -> list[tuple[str, str]]:
-    """``(wire_id, text)`` per reply option: the AUTHORED ``id`` when the sender set one
-    (sent on the wire and echoed back on tap), else the minted 0-based index. A notification
-    tap is never an answer — a minted index carries no ``:`` interaction part, so
-    ``_map_tap_to_answer`` can never mistake it for a pending-ask reply (an authored id would
-    have to equal a live ask's ``{interaction_id}:{index}`` verbatim to collide)."""
-    return [(reply.id or str(index), reply.text) for index, reply in enumerate(replies)]
+def _mint_wire_ids(authored: list[str | None], noun: str) -> list[str]:
+    """The wire id for every tappable option on ONE message, collision-proof against the
+    AUTHORED ids present. WhatsApp requires interactive button/list-row ids UNIQUE across
+    the whole message, so a minted id that happened to equal an authored id (e.g. an
+    authored ``"1"`` beside an un-id'd sibling whose 0-based index also mints ``"1"``) would
+    make Meta 400 the send. Rule (mirrors the telegram channel's prefer-authored/mint-index
+    discipline): use the author's id where set; else mint the option's 0-based index; if that
+    minted token collides with an authored id on the SAME message (or a token already
+    assigned), step deterministically (``{index}#{n}``) until it is free — the reserved set
+    is finite so this terminates, and the stepped token still carries no ``:`` interaction
+    part, so ``_map_tap_to_answer`` can never mistake a notification tap for a pending-ask
+    reply.
+
+    Two EQUAL authored ids on one message are an author error the wire cannot express
+    (unique-id rule) — refused loudly here with ``ChannelInputError`` naming the id, before
+    any send, rather than shipped for Meta to 400."""
+    authored_ids = [value for value in authored if value is not None]
+    seen: set[str] = set()
+    for value in authored_ids:
+        if value in seen:
+            raise ChannelInputError(
+                f"{noun} carries two tappable options with the same authored id {value!r}; "
+                "option ids must be unique across the message"
+            )
+        seen.add(value)
+    used = set(authored_ids)
+    wire_ids: list[str] = []
+    for index, value in enumerate(authored):
+        if value is not None:
+            wire_ids.append(value)
+            continue
+        candidate = str(index)
+        bump = 0
+        while candidate in used:
+            bump += 1
+            candidate = f"{index}#{bump}"
+        used.add(candidate)
+        wire_ids.append(candidate)
+    return wire_ids
 
 
-def _api_sections(sections: list[OptionSection]) -> list[dict[str, Any]]:
+def _reply_wire_ids(replies: list[ReplyOption], wire_ids: list[str]) -> list[tuple[str, str]]:
+    """``(wire_id, text)`` per reply option — ``wire_ids`` is the pre-minted, collision-proof
+    id list (see :func:`_mint_wire_ids`) aligned with ``replies``. A minted id carries no
+    ``:`` interaction part, so ``_map_tap_to_answer`` can never mistake a notification tap for
+    a pending-ask reply."""
+    return [(wire_id, reply.text) for wire_id, reply in zip(wire_ids, replies, strict=True)]
+
+
+def _api_sections(sections: list[OptionSection], wire_ids: list[str]) -> list[dict[str, Any]]:
     """The Cloud-API ``action.sections`` array for a sectioned notification list: each
-    section keeps its ``title`` and maps its reply rows to ``{id, title, description?}``. Row
-    ids are the AUTHORED id when set, else a minted globally-unique index (list-row ids must
-    be unique across the whole message); a present ``description`` rides as the row's
-    secondary line."""
+    section keeps its ``title`` and maps its reply rows to ``{id, title, description?}``.
+    ``wire_ids`` is the pre-minted, collision-proof id list (see :func:`_mint_wire_ids`)
+    aligned with the rows read left-to-right across every section (list-row ids must be
+    unique across the whole message); a present ``description`` rides as the row's secondary
+    line."""
     api_sections: list[dict[str, Any]] = []
-    row_index = 0
+    cursor = 0
     for section in sections:
         rows: list[dict[str, str]] = []
         for row in section.rows:
-            api_row: dict[str, str] = {"id": row.id or str(row_index), "title": row.text}
+            api_row: dict[str, str] = {"id": wire_ids[cursor], "title": row.text}
             if row.description:
                 api_row["description"] = row.description
             rows.append(api_row)
-            row_index += 1
+            cursor += 1
         api_sections.append({"title": section.title, "rows": rows})
     return api_sections
+
+
+def _sections_renderable(body: str, sections: list[OptionSection]) -> bool:
+    """Whether a sectioned list fits every WhatsApp wire cap: an interactive body within
+    ``_INTERACTIVE_BODY_MAX_CHARS``, each section title within ``_SECTION_TITLE_MAX_CHARS``,
+    each row title within ``_LIST_ROW_TITLE_MAX_CHARS`` and each row description within
+    ``_LIST_ROW_DESCRIPTION_MAX_CHARS``. A single over-cap field forces the whole message a
+    tier down to numbered text (never a truncated/over-cap value on the wire)."""
+    if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
+        return False
+    for section in sections:
+        if len(section.title) > _SECTION_TITLE_MAX_CHARS:
+            return False
+        for row in section.rows:
+            if len(row.text) > _LIST_ROW_TITLE_MAX_CHARS:
+                return False
+            if row.description is not None and len(row.description) > _LIST_ROW_DESCRIPTION_MAX_CHARS:
+                return False
+    return True
+
+
+def _numbered_sections_body(body: str, sections: list[OptionSection], footer: str | None) -> str:
+    """The numbered-text fallback for a sectioned list past the wire caps: the body, then each
+    section's title as a header line with its rows numbered continuously (1-based across all
+    sections), the type-an-option footer, and any interactive footer appended as a trailing
+    line — the plain-text send carries no wire caps on these fields, so the authored titles
+    ride whole."""
+    lines = [body]
+    index = 1
+    for section in sections:
+        lines.append(section.title)
+        for row in section.rows:
+            lines.append(f"{index}. {row.text}")
+            index += 1
+    lines.append(_NUMBERED_FALLBACK_FOOTER)
+    if footer is not None:
+        lines.append(footer)
+    return "\n".join(lines)
+
+
+def _cta_url_renderable(body: str, link: LinkOption) -> bool:
+    """Whether a lone link option fits the ``cta_url`` interactive: an interactive body within
+    ``_INTERACTIVE_BODY_MAX_CHARS`` and a button ``display_text`` within
+    ``_CTA_URL_LABEL_MAX_CHARS``. Otherwise the lone link degrades to a ``label: url`` body
+    line (the same rendering the multi-link path uses)."""
+    return len(body) <= _INTERACTIVE_BODY_MAX_CHARS and len(link.label) <= _CTA_URL_LABEL_MAX_CHARS
 
 
 def _link_option_line(option: LinkOption) -> str:
@@ -417,13 +535,26 @@ async def _send_interactive_notification(
 
     Wire mapping (Cloud API):
 
-    * ``sections`` → an interactive LIST (multi-section, per-row descriptions).
+    * ``sections`` → an interactive LIST (multi-section, per-row descriptions), OR the
+      numbered-text fallback when a section title / row title / row description / body exceeds
+      its wire cap (the whole message degrades a tier; the authored titles ride as text lines).
     * flat ``options`` with reply entries → reply BUTTONS (≤3, unique short titles) or a LIST
       (more rows / longer titles / any row description), with any LINK options appended to the
-      body as ``label: url`` lines (WhatsApp reply widgets carry no URL button).
-    * a lone LINK option (no replies) → a ``cta_url`` interactive (one URL button).
+      body as ``label: url`` lines (WhatsApp reply widgets carry no URL button); an over-cap
+      row title/description/body degrades the whole message to numbered text.
+    * a lone LINK option (no replies) → a ``cta_url`` interactive (one URL button), OR — when
+      its ``display_text`` label exceeds the cta_url cap or the body exceeds the interactive
+      body cap — the ``label: url`` body-line rendering the multi-link path uses.
     * only LINK options (≥2) → a plain text body of ``label: url`` lines (no native multi-URL
       interactive exists), the footer appended and any media header sent ahead.
+
+    Degrade discipline for a contract-valid-but-over-wire-cap field: never truncate, never
+    ship an over-cap value — degrade the WHOLE message one tier. A ``footer`` longer than the
+    wire footer cap is folded into the body as a trailing line (the established text-fallback
+    idiom) and the interactive footer dropped, so the body's own cap check then decides
+    interactive-vs-fallback for free. Author-error id collisions are refused up front by
+    :func:`_mint_wire_ids` (loud ``ChannelInputError``, before any send), regardless of the
+    tier the message ends up rendering as.
 
     A media ``header`` (image/video/document) rides the interactive header; an ``audio``
     header or a text-fallback header is sent as its own message first. ``footer`` rides the
@@ -434,30 +565,53 @@ async def _send_interactive_notification(
     footer = notification.footer
     prelude: list[str] = []
 
-    # Sectioned list.
+    # A footer past the wire footer cap cannot ride the interactive footer slot: fold it into
+    # the body as a trailing line (the same idiom the text-only fallbacks use) and drop the
+    # interactive footer. The body's own _INTERACTIVE_BODY_MAX_CHARS check below then decides
+    # interactive-vs-fallback — if body+footer no longer fit, the message degrades to numbered
+    # text; otherwise the interactive renders with the footer folded into its body.
+    if footer is not None and len(footer) > _FOOTER_MAX_CHARS:
+        body = _append_lines(body, [footer])
+        footer = None
+
+    # Sectioned list. Mint the row ids up front (validates unique authored ids loudly even when
+    # the message ends up degrading to text), then render the list only if every field fits the
+    # wire; otherwise degrade the whole message to numbered text.
     if notification.sections is not None:
-        header_obj = _build_header_object(header) if header is not None and header.kind is not MediaKind.AUDIO else None
-        if header is not None and header_obj is None:
+        section_ids = _mint_wire_ids(
+            [row.id for section in notification.sections for row in section.rows], "notification"
+        )
+        if _sections_renderable(body, notification.sections):
+            header_obj = (
+                _build_header_object(header) if header is not None and header.kind is not MediaKind.AUDIO else None
+            )
+            if header is not None and header_obj is None:
+                prelude.append(await _send_one_file(phone_number_id, target, header))
+            return [
+                *prelude,
+                await send_interactive_list(
+                    phone_number_id=phone_number_id,
+                    to=target,
+                    body=body,
+                    button_text=_LIST_BUTTON_LABEL,
+                    sections=_api_sections(notification.sections, section_ids),
+                    header=header_obj,
+                    footer=footer,
+                ),
+            ]
+        # Degrade: an over-cap section/row title, row description, or body forces numbered text.
+        if header is not None:
             prelude.append(await _send_one_file(phone_number_id, target, header))
-        return [
-            *prelude,
-            await send_interactive_list(
-                phone_number_id=phone_number_id,
-                to=target,
-                body=body,
-                button_text=_LIST_BUTTON_LABEL,
-                sections=_api_sections(notification.sections),
-                header=header_obj,
-                footer=footer,
-            ),
-        ]
+        text_body = _numbered_sections_body(body, notification.sections, footer)
+        return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
 
     options = notification.options or []
     replies = [option for option in options if isinstance(option, ReplyOption)]
     link_options = [option for option in options if isinstance(option, LinkOption)]
 
-    # A lone link option → the single-URL cta_url interactive.
-    if not replies and len(link_options) == 1:
+    # A lone link option → the single-URL cta_url interactive, when its label and the body fit
+    # the wire; an over-cap label/body degrades it to the label: url body-line rendering below.
+    if not replies and len(link_options) == 1 and _cta_url_renderable(body, link_options[0]):
         header_obj = _build_header_object(header) if header is not None and header.kind is not MediaKind.AUDIO else None
         if header is not None and header_obj is None:
             prelude.append(await _send_one_file(phone_number_id, target, header))
@@ -476,8 +630,9 @@ async def _send_interactive_notification(
 
     body_with_links = _append_lines(body, [_link_option_line(option) for option in link_options])
 
-    # Only link options (≥2): no native multi-URL interactive — a plain text body of the
-    # link lines, the footer appended, and any media header sent ahead.
+    # Only link options (a lone over-cap link degraded here, or ≥2 links): no native multi-URL
+    # interactive — a plain text body of the link lines, the footer appended, and any media
+    # header sent ahead.
     if not replies:
         if header is not None:
             prelude.append(await _send_one_file(phone_number_id, target, header))
@@ -485,10 +640,13 @@ async def _send_interactive_notification(
         return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
 
     # Reply options → buttons or list; buttons render no description, so any described row
-    # prefers the list.
+    # prefers the list, and an over-cap row title/description/body degrades to numbered text.
     titles = [reply.text for reply in replies]
+    descriptions = [reply.description for reply in replies]
     allow_buttons = not any(reply.description for reply in replies)
-    kind = _interactive_choice_kind(body_with_links, titles, allow_buttons=allow_buttons)
+    kind = _interactive_choice_kind(body_with_links, titles, allow_buttons=allow_buttons, descriptions=descriptions)
+    # Mint the reply ids up front (validates unique authored ids loudly even on the text tier).
+    reply_ids = _mint_wire_ids([reply.id for reply in replies], "notification")
 
     header_rides = header is not None and kind != "fallback" and header.kind is not MediaKind.AUDIO
     header_obj = _build_header_object(header) if header is not None and header_rides else None
@@ -502,15 +660,15 @@ async def _send_interactive_notification(
                 phone_number_id=phone_number_id,
                 to=target,
                 body=body_with_links,
-                buttons=_reply_wire_ids(replies),
+                buttons=_reply_wire_ids(replies, reply_ids),
                 header=header_obj,
                 footer=footer,
             ),
         ]
     if kind == "list":
         rows: list[dict[str, str]] = []
-        for index, reply in enumerate(replies):
-            row: dict[str, str] = {"id": reply.id or str(index), "title": reply.text}
+        for wire_id, reply in zip(reply_ids, replies, strict=True):
+            row: dict[str, str] = {"id": wire_id, "title": reply.text}
             if reply.description:
                 row["description"] = reply.description
             rows.append(row)

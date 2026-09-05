@@ -1313,6 +1313,196 @@ async def test_notify_options_and_media_send_choice_then_images(fake_redis: Fake
     assert fake_httpx.calls[1]["json"]["image"] == {"link": "https://cdn.example/a.jpg"}
 
 
+# --- Interactive wire-cap graceful degrade (contract-valid but over Meta's caps) ------------
+# The contract admits strings far longer than WhatsApp's per-field wire caps, so a
+# contract-valid notification can still exceed a cap. Each over-cap field degrades the WHOLE
+# message one tier (never a truncated/over-cap value Meta would 400), mirroring the flat
+# select ask's established _interactive_choice_kind discipline.
+
+
+async def test_notify_over_cap_row_description_degrades_list_to_numbered_text(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A row description past the 72-char list-row cap cannot ride the list (and a described
+    # option can never be a button), so the whole message degrades to numbered text.
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Yes", description="d" * 73), ReplyOption(text="No")],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == "Pick\n1. Yes\n2. No\nReply with the text of one option."
+
+
+async def test_notify_over_cap_section_title_degrades_list_to_numbered_text(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A section title past the 24-char cap forces the whole sectioned list to numbered text,
+    # the authored titles riding as plain text lines (no cap on a plain-text send).
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick a dish",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="s" * 25, rows=[ReplyOption(text="Soup")])],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == f"Pick a dish\n{'s' * 25}\n1. Soup\nReply with the text of one option."
+
+
+async def test_notify_over_cap_section_row_title_degrades_list_to_numbered_text(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A sectioned-list row title past the 24-char cap forces numbered text — the sections path
+    # never checked row titles (or the body) before this fix.
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="Mains", rows=[ReplyOption(text="r" * 25)])],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == f"Pick\nMains\n1. {'r' * 25}\nReply with the text of one option."
+
+
+async def test_notify_over_cap_body_degrades_sections_to_numbered_text(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An interactive body past the 1024-char cap forces the sectioned list to numbered text —
+    # the sections path never checked the body before this fix.
+    fake_httpx.responses.append(_accepted("wamid.NUM"))
+    long_message = "m" * 1025
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message=long_message,
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="Mains", rows=[ReplyOption(text="Steak")])],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == f"{long_message}\nMains\n1. Steak\nReply with the text of one option."
+
+
+async def test_notify_over_cap_footer_folds_into_body_and_interactive_still_renders(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A footer past the 60-char footer cap folds into the body as a trailing line and the
+    # interactive footer is dropped; the small option set still renders as buttons (body+footer
+    # fit the 1024 body cap).
+    fake_httpx.responses.append(_accepted("wamid.BTN"))
+    long_footer = "f" * 61
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="How did we do?",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Great"), ReplyOption(text="Poor")],
+            footer=long_footer,
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "interactive"
+    interactive = payload["interactive"]
+    assert interactive["type"] == "button"
+    assert interactive["body"]["text"] == f"How did we do?\n{long_footer}"
+    assert "footer" not in interactive
+
+
+async def test_notify_over_cap_cta_url_label_degrades_to_body_line(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A lone link whose display_text (label) exceeds the 20-char cta_url cap degrades to the
+    # `label: url` body-line rendering instead of shipping an over-cap cta_url button.
+    fake_httpx.responses.append(_accepted("wamid.LINK"))
+    long_label = "L" * 21
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Your invoice is ready.",
+            recipient=ALLOWED_A,
+            options=[LinkOption(label=long_label, url="https://pay.example/42")],
+        )
+    )
+
+    payload = fake_httpx.calls[0]["json"]
+    assert payload["type"] == "text"
+    assert payload["text"]["body"] == f"Your invoice is ready.\n{long_label}: https://pay.example/42"
+
+
+# --- Minted-id collision-proofing against authored ids (FINDING B) --------------------------
+
+
+async def test_notify_minted_id_steps_past_a_colliding_authored_id(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # An authored numeric id beside an un-id'd sibling: the sibling's minted 0-based index would
+    # equal the authored id, a wire collision Meta 400s (button/row ids must be unique). The
+    # minted id steps to a deterministic non-colliding token instead.
+    fake_httpx.responses.append(_accepted("wamid.BTN"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="How did we do?",
+            recipient=ALLOWED_A,
+            options=[ReplyOption(text="Great", id="1"), ReplyOption(text="Poor")],
+        )
+    )
+
+    buttons = fake_httpx.calls[0]["json"]["interactive"]["action"]["buttons"]
+    wire_ids = [button["reply"]["id"] for button in buttons]
+    assert wire_ids == ["1", "1#1"]
+    assert len(set(wire_ids)) == len(wire_ids)  # unique across the message
+
+
+async def test_notify_sectioned_minted_id_steps_past_a_colliding_authored_id(
+    fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # Same collision-proofing across a sectioned list: the un-id'd row's minted GLOBAL index
+    # would equal the authored id on its sibling; it steps to a non-colliding token.
+    fake_httpx.responses.append(_accepted("wamid.SEC"))
+
+    await WhatsAppChannel().notify(
+        ChannelNotification(
+            message="Pick",
+            recipient=ALLOWED_A,
+            sections=[OptionSection(title="S", rows=[ReplyOption(text="A", id="1"), ReplyOption(text="B")])],
+        )
+    )
+
+    rows = fake_httpx.calls[0]["json"]["interactive"]["action"]["sections"][0]["rows"]
+    wire_ids = [row["id"] for row in rows]
+    assert wire_ids == ["1", "1#1"]
+    assert len(set(wire_ids)) == len(wire_ids)
+
+
+async def test_notify_duplicate_authored_ids_refused_pre_wire(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # Two options carrying the SAME authored id is an author error the wire cannot express
+    # (unique-id rule) — refused loudly BEFORE any send, never round-tripped to Meta.
+    with pytest.raises(ChannelInputError, match="dup"):
+        await WhatsAppChannel().notify(
+            ChannelNotification(
+                message="Pick",
+                recipient=ALLOWED_A,
+                options=[ReplyOption(text="A", id="dup"), ReplyOption(text="B", id="dup")],
+            )
+        )
+
+    assert not fake_httpx.calls  # nothing sent
+
+
 async def test_notify_template_maps_body_parameters(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     fake_httpx.responses.append(_accepted("wamid.TPL"))
 
